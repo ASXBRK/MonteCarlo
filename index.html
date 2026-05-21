@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Monte Carlo Investment Projection</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <h1>Monte Carlo Investment Projection</h1>
+        <p class="subtitle">
+          2,000 simulated futures vs. a steady, "stagnant return" projection.
+        </p>
+      </header>
+
+      <section class="controls" aria-label="Inputs">
+        <div class="control">
+          <label for="age">Current age <span class="hint">(optional)</span></label>
+          <input id="age" type="number" min="0" max="100" step="1" placeholder="e.g. 30" />
+        </div>
+
+        <div class="control control-wide">
+          <label for="horizon">
+            Time horizon: <output id="horizonOut">30</output> years
+          </label>
+          <input id="horizon" type="range" min="5" max="50" step="1" value="30" />
+        </div>
+
+        <div class="control">
+          <label for="starting">Starting balance ($)</label>
+          <input id="starting" type="number" min="0" step="1000" value="50000" />
+        </div>
+
+        <div class="control">
+          <label for="monthly">Monthly contribution ($)</label>
+          <input id="monthly" type="number" min="0" step="100" value="1000" />
+        </div>
+
+        <div class="control">
+          <label for="asset">Asset class</label>
+          <select id="asset"></select>
+          <div class="asset-meta" id="assetMeta"></div>
+        </div>
+      </section>
+
+      <section class="chart-wrap">
+        <div id="chart"></div>
+      </section>
+
+      <section class="summary" id="summary" aria-live="polite"></section>
+
+      <footer class="app-footer">
+        <p>
+          Educational tool only. Returns are illustrative; past performance is not
+          a forecast. No fees, taxes, or inflation modelled.
+        </p>
+      </footer>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

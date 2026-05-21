@@ -1,0 +1,111 @@
+// Monte Carlo simulation core.
+// Monthly steps, yearly snapshots, percentile aggregation.
+
+const NUM_PATHS = 2000;
+const SAMPLE_PATHS = 30;
+
+// Box-Muller: returns one N(0,1) sample. We discard the paired value
+// to keep the call site simple; the cost is negligible at this scale.
+function randn() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function quantileSorted(sorted, q) {
+  const n = sorted.length;
+  if (n === 0) return 0;
+  if (n === 1) return sorted[0];
+  const pos = q * (n - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+// Deterministic compound path with same monthly mechanics but z=0.
+function deterministicPath({ horizonYears, startingBalance, monthlyContribution, mu }) {
+  const months = horizonYears * 12;
+  const rMonthly = mu / 12;
+  const yearly = new Array(horizonYears + 1);
+  let balance = startingBalance;
+  yearly[0] = balance;
+  for (let m = 1; m <= months; m++) {
+    balance = balance * (1 + rMonthly) + monthlyContribution;
+    if (m % 12 === 0) yearly[m / 12] = balance;
+  }
+  return yearly;
+}
+
+export function simulate({
+  horizonYears,
+  startingBalance,
+  monthlyContribution,
+  mu,
+  sigma,
+  numPaths = NUM_PATHS,
+  samplePaths = SAMPLE_PATHS,
+}) {
+  const months = horizonYears * 12;
+  const years = horizonYears + 1; // include year 0
+  const rMonthly = mu / 12;
+  const sigmaMonthly = sigma / Math.sqrt(12);
+
+  // Flat Float64Array: row-major [path * years + year].
+  const yearlyAll = new Float64Array(numPaths * years);
+
+  for (let p = 0; p < numPaths; p++) {
+    let balance = startingBalance;
+    const base = p * years;
+    yearlyAll[base + 0] = balance;
+    for (let m = 1; m <= months; m++) {
+      const z = randn();
+      const r = rMonthly + sigmaMonthly * z;
+      balance = balance * (1 + r) + monthlyContribution;
+      if (balance < 0) balance = 0; // floor at zero
+      if (m % 12 === 0) {
+        yearlyAll[base + m / 12] = balance;
+      }
+    }
+  }
+
+  // Per-year percentiles.
+  const p05 = new Array(years);
+  const p25 = new Array(years);
+  const p50 = new Array(years);
+  const p75 = new Array(years);
+  const p95 = new Array(years);
+  const colBuf = new Float64Array(numPaths);
+
+  for (let y = 0; y < years; y++) {
+    for (let p = 0; p < numPaths; p++) colBuf[p] = yearlyAll[p * years + y];
+    const sorted = Array.from(colBuf).sort((a, b) => a - b);
+    p05[y] = quantileSorted(sorted, 0.05);
+    p25[y] = quantileSorted(sorted, 0.25);
+    p50[y] = quantileSorted(sorted, 0.50);
+    p75[y] = quantileSorted(sorted, 0.75);
+    p95[y] = quantileSorted(sorted, 0.95);
+  }
+
+  // Sample N paths at random for visual texture.
+  const sampleIdx = new Set();
+  while (sampleIdx.size < Math.min(samplePaths, numPaths)) {
+    sampleIdx.add(Math.floor(Math.random() * numPaths));
+  }
+  const sampled = [];
+  for (const idx of sampleIdx) {
+    const row = new Array(years);
+    const base = idx * years;
+    for (let y = 0; y < years; y++) row[y] = yearlyAll[base + y];
+    sampled.push(row);
+  }
+
+  const deterministic = deterministicPath({
+    horizonYears, startingBalance, monthlyContribution, mu,
+  });
+
+  const xYears = Array.from({ length: years }, (_, i) => i);
+
+  return { xYears, p05, p25, p50, p75, p95, deterministic, sampled };
+}
