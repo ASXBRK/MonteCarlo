@@ -16,41 +16,29 @@
         </p>
       </header>
 
-      <section class="controls" aria-label="Inputs">
-        <div class="control">
-          <label for="age">Current age <span class="hint">(optional)</span></label>
-          <input id="age" type="number" min="0" max="100" step="1" placeholder="e.g. 30" />
-        </div>
-
-        <div class="control control-wide">
-          <label for="horizon">
-            Time horizon: <output id="horizonOut">30</output> years
+      <section class="controls-wrap">
+        <div class="controls-topbar">
+          <label class="toggle">
+            <input id="compareToggle" type="checkbox" />
+            <span>Compare scenarios</span>
           </label>
-          <input id="horizon" type="range" min="5" max="50" step="1" value="30" />
         </div>
-
-        <div class="control">
-          <label for="starting">Starting balance ($)</label>
-          <input id="starting" type="number" min="0" step="1000" value="50000" />
-        </div>
-
-        <div class="control">
-          <label for="monthly">Monthly contribution ($)</label>
-          <input id="monthly" type="number" min="0" step="100" value="1000" />
-        </div>
-
-        <div class="control">
-          <label for="asset">Asset class</label>
-          <select id="asset"></select>
-          <div class="asset-meta" id="assetMeta"></div>
-        </div>
+        <div id="scenarios" class="scenarios single"></div>
       </section>
 
       <section class="chart-wrap">
         <div id="chart"></div>
       </section>
 
-      <section class="summary" id="summary" aria-live="polite"></section>
+      <section id="compareExtras" class="compare-extras" hidden>
+        <div id="callout" class="callout"></div>
+        <div class="chart-wrap chart-wrap-small">
+          <div id="probChart"></div>
+        </div>
+        <div id="narrative" class="narrative"></div>
+      </section>
+
+      <section id="summary" class="summary" aria-live="polite"></section>
 
       <footer class="app-footer">
         <p>

@@ -1,33 +1,33 @@
 // Plotly wiring. Aggregates already happened in sim; we just shape traces.
 
 const COLOURS = {
-  band95: "rgba(56, 132, 224, 0.12)",   // outer band fill
-  band75: "rgba(56, 132, 224, 0.28)",   // inner band fill
+  band95: "rgba(56, 132, 224, 0.12)",
+  band75: "rgba(56, 132, 224, 0.28)",
   median: "rgb(28, 90, 180)",
   sample: "rgba(80, 80, 80, 0.15)",
   deterministic: "rgb(220, 90, 40)",
 };
 
-function buildTraces(sim) {
-  const { xYears, p05, p25, p50, p75, p95, deterministic, sampled } = sim;
+// Compare-mode palette. The colours are spec-fixed.
+const COMPARE = {
+  A: { line: "#1f77b4", band: "rgba(31, 119, 180, 0.18)" },
+  B: { line: "#ff7f0e", band: "rgba(255, 127, 14, 0.18)" },
+  prob: "rgb(60, 60, 70)",
+};
 
+function buildSingleTraces(sim) {
+  const { xYears, p05, p25, p50, p75, p95, deterministic, sampled } = sim;
   const traces = [];
 
-  // Sampled paths first so the bands paint over them where they overlap.
-  // We still get visible grey wisps in the outer 5/95 band region.
   for (let i = 0; i < sampled.length; i++) {
     traces.push({
-      x: xYears,
-      y: sampled[i],
-      mode: "lines",
-      type: "scatter",
+      x: xYears, y: sampled[i],
+      mode: "lines", type: "scatter",
       line: { color: COLOURS.sample, width: 1 },
-      hoverinfo: "skip",
-      showlegend: false,
+      hoverinfo: "skip", showlegend: false,
     });
   }
 
-  // 5-95 band: invisible lower edge then upper edge with fill='tonexty'.
   traces.push({
     x: xYears, y: p05,
     mode: "lines", type: "scatter",
@@ -43,7 +43,6 @@ function buildTraces(sim) {
     hovertemplate: "Year %{x} · 95th: %{y:$,.0f}<extra></extra>",
   });
 
-  // 25-75 band.
   traces.push({
     x: xYears, y: p25,
     mode: "lines", type: "scatter",
@@ -59,7 +58,6 @@ function buildTraces(sim) {
     hovertemplate: "Year %{x} · 75th: %{y:$,.0f}<extra></extra>",
   });
 
-  // Median.
   traces.push({
     x: xYears, y: p50,
     mode: "lines", type: "scatter",
@@ -68,7 +66,6 @@ function buildTraces(sim) {
     hovertemplate: "Year %{x} · median: %{y:$,.0f}<extra></extra>",
   });
 
-  // Deterministic comparison.
   traces.push({
     x: xYears, y: deterministic,
     mode: "lines", type: "scatter",
@@ -80,8 +77,52 @@ function buildTraces(sim) {
   return traces;
 }
 
+// Compare-mode fan chart: only p5–p95 band + median for each scenario.
+function buildCompareTraces(sims, names) {
+  const traces = [];
+  const order = ["A", "B"];
+
+  for (const id of order) {
+    const sim = sims[id];
+    const c = COMPARE[id];
+    const label = names[id];
+
+    // p5 (invisible lower edge)
+    traces.push({
+      x: sim.xYears, y: sim.p05,
+      mode: "lines", type: "scatter",
+      line: { color: "rgba(0,0,0,0)", width: 0 },
+      hoverinfo: "skip", showlegend: false,
+    });
+    // p95 (fill to previous)
+    traces.push({
+      x: sim.xYears, y: sim.p95,
+      mode: "lines", type: "scatter",
+      line: { color: "rgba(0,0,0,0)", width: 0 },
+      fill: "tonexty", fillcolor: c.band,
+      name: `${label} · 5–95th`,
+      hovertemplate: `Year %{x} · ${label} 95th: %{y:$,.0f}<extra></extra>`,
+    });
+  }
+
+  // Medians on top of both bands.
+  for (const id of order) {
+    const sim = sims[id];
+    const c = COMPARE[id];
+    const label = names[id];
+    traces.push({
+      x: sim.xYears, y: sim.p50,
+      mode: "lines", type: "scatter",
+      line: { color: c.line, width: 2.75 },
+      name: `${label} · median`,
+      hovertemplate: `Year %{x} · ${label} median: %{y:$,.0f}<extra></extra>`,
+    });
+  }
+
+  return traces;
+}
+
 function buildAxisTicks(horizonYears, currentAge) {
-  // ~7 ticks across the horizon, including 0 and horizonYears.
   const desired = 7;
   const stepGuess = horizonYears / (desired - 1);
   const niceSteps = [1, 2, 5, 10];
@@ -99,8 +140,14 @@ function buildAxisTicks(horizonYears, currentAge) {
   return { vals, text };
 }
 
+const BASE_FONT = {
+  family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+  size: 13, color: "#222",
+};
+
+// Render single-scenario fan chart (unchanged behaviour).
 export function renderChart(containerId, sim, { horizonYears, currentAge }) {
-  const data = buildTraces(sim);
+  const data = buildSingleTraces(sim);
   const ticks = buildAxisTicks(horizonYears, currentAge);
 
   const layout = {
@@ -109,10 +156,7 @@ export function renderChart(containerId, sim, { horizonYears, currentAge }) {
     plot_bgcolor: "white",
     hovermode: "x unified",
     legend: {
-      orientation: "h",
-      y: -0.18,
-      x: 0.5,
-      xanchor: "center",
+      orientation: "h", y: -0.18, x: 0.5, xanchor: "center",
       bgcolor: "rgba(255,255,255,0)",
     },
     xaxis: {
@@ -120,23 +164,99 @@ export function renderChart(containerId, sim, { horizonYears, currentAge }) {
       tickmode: "array",
       tickvals: ticks.vals,
       ticktext: ticks.text,
-      showgrid: false,
-      zeroline: false,
+      showgrid: false, zeroline: false,
     },
     yaxis: {
       title: { text: "Portfolio value", standoff: 10 },
       tickformat: "$,.2s",
       gridcolor: "rgba(0,0,0,0.06)",
-      zeroline: false,
-      rangemode: "tozero",
+      zeroline: false, rangemode: "tozero",
     },
-    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+    font: BASE_FONT,
   };
 
-  const config = {
-    displayModeBar: false,
-    responsive: true,
+  Plotly.react(containerId, data, layout, { displayModeBar: false, responsive: true });
+}
+
+// Render compare-mode fan chart (4 visual elements: 2 bands + 2 medians).
+export function renderCompareChart(containerId, sims, { horizonYears, currentAge, names }) {
+  const data = buildCompareTraces(sims, names);
+  const ticks = buildAxisTicks(horizonYears, currentAge);
+
+  const layout = {
+    margin: { l: 70, r: 20, t: 30, b: 60 },
+    paper_bgcolor: "white",
+    plot_bgcolor: "white",
+    hovermode: "x unified",
+    legend: {
+      orientation: "h", y: -0.18, x: 0.5, xanchor: "center",
+      bgcolor: "rgba(255,255,255,0)",
+    },
+    xaxis: {
+      title: { text: "Time", standoff: 10 },
+      tickmode: "array",
+      tickvals: ticks.vals,
+      ticktext: ticks.text,
+      showgrid: false, zeroline: false,
+    },
+    yaxis: {
+      title: { text: "Portfolio value", standoff: 10 },
+      tickformat: "$,.2s",
+      gridcolor: "rgba(0,0,0,0.06)",
+      zeroline: false, rangemode: "tozero",
+    },
+    font: BASE_FONT,
   };
 
-  Plotly.react(containerId, data, layout, config);
+  Plotly.react(containerId, data, layout, { displayModeBar: false, responsive: true });
+}
+
+// Render probability-over-time line chart.
+export function renderProbChart(containerId, xYears, probAGreater, { horizonYears, currentAge }) {
+  const ticks = buildAxisTicks(horizonYears, currentAge);
+
+  const data = [
+    {
+      x: xYears,
+      y: probAGreater.map((p) => p * 100),
+      mode: "lines",
+      type: "scatter",
+      line: { color: COMPARE.prob, width: 2.25 },
+      name: "P(A > B)",
+      hovertemplate: "Year %{x} · P(A > B) = %{y:.0f}%<extra></extra>",
+    },
+  ];
+
+  const layout = {
+    margin: { l: 60, r: 20, t: 30, b: 50 },
+    height: 200,
+    paper_bgcolor: "white",
+    plot_bgcolor: "white",
+    showlegend: false,
+    hovermode: "x unified",
+    xaxis: {
+      tickmode: "array",
+      tickvals: ticks.vals,
+      ticktext: ticks.text,
+      showgrid: false, zeroline: false,
+      range: [0, horizonYears],
+    },
+    yaxis: {
+      title: { text: "P(A finishes higher)", standoff: 8 },
+      ticksuffix: "%",
+      range: [0, 100],
+      gridcolor: "rgba(0,0,0,0.06)",
+      zeroline: false,
+    },
+    shapes: [
+      {
+        type: "line", xref: "x", yref: "y",
+        x0: 0, x1: horizonYears, y0: 50, y1: 50,
+        line: { color: "rgba(0,0,0,0.35)", width: 1, dash: "dash" },
+      },
+    ],
+    font: BASE_FONT,
+  };
+
+  Plotly.react(containerId, data, layout, { displayModeBar: false, responsive: true });
 }

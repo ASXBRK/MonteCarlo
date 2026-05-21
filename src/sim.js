@@ -119,5 +119,9 @@ export function simulate({
 
   const xYears = Array.from({ length: years }, (_, i) => i);
 
-  return { xYears, p05, p25, p50, p75, p95, deterministic, sampled };
+  return {
+    xYears, p05, p25, p50, p75, p95, deterministic, sampled,
+    // Full per-path yearly matrix, exposed for compare mode (path pairing).
+    paths: yearlyAll, numPaths, years,
+  };
 }
