@@ -35,7 +35,9 @@ function buildSingleTraces(sim) {
     });
   }
 
-  // p5-p95 outer band (lighter).
+  // p5-p95 outer band (lighter). Lower edge is hover-skipped; upper
+  // edge carries the band's hover row, with customdata pointing at the
+  // lower edge so the tooltip shows "low – high" on one line.
   traces.push({
     x: xYears, y: p05,
     mode: "lines", type: "scatter",
@@ -43,12 +45,12 @@ function buildSingleTraces(sim) {
     hoverinfo: "skip", showlegend: false,
   });
   traces.push({
-    x: xYears, y: p95,
+    x: xYears, y: p95, customdata: p05,
     mode: "lines", type: "scatter",
     line: { color: "rgba(0,0,0,0)", width: 0 },
     fill: "tonexty", fillcolor: COLOURS.band95,
-    name: "5–95th percentile",
-    hovertemplate: "Year %{x} · 95th: %{y:$,.0f}<extra></extra>",
+    name: "90% likely",
+    hovertemplate: "<b>90% likely</b>  %{customdata:$,.0f} – %{y:$,.0f}<extra></extra>",
   });
 
   // p25-p75 inner band (darker).
@@ -59,28 +61,28 @@ function buildSingleTraces(sim) {
     hoverinfo: "skip", showlegend: false,
   });
   traces.push({
-    x: xYears, y: p75,
+    x: xYears, y: p75, customdata: p25,
     mode: "lines", type: "scatter",
     line: { color: "rgba(0,0,0,0)", width: 0 },
     fill: "tonexty", fillcolor: COLOURS.band75,
-    name: "25–75th percentile",
-    hovertemplate: "Year %{x} · 75th: %{y:$,.0f}<extra></extra>",
+    name: "50% likely",
+    hovertemplate: "<b>50% likely</b>  %{customdata:$,.0f} – %{y:$,.0f}<extra></extra>",
   });
 
   traces.push({
     x: xYears, y: p50,
     mode: "lines", type: "scatter",
     line: { color: COLOURS.median, width: 2.5 },
-    name: "Median (50th)",
-    hovertemplate: "Year %{x} · median: %{y:$,.0f}<extra></extra>",
+    name: "Median",
+    hovertemplate: "<b>Median</b>  %{y:$,.0f}<extra></extra>",
   });
 
   traces.push({
     x: xYears, y: deterministic,
     mode: "lines", type: "scatter",
     line: { color: COLOURS.deterministic, width: 2.25, dash: "dash" },
-    name: "Steady return (no variance)",
-    hovertemplate: "Year %{x} · steady: %{y:$,.0f}<extra></extra>",
+    name: "Steady return",
+    hovertemplate: "<b>Steady return</b>  %{y:$,.0f}<extra></extra>",
   });
 
   return traces;
@@ -96,21 +98,21 @@ function buildCompareTraces(sims, names) {
     const c = COMPARE[id];
     const label = names[id];
 
-    // p5 (invisible lower edge)
+    // p5 (invisible lower edge, hover-skipped)
     traces.push({
       x: sim.xYears, y: sim.p05,
       mode: "lines", type: "scatter",
       line: { color: "rgba(0,0,0,0)", width: 0 },
       hoverinfo: "skip", showlegend: false,
     });
-    // p95 (fill to previous)
+    // p95 (fill to previous, carries the band's hover row)
     traces.push({
-      x: sim.xYears, y: sim.p95,
+      x: sim.xYears, y: sim.p95, customdata: sim.p05,
       mode: "lines", type: "scatter",
       line: { color: "rgba(0,0,0,0)", width: 0 },
       fill: "tonexty", fillcolor: c.band,
-      name: `${label} · 5–95th`,
-      hovertemplate: `Year %{x} · ${label} 95th: %{y:$,.0f}<extra></extra>`,
+      name: `${label} · 90% likely`,
+      hovertemplate: `<b>${label} · 90% likely</b>  %{customdata:$,.0f} – %{y:$,.0f}<extra></extra>`,
     });
   }
 
@@ -123,8 +125,8 @@ function buildCompareTraces(sims, names) {
       x: sim.xYears, y: sim.p50,
       mode: "lines", type: "scatter",
       line: { color: c.line, width: 2.75 },
-      name: `${label} · median`,
-      hovertemplate: `Year %{x} · ${label} median: %{y:$,.0f}<extra></extra>`,
+      name: `${label} · Median`,
+      hovertemplate: `<b>${label} · Median</b>  %{y:$,.0f}<extra></extra>`,
     });
   }
 
@@ -152,6 +154,13 @@ function buildAxisTicks(horizonYears, currentAge) {
 const BASE_FONT = {
   family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
   size: 13, color: "#222",
+};
+
+const HOVER_LABEL = {
+  bgcolor: "white",
+  bordercolor: "rgba(0,0,0,0.08)",
+  font: { ...BASE_FONT },
+  align: "left",
 };
 
 // Render single-scenario fan chart. The y-axis is locked to the bulk
@@ -191,6 +200,7 @@ export function renderChart(containerId, sim, { horizonYears, currentAge }) {
       range: [0, yMax],
     },
     font: BASE_FONT,
+    hoverlabel: HOVER_LABEL,
   };
 
   Plotly.react(containerId, data, layout, { displayModeBar: false, responsive: true });
@@ -224,6 +234,7 @@ export function renderCompareChart(containerId, sims, { horizonYears, currentAge
       zeroline: false, rangemode: "tozero",
     },
     font: BASE_FONT,
+    hoverlabel: HOVER_LABEL,
   };
 
   Plotly.react(containerId, data, layout, { displayModeBar: false, responsive: true });
@@ -274,6 +285,7 @@ export function renderProbChart(containerId, xYears, probAGreater, { horizonYear
       },
     ],
     font: BASE_FONT,
+    hoverlabel: HOVER_LABEL,
   };
 
   Plotly.react(containerId, data, layout, { displayModeBar: false, responsive: true });
