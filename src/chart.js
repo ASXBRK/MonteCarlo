@@ -15,8 +15,15 @@ const COMPARE = {
   prob: "rgb(60, 60, 70)",
 };
 
+// Trace order matters: the first SAMPLE_PATH_COUNT traces are the
+// overlay paths, restyled in place by the animation tick. Don't
+// reorder without updating SAMPLE_TRACE_INDICES below.
+export const SAMPLE_PATH_COUNT = 30;
+export const sampleTraceIndices = () =>
+  Array.from({ length: SAMPLE_PATH_COUNT }, (_, i) => i);
+
 function buildSingleTraces(sim) {
-  const { xYears, p05, p25, p50, p75, p95, deterministic, sampled } = sim;
+  const { xYears, p25, p50, p75, deterministic, sampled } = sim;
   const traces = [];
 
   for (let i = 0; i < sampled.length; i++) {
@@ -27,21 +34,6 @@ function buildSingleTraces(sim) {
       hoverinfo: "skip", showlegend: false,
     });
   }
-
-  traces.push({
-    x: xYears, y: p05,
-    mode: "lines", type: "scatter",
-    line: { color: "rgba(0,0,0,0)", width: 0 },
-    hoverinfo: "skip", showlegend: false,
-  });
-  traces.push({
-    x: xYears, y: p95,
-    mode: "lines", type: "scatter",
-    line: { color: "rgba(0,0,0,0)", width: 0 },
-    fill: "tonexty", fillcolor: COLOURS.band95,
-    name: "5–95th percentile",
-    hovertemplate: "Year %{x} · 95th: %{y:$,.0f}<extra></extra>",
-  });
 
   traces.push({
     x: xYears, y: p25,
@@ -145,10 +137,14 @@ const BASE_FONT = {
   size: 13, color: "#222",
 };
 
-// Render single-scenario fan chart (unchanged behaviour).
+// Render single-scenario fan chart. The y-axis is locked to the bulk
+// of outcomes (~p95 of terminal year). Individual sample paths that
+// exceed this ceiling get clipped at the top edge — that's intentional;
+// it keeps the chart's central story stable as paths rotate.
 export function renderChart(containerId, sim, { horizonYears, currentAge }) {
   const data = buildSingleTraces(sim);
   const ticks = buildAxisTicks(horizonYears, currentAge);
+  const yMax = sim.p95[sim.p95.length - 1] * 1.05;
 
   const layout = {
     margin: { l: 70, r: 20, t: 30, b: 60 },
@@ -170,7 +166,8 @@ export function renderChart(containerId, sim, { horizonYears, currentAge }) {
       title: { text: "Portfolio value", standoff: 10 },
       tickformat: "$,.2s",
       gridcolor: "rgba(0,0,0,0.06)",
-      zeroline: false, rangemode: "tozero",
+      zeroline: false,
+      range: [0, yMax],
     },
     font: BASE_FONT,
   };

@@ -1,6 +1,14 @@
 import { PROFILES, DEFAULT_PROFILE } from "./profiles.js";
 import { simulate, generateShocks, NUM_PATHS } from "./sim.js";
-import { renderChart, renderCompareChart, renderProbChart, renderBellCurves } from "./chart.js";
+import {
+  renderChart, renderCompareChart, renderProbChart, renderBellCurves,
+  SAMPLE_PATH_COUNT, sampleTraceIndices,
+} from "./chart.js";
+
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const $ = (id) => document.getElementById(id);
 
@@ -316,6 +324,45 @@ function updateSingleOutput(s, sim) {
   q("range").textContent = `${fmtMoney(sim.p05[last])} – ${fmtMoney(sim.p95[last])}`;
 }
 
+// Resample `count` paths uniformly at random from a sim's full path
+// matrix, returning yearly value rows. Used by the overlay animation.
+function resampleSinglePaths(sim, count = SAMPLE_PATH_COUNT) {
+  const seen = new Set();
+  const rows = [];
+  const target = Math.min(count, sim.numPaths);
+  while (rows.length < target) {
+    const i = Math.floor(Math.random() * sim.numPaths);
+    if (seen.has(i)) continue;
+    seen.add(i);
+    const row = new Array(sim.years);
+    const base = i * sim.years;
+    for (let y = 0; y < sim.years; y++) row[y] = sim.paths[base + y];
+    rows.push(row);
+  }
+  return rows;
+}
+
+let singleAnimTimer = null;
+const SINGLE_ANIM_INTERVAL_MS = 4000;
+
+function stopSingleAnimation() {
+  if (singleAnimTimer != null) {
+    clearInterval(singleAnimTimer);
+    singleAnimTimer = null;
+  }
+}
+
+function startSingleAnimation(sim) {
+  stopSingleAnimation();
+  if (prefersReducedMotion()) return;
+  singleAnimTimer = setInterval(() => {
+    const rows = resampleSinglePaths(sim);
+    // Restyle only the overlay traces — the median, deterministic, and
+    // p25–p75 bands stay put, so there's no flicker on the main story.
+    Plotly.restyle("chart", { y: rows }, sampleTraceIndices());
+  }, SINGLE_ANIM_INTERVAL_MS);
+}
+
 function runSingle() {
   const s = state.scenarios.A;
   const { mu, sigma } = PROFILES[s.asset];
@@ -333,6 +380,8 @@ function runSingle() {
 
   ensureOutputSkeleton("single");
   updateSingleOutput(s, sim);
+
+  startSingleAnimation(sim);
 
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · single · ${s.asset} · ${s.horizonYears}y`);
 }
@@ -488,6 +537,10 @@ function statRowsHTML(simA, simB, sA, sB, names, sharedHorizon) {
 }
 
 function runCompare() {
+  // Compare mode has no overlay paths — kill any animation that was
+  // running in single mode.
+  stopSingleAnimation();
+
   const sA = state.scenarios.A;
   const sB = state.scenarios.B;
   const profA = PROFILES[sA.asset];

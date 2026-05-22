@@ -104,22 +104,13 @@ export function simulate({
     p95[y] = quantileSorted(sorted, 0.95);
   }
 
-  // Sample N paths from the central 90% by terminal value.
-  // The bands above are computed over all paths; this filter only
-  // restricts which paths get drawn as overlay wisps, so the most
-  // extreme outliers don't crowd the chart.
-  const lastY = years - 1;
-  const termLo = p05[lastY];
-  const termHi = p95[lastY];
-  const eligible = [];
-  for (let p = 0; p < numPaths; p++) {
-    const term = yearlyAll[p * years + lastY];
-    if (term >= termLo && term <= termHi) eligible.push(p);
-  }
+  // Sample N paths uniformly at random from the full simulation.
+  // The chart's explicit y-axis range (locked to ~p95) clips any
+  // extreme paths visually, which is intentional.
   const sampleIdx = new Set();
-  const targetCount = Math.min(samplePaths, eligible.length);
+  const targetCount = Math.min(samplePaths, numPaths);
   while (sampleIdx.size < targetCount) {
-    sampleIdx.add(eligible[Math.floor(Math.random() * eligible.length)]);
+    sampleIdx.add(Math.floor(Math.random() * numPaths));
   }
   const sampled = [];
   for (const idx of sampleIdx) {
