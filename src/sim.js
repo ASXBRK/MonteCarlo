@@ -1,7 +1,7 @@
 // Monte Carlo simulation core.
 // Monthly steps, yearly snapshots, percentile aggregation.
 
-const NUM_PATHS = 2000;
+export const NUM_PATHS = 2000;
 const SAMPLE_PATHS = 30;
 
 // Box-Muller: returns one N(0,1) sample. We discard the paired value
@@ -11,6 +11,15 @@ function randn() {
   while (u === 0) u = Math.random();
   while (v === 0) v = Math.random();
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// Pre-generate a flat Float64Array of N(0,1) shocks in row-major
+// [path * months + month] layout, for use as `preGenZ` so multiple
+// simulate() calls can share the same market sequence.
+export function generateShocks(numPaths, months) {
+  const out = new Float64Array(numPaths * months);
+  for (let i = 0; i < out.length; i++) out[i] = randn();
+  return out;
 }
 
 function quantileSorted(sorted, q) {
@@ -46,6 +55,12 @@ export function simulate({
   sigma,
   numPaths = NUM_PATHS,
   samplePaths = SAMPLE_PATHS,
+  // Optional shared shock matrix: Float64Array of size numPaths*months
+  // in [path * months + monthIndex] layout, where monthIndex is 0-based
+  // (so step m=1 reads index 0). When supplied, both compared scenarios
+  // see the same market sequence; when omitted, shocks are generated
+  // internally (single-scenario behaviour).
+  preGenZ = null,
 }) {
   const months = horizonYears * 12;
   const years = horizonYears + 1; // include year 0
@@ -58,9 +73,10 @@ export function simulate({
   for (let p = 0; p < numPaths; p++) {
     let balance = startingBalance;
     const base = p * years;
+    const zBase = p * months;
     yearlyAll[base + 0] = balance;
     for (let m = 1; m <= months; m++) {
-      const z = randn();
+      const z = preGenZ ? preGenZ[zBase + (m - 1)] : randn();
       const r = rMonthly + sigmaMonthly * z;
       balance = balance * (1 + r) + monthlyContribution;
       if (balance < 0) balance = 0; // floor at zero

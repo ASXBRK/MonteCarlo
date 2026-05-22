@@ -1,5 +1,5 @@
 import { PROFILES, DEFAULT_PROFILE } from "./profiles.js";
-import { simulate } from "./sim.js";
+import { simulate, generateShocks, NUM_PATHS } from "./sim.js";
 import { renderChart, renderCompareChart, renderProbChart, renderBellCurves } from "./chart.js";
 
 const $ = (id) => document.getElementById(id);
@@ -232,13 +232,14 @@ function applyHorizonLabel() {
 
 // --- sim wrappers ---------------------------------------------------------
 
-function runScenario(s) {
+function runScenario(s, preGenZ = null) {
   const { mu, sigma } = PROFILES[s.asset];
   return simulate({
     horizonYears: s.horizonYears,
     startingBalance: s.startingBalance,
     monthlyContribution: s.monthlyContribution,
     mu, sigma,
+    preGenZ,
   });
 }
 
@@ -502,15 +503,23 @@ function runCompare() {
     B: subs.B || "Scenario B",
   };
 
-  const t0 = performance.now();
-  const simA = runScenario(sA);
-  const simB = runScenario(sB);
-  const t1 = performance.now();
-
-  // Shared horizon for paired computations & narrative.
+  // Shared horizon for paired computations & narrative. The horizon
+  // slider in compare mode forces both scenarios to the same value,
+  // but min() keeps this robust if that ever changes.
   const sharedHorizon = Math.min(sA.horizonYears, sB.horizonYears);
   const sharedYears = sharedHorizon + 1;
   const sharedAge = parseAge(sA.age) ?? parseAge(sB.age);
+
+  // Pre-generate a single shock matrix and feed it to both sims.
+  // A and B then react to the same market under different strategies,
+  // not two independent random universes. With this in place, identical
+  // strategies produce identical paths and regret collapses to 0.
+  const sharedMonths = sharedHorizon * 12;
+  const t0 = performance.now();
+  const shocks = generateShocks(NUM_PATHS, sharedMonths);
+  const simA = runScenario(sA, shocks);
+  const simB = runScenario(sB, shocks);
+  const t1 = performance.now();
 
   renderCompareChart("chart", { A: simA, B: simB }, {
     horizonYears: sharedHorizon,
