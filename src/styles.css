@@ -81,9 +81,29 @@ html, body {
 .scenarios.single .scenario { padding: 0; }
 
 .scenarios.compare {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.scenario-shared {
+  display: grid;
+  grid-template-columns: 1fr 3fr;
+  gap: 18px;
+  padding: 12px 14px 14px;
+  background: #f3f5f8;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.scenario-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 18px;
+}
+
+.scenario-columns.single {
+  display: block;
 }
 
 .scenario {
@@ -314,7 +334,8 @@ html, body {
 
 @media (max-width: 900px) {
   .scenario-grid { grid-template-columns: repeat(2, 1fr); }
-  .scenarios.compare { grid-template-columns: 1fr; }
+  .scenario-columns { grid-template-columns: 1fr; }
+  .scenario-shared { grid-template-columns: 1fr; }
   .summary.single  { grid-template-columns: repeat(2, 1fr); }
   #chart    { height: 420px; }
 }

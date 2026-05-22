@@ -66,7 +66,10 @@ function buildScenarioBlock(id, values) {
 
   const grid = document.createElement("div");
   grid.className = "scenario-grid";
-  grid.innerHTML = `
+
+  // In compare mode, age + horizon live in the shared block above;
+  // the per-scenario block shows only balance/monthly/asset.
+  const ageHorizonMarkup = state.compareMode ? "" : `
     <div class="control">
       <label>Current age <span class="hint">(optional)</span></label>
       <input type="number" min="0" max="100" step="1" placeholder="e.g. 30"
@@ -77,6 +80,10 @@ function buildScenarioBlock(id, values) {
       <input type="range" min="5" max="50" step="1"
              data-field="horizonYears" value="${values.horizonYears}" />
     </div>
+  `;
+
+  grid.innerHTML = `
+    ${ageHorizonMarkup}
     <div class="control">
       <label>Starting balance ($)</label>
       <input type="number" min="0" step="1000"
@@ -108,6 +115,31 @@ function buildScenarioBlock(id, values) {
   return block;
 }
 
+// Shared age + horizon controls, shown only in compare mode.
+function buildSharedBlock() {
+  const block = document.createElement("div");
+  block.className = "scenario-shared";
+  // Values come from A; B is kept in sync.
+  const values = state.scenarios.A;
+  block.innerHTML = `
+    <div class="control">
+      <label>Current age <span class="hint">(optional)</span></label>
+      <input type="number" min="0" max="100" step="1" placeholder="e.g. 30"
+             data-shared="age" value="${values.age}" />
+    </div>
+    <div class="control control-wide">
+      <label>Time horizon: <output data-role="horizonOut">${values.horizonYears}</output> years</label>
+      <input type="range" min="5" max="50" step="1"
+             data-shared="horizonYears" value="${values.horizonYears}" />
+    </div>
+  `;
+  block.querySelectorAll("[data-shared]").forEach((el) => {
+    el.addEventListener("input", () => onSharedChange(el));
+    el.addEventListener("change", () => onSharedChange(el));
+  });
+  return block;
+}
+
 function onFieldChange(id, el) {
   const field = el.dataset.field;
   const raw = el.value;
@@ -123,13 +155,34 @@ function onFieldChange(id, el) {
   scheduleRun();
 }
 
+function onSharedChange(el) {
+  const field = el.dataset.shared;
+  const raw = el.value;
+  if (field === "age") {
+    state.scenarios.A.age = raw;
+    state.scenarios.B.age = raw;
+  } else {
+    const n = Number(raw);
+    const val = Number.isFinite(n) ? Math.max(0, n) : 0;
+    state.scenarios.A.horizonYears = val;
+    state.scenarios.B.horizonYears = val;
+  }
+  scheduleRun();
+}
+
 function renderControls() {
   els.scenarios.innerHTML = "";
   els.scenarios.className = `scenarios ${state.compareMode ? "compare" : "single"}`;
-  els.scenarios.appendChild(buildScenarioBlock("A", state.scenarios.A));
   if (state.compareMode) {
-    els.scenarios.appendChild(buildScenarioBlock("B", state.scenarios.B));
+    els.scenarios.appendChild(buildSharedBlock());
   }
+  const columns = document.createElement("div");
+  columns.className = state.compareMode ? "scenario-columns" : "scenario-columns single";
+  columns.appendChild(buildScenarioBlock("A", state.scenarios.A));
+  if (state.compareMode) {
+    columns.appendChild(buildScenarioBlock("B", state.scenarios.B));
+  }
+  els.scenarios.appendChild(columns);
 }
 
 // --- subtitle / diff ------------------------------------------------------
@@ -137,7 +190,6 @@ function renderControls() {
 function describeField(field, value) {
   switch (field) {
     case "asset": return value;
-    case "horizonYears": return `${value}y`;
     case "startingBalance": return `${fmtMoneyShort(value)} start`;
     case "monthlyContribution": return `${fmtMoneyShort(value)}/mo`;
     default: return String(value);
@@ -145,8 +197,9 @@ function describeField(field, value) {
 }
 
 // Returns the per-scenario subtitle text, or "" if nothing differs.
+// Only considers per-scenario fields; horizon and age are shared.
 function computeSubtitles(a, b) {
-  const fields = ["asset", "horizonYears", "startingBalance", "monthlyContribution"];
+  const fields = ["asset", "startingBalance", "monthlyContribution"];
   const diffs = fields.filter((f) => a[f] !== b[f]);
   if (diffs.length === 0) return { A: "", B: "" };
   return {
@@ -169,8 +222,12 @@ function applyAssetMeta(id, mu, sigma) {
   if (!block) return;
   const el = block.querySelector('[data-role="assetMeta"]');
   if (el) el.textContent = `μ = ${(mu * 100).toFixed(1)}% · σ = ${(sigma * 100).toFixed(0)}%`;
-  const ho = block.querySelector('[data-role="horizonOut"]');
-  if (ho) ho.textContent = String(state.scenarios[id].horizonYears);
+}
+
+// Updates the horizon output label (shared block in compare, per-scenario in single).
+function applyHorizonLabel() {
+  const out = els.scenarios.querySelector('[data-role="horizonOut"]');
+  if (out) out.textContent = String(state.scenarios.A.horizonYears);
 }
 
 // --- sim wrappers ---------------------------------------------------------
@@ -215,6 +272,7 @@ function runSingle() {
   const s = state.scenarios.A;
   const { mu, sigma } = PROFILES[s.asset];
   applyAssetMeta("A", mu, sigma);
+  applyHorizonLabel();
 
   const t0 = performance.now();
   const sim = runScenario(s);
@@ -387,6 +445,7 @@ function runCompare() {
   const profB = PROFILES[sB.asset];
   applyAssetMeta("A", profA.mu, profA.sigma);
   applyAssetMeta("B", profB.mu, profB.sigma);
+  applyHorizonLabel();
 
   const subs = computeSubtitles(sA, sB);
   applySubtitles(subs);
