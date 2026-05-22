@@ -505,7 +505,6 @@ function runCompare() {
   });
 
   const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
-  q("callout").textContent = calloutText(probA, names);
 
   // Chart headline uses "Plan A/B" fallback (reads more naturally than
   // "Scenario A/B" in a sentence) when subtitles are empty.
@@ -515,12 +514,32 @@ function runCompare() {
   };
   q("probTitle").textContent = `Probability ${chartNames.A} finishes ahead of ${chartNames.B}`;
 
-  // Narrative + stat block.
-  const aMedian = simA.p50[sharedHorizon];
-  const bMedian = simB.p50[sharedHorizon];
-  const higherIsA = aMedian >= bMedian;
-  const regret = regretFraction(simA, simB, sharedHorizon, sharedHorizon, higherIsA);
-  q("narrative").innerHTML = narrativeHTML(simA, simB, names, sharedHorizon, regret);
+  // Identical per-scenario inputs → suppress callout, swap narrative
+  // for an explainer. The bands & probability chart still render —
+  // they're the visual evidence that the two configs match.
+  const identical =
+    sA.asset === sB.asset &&
+    sA.startingBalance === sB.startingBalance &&
+    sA.monthlyContribution === sB.monthlyContribution;
+
+  if (identical) {
+    q("callout").textContent = "";
+    q("narrative").innerHTML = `
+      <p>Both scenarios are configured identically. The small differences
+      between the two fans are sampling noise — each scenario runs its own
+      2,000-path simulation with independent random draws. Change at least
+      one per-scenario input (asset class, starting balance, or monthly
+      contribution) to see a meaningful comparison.</p>
+    `;
+  } else {
+    q("callout").textContent = calloutText(probA, names);
+    const aMedian = simA.p50[sharedHorizon];
+    const bMedian = simB.p50[sharedHorizon];
+    const higherIsA = aMedian >= bMedian;
+    const regret = regretFraction(simA, simB, sharedHorizon, sharedHorizon, higherIsA);
+    q("narrative").innerHTML = narrativeHTML(simA, simB, names, sharedHorizon, regret);
+  }
+
   q("statbody").innerHTML = statRowsHTML(simA, simB, sA, sB, names, sharedHorizon);
 
   console.log(

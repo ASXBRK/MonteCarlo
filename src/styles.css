@@ -280,6 +280,7 @@ html, body {
   font-size: 14px;
   font-weight: 600;
 }
+.callout:empty { display: none; }
 
 .narrative {
   background: var(--card);
