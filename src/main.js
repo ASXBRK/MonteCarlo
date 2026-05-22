@@ -16,6 +16,8 @@ const els = {
   toggle: $("compareToggle"),
   drawdownToggle: $("drawdownToggle"),
   scenarios: $("scenarios"),
+  horizonSlider: $("horizonSlider"),
+  sliderLabel: document.querySelector('[data-role="sliderLabel"]'),
   output: $("output"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
@@ -75,10 +77,11 @@ function parseAge(v) {
 
 // --- DOM building ---------------------------------------------------------
 
-// Whether the per-scenario block should host the age/horizon inputs.
-// Only when compare mode is OFF and drawdown mode is OFF do they live
-// in the scenario row; otherwise they live in the shared block.
-function scenarioHostsAgeHorizon() {
+// Whether the per-scenario block should host the age input.
+// (Horizon and end age both live on the persistent slider.) Only when
+// compare mode is OFF and drawdown mode is OFF does age live in the
+// scenario row; otherwise it lives in the shared block.
+function scenarioHostsAge() {
   return !state.compareMode && !state.drawdownMode;
 }
 
@@ -100,16 +103,11 @@ function buildScenarioBlock(id, values) {
   const grid = document.createElement("div");
   grid.className = "scenario-grid";
 
-  const ageHorizonMarkup = scenarioHostsAgeHorizon() ? `
+  const ageMarkup = scenarioHostsAge() ? `
     <div class="control">
       <label>Current age <span class="hint">(optional)</span></label>
       <input type="number" min="0" max="100" step="1" placeholder="e.g. 30"
              data-field="age" value="${values.age}" />
-    </div>
-    <div class="control control-wide">
-      <label>Time horizon: <output data-role="horizonOut">${values.horizonYears}</output> years</label>
-      <input type="range" min="5" max="50" step="1"
-             data-field="horizonYears" value="${values.horizonYears}" />
     </div>
   ` : "";
 
@@ -127,7 +125,7 @@ function buildScenarioBlock(id, values) {
   ` : "";
 
   grid.innerHTML = `
-    ${ageHorizonMarkup}
+    ${ageMarkup}
     <div class="control">
       <label>Starting balance ($)</label>
       <input type="number" min="0" step="1000"
@@ -166,7 +164,7 @@ function buildScenarioBlock(id, values) {
 //     age is per-scenario)
 function buildSharedBlock() {
   const block = document.createElement("div");
-  block.className = state.drawdownMode ? "scenario-shared drawdown" : "scenario-shared";
+  block.className = "scenario-shared";
   const values = state.scenarios.A;
 
   if (state.drawdownMode) {
@@ -176,17 +174,6 @@ function buildSharedBlock() {
         <input type="number" min="0" max="100" step="1"
                data-shared="currentAge" value="${values.currentAge}" />
       </div>
-      <div class="control">
-        <label>End age <span class="hint">(life expectancy)</span></label>
-        <input type="number" min="50" max="110" step="1"
-               data-shared="endAge" value="${values.endAge}" />
-      </div>
-      <div class="control control-wide shared-meta">
-        <label>Projection horizon</label>
-        <div class="shared-meta-value" data-role="horizonHint">
-          ${effectiveHorizonYears()} years (end age − current age)
-        </div>
-      </div>
     `;
   } else {
     block.innerHTML = `
@@ -194,11 +181,6 @@ function buildSharedBlock() {
         <label>Current age <span class="hint">(optional)</span></label>
         <input type="number" min="0" max="100" step="1" placeholder="e.g. 30"
                data-shared="age" value="${values.age}" />
-      </div>
-      <div class="control control-wide">
-        <label>Time horizon: <output data-role="horizonOut">${values.horizonYears}</output> years</label>
-        <input type="range" min="5" max="50" step="1"
-               data-shared="horizonYears" value="${values.horizonYears}" />
       </div>
     `;
   }
@@ -298,16 +280,46 @@ function applyAssetMeta(id, mu, sigma) {
   if (el) el.textContent = `μ = ${(mu * 100).toFixed(1)}% · σ = ${(sigma * 100).toFixed(0)}%`;
 }
 
-// Updates the horizon output label / hint depending on which input
-// surface is currently visible.
-function applyHorizonLabel() {
-  const out = els.scenarios.querySelector('[data-role="horizonOut"]');
-  if (out) out.textContent = String(state.scenarios.A.horizonYears);
-  const hint = els.scenarios.querySelector('[data-role="horizonHint"]');
-  if (hint) {
-    hint.textContent = `${effectiveHorizonYears()} years (end age − current age)`;
+// Sync the persistent horizon/end-age slider with state — value,
+// min/max range, and label text. Called after every state change.
+function applySlider() {
+  const a = state.scenarios.A;
+  if (state.drawdownMode) {
+    const min = a.retirementAge + 5;
+    const max = 105;
+    let value = a.endAge;
+    if (value < min) { value = min; a.endAge = min; state.scenarios.B.endAge = min; }
+    if (value > max) { value = max; a.endAge = max; state.scenarios.B.endAge = max; }
+    els.horizonSlider.min = String(min);
+    els.horizonSlider.max = String(max);
+    els.horizonSlider.step = "1";
+    els.horizonSlider.value = String(value);
+    els.sliderLabel.innerHTML = `Project until age: <output>${value}</output>`;
+  } else {
+    els.horizonSlider.min = "5";
+    els.horizonSlider.max = "50";
+    els.horizonSlider.step = "1";
+    els.horizonSlider.value = String(a.horizonYears);
+    els.sliderLabel.innerHTML = `Time horizon: <output>${a.horizonYears}</output> years`;
   }
 }
+
+function onSliderChange() {
+  const raw = Number(els.horizonSlider.value);
+  if (!Number.isFinite(raw)) return;
+  if (state.drawdownMode) {
+    state.scenarios.A.endAge = raw;
+    state.scenarios.B.endAge = raw;
+  } else {
+    state.scenarios.A.horizonYears = raw;
+    state.scenarios.B.horizonYears = raw;
+  }
+  applySlider();
+  scheduleRun();
+}
+
+els.horizonSlider.addEventListener("input", onSliderChange);
+els.horizonSlider.addEventListener("change", onSliderChange);
 
 // --- sim wrappers ---------------------------------------------------------
 
@@ -486,7 +498,7 @@ function runSingle() {
   const s = state.scenarios.A;
   const { mu, sigma } = PROFILES[s.asset];
   applyAssetMeta("A", mu, sigma);
-  applyHorizonLabel();
+  applySlider();
 
   const t0 = performance.now();
   const sim = runScenario(s);
@@ -685,7 +697,7 @@ function runCompare() {
   const profB = PROFILES[sB.asset];
   applyAssetMeta("A", profA.mu, profA.sigma);
   applyAssetMeta("B", profB.mu, profB.sigma);
-  applyHorizonLabel();
+  applySlider();
 
   const subs = computeSubtitles(sA, sB);
   applySubtitles(subs);

@@ -240,6 +240,43 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
+/* --- persistent horizon slider --- */
+
+/* Aligned to the chart's plot area: chart-wrap has 12px padding and
+   Plotly's layout uses margin.l = 70, margin.r = 20. So the slider's
+   inner pad is 12 + 70 = 82 on the left, 12 + 20 = 32 on the right. */
+.horizon-slider-wrap {
+  margin: 0 0 16px 0;
+}
+
+.horizon-slider {
+  padding-left: 82px;
+  padding-right: 32px;
+}
+
+.horizon-slider-label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.horizon-slider-label output {
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13.5px;
+}
+
+.horizon-slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
 /* --- charts --- */
 
 .chart-wrap {
@@ -552,4 +589,6 @@ dialog.modal::backdrop {
   .app-header h1 { font-size: 20px; }
   .header-actions { width: 100%; justify-content: space-between; }
   .stat-table th, .stat-table td { padding: 6px 6px; font-size: 12.5px; }
+  /* Slider alignment loosens on narrow screens — full row, no plot-area inset. */
+  .horizon-slider { padding-left: 12px; padding-right: 12px; }
 }
