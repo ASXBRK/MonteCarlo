@@ -23,7 +23,7 @@ export const sampleTraceIndices = () =>
   Array.from({ length: SAMPLE_PATH_COUNT }, (_, i) => i);
 
 function buildSingleTraces(sim) {
-  const { xYears, p25, p50, p75, deterministic, sampled } = sim;
+  const { xYears, p05, p25, p50, p75, p95, deterministic, sampled } = sim;
   const traces = [];
 
   for (let i = 0; i < sampled.length; i++) {
@@ -35,6 +35,23 @@ function buildSingleTraces(sim) {
     });
   }
 
+  // p5-p95 outer band (lighter).
+  traces.push({
+    x: xYears, y: p05,
+    mode: "lines", type: "scatter",
+    line: { color: "rgba(0,0,0,0)", width: 0 },
+    hoverinfo: "skip", showlegend: false,
+  });
+  traces.push({
+    x: xYears, y: p95,
+    mode: "lines", type: "scatter",
+    line: { color: "rgba(0,0,0,0)", width: 0 },
+    fill: "tonexty", fillcolor: COLOURS.band95,
+    name: "5–95th percentile",
+    hovertemplate: "Year %{x} · 95th: %{y:$,.0f}<extra></extra>",
+  });
+
+  // p25-p75 inner band (darker).
   traces.push({
     x: xYears, y: p25,
     mode: "lines", type: "scatter",
@@ -167,6 +184,10 @@ export function renderChart(containerId, sim, { horizonYears, currentAge }) {
       tickformat: "$,.2s",
       gridcolor: "rgba(0,0,0,0.06)",
       zeroline: false,
+      // autorange must be explicitly false alongside `range`. Without it,
+      // Plotly.restyle (used by the overlay animation) triggers an
+      // internal recompute that overrides the explicit range.
+      autorange: false,
       range: [0, yMax],
     },
     font: BASE_FONT,
