@@ -115,6 +115,25 @@ html, body {
   border-radius: 10px;
 }
 
+.scenario-shared.drawdown {
+  grid-template-columns: 1fr 1fr 2fr;
+}
+
+.shared-meta-value {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+}
+
+.stat-headline {
+  background: #fff6e6;
+  border-color: #f0d68c;
+}
+.stat-headline .stat-value { color: #6b4f00; }
+
 .scenario-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -14,6 +14,10 @@
         <div class="header-actions">
           <button id="paramsBtn" class="btn-text" type="button">Parameters</button>
           <label class="toggle">
+            <input id="drawdownToggle" type="checkbox" />
+            <span>Drawdown phase</span>
+          </label>
+          <label class="toggle">
             <input id="compareToggle" type="checkbox" />
             <span>Compare scenarios</span>
           </label>
@@ -87,6 +91,20 @@
           <p>In compare mode, both scenarios run against the same sequence of market shocks. The i-th simulated path of A and the i-th simulated path of B are responses to the same random market under different strategies — not two independent random universes. This isolates the comparison to the strategy decision itself: contributing more always beats contributing less when other inputs are equal, and asset-class comparisons reflect how each profile responds to the same market.</p>
           <p>P(A &gt; B) at year <em>t</em> is the fraction of paired paths where A's value exceeds B's. Ties contribute 0.5 to each side, so identical configurations evaluate to 50% at year 0 rather than 0%.</p>
           <p>When asset classes differ, the same shock produces different returns because higher-volatility profiles amplify it. A z = −1 month gives Growth a −2.55% return and Balanced a −1.77% return; a z = +2.5 month gives them +8.57% and +6.32%. The probability line evolves because the strategies respond differently to the same market, not because they live in different random universes.</p>
+        </section>
+
+        <section>
+          <h3>Drawdown phase</h3>
+          <p>The Drawdown toggle extends the simulation past retirement into the decumulation phase. The portfolio continues to compound at the chosen asset profile, while planned withdrawals are taken each month. Paths that deplete to zero stay at zero — there is no floor or recovery mechanism.</p>
+          <p><strong>Scope.</strong> This tool models a single investment portfolio in isolation. It does not include age pension entitlement, non-portfolio assets, partner's income, property, or other income sources. Total retirement income for most users will be higher than the portfolio drawdown shown here. For holistic retirement income modelling, this tool should be used alongside other planning resources.</p>
+          <p><strong>Defensive bucket.</strong> The defensive bucket sets aside a number of years of expected withdrawals in low-volatility assets (cash equivalent). This is rebalanced monthly to maintain its size, and withdrawals are taken from it first. The pedagogical content is exposure to sequence risk: a larger defensive bucket reduces the need to sell growth assets during early market drawdowns, at the cost of less upside if those drawdowns don't occur.</p>
+          <p><strong>Withdrawal strategies.</strong></p>
+          <ul>
+            <li><em>Fixed real (Bengen).</em> Withdraw the same real dollar amount each year regardless of portfolio performance. Bengen (1994) introduced this baseline strategy.</li>
+            <li><em>Guyton-Klinger guardrails.</em> Fixed real with two dynamic guardrails: if the current withdrawal rate exceeds the initial rate by more than 20%, cut next year's withdrawal by 10%; if it falls below by more than 20%, increase by 10%; otherwise hold in real terms. Guyton &amp; Klinger (2006).</li>
+            <li><em>Fixed % of balance.</em> Withdraw a fixed percentage of the current balance each year, where the percentage is set so that the initial withdrawal equals the user's annual withdrawal input. Cannot deplete the portfolio in the limit, but income varies year-to-year with market performance.</li>
+          </ul>
+          <p><strong>Probability of ruin.</strong> Percentage of simulated paths where the portfolio depletes to zero at any point during the projection horizon. This is portfolio depletion only; total retirement income for AU users typically includes age pension and other sources not modelled here.</p>
         </section>
 
         <section>

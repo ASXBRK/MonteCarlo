@@ -163,14 +163,61 @@ const HOVER_LABEL = {
   align: "left",
 };
 
+// Returns the retirement marker line + shaded post-retirement region
+// to add to a fan chart's layout when drawdown is active.
+function drawdownShapesAndAnnotations({ retirementYear, horizonYears, yMax }) {
+  if (retirementYear == null || retirementYear <= 0 || retirementYear >= horizonYears) {
+    return { shapes: [], annotations: [] };
+  }
+  return {
+    shapes: [
+      // Shaded post-retirement region.
+      {
+        type: "rect", xref: "x", yref: "paper",
+        x0: retirementYear, x1: horizonYears, y0: 0, y1: 1,
+        fillcolor: "rgba(120, 110, 90, 0.06)",
+        line: { width: 0 },
+        layer: "below",
+      },
+      // Vertical dashed line at retirement.
+      {
+        type: "line", xref: "x", yref: "paper",
+        x0: retirementYear, x1: retirementYear, y0: 0, y1: 1,
+        line: { color: "rgba(80, 70, 50, 0.55)", width: 1.25, dash: "dash" },
+        layer: "above",
+      },
+    ],
+    annotations: [
+      {
+        x: retirementYear, xref: "x",
+        y: 1, yref: "paper",
+        yanchor: "bottom", xanchor: "center",
+        text: "Retirement",
+        showarrow: false,
+        font: { size: 11, color: "rgba(80, 70, 50, 0.85)" },
+        bgcolor: "rgba(255,255,255,0.8)",
+        borderpad: 2,
+      },
+    ],
+  };
+}
+
 // Render single-scenario fan chart. The y-axis is locked to the bulk
 // of outcomes (~p95 of terminal year). Individual sample paths that
 // exceed this ceiling get clipped at the top edge — that's intentional;
 // it keeps the chart's central story stable as paths rotate.
-export function renderChart(containerId, sim, { horizonYears, currentAge }) {
+export function renderChart(containerId, sim, { horizonYears, currentAge, retirementYear = null }) {
   const data = buildSingleTraces(sim);
   const ticks = buildAxisTicks(horizonYears, currentAge);
-  const yMax = sim.p95[sim.p95.length - 1] * 1.05;
+  // Cap y-axis off the bulk of the distribution including drawdown.
+  // Use the max p95 across all years so the chart doesn't shrink when
+  // the terminal p95 drops below the pre-retirement peak.
+  let p95Peak = 0;
+  for (const v of sim.p95) if (v > p95Peak) p95Peak = v;
+  const yMax = (p95Peak || 1) * 1.05;
+  const { shapes, annotations } = drawdownShapesAndAnnotations({
+    retirementYear, horizonYears, yMax,
+  });
 
   const layout = {
     margin: { l: 70, r: 20, t: 30, b: 60 },
@@ -199,6 +246,8 @@ export function renderChart(containerId, sim, { horizonYears, currentAge }) {
       autorange: false,
       range: [0, yMax],
     },
+    shapes,
+    annotations,
     font: BASE_FONT,
     hoverlabel: HOVER_LABEL,
   };
@@ -207,9 +256,12 @@ export function renderChart(containerId, sim, { horizonYears, currentAge }) {
 }
 
 // Render compare-mode fan chart (4 visual elements: 2 bands + 2 medians).
-export function renderCompareChart(containerId, sims, { horizonYears, currentAge, names }) {
+export function renderCompareChart(containerId, sims, { horizonYears, currentAge, names, retirementYear = null }) {
   const data = buildCompareTraces(sims, names);
   const ticks = buildAxisTicks(horizonYears, currentAge);
+  const { shapes, annotations } = drawdownShapesAndAnnotations({
+    retirementYear, horizonYears,
+  });
 
   const layout = {
     margin: { l: 70, r: 20, t: 30, b: 60 },
@@ -233,6 +285,8 @@ export function renderCompareChart(containerId, sims, { horizonYears, currentAge
       gridcolor: "rgba(0,0,0,0.06)",
       zeroline: false, rangemode: "tozero",
     },
+    shapes,
+    annotations,
     font: BASE_FONT,
     hoverlabel: HOVER_LABEL,
   };
