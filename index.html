@@ -73,7 +73,15 @@
             <tbody id="paramAssetTable"></tbody>
           </table>
           <div id="bellCurves" class="modal-chart"></div>
-          <p>All figures are nominal, pre-fee, pre-tax. Source: illustrative, calibrated against publicly available long-term capital market assumptions. Not specific to any product or fund.</p>
+          <p>All figures are real (net of inflation), pre-fee, pre-tax. Source: placeholder values consistent with major forward-looking capital market assumption frameworks (Mercer LTCMA, JP Morgan LTCMA typical ranges); they will be re-sourced against a specific CMA reference in a later update. Not specific to any product or fund.</p>
+        </section>
+
+        <section>
+          <h3>Real-terms convention</h3>
+          <p>All amounts in this tool are expressed in real (today's dollars) terms. Profile expected returns are net of inflation — a 5% real return for Growth means the portfolio's purchasing power grows by 5% per year, not its nominal value.</p>
+          <p>Contributions and withdrawals maintain their real purchasing power throughout the projection. A $1,000/month contribution today represents the same purchasing power across all projection years, which is equivalent to that contribution growing with CPI in nominal dollars. The same applies to drawdown withdrawals.</p>
+          <p>Profile expected returns are placeholder values consistent with forward-looking capital market assumption frameworks. They will be updated with sourced figures in a future release.</p>
+          <p>A future update will add a nominal-dollars toggle for users who want to see the inflated nominal values alongside the real values.</p>
         </section>
 
         <section>
@@ -118,7 +126,7 @@
             <li>Occasional jumps and regime shifts</li>
           </ul>
           <p>The current model captures none of these. Fan widths shown here are likely understated at the tails relative to historical experience. Tools incorporating jump-diffusion, GARCH, or empirical bootstrapping will show wider extremes at the cost of model complexity.</p>
-          <p>No fees, taxes, or inflation. Returns are nominal pre-cost. For a real-terms view, subtract roughly 2.5% from each μ.</p>
+          <p>No fees and no taxes. Returns are real (net of inflation) and pre-cost, so contribution and withdrawal amounts you enter are in today's purchasing power. A future release will add a nominal-dollars toggle.</p>
         </section>
 
         <section>
