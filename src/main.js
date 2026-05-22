@@ -1,6 +1,6 @@
 import { PROFILES, DEFAULT_PROFILE } from "./profiles.js";
 import { simulate } from "./sim.js";
-import { renderChart, renderCompareChart, renderProbChart } from "./chart.js";
+import { renderChart, renderCompareChart, renderProbChart, renderBellCurves } from "./chart.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -8,6 +8,9 @@ const els = {
   toggle: $("compareToggle"),
   scenarios: $("scenarios"),
   output: $("output"),
+  paramsBtn: $("paramsBtn"),
+  paramsModal: $("paramsModal"),
+  paramAssetTable: $("paramAssetTable"),
 };
 
 const DEFAULTS = {
@@ -544,6 +547,44 @@ els.toggle.addEventListener("change", () => {
   run();
 });
 
+// --- Parameters modal -----------------------------------------------------
+
+let bellCurvesRendered = false;
+
+function populateParamsTable() {
+  els.paramAssetTable.innerHTML = Object.entries(PROFILES).map(
+    ([name, { mu, sigma }]) => `
+      <tr>
+        <td>${name}</td>
+        <td>${(mu * 100).toFixed(1)}%</td>
+        <td>${(sigma * 100).toFixed(0)}%</td>
+      </tr>
+    `
+  ).join("");
+}
+
+function openModal() {
+  els.paramsModal.showModal();
+  // Render the bell curves lazily on first open, when the dialog has
+  // real dimensions so Plotly sizes correctly.
+  if (!bellCurvesRendered) {
+    renderBellCurves("bellCurves", PROFILES);
+    bellCurvesRendered = true;
+  }
+}
+
+function closeModal() {
+  els.paramsModal.close();
+}
+
+els.paramsBtn.addEventListener("click", openModal);
+els.paramsModal.querySelector(".modal-close").addEventListener("click", closeModal);
+// Click on backdrop (i.e. on the dialog element itself, outside the content) closes.
+els.paramsModal.addEventListener("click", (e) => {
+  if (e.target === els.paramsModal) closeModal();
+});
+
 // Boot.
+populateParamsTable();
 renderControls();
 run();

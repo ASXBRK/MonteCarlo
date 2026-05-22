@@ -11,18 +11,16 @@
     <div class="app">
       <header class="app-header">
         <h1>Monte Carlo Investment Projection</h1>
-        <p class="subtitle">
-          2,000 simulated futures vs. a steady, "stagnant return" projection.
-        </p>
-      </header>
-
-      <section class="controls-wrap">
-        <div class="controls-topbar">
+        <div class="header-actions">
+          <button id="paramsBtn" class="btn-text" type="button">Parameters</button>
           <label class="toggle">
             <input id="compareToggle" type="checkbox" />
             <span>Compare scenarios</span>
           </label>
         </div>
+      </header>
+
+      <section class="controls-wrap">
         <div id="scenarios" class="scenarios single"></div>
       </section>
 
@@ -31,14 +29,85 @@
       </section>
 
       <section id="output"></section>
-
-      <footer class="app-footer">
-        <p>
-          Educational tool only. Returns are illustrative; past performance is not
-          a forecast. No fees, taxes, or inflation modelled.
-        </p>
-      </footer>
     </div>
+
+    <dialog id="paramsModal" class="modal" aria-labelledby="paramsTitle">
+      <div class="modal-head">
+        <h2 id="paramsTitle" class="modal-title">Parameters</h2>
+        <button class="modal-close" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <section>
+          <h3>Engine</h3>
+          <ul class="param-list">
+            <li>Paths per scenario: 2,000</li>
+            <li>Step: monthly (12 steps per year)</li>
+            <li>Return distribution: i.i.d. normal, sampled via Box-Muller</li>
+            <li>Per-step return: <code>r = μ/12 + (σ/√12) × z</code>, where <code>z ~ N(0,1)</code></li>
+            <li>Balance update: <code>B(t+1) = B(t) × (1+r) + contribution</code></li>
+            <li>Stored snapshots: yearly only</li>
+          </ul>
+          <div class="formula">
+            <div>monthly μ = annual μ / 12</div>
+            <div>monthly σ = annual σ / √12</div>
+          </div>
+        </section>
+
+        <section>
+          <h3>Asset class assumptions</h3>
+          <table class="param-table">
+            <thead>
+              <tr><th>Profile</th><th>μ (annual)</th><th>σ (annual)</th></tr>
+            </thead>
+            <tbody id="paramAssetTable"></tbody>
+          </table>
+          <div id="bellCurves" class="modal-chart"></div>
+          <p>All figures are nominal, pre-fee, pre-tax. Source: illustrative, calibrated against publicly available long-term capital market assumptions. Not specific to any product or fund.</p>
+        </section>
+
+        <section>
+          <h3>Why monthly, not daily</h3>
+          <p>Under i.i.d. normal sampling, returns drawn at any sub-monthly frequency converge to an indistinguishable terminal distribution once correctly scaled. Daily steps multiply compute by ~21× with no visible change in the bands. Sub-monthly granularity only matters when path-dependent features (rebalancing rules, withdrawal triggers, stop-losses) require finer resolution. None apply here.</p>
+          <p>Annual steps would distort the early years, as monthly contributions do not compress cleanly into yearly buckets.</p>
+        </section>
+
+        <section>
+          <h3>Why the median sits below the steady-return line</h3>
+          <p>The dashed steady-return line is the deterministic projection: starting balance compounded at μ monthly, plus contributions. It represents the arithmetic expected outcome.</p>
+          <p>In a log-normal accumulation, the median outcome sits below the mean, roughly by μ − σ²/2 in continuous time. The median fan path will visibly fall below the steady-return line, and the gap widens at higher σ. This is the volatility drag, and it is correct behaviour, not a bug.</p>
+        </section>
+
+        <section>
+          <h3>Overlay paths</h3>
+          <p>The 30 grey paths drawn over the bands in single-scenario mode are sampled from paths whose terminal value falls between p5 and p95 of the full simulation. This is a presentation choice. The fan bands convey the true range; unconstrained overlay sampling occasionally produces outlier paths that compress the chart's y-axis and obscure the central story.</p>
+        </section>
+
+        <section>
+          <h3>Probability of leading</h3>
+          <p>In compare mode, P(A &gt; B) at year <em>t</em> is computed by pairing the i-th simulated path of A with the i-th simulated path of B, then counting wins across all 2,000 pairs. Pairing by index is valid as the two scenarios use independent random draws — the result is equivalent in expectation to the cross-product comparison, at a fraction of the compute.</p>
+          <p>Ties contribute 0.5 to each side, so identical starting positions evaluate to 50% at year 0, not 0%.</p>
+        </section>
+
+        <section>
+          <h3>Model limitations</h3>
+          <p>i.i.d. normal sampling is the dominant simplification. Real returns exhibit:</p>
+          <ul>
+            <li>Fat tails (more extreme outcomes than the normal distribution predicts)</li>
+            <li>Volatility clustering (calm and turbulent periods cluster in time)</li>
+            <li>Mild autocorrelation at short lags</li>
+            <li>Occasional jumps and regime shifts</li>
+          </ul>
+          <p>The current model captures none of these. Fan widths shown here are likely understated at the tails relative to historical experience. Tools incorporating jump-diffusion, GARCH, or empirical bootstrapping will show wider extremes at the cost of model complexity.</p>
+          <p>No fees, taxes, or inflation. Returns are nominal pre-cost. For a real-terms view, subtract roughly 2.5% from each μ.</p>
+        </section>
+
+        <section>
+          <h3>Scope</h3>
+          <p>This tool is designed to show that a single "average return" figure hides material outcome dispersion, and that comparing strategies requires examining the full distribution rather than the central estimate.</p>
+          <p>Not for investment recommendations, fee analysis, retirement-adequacy modelling, or any scenario involving withdrawals from the portfolio.</p>
+        </section>
+      </div>
+    </dialog>
 
     <script type="module" src="/src/main.js"></script>
   </body>

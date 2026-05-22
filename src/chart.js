@@ -260,3 +260,58 @@ export function renderProbChart(containerId, xYears, probAGreater, { horizonYear
 
   Plotly.react(containerId, data, layout, { displayModeBar: false, responsive: true });
 }
+
+// Static bell curves overlay for the Parameters modal. One Gaussian
+// per profile, centred at μ, width proportional to σ, peak height
+// normalised to 1 so shapes are directly comparable.
+export function renderBellCurves(containerId, profiles) {
+  let xMin = 0, xMax = 0;
+  for (const { mu, sigma } of Object.values(profiles)) {
+    xMin = Math.min(xMin, (mu - 3 * sigma) * 100);
+    xMax = Math.max(xMax, (mu + 3 * sigma) * 100);
+  }
+  const step = (xMax - xMin) / 240;
+  const xs = [];
+  for (let x = xMin; x <= xMax; x += step) xs.push(x);
+
+  const palette = ["#6b8e23", "#3a86c9", "#5e60ce", "#1c5ab4", "#dc5a28", "#b5179e", "#9a031e"];
+
+  const traces = Object.entries(profiles).map(([name, { mu, sigma }], i) => {
+    const muPct = mu * 100;
+    const sigmaPct = sigma * 100;
+    const ys = xs.map((x) => Math.exp(-Math.pow(x - muPct, 2) / (2 * sigmaPct * sigmaPct)));
+    return {
+      x: xs, y: ys,
+      mode: "lines", type: "scatter",
+      name,
+      line: { width: 1.5, color: palette[i % palette.length] },
+      hovertemplate: `${name} · μ=${(mu * 100).toFixed(1)}%, σ=${(sigma * 100).toFixed(0)}%<extra></extra>`,
+    };
+  });
+
+  const layout = {
+    margin: { l: 10, r: 10, t: 10, b: 50 },
+    height: 220,
+    paper_bgcolor: "transparent",
+    plot_bgcolor: "transparent",
+    showlegend: true,
+    legend: { orientation: "h", x: 0.5, xanchor: "center", y: -0.12, font: { size: 11 } },
+    xaxis: {
+      ticksuffix: "%",
+      zeroline: true,
+      zerolinecolor: "rgba(0,0,0,0.25)",
+      zerolinewidth: 1,
+      showgrid: false,
+      tickfont: { size: 11 },
+    },
+    yaxis: {
+      showticklabels: false,
+      showgrid: false,
+      zeroline: false,
+      range: [0, 1.1],
+    },
+    font: BASE_FONT,
+  };
+
+  Plotly.newPlot(containerId, traces, layout, { displayModeBar: false, responsive: true });
+}
