@@ -84,9 +84,9 @@
 
         <section>
           <h3>Probability of leading</h3>
-          <p>In compare mode, P(A &gt; B) at year <em>t</em> is computed by pairing the i-th simulated path of A with the i-th simulated path of B, then counting wins across all 2,000 pairs. Pairing by index is valid because both scenarios share the same shock matrix (see below) — the i-th path is the same market in both.</p>
-          <p>Ties contribute 0.5 to each side, so identical starting positions evaluate to 50% at year 0, not 0%.</p>
-          <p>In compare mode, both scenarios run against the same sequence of market shocks. A and B are responses to the same random market under different strategies, not two independent random universes. This means contributing more always beats contributing less when other inputs are equal — which matches the question being asked. When asset classes differ, the same shock produces different returns because higher-volatility profiles amplify it; this is why a Growth-versus-Balanced comparison still shows the probability evolving meaningfully over time.</p>
+          <p>In compare mode, both scenarios run against the same sequence of market shocks. The i-th simulated path of A and the i-th simulated path of B are responses to the same random market under different strategies — not two independent random universes. This isolates the comparison to the strategy decision itself: contributing more always beats contributing less when other inputs are equal, and asset-class comparisons reflect how each profile responds to the same market.</p>
+          <p>P(A &gt; B) at year <em>t</em> is the fraction of paired paths where A's value exceeds B's. Ties contribute 0.5 to each side, so identical configurations evaluate to 50% at year 0 rather than 0%.</p>
+          <p>When asset classes differ, the same shock produces different returns because higher-volatility profiles amplify it. A z = −1 month gives Growth a −2.55% return and Balanced a −1.77% return; a z = +2.5 month gives them +8.57% and +6.32%. The probability line evolves because the strategies respond differently to the same market, not because they live in different random universes.</p>
         </section>
 
         <section>

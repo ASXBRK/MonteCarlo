@@ -282,7 +282,7 @@ function ensureOutputSkeleton(mode) {
         <div class="prob-header">
           <h3 class="prob-title" data-role="probTitle"></h3>
           <button class="info-icon" type="button" aria-label="About this chart"
-            title="At each year, we pair the i-th simulated path of each plan and count how often Plan A finishes ahead. Ties count as half. The dashed line marks 50/50.">i</button>
+            title="At each year, this shows the fraction of 2,000 simulated markets in which Plan A's value exceeds Plan B's. Both plans face the same market shocks each month, so the comparison isolates strategy choice from market luck. Ties count as half. The dashed line marks 50/50.">i</button>
         </div>
         <div id="probChart"></div>
       </div>
@@ -559,11 +559,11 @@ function runCompare() {
   if (identical) {
     q("callout").textContent = "";
     q("narrative").innerHTML = `
-      <p>Both scenarios are configured identically. The small differences
-      between the two fans are sampling noise — each scenario runs its own
-      2,000-path simulation with independent random draws. Change at least
-      one per-scenario input (asset class, starting balance, or monthly
-      contribution) to see a meaningful comparison.</p>
+      <p>Both scenarios are configured identically, so they produce the
+      same paths under the same market shocks — the two fans overlap
+      exactly. Change at least one per-scenario input (asset class,
+      starting balance, or monthly contribution) to see a meaningful
+      comparison.</p>
     `;
   } else {
     q("callout").textContent = calloutText(probA, names);
