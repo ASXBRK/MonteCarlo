@@ -242,7 +242,7 @@ export function renderProbChart(containerId, xYears, probAGreater, { horizonYear
       range: [0, horizonYears],
     },
     yaxis: {
-      title: { text: "P(A finishes higher)", standoff: 8 },
+      title: { text: "Probability", standoff: 8 },
       ticksuffix: "%",
       range: [0, 100],
       gridcolor: "rgba(0,0,0,0.06)",

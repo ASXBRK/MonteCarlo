@@ -278,6 +278,11 @@ function ensureOutputSkeleton(mode) {
     els.output.innerHTML = `
       <div class="callout" data-role="callout"></div>
       <div class="chart-wrap chart-wrap-small">
+        <div class="prob-header">
+          <h3 class="prob-title" data-role="probTitle"></h3>
+          <button class="info-icon" type="button" aria-label="About this chart"
+            title="At each year, we pair the i-th simulated path of each plan and count how often Plan A finishes ahead. Ties count as half. The dashed line marks 50/50.">i</button>
+        </div>
         <div id="probChart"></div>
       </div>
       <div class="narrative" data-role="narrative"></div>
@@ -501,6 +506,14 @@ function runCompare() {
 
   const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
   q("callout").textContent = calloutText(probA, names);
+
+  // Chart headline uses "Plan A/B" fallback (reads more naturally than
+  // "Scenario A/B" in a sentence) when subtitles are empty.
+  const chartNames = {
+    A: subs.A || "Plan A",
+    B: subs.B || "Plan B",
+  };
+  q("probTitle").textContent = `Probability ${chartNames.A} finishes ahead of ${chartNames.B}`;
 
   // Narrative + stat block.
   const aMedian = simA.p50[sharedHorizon];
