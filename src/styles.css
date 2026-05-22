@@ -217,9 +217,7 @@ html, body {
 #chart  { width: 100%; height: 520px; }
 #probChart { width: 100%; height: 200px; }
 
-/* --- compare extras --- */
-
-.compare-extras { display: flex; flex-direction: column; }
+/* --- compare extras (only present in DOM when compare mode is on) --- */
 
 .callout {
   background: #fff8e6;
@@ -230,10 +228,6 @@ html, body {
   margin-bottom: 12px;
   font-size: 14px;
   font-weight: 600;
-}
-
-.callout:empty {
-  display: none;
 }
 
 .narrative {

@@ -7,10 +7,7 @@ const $ = (id) => document.getElementById(id);
 const els = {
   toggle: $("compareToggle"),
   scenarios: $("scenarios"),
-  summary: $("summary"),
-  compareExtras: $("compareExtras"),
-  callout: $("callout"),
-  narrative: $("narrative"),
+  output: $("output"),
 };
 
 const DEFAULTS = {
@@ -244,28 +241,70 @@ function runScenario(s) {
 
 // --- single-mode rendering -----------------------------------------------
 
-function renderSingleSummary(s, sim) {
+// Build the output section's DOM skeleton for the given mode.
+// Only rebuilds when the mode actually changes, so subsequent runs in
+// the same mode just update text/values into existing elements.
+// When switching modes, any Plotly chart inside (e.g. #probChart) is
+// torn down with its host node — its references go with it.
+function ensureOutputSkeleton(mode) {
+  if (els.output.dataset.mode === mode) return;
+  els.output.dataset.mode = mode;
+
+  if (mode === "single") {
+    els.output.innerHTML = `
+      <div class="summary single">
+        <div class="stat">
+          <div class="stat-label">Total contributed</div>
+          <div class="stat-value" data-role="contrib">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label" data-role="steadyLabel">Steady return</div>
+          <div class="stat-value" data-role="steady">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Median outcome</div>
+          <div class="stat-value" data-role="median">—</div>
+        </div>
+        <div class="stat range">
+          <div class="stat-label">5th – 95th percentile</div>
+          <div class="stat-value" data-role="range">—</div>
+        </div>
+      </div>
+    `;
+  } else {
+    els.output.innerHTML = `
+      <div class="callout" data-role="callout"></div>
+      <div class="chart-wrap chart-wrap-small">
+        <div id="probChart"></div>
+      </div>
+      <div class="narrative" data-role="narrative"></div>
+      <div class="summary compare">
+        <table class="stat-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Total contributed</th>
+              <th>5th percentile</th>
+              <th>Median</th>
+              <th>95th percentile</th>
+            </tr>
+          </thead>
+          <tbody data-role="statbody"></tbody>
+        </table>
+      </div>
+    `;
+  }
+}
+
+function updateSingleOutput(s, sim) {
   const last = sim.xYears.length - 1;
   const totalContrib = s.startingBalance + s.monthlyContribution * 12 * s.horizonYears;
-  els.summary.className = "summary single";
-  els.summary.innerHTML = `
-    <div class="stat">
-      <div class="stat-label">Total contributed</div>
-      <div class="stat-value">${fmtMoney(totalContrib)}</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Steady return @ ${(PROFILES[s.asset].mu * 100).toFixed(1)}%</div>
-      <div class="stat-value">${fmtMoney(sim.deterministic[last])}</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Median outcome</div>
-      <div class="stat-value">${fmtMoney(sim.p50[last])}</div>
-    </div>
-    <div class="stat range">
-      <div class="stat-label">5th – 95th percentile</div>
-      <div class="stat-value">${fmtMoney(sim.p05[last])} – ${fmtMoney(sim.p95[last])}</div>
-    </div>
-  `;
+  const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
+  q("contrib").textContent = fmtMoney(totalContrib);
+  q("steadyLabel").textContent = `Steady return @ ${(PROFILES[s.asset].mu * 100).toFixed(1)}%`;
+  q("steady").textContent = fmtMoney(sim.deterministic[last]);
+  q("median").textContent = fmtMoney(sim.p50[last]);
+  q("range").textContent = `${fmtMoney(sim.p05[last])} – ${fmtMoney(sim.p95[last])}`;
 }
 
 function runSingle() {
@@ -282,31 +321,38 @@ function runSingle() {
     horizonYears: s.horizonYears,
     currentAge: parseAge(s.age),
   });
-  renderSingleSummary(s, sim);
 
-  els.compareExtras.hidden = true;
+  ensureOutputSkeleton("single");
+  updateSingleOutput(s, sim);
+
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · single · ${s.asset} · ${s.horizonYears}y`);
 }
 
 // --- compare-mode rendering ----------------------------------------------
 
-// P(A_i(t) > B_i(t)) for each year t in [0, sharedYears).
+// P(A_i(t) "wins" over B_i(t)) for each year t in [0, sharedYears).
+// Ties contribute 0.5 — so a year where every path is tied yields 50%,
+// not 0%. Without this, year 0 at equal starting balances reads as 0%.
 function pathProbability(simA, simB, sharedYears) {
   const n = Math.min(simA.numPaths, simB.numPaths);
   const yearsA = simA.years;
   const yearsB = simB.years;
   const out = new Array(sharedYears);
   for (let y = 0; y < sharedYears; y++) {
-    let count = 0;
+    let wins = 0;
     for (let p = 0; p < n; p++) {
-      if (simA.paths[p * yearsA + y] > simB.paths[p * yearsB + y]) count++;
+      const a = simA.paths[p * yearsA + y];
+      const b = simB.paths[p * yearsB + y];
+      if (a > b) wins += 1;
+      else if (a === b) wins += 0.5;
     }
-    out[y] = count / n;
+    out[y] = wins / n;
   }
   return out;
 }
 
-// Fraction of paths where simA's terminal < simB's terminal.
+// Probability that the higher-median scenario finishes below the lower-median
+// scenario at the terminal year. Ties contribute 0.5 — same rule as above.
 function regretFraction(simA, simB, termIdxA, termIdxB, higherIsA) {
   const n = Math.min(simA.numPaths, simB.numPaths);
   const yearsA = simA.years;
@@ -316,23 +362,20 @@ function regretFraction(simA, simB, termIdxA, termIdxB, higherIsA) {
     const a = simA.paths[p * yearsA + termIdxA];
     const b = simB.paths[p * yearsB + termIdxB];
     // "finish worse off in H than in L"
-    if (higherIsA) {
-      if (a < b) bad++;
-    } else {
-      if (b < a) bad++;
-    }
+    const hVal = higherIsA ? a : b;
+    const lVal = higherIsA ? b : a;
+    if (hVal < lVal) bad += 1;
+    else if (hVal === lVal) bad += 0.5;
   }
   return bad / n;
 }
 
-function renderCallout(probAGreater, names) {
-  // Skip year 0 because at equal starting balances P is locked at 0.
-  const start = 1;
+function calloutText(probAGreater, names) {
+  // Year 0 now reads correctly thanks to tie-handling (50% if equal
+  // start balances, 0/100% if not), so we scan the whole range.
+  const start = 0;
   const end = probAGreater.length - 1;
-  if (end < start) {
-    els.callout.textContent = "";
-    return;
-  }
+  if (end < start) return "";
 
   let allAbove = true, allBelow = true;
   for (let y = start; y <= end; y++) {
@@ -340,41 +383,34 @@ function renderCallout(probAGreater, names) {
     if (probAGreater[y] >= 0.5) allBelow = false;
   }
 
-  let text = "";
-  if (allAbove) {
-    text = `${names.A} is more likely to lead throughout the entire horizon.`;
-  } else if (allBelow) {
-    text = `${names.B} is more likely to lead throughout the entire horizon.`;
-  } else {
-    const initialDir = probAGreater[start] > 0.5 ? "A" : "B";
-    let flipYear = -1;
-    let flipTo = null;
-    for (let y = start + 1; y <= end; y++) {
-      const dir = probAGreater[y] > 0.5 ? "A" : (probAGreater[y] < 0.5 ? "B" : null);
-      if (dir && dir !== initialDir) {
-        flipYear = y;
-        flipTo = dir;
-        break;
-      }
-    }
-    if (flipYear === -1) {
-      // Mostly straddles 50% — degenerate case.
-      text = `${names.A} and ${names.B} stay close to 50/50 across the horizon.`;
-    } else {
-      text = `${names[flipTo]} becomes more likely to lead from Year ${flipYear}.`;
+  if (allAbove) return `${names.A} is more likely to lead throughout the entire horizon.`;
+  if (allBelow) return `${names.B} is more likely to lead throughout the entire horizon.`;
+
+  // Use the first year with a non-tied probability as the initial direction.
+  let initialDir = null;
+  let initialY = start;
+  for (let y = start; y <= end; y++) {
+    if (probAGreater[y] > 0.5) { initialDir = "A"; initialY = y; break; }
+    if (probAGreater[y] < 0.5) { initialDir = "B"; initialY = y; break; }
+  }
+  if (initialDir == null) {
+    return `${names.A} and ${names.B} stay close to 50/50 across the horizon.`;
+  }
+  for (let y = initialY + 1; y <= end; y++) {
+    const dir = probAGreater[y] > 0.5 ? "A" : (probAGreater[y] < 0.5 ? "B" : null);
+    if (dir && dir !== initialDir) {
+      return `${names[dir]} becomes more likely to lead from Year ${y}.`;
     }
   }
-
-  els.callout.textContent = text;
+  return `${names.A} and ${names.B} stay close to 50/50 across the horizon.`;
 }
 
-function renderNarrative(simA, simB, sA, sB, names, sharedHorizon, regret) {
-  const tA = sharedHorizon; // index of terminal year within shared range
-  const tB = sharedHorizon;
-  const aMedian = simA.p50[tA];
-  const bMedian = simB.p50[tB];
-  const aP5 = simA.p05[tA];
-  const bP5 = simB.p05[tB];
+function narrativeHTML(simA, simB, names, sharedHorizon, regret) {
+  const t = sharedHorizon;
+  const aMedian = simA.p50[t];
+  const bMedian = simB.p50[t];
+  const aP5 = simA.p05[t];
+  const bP5 = simB.p05[t];
 
   const higherIsA = aMedian >= bMedian;
   const Hname = higherIsA ? names.A : names.B;
@@ -387,14 +423,11 @@ function renderNarrative(simA, simB, sA, sB, names, sharedHorizon, regret) {
   const premium = Math.round((Hmedian / Math.max(Lmedian, 1) - 1) * 100);
   const regretPct = Math.round(regret * 100);
 
-  let tailSentence;
-  if (Hp5 < Lp5) {
-    tailSentence = `However, ${Hname}'s 5th-percentile outcome is ${fmtMoney(Hp5)} versus ${Lname}'s ${fmtMoney(Lp5)} — the extra upside comes with greater downside risk.`;
-  } else {
-    tailSentence = `${Hname} also has a higher worst-case outcome (${fmtMoney(Hp5)} at the 5th percentile, versus ${Lname}'s ${fmtMoney(Lp5)}) — one scenario dominates the other.`;
-  }
+  const tailSentence = Hp5 < Lp5
+    ? `However, ${Hname}'s 5th-percentile outcome is ${fmtMoney(Hp5)} versus ${Lname}'s ${fmtMoney(Lp5)} — the extra upside comes with greater downside risk.`
+    : `${Hname} also has a higher worst-case outcome (${fmtMoney(Hp5)} at the 5th percentile, versus ${Lname}'s ${fmtMoney(Lp5)}) — one scenario dominates the other.`;
 
-  els.narrative.innerHTML = `
+  return `
     <p>Over ${sharedHorizon} years, <strong>${Hname}</strong> ends with a median of
     <strong>${fmtMoney(Hmedian)}</strong> — about <strong>${premium}%</strong> above
     ${Lname}'s ${fmtMoney(Lmedian)}. ${tailSentence}
@@ -403,9 +436,9 @@ function renderNarrative(simA, simB, sA, sB, names, sharedHorizon, regret) {
   `;
 }
 
-function renderCompareStatBlock(simA, simB, sA, sB, names, sharedHorizon) {
-  const rowFor = (label, s, sim) => {
-    const t = sharedHorizon;
+function statRowsHTML(simA, simB, sA, sB, names, sharedHorizon) {
+  const t = sharedHorizon;
+  const row = (label, s, sim) => {
     const totalContrib = s.startingBalance + s.monthlyContribution * 12 * sharedHorizon;
     return `
       <tr>
@@ -417,25 +450,7 @@ function renderCompareStatBlock(simA, simB, sA, sB, names, sharedHorizon) {
       </tr>
     `;
   };
-
-  els.summary.className = "summary compare";
-  els.summary.innerHTML = `
-    <table class="stat-table">
-      <thead>
-        <tr>
-          <th></th>
-          <th>Total contributed</th>
-          <th>5th percentile</th>
-          <th>Median</th>
-          <th>95th percentile</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rowFor(names.A, sA, simA)}
-        ${rowFor(names.B, sB, simB)}
-      </tbody>
-    </table>
-  `;
+  return row(names.A, sA, simA) + row(names.B, sB, simB);
 }
 
 function runCompare() {
@@ -470,24 +485,27 @@ function runCompare() {
     names,
   });
 
+  ensureOutputSkeleton("compare");
+
   // Probability over time.
   const probA = pathProbability(simA, simB, sharedYears);
   const xYears = Array.from({ length: sharedYears }, (_, i) => i);
 
-  els.compareExtras.hidden = false;
   renderProbChart("probChart", xYears, probA, {
     horizonYears: sharedHorizon,
     currentAge: sharedAge,
   });
-  renderCallout(probA, names);
+
+  const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
+  q("callout").textContent = calloutText(probA, names);
 
   // Narrative + stat block.
   const aMedian = simA.p50[sharedHorizon];
   const bMedian = simB.p50[sharedHorizon];
   const higherIsA = aMedian >= bMedian;
   const regret = regretFraction(simA, simB, sharedHorizon, sharedHorizon, higherIsA);
-  renderNarrative(simA, simB, sA, sB, names, sharedHorizon, regret);
-  renderCompareStatBlock(simA, simB, sA, sB, names, sharedHorizon);
+  q("narrative").innerHTML = narrativeHTML(simA, simB, names, sharedHorizon, regret);
+  q("statbody").innerHTML = statRowsHTML(simA, simB, sA, sB, names, sharedHorizon);
 
   console.log(
     `sim ${(t1 - t0).toFixed(1)}ms · compare · ` +
