@@ -379,25 +379,37 @@ function regretFraction(simA, simB, termIdxA, termIdxB, higherIsA) {
 }
 
 function calloutText(probAGreater, names) {
-  // Year 0 now reads correctly thanks to tie-handling (50% if equal
-  // start balances, 0/100% if not), so we scan the whole range.
-  const start = 0;
   const end = probAGreater.length - 1;
-  if (end < start) return "";
+  if (end < 1) return "";
 
-  let allAbove = true, allBelow = true;
-  for (let y = start; y <= end; y++) {
-    if (probAGreater[y] <= 0.5) allAbove = false;
-    if (probAGreater[y] >= 0.5) allBelow = false;
+  // Skip Year 0. It is a forced 50% when starting balances match,
+  // which would otherwise flip every directional check.
+  let maxDeviation = 0;
+  for (let y = 1; y <= end; y++) {
+    const dev = Math.abs(probAGreater[y] - 0.5);
+    if (dev > maxDeviation) maxDeviation = dev;
   }
 
+  // True "close to 50/50" case: max deviation across the horizon
+  // stays under 5 percentage points.
+  if (maxDeviation < 0.05) {
+    return `${names.A} and ${names.B} stay close to 50/50 across the horizon.`;
+  }
+
+  // Leadership checks use STRICT inequality so a 0.5 tie at any
+  // year does not flip the flags.
+  let allAbove = true, allBelow = true;
+  for (let y = 1; y <= end; y++) {
+    if (probAGreater[y] < 0.5) allAbove = false;
+    if (probAGreater[y] > 0.5) allBelow = false;
+  }
   if (allAbove) return `${names.A} is more likely to lead throughout the entire horizon.`;
   if (allBelow) return `${names.B} is more likely to lead throughout the entire horizon.`;
 
-  // Use the first year with a non-tied probability as the initial direction.
+  // Crossover detection starts from Year 1.
   let initialDir = null;
-  let initialY = start;
-  for (let y = start; y <= end; y++) {
+  let initialY = 1;
+  for (let y = 1; y <= end; y++) {
     if (probAGreater[y] > 0.5) { initialDir = "A"; initialY = y; break; }
     if (probAGreater[y] < 0.5) { initialDir = "B"; initialY = y; break; }
   }
@@ -410,7 +422,9 @@ function calloutText(probAGreater, names) {
       return `${names[dir]} becomes more likely to lead from Year ${y}.`;
     }
   }
-  return `${names.A} and ${names.B} stay close to 50/50 across the horizon.`;
+  // If no crossover after the initial direction is set, that
+  // scenario led throughout — NOT "stays close to 50/50".
+  return `${names[initialDir]} is more likely to lead throughout the entire horizon.`;
 }
 
 function narrativeHTML(simA, simB, names, sharedHorizon, regret) {
@@ -428,17 +442,28 @@ function narrativeHTML(simA, simB, names, sharedHorizon, regret) {
   const Hp5 = higherIsA ? aP5 : bP5;
   const Lp5 = higherIsA ? bP5 : aP5;
 
-  const premium = Math.round((Hmedian / Math.max(Lmedian, 1) - 1) * 100);
+  const premiumRaw = (Hmedian / Math.max(Lmedian, 1) - 1) * 100;
+  const premium = Math.round(premiumRaw);
   const regretPct = Math.round(regret * 100);
 
-  const tailSentence = Hp5 < Lp5
-    ? `However, ${Hname}'s 5th-percentile outcome is ${fmtMoney(Hp5)} versus ${Lname}'s ${fmtMoney(Lp5)} — the extra upside comes with greater downside risk.`
-    : `${Hname} also has a higher worst-case outcome (${fmtMoney(Hp5)} at the 5th percentile, versus ${Lname}'s ${fmtMoney(Lp5)}) — one scenario dominates the other.`;
+  let leadingSentence;
+  if (premium <= 2) {
+    leadingSentence = `Over ${sharedHorizon} years, ${Hname} and ${Lname} end with very similar medians (${fmtMoney(Hmedian)} versus ${fmtMoney(Lmedian)}) — the central outcomes are essentially tied.`;
+  } else {
+    leadingSentence = `Over ${sharedHorizon} years, <strong>${Hname}</strong> ends with a median of <strong>${fmtMoney(Hmedian)}</strong> — about <strong>${premium}%</strong> above ${Lname}'s ${fmtMoney(Lmedian)}.`;
+  }
+
+  let tailSentence;
+  if (Hp5 < Lp5) {
+    tailSentence = `However, ${Hname}'s 5th-percentile outcome is ${fmtMoney(Hp5)} versus ${Lname}'s ${fmtMoney(Lp5)} — the extra upside comes with greater downside risk.`;
+  } else if (Hp5 > Lp5) {
+    tailSentence = `${Hname} also has the higher worst-case outcome (${fmtMoney(Hp5)} at the 5th percentile, versus ${Lname}'s ${fmtMoney(Lp5)}), so the higher median does not come at the cost of more downside risk.`;
+  } else {
+    tailSentence = `Both scenarios share the same 5th-percentile outcome of ${fmtMoney(Hp5)}, so the comparison reduces to upside potential rather than downside risk.`;
+  }
 
   return `
-    <p>Over ${sharedHorizon} years, <strong>${Hname}</strong> ends with a median of
-    <strong>${fmtMoney(Hmedian)}</strong> — about <strong>${premium}%</strong> above
-    ${Lname}'s ${fmtMoney(Lmedian)}. ${tailSentence}
+    <p>${leadingSentence} ${tailSentence}
     There's a <strong>${regretPct}%</strong> chance you actually finish worse off in
     ${Hname} than you would have in ${Lname}.</p>
   `;
