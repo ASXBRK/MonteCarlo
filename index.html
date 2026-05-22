@@ -95,16 +95,10 @@
 
         <section>
           <h3>Drawdown phase</h3>
-          <p>The Drawdown toggle extends the simulation past retirement into the decumulation phase. The portfolio continues to compound at the chosen asset profile, while planned withdrawals are taken each month. Paths that deplete to zero stay at zero — there is no floor or recovery mechanism.</p>
+          <p>The Drawdown toggle extends the simulation past retirement into the decumulation phase. The portfolio continues to compound at the selected asset profile; contributions stop, and a fixed real withdrawal is taken each month. Paths that deplete to zero stay at zero — no floor, no recovery.</p>
           <p><strong>Scope.</strong> This tool models a single investment portfolio in isolation. It does not include age pension entitlement, non-portfolio assets, partner's income, property, or other income sources. Total retirement income for most users will be higher than the portfolio drawdown shown here. For holistic retirement income modelling, this tool should be used alongside other planning resources.</p>
-          <p><strong>Defensive bucket.</strong> The defensive bucket sets aside a number of years of expected withdrawals in low-volatility assets (cash equivalent). This is rebalanced monthly to maintain its size, and withdrawals are taken from it first. The pedagogical content is exposure to sequence risk: a larger defensive bucket reduces the need to sell growth assets during early market drawdowns, at the cost of less upside if those drawdowns don't occur.</p>
-          <p><strong>Withdrawal strategies.</strong></p>
-          <ul>
-            <li><em>Fixed real (Bengen).</em> Withdraw the same real dollar amount each year regardless of portfolio performance. Bengen (1994) introduced this baseline strategy.</li>
-            <li><em>Guyton-Klinger guardrails.</em> Fixed real with two dynamic guardrails: if the current withdrawal rate exceeds the initial rate by more than 20%, cut next year's withdrawal by 10%; if it falls below by more than 20%, increase by 10%; otherwise hold in real terms. Guyton &amp; Klinger (2006).</li>
-            <li><em>Fixed % of balance.</em> Withdraw a fixed percentage of the current balance each year, where the percentage is set so that the initial withdrawal equals the user's annual withdrawal input. Cannot deplete the portfolio in the limit, but income varies year-to-year with market performance.</li>
-          </ul>
-          <p><strong>Probability of ruin.</strong> Percentage of simulated paths where the portfolio depletes to zero at any point during the projection horizon. This is portfolio depletion only; total retirement income for AU users typically includes age pension and other sources not modelled here.</p>
+          <p><strong>Withdrawal assumption.</strong> The tool assumes a fixed-real withdrawal strategy (Bengen 1994) — the same real dollar amount withdrawn each year regardless of portfolio performance. Dynamic strategies such as Guyton-Klinger guardrails or fixed-percentage withdrawals produce different outcome distributions and may be added as comparison features in future versions.</p>
+          <p><strong>Probability of ruin.</strong> Percentage of simulated paths where the portfolio depletes to zero at any point during the projection horizon. This is portfolio depletion only; total retirement income for Australian users typically includes age pension and other sources not modelled here.</p>
         </section>
 
         <section>

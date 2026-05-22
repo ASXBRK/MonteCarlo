@@ -37,10 +37,8 @@ function quantileSorted(sorted, q) {
 }
 
 // Deterministic compound path. Accumulation uses (μ/12) compounding
-// plus contribution; if drawdown is provided, post-retirement months
-// strip the contribution and instead withdraw annualWithdrawal/12 per
-// month (fixed real, even when the stochastic strategy is something
-// else — the deterministic line is meant to be a clean baseline).
+// plus contribution. If drawdown is provided, post-retirement months
+// strip the contribution and withdraw annualWithdrawal/12 per month.
 function deterministicPath({
   horizonYears, startingBalance, monthlyContribution, mu, drawdown,
 }) {
@@ -69,21 +67,16 @@ export function simulate({
   sigma,
   numPaths = NUM_PATHS,
   samplePaths = SAMPLE_PATHS,
-  // Optional shared shock matrix for the growth bucket, Float64Array
-  // of size numPaths*months in [path * months + monthIndex] layout
-  // (monthIndex 0-based, so step m=1 reads index 0).
+  // Optional shared shock matrix, Float64Array of size numPaths*months
+  // in [path * months + monthIndex] layout (monthIndex 0-based, so step
+  // m=1 reads index 0).
   preGenZ = null,
-  // Optional drawdown config. When supplied, the simulation runs
-  // accumulation up to retirementMonth and then a two-bucket
-  // withdrawal phase to the end.
-  //   {
-  //     retirementMonth,           // 1..months; switch happens at end of this month
-  //     annualWithdrawal,          // real $ per year at retirement
-  //     defensiveYears,            // years of withdrawals to hold defensive
-  //     strategy,                  // 'fixed-real' | 'fixed-pct' | 'guyton-klinger'
-  //     defensiveMu, defensiveSigma,
-  //     preGenZDefensive,          // optional shared defensive shock matrix
-  //   }
+  // Optional drawdown config. When supplied, accumulation runs up to
+  // retirementMonth, then contributions stop and a fixed-real
+  // withdrawal of (annualWithdrawal / 12) is taken each month. Paths
+  // that deplete stay at zero. No defensive bucket, no strategy choice
+  // — V1 is intentionally minimal.
+  //   { retirementMonth, annualWithdrawal }
   drawdown = null,
 }) {
   const months = horizonYears * 12;
@@ -92,28 +85,19 @@ export function simulate({
   const sigmaMonthly = sigma / Math.sqrt(12);
 
   const isDrawdown = drawdown !== null;
-  const retirementMonth = isDrawdown ? drawdown.retirementMonth : months + 1; // never reached
-  const dfMu = isDrawdown ? drawdown.defensiveMu / 12 : 0;
-  const dfSigma = isDrawdown ? drawdown.defensiveSigma / Math.sqrt(12) : 0;
-  const dfYears = isDrawdown ? drawdown.defensiveYears : 0;
-  const dfStrategy = isDrawdown ? drawdown.strategy : null;
-  const initialAnnualWithdrawal = isDrawdown ? drawdown.annualWithdrawal : 0;
+  const retirementMonth = isDrawdown ? drawdown.retirementMonth : months + 1;
+  const monthlyWithdrawal = isDrawdown ? drawdown.annualWithdrawal / 12 : 0;
 
-  // Flat Float64Array: row-major [path * years + year].
   const yearlyAll = new Float64Array(numPaths * years);
-  // Per-path ruin flag (1 = depleted to zero at some point).
   const ruined = isDrawdown ? new Uint8Array(numPaths) : null;
 
   for (let p = 0; p < numPaths; p++) {
-    let growthBalance = startingBalance;
-    let defensiveBalance = 0;
-    let annualWithdrawal = initialAnnualWithdrawal;
-    let initialWR = 0;
+    let balance = startingBalance;
     let isRuined = false;
 
     const base = p * years;
     const zBase = p * months;
-    yearlyAll[base + 0] = growthBalance;
+    yearlyAll[base + 0] = balance;
 
     for (let m = 1; m <= months; m++) {
       if (isRuined) {
@@ -121,96 +105,32 @@ export function simulate({
         continue;
       }
 
-      // Growth bucket return — applied every month regardless of phase.
       const z = preGenZ ? preGenZ[zBase + (m - 1)] : randn();
       const r = rMonthly + sigmaMonthly * z;
-      growthBalance = growthBalance * (1 + r);
+      balance = balance * (1 + r);
 
       if (m <= retirementMonth) {
         // Accumulation: contribute, no withdrawal.
-        growthBalance += monthlyContribution;
-        if (growthBalance < 0) growthBalance = 0;
-
-        // At the boundary, split into buckets.
-        if (m === retirementMonth && isDrawdown) {
-          const total = growthBalance;
-          const targetDef = initialAnnualWithdrawal * dfYears;
-          if (targetDef >= total) {
-            defensiveBalance = total;
-            growthBalance = 0;
-          } else {
-            defensiveBalance = targetDef;
-            growthBalance = total - targetDef;
-          }
-          initialWR = total > 0 ? initialAnnualWithdrawal / total : 0;
-        }
+        balance += monthlyContribution;
       } else {
-        // Drawdown: apply defensive return, withdraw, rebalance.
-        const dIdx = m - 1; // index in absolute months
-        const zd = drawdown.preGenZDefensive
-          ? drawdown.preGenZDefensive[zBase + dIdx]
-          : randn();
-        const rd = dfMu + dfSigma * zd;
-        defensiveBalance = defensiveBalance * (1 + rd);
-
-        const totalBefore = growthBalance + defensiveBalance;
-        let monthlyWithdrawal;
-        if (dfStrategy === "fixed-pct") {
-          monthlyWithdrawal = (initialWR / 12) * totalBefore;
-        } else {
-          monthlyWithdrawal = annualWithdrawal / 12;
-        }
-        if (monthlyWithdrawal < 0) monthlyWithdrawal = 0;
-
-        // Take from defensive first, then growth. Mark ruin if both go.
-        if (defensiveBalance >= monthlyWithdrawal) {
-          defensiveBalance -= monthlyWithdrawal;
-        } else {
-          const remainder = monthlyWithdrawal - defensiveBalance;
-          defensiveBalance = 0;
-          if (growthBalance >= remainder) {
-            growthBalance -= remainder;
-          } else {
-            growthBalance = 0;
-            isRuined = true;
-          }
-        }
-
-        // Rebalance defensive toward target (years × current annual withdrawal).
-        if (!isRuined) {
-          const totalNow = growthBalance + defensiveBalance;
-          const targetNow = annualWithdrawal * dfYears;
-          const targetActual = Math.min(targetNow, totalNow);
-          if (defensiveBalance < targetActual && growthBalance > 0) {
-            const transfer = Math.min(targetActual - defensiveBalance, growthBalance);
-            defensiveBalance += transfer;
-            growthBalance -= transfer;
-          }
+        // Drawdown: withdraw fixed real, mark ruin if depleted.
+        balance -= monthlyWithdrawal;
+        if (balance <= 0) {
+          balance = 0;
+          isRuined = true;
         }
       }
+      if (balance < 0) balance = 0;
 
-      // Year-end snapshot + G-K annual adjustment.
       if (m % 12 === 0) {
-        const totalYear = isRuined ? 0 : growthBalance + defensiveBalance;
-        yearlyAll[base + m / 12] = totalYear;
-
-        if (isDrawdown && dfStrategy === "guyton-klinger" &&
-            !isRuined && m > retirementMonth && totalYear > 0 && initialWR > 0) {
-          const currentWR = annualWithdrawal / totalYear;
-          if (currentWR > initialWR * 1.20) {
-            annualWithdrawal = annualWithdrawal * 0.90;
-          } else if (currentWR < initialWR * 0.80) {
-            annualWithdrawal = annualWithdrawal * 1.10;
-          }
-          // else: hold in real terms.
-        }
+        yearlyAll[base + m / 12] = isRuined ? 0 : balance;
       }
     }
 
     if (isRuined) ruined[p] = 1;
   }
 
-  // Per-year percentiles across all paths.
+  // Per-year percentiles.
   const p05 = new Array(years);
   const p25 = new Array(years);
   const p50 = new Array(years);
@@ -246,13 +166,12 @@ export function simulate({
     horizonYears, startingBalance, monthlyContribution, mu,
     drawdown: isDrawdown ? {
       retirementMonth,
-      annualWithdrawal: initialAnnualWithdrawal,
+      annualWithdrawal: drawdown.annualWithdrawal,
     } : null,
   });
 
   const xYears = Array.from({ length: years }, (_, i) => i);
 
-  // Probability of ruin (fraction of paths that hit zero at any point).
   let ruinedFraction = 0;
   if (isDrawdown) {
     let count = 0;

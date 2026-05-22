@@ -22,12 +22,6 @@ const els = {
   paramAssetTable: $("paramAssetTable"),
 };
 
-const STRATEGIES = [
-  { value: "fixed-real",     label: "Fixed real (Bengen)" },
-  { value: "guyton-klinger", label: "Guyton-Klinger guardrails" },
-  { value: "fixed-pct",      label: "Fixed % of balance" },
-];
-
 const DEFAULTS = {
   age: "",
   horizonYears: 30,
@@ -39,8 +33,6 @@ const DEFAULTS = {
   retirementAge: 65,
   endAge: 90,
   annualWithdrawal: 50000,
-  defensiveYears: 7,
-  strategy: "fixed-real",
 };
 
 const state = {
@@ -132,19 +124,6 @@ function buildScenarioBlock(id, values) {
       <input type="number" min="0" step="1000"
              data-field="annualWithdrawal" value="${values.annualWithdrawal}" />
     </div>
-    <div class="control">
-      <label>Defensive bucket (years)</label>
-      <input type="number" min="0" max="20" step="1"
-             data-field="defensiveYears" value="${values.defensiveYears}" />
-    </div>
-    <div class="control">
-      <label>Withdrawal strategy</label>
-      <select data-field="strategy">
-        ${STRATEGIES.map(({ value, label }) =>
-          `<option value="${value}"${value === values.strategy ? " selected" : ""}>${label}</option>`
-        ).join("")}
-      </select>
-    </div>
   ` : "";
 
   grid.innerHTML = `
@@ -234,7 +213,7 @@ function buildSharedBlock() {
 function onFieldChange(id, el) {
   const field = el.dataset.field;
   const raw = el.value;
-  if (field === "age" || field === "asset" || field === "strategy") {
+  if (field === "age" || field === "asset") {
     state.scenarios[id][field] = raw;
   } else {
     const n = Number(raw);
@@ -281,12 +260,8 @@ function describeField(field, value) {
     case "startingBalance": return `${fmtMoneyShort(value)} start`;
     case "monthlyContribution": return `${fmtMoneyShort(value)}/mo`;
     case "retirementAge": return `retire @ ${value}`;
-    case "annualWithdrawal": return `${fmtMoneyShort(value)}/yr withdraw`;
-    case "defensiveYears": return `${value}y defensive`;
-    case "strategy": {
-      const s = STRATEGIES.find((x) => x.value === value);
-      return s ? s.label : String(value);
-    }
+    case "annualWithdrawal":
+      return value === 0 ? "no withdrawals" : `${fmtMoneyShort(value)}/yr withdraw`;
     default: return String(value);
   }
 }
@@ -295,7 +270,7 @@ function describeField(field, value) {
 // Only considers per-scenario fields; shared inputs are excluded.
 function computeSubtitles(a, b) {
   const baseFields = ["asset", "startingBalance", "monthlyContribution"];
-  const drawdownFields = ["retirementAge", "annualWithdrawal", "defensiveYears", "strategy"];
+  const drawdownFields = ["retirementAge", "annualWithdrawal"];
   const fields = state.drawdownMode
     ? [...baseFields, ...drawdownFields]
     : baseFields;
@@ -336,23 +311,17 @@ function applyHorizonLabel() {
 
 // --- sim wrappers ---------------------------------------------------------
 
-function buildDrawdownConfig(s, preGenZDefensive = null) {
+function buildDrawdownConfig(s) {
   if (!state.drawdownMode) return null;
-  const cash = PROFILES["Cash"];
   const currentAge = state.scenarios.A.currentAge; // shared anchor
   const retirementMonth = Math.max(1, (s.retirementAge - currentAge) * 12);
   return {
     retirementMonth,
     annualWithdrawal: s.annualWithdrawal,
-    defensiveYears: s.defensiveYears,
-    strategy: s.strategy,
-    defensiveMu: cash.mu,
-    defensiveSigma: cash.sigma,
-    preGenZDefensive,
   };
 }
 
-function runScenario(s, preGenZ = null, preGenZDefensive = null) {
+function runScenario(s, preGenZ = null) {
   const { mu, sigma } = PROFILES[s.asset];
   const horizon = state.drawdownMode
     ? Math.max(1, state.scenarios.A.endAge - state.scenarios.A.currentAge)
@@ -363,7 +332,7 @@ function runScenario(s, preGenZ = null, preGenZDefensive = null) {
     monthlyContribution: s.monthlyContribution,
     mu, sigma,
     preGenZ,
-    drawdown: buildDrawdownConfig(s, preGenZDefensive),
+    drawdown: buildDrawdownConfig(s),
   });
 }
 
@@ -539,7 +508,7 @@ function runSingle() {
   startSingleAnimation(sim);
 
   const tag = state.drawdownMode
-    ? `drawdown · ret@${s.retirementAge}/${s.strategy} · ruin=${(sim.ruinedFraction * 100).toFixed(1)}%`
+    ? `drawdown · ret@${s.retirementAge} · withdraw=${s.annualWithdrawal} · ruin=${(sim.ruinedFraction * 100).toFixed(1)}%`
     : `${s.asset} · ${s.horizonYears}y`;
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · single · ${tag}`);
 }
@@ -739,16 +708,13 @@ function runCompare() {
     ? Math.max(0, sA.retirementAge - sA.currentAge)
     : null;
 
-  // Pre-generate growth shocks (and defensive shocks in drawdown mode)
-  // and feed them to both sims so A and B respond to the same market.
+  // Pre-generate growth shocks and feed them to both sims so A and B
+  // respond to the same market.
   const sharedMonths = sharedHorizon * 12;
   const t0 = performance.now();
   const shocks = generateShocks(NUM_PATHS, sharedMonths);
-  const defensiveShocks = state.drawdownMode
-    ? generateShocks(NUM_PATHS, sharedMonths)
-    : null;
-  const simA = runScenario(sA, shocks, defensiveShocks);
-  const simB = runScenario(sB, shocks, defensiveShocks);
+  const simA = runScenario(sA, shocks);
+  const simB = runScenario(sB, shocks);
   const t1 = performance.now();
 
   renderCompareChart("chart", { A: simA, B: simB }, {
@@ -789,9 +755,7 @@ function runCompare() {
     sA.monthlyContribution === sB.monthlyContribution;
   const drawdownIdentical = state.drawdownMode &&
     sA.retirementAge === sB.retirementAge &&
-    sA.annualWithdrawal === sB.annualWithdrawal &&
-    sA.defensiveYears === sB.defensiveYears &&
-    sA.strategy === sB.strategy;
+    sA.annualWithdrawal === sB.annualWithdrawal;
   const identical = state.drawdownMode
     ? (baseIdentical && drawdownIdentical)
     : baseIdentical;
