@@ -550,8 +550,15 @@ function run() {
 els.toggle.addEventListener("change", () => {
   state.compareMode = els.toggle.checked;
   if (state.compareMode) {
-    // Initialise B as a copy of A's current values.
-    state.scenarios.B = { ...state.scenarios.A };
+    // B inherits balance and contribution from A, but defaults to a
+    // different asset class so the two fans are obviously distinct on
+    // first render. Untrained users otherwise read two near-identical
+    // fans as a bug.
+    const defaultBAsset = state.scenarios.A.asset === "Balanced" ? "Growth" : "Balanced";
+    state.scenarios.B = {
+      ...state.scenarios.A,
+      asset: defaultBAsset,
+    };
   } else {
     // Discard B's values.
     state.scenarios.B = { ...DEFAULTS };
