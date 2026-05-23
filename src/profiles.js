@@ -2,7 +2,7 @@
 // mu and sigma are annual. mu is a REAL expected return (net of
 // inflation) — the simulation runs in today's-dollar terms throughout.
 export const PROFILES = {
-  Cash:               { mu: 0.005, sigma: 0.01 },
+  Cash:               { mu: 0.005, sigma: 0.015 },
   Conservative:       { mu: 0.020, sigma: 0.05 },
   Balanced:           { mu: 0.035, sigma: 0.08 },
   Growth:             { mu: 0.050, sigma: 0.11 },

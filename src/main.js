@@ -2,7 +2,7 @@ import { PROFILES, DEFAULT_PROFILE } from "./profiles.js";
 import { simulate, generateShocks, NUM_PATHS } from "./sim.js";
 import {
   renderChart, renderCompareChart, renderProbChart, renderBellCurves,
-  SAMPLE_PATH_COUNT, sampleTraceIndices,
+  SAMPLE_PATH_COUNT, sampleTraceIndices, UNITS,
 } from "./chart.js";
 
 const prefersReducedMotion = () =>
@@ -22,7 +22,14 @@ const els = {
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
   paramAssetTable: $("paramAssetTable"),
+  chartNote: document.querySelector('[data-role="chartNote"]'),
 };
+
+// Stamp the units note once at boot. A future nominal-dollars toggle
+// would call this again after swapping UNITS.
+function applyUnitsLabel() {
+  if (els.chartNote) els.chartNote.textContent = UNITS.chartNote;
+}
 
 const DEFAULTS = {
   age: "",
@@ -143,7 +150,9 @@ function buildScenarioBlock(id, values) {
           (n) => `<option value="${n}"${n === values.asset ? " selected" : ""}>${n}</option>`
         ).join("")}
       </select>
-      <div class="asset-meta" data-role="assetMeta"></div>
+      <a class="calibration-link" href="#" data-open-params="asset-assumptions">
+        <span class="info-glyph" aria-hidden="true">i</span> How these profiles are calibrated
+      </a>
     </div>
     ${drawdownMarkup}
   `;
@@ -271,13 +280,6 @@ function applySubtitles(subs) {
     const el = block.querySelector('[data-role="subtitle"]');
     if (el) el.textContent = subs[id];
   }
-}
-
-function applyAssetMeta(id, mu, sigma) {
-  const block = els.scenarios.querySelector(`.scenario[data-scenario="${id}"]`);
-  if (!block) return;
-  const el = block.querySelector('[data-role="assetMeta"]');
-  if (el) el.textContent = `μ = ${(mu * 100).toFixed(1)}% · σ = ${(sigma * 100).toFixed(0)}%`;
 }
 
 // Sync the persistent horizon/end-age slider with state — value,
@@ -496,8 +498,6 @@ function startSingleAnimation(sim) {
 
 function runSingle() {
   const s = state.scenarios.A;
-  const { mu, sigma } = PROFILES[s.asset];
-  applyAssetMeta("A", mu, sigma);
   applySlider();
 
   const t0 = performance.now();
@@ -693,10 +693,6 @@ function runCompare() {
 
   const sA = state.scenarios.A;
   const sB = state.scenarios.B;
-  const profA = PROFILES[sA.asset];
-  const profB = PROFILES[sB.asset];
-  applyAssetMeta("A", profA.mu, profA.sigma);
-  applyAssetMeta("B", profB.mu, profB.sigma);
   applySlider();
 
   const subs = computeSubtitles(sA, sB);
@@ -902,13 +898,15 @@ function populateParamsTable() {
   ).join("");
 }
 
-function openModal() {
+function openModal(scrollToId = null) {
   els.paramsModal.showModal();
-  // Render the bell curves lazily on first open, when the dialog has
-  // real dimensions so Plotly sizes correctly.
   if (!bellCurvesRendered) {
     renderBellCurves("bellCurves", PROFILES);
     bellCurvesRendered = true;
+  }
+  if (scrollToId) {
+    const target = els.paramsModal.querySelector(`#${scrollToId}`);
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
 
@@ -916,7 +914,16 @@ function closeModal() {
   els.paramsModal.close();
 }
 
-els.paramsBtn.addEventListener("click", openModal);
+els.paramsBtn.addEventListener("click", () => openModal());
+
+// Calibration / "how is this defined?" links inside the input area
+// open the modal scrolled to the relevant section.
+els.scenarios.addEventListener("click", (e) => {
+  const link = e.target.closest("[data-open-params]");
+  if (!link) return;
+  e.preventDefault();
+  openModal(link.dataset.openParams);
+});
 els.paramsModal.querySelector(".modal-close").addEventListener("click", closeModal);
 // Click on backdrop (i.e. on the dialog element itself, outside the content) closes.
 els.paramsModal.addEventListener("click", (e) => {
@@ -924,6 +931,7 @@ els.paramsModal.addEventListener("click", (e) => {
 });
 
 // Boot.
+applyUnitsLabel();
 populateParamsTable();
 renderControls();
 run();

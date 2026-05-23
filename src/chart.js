@@ -163,6 +163,14 @@ const HOVER_LABEL = {
   align: "left",
 };
 
+// Display units. The simulation runs in real (today's dollars) terms.
+// A future nominal-dollars toggle will swap these strings; everything
+// downstream reads from this object so the flip is a one-liner.
+export const UNITS = {
+  yAxisLabel: "Portfolio value (today's dollars)",
+  chartNote: "All values in today's dollars (CPI-adjusted)",
+};
+
 // Returns the retirement marker line + shaded post-retirement region
 // to add to a fan chart's layout when drawdown is active.
 function drawdownShapesAndAnnotations({ retirementYear, horizonYears, yMax }) {
@@ -236,7 +244,7 @@ export function renderChart(containerId, sim, { horizonYears, currentAge, retire
       showgrid: false, zeroline: false,
     },
     yaxis: {
-      title: { text: "Portfolio value", standoff: 10 },
+      title: { text: UNITS.yAxisLabel, standoff: 10 },
       tickformat: "$,.2s",
       gridcolor: "rgba(0,0,0,0.06)",
       zeroline: false,
@@ -280,7 +288,7 @@ export function renderCompareChart(containerId, sims, { horizonYears, currentAge
       showgrid: false, zeroline: false,
     },
     yaxis: {
-      title: { text: "Portfolio value", standoff: 10 },
+      title: { text: UNITS.yAxisLabel, standoff: 10 },
       tickformat: "$,.2s",
       gridcolor: "rgba(0,0,0,0.06)",
       zeroline: false, rangemode: "tozero",
