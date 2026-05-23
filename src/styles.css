@@ -314,6 +314,64 @@ html, body {
 }
 .chart-note:empty { display: none; }
 
+.display-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: #eef1f5;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px;
+  margin: 0 0 8px;
+  font: inherit;
+}
+
+.display-option {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  background: transparent;
+  border: none;
+  padding: 5px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  letter-spacing: 0.01em;
+}
+
+.display-option.active {
+  background: white;
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.display-option:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* --- Parameters modal inline field --- */
+
+.param-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 12px;
+}
+
+.param-inline-field label {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.param-inline-field input[type="number"] {
+  width: 90px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+
 .prob-header {
   display: flex;
   align-items: center;

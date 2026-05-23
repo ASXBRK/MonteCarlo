@@ -2,7 +2,7 @@ import { PROFILES, DEFAULT_PROFILE } from "./profiles.js";
 import { simulate, generateShocks, NUM_PATHS } from "./sim.js";
 import {
   renderChart, renderCompareChart, renderProbChart, renderBellCurves,
-  SAMPLE_PATH_COUNT, sampleTraceIndices, UNITS,
+  SAMPLE_PATH_COUNT, sampleTraceIndices,
 } from "./chart.js";
 
 const prefersReducedMotion = () =>
@@ -23,12 +23,66 @@ const els = {
   paramsModal: $("paramsModal"),
   paramAssetTable: $("paramAssetTable"),
   chartNote: document.querySelector('[data-role="chartNote"]'),
+  displayOptions: document.querySelectorAll(".display-option"),
+  inflationInput: $("inflationInput"),
 };
 
-// Stamp the units note once at boot. A future nominal-dollars toggle
-// would call this again after swapping UNITS.
+// Strings driven by units state. The simulation runs in real terms;
+// nominal is a display transform applied year-by-year by displayFactors.
+function currentUnitsStrings() {
+  if (state.units === "real") {
+    return {
+      yAxisLabel: "Portfolio value (today's dollars)",
+      chartNote: "All values in today's dollars (CPI-adjusted)",
+    };
+  }
+  const pct = (state.inflation * 100).toFixed(1).replace(/\.0$/, "");
+  return {
+    yAxisLabel: "Portfolio value (future dollars)",
+    chartNote: `All values in future dollars (nominal, ${pct}% inflation assumed)`,
+  };
+}
+
+// Returns an array of length `years` where factors[t] = (1+i)^t in
+// nominal mode, or null in real mode (meaning "no conversion").
+function displayFactors(years) {
+  if (state.units === "real") return null;
+  const r = state.inflation;
+  const out = new Array(years);
+  for (let y = 0; y < years; y++) out[y] = Math.pow(1 + r, y);
+  return out;
+}
+
+function scaleArr(arr, factors) {
+  if (!factors) return arr;
+  return arr.map((v, i) => v * factors[i]);
+}
+
+// Returns a sim-shaped object with bands / deterministic / sampled
+// arrays scaled by factors. paths/numPaths/years/ruined* are left
+// alone — they're either raw or dimensionless.
+function applyDisplayToSim(sim, factors) {
+  if (!factors) return sim;
+  return {
+    ...sim,
+    p05: scaleArr(sim.p05, factors),
+    p25: scaleArr(sim.p25, factors),
+    p50: scaleArr(sim.p50, factors),
+    p75: scaleArr(sim.p75, factors),
+    p95: scaleArr(sim.p95, factors),
+    deterministic: scaleArr(sim.deterministic, factors),
+    sampled: sim.sampled.map((row) => row.map((v, i) => v * factors[i])),
+  };
+}
+
 function applyUnitsLabel() {
-  if (els.chartNote) els.chartNote.textContent = UNITS.chartNote;
+  const s = currentUnitsStrings();
+  if (els.chartNote) els.chartNote.textContent = s.chartNote;
+  els.displayOptions.forEach((btn) => {
+    const active = btn.dataset.units === state.units;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  });
 }
 
 const DEFAULTS = {
@@ -47,6 +101,8 @@ const DEFAULTS = {
 const state = {
   compareMode: false,
   drawdownMode: false,
+  units: "real",      // "real" | "nominal"
+  inflation: 0.025,   // annual rate used only when units === "nominal"
   scenarios: {
     A: { ...DEFAULTS },
     B: { ...DEFAULTS },
@@ -435,31 +491,45 @@ function ensureOutputSkeleton(mode) {
   }
 }
 
-function updateSingleOutput(s, sim) {
-  const last = sim.xYears.length - 1;
+// Total contributed over `years` years, given a (possibly nominal)
+// year-by-year factor array. In real mode this collapses to the
+// simple sum; in nominal mode each year-t contribution is scaled by
+// (1+i)^t — matching the chart's nominal-stream convention.
+function totalContribFor(s, years, factors) {
+  if (!factors) return s.startingBalance + s.monthlyContribution * 12 * years;
+  let total = s.startingBalance;
+  for (let t = 0; t < years; t++) {
+    total += s.monthlyContribution * 12 * factors[t];
+  }
+  return total;
+}
+
+function updateSingleOutput(s, dsim) {
+  const last = dsim.xYears.length - 1;
   const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
+  const factors = displayFactors(dsim.years);
 
   if (state.drawdownMode) {
     const retYear = retirementYearsFromAge(s);
-    q("ruin").textContent = `${(sim.ruinedFraction * 100).toFixed(1)}%`;
-    q("median").textContent = fmtMoney(sim.p50[last]);
-    q("atRetirement").textContent = sim.p50[retYear] != null
-      ? fmtMoney(sim.p50[retYear])
+    q("ruin").textContent = `${(dsim.ruinedFraction * 100).toFixed(1)}%`;
+    q("median").textContent = fmtMoney(dsim.p50[last]);
+    q("atRetirement").textContent = dsim.p50[retYear] != null
+      ? fmtMoney(dsim.p50[retYear])
       : "—";
-    q("range").textContent = `${fmtMoney(sim.p05[last])} – ${fmtMoney(sim.p95[last])}`;
+    q("range").textContent = `${fmtMoney(dsim.p05[last])} – ${fmtMoney(dsim.p95[last])}`;
   } else {
-    const totalContrib = s.startingBalance + s.monthlyContribution * 12 * s.horizonYears;
-    q("contrib").textContent = fmtMoney(totalContrib);
+    q("contrib").textContent = fmtMoney(totalContribFor(s, s.horizonYears, factors));
     q("steadyLabel").textContent = `Steady return @ ${(PROFILES[s.asset].mu * 100).toFixed(1)}%`;
-    q("steady").textContent = fmtMoney(sim.deterministic[last]);
-    q("median").textContent = fmtMoney(sim.p50[last]);
-    q("range").textContent = `${fmtMoney(sim.p05[last])} – ${fmtMoney(sim.p95[last])}`;
+    q("steady").textContent = fmtMoney(dsim.deterministic[last]);
+    q("median").textContent = fmtMoney(dsim.p50[last]);
+    q("range").textContent = `${fmtMoney(dsim.p05[last])} – ${fmtMoney(dsim.p95[last])}`;
   }
 }
 
 // Resample `count` paths uniformly at random from a sim's full path
 // matrix, returning yearly value rows. Used by the overlay animation.
-function resampleSinglePaths(sim, count = SAMPLE_PATH_COUNT) {
+// `factors` (may be null) scales each year for nominal display.
+function resampleSinglePaths(sim, factors, count = SAMPLE_PATH_COUNT) {
   const seen = new Set();
   const rows = [];
   const target = Math.min(count, sim.numPaths);
@@ -469,7 +539,10 @@ function resampleSinglePaths(sim, count = SAMPLE_PATH_COUNT) {
     seen.add(i);
     const row = new Array(sim.years);
     const base = i * sim.years;
-    for (let y = 0; y < sim.years; y++) row[y] = sim.paths[base + y];
+    for (let y = 0; y < sim.years; y++) {
+      const v = sim.paths[base + y];
+      row[y] = factors ? v * factors[y] : v;
+    }
     rows.push(row);
   }
   return rows;
@@ -485,16 +558,20 @@ function stopSingleAnimation() {
   }
 }
 
-function startSingleAnimation(sim) {
+function startSingleAnimation(sim, factors) {
   stopSingleAnimation();
   if (prefersReducedMotion()) return;
   singleAnimTimer = setInterval(() => {
-    const rows = resampleSinglePaths(sim);
-    // Restyle only the overlay traces — the median, deterministic, and
-    // p25–p75 bands stay put, so there's no flicker on the main story.
+    const rows = resampleSinglePaths(sim, factors);
     Plotly.restyle("chart", { y: rows }, sampleTraceIndices());
   }, SINGLE_ANIM_INTERVAL_MS);
 }
+
+// Cache of the most recent sim outputs, keyed by mode. Display-only
+// changes (units toggle, inflation rate) re-render from these without
+// resimulating — which would otherwise reshuffle sample paths.
+let lastSingle = null;   // { sim, s, horizon, currentAge, retirementYear }
+let lastCompare = null;  // { simA, simB, sA, sB, sharedHorizon, sharedAge, retirementYear, names, chartNames, identical, probA }
 
 function runSingle() {
   const s = state.scenarios.A;
@@ -504,25 +581,41 @@ function runSingle() {
   const sim = runScenario(s);
   const t1 = performance.now();
 
-  const horizon = state.drawdownMode ? effectiveHorizonYears() : s.horizonYears;
-  const currentAge = state.drawdownMode ? s.currentAge : parseAge(s.age);
-  const retirementYear = state.drawdownMode ? retirementYearsFromAge(s) : null;
-
-  renderChart("chart", sim, {
-    horizonYears: horizon,
-    currentAge,
-    retirementYear,
-  });
-
-  ensureOutputSkeleton(state.drawdownMode ? "single-drawdown" : "single");
-  updateSingleOutput(s, sim);
-
-  startSingleAnimation(sim);
+  lastSingle = {
+    sim,
+    s: { ...s },
+    horizon: state.drawdownMode ? effectiveHorizonYears() : s.horizonYears,
+    currentAge: state.drawdownMode ? s.currentAge : parseAge(s.age),
+    retirementYear: state.drawdownMode ? retirementYearsFromAge(s) : null,
+  };
+  lastCompare = null;
+  redisplaySingle();
 
   const tag = state.drawdownMode
     ? `drawdown · ret@${s.retirementAge} · withdraw=${s.annualWithdrawal} · ruin=${(sim.ruinedFraction * 100).toFixed(1)}%`
     : `${s.asset} · ${s.horizonYears}y`;
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · single · ${tag}`);
+}
+
+function redisplaySingle() {
+  if (!lastSingle) return;
+  const { sim, s, horizon, currentAge, retirementYear } = lastSingle;
+  const factors = displayFactors(sim.years);
+  const dsim = applyDisplayToSim(sim, factors);
+  const { yAxisLabel } = currentUnitsStrings();
+
+  renderChart("chart", dsim, {
+    horizonYears: horizon,
+    currentAge,
+    retirementYear,
+    yAxisLabel,
+  });
+
+  ensureOutputSkeleton(state.drawdownMode ? "single-drawdown" : "single");
+  updateSingleOutput(s, dsim);
+
+  startSingleAnimation(sim, factors);
+  applyUnitsLabel();
 }
 
 // --- compare-mode rendering ----------------------------------------------
@@ -658,37 +751,35 @@ function narrativeHTML(simA, simB, names, sharedHorizon, regret) {
   `;
 }
 
-function statRowsHTML(simA, simB, sA, sB, names, sharedHorizon) {
+function statRowsHTML(dsimA, dsimB, sA, sB, names, sharedHorizon) {
   const t = sharedHorizon;
-  const row = (label, s, sim) => {
+  const factors = displayFactors(dsimA.years);
+  const row = (label, s, dsim) => {
     if (state.drawdownMode) {
       return `
         <tr>
           <th scope="row">${label}</th>
-          <td>${(sim.ruinedFraction * 100).toFixed(1)}%</td>
-          <td>${fmtMoney(sim.p05[t])}</td>
-          <td>${fmtMoney(sim.p50[t])}</td>
-          <td>${fmtMoney(sim.p95[t])}</td>
+          <td>${(dsim.ruinedFraction * 100).toFixed(1)}%</td>
+          <td>${fmtMoney(dsim.p05[t])}</td>
+          <td>${fmtMoney(dsim.p50[t])}</td>
+          <td>${fmtMoney(dsim.p95[t])}</td>
         </tr>
       `;
     }
-    const totalContrib = s.startingBalance + s.monthlyContribution * 12 * sharedHorizon;
     return `
       <tr>
         <th scope="row">${label}</th>
-        <td>${fmtMoney(totalContrib)}</td>
-        <td>${fmtMoney(sim.p05[t])}</td>
-        <td>${fmtMoney(sim.p50[t])}</td>
-        <td>${fmtMoney(sim.p95[t])}</td>
+        <td>${fmtMoney(totalContribFor(s, sharedHorizon, factors))}</td>
+        <td>${fmtMoney(dsim.p05[t])}</td>
+        <td>${fmtMoney(dsim.p50[t])}</td>
+        <td>${fmtMoney(dsim.p95[t])}</td>
       </tr>
     `;
   };
-  return row(names.A, sA, simA) + row(names.B, sB, simB);
+  return row(names.A, sA, dsimA) + row(names.B, sB, dsimB);
 }
 
 function runCompare() {
-  // Compare mode has no overlay paths — kill any animation that was
-  // running in single mode.
   stopSingleAnimation();
 
   const sA = state.scenarios.A;
@@ -701,10 +792,11 @@ function runCompare() {
     A: subs.A || "Scenario A",
     B: subs.B || "Scenario B",
   };
+  const chartNames = {
+    A: subs.A || "Plan A",
+    B: subs.B || "Plan B",
+  };
 
-  // Shared horizon for paired computations & narrative. Drawdown mode
-  // anchors it to (endAge - currentAge); accumulation mode uses A's
-  // horizon slider (B is kept in sync via the shared block).
   const sharedHorizon = state.drawdownMode
     ? effectiveHorizonYears()
     : Math.min(sA.horizonYears, sB.horizonYears);
@@ -716,8 +808,6 @@ function runCompare() {
     ? Math.max(0, sA.retirementAge - sA.currentAge)
     : null;
 
-  // Pre-generate growth shocks and feed them to both sims so A and B
-  // respond to the same market.
   const sharedMonths = sharedHorizon * 12;
   const t0 = performance.now();
   const shocks = generateShocks(NUM_PATHS, sharedMonths);
@@ -725,38 +815,6 @@ function runCompare() {
   const simB = runScenario(sB, shocks);
   const t1 = performance.now();
 
-  renderCompareChart("chart", { A: simA, B: simB }, {
-    horizonYears: sharedHorizon,
-    currentAge: sharedAge,
-    names,
-    retirementYear,
-  });
-
-  ensureOutputSkeleton(state.drawdownMode ? "compare-drawdown" : "compare");
-
-  // Probability over time.
-  const probA = pathProbability(simA, simB, sharedYears);
-  const xYears = Array.from({ length: sharedYears }, (_, i) => i);
-
-  renderProbChart("probChart", xYears, probA, {
-    horizonYears: sharedHorizon,
-    currentAge: sharedAge,
-  });
-
-  const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
-
-  // Chart headline uses "Plan A/B" fallback (reads more naturally than
-  // "Scenario A/B" in a sentence) when subtitles are empty.
-  const chartNames = {
-    A: subs.A || "Plan A",
-    B: subs.B || "Plan B",
-  };
-  q("probTitle").textContent = state.drawdownMode
-    ? `Probability ${chartNames.A}'s portfolio leads ${chartNames.B}'s`
-    : `Probability ${chartNames.A} finishes ahead of ${chartNames.B}`;
-
-  // Identical per-scenario inputs → suppress callout, swap narrative
-  // for an explainer. In drawdown mode we compare a fuller set.
   const baseIdentical =
     sA.asset === sB.asset &&
     sA.startingBalance === sB.startingBalance &&
@@ -768,6 +826,56 @@ function runCompare() {
     ? (baseIdentical && drawdownIdentical)
     : baseIdentical;
 
+  const probA = pathProbability(simA, simB, sharedYears);
+
+  lastCompare = {
+    simA, simB,
+    sA: { ...sA }, sB: { ...sB },
+    sharedHorizon, sharedYears, sharedAge, retirementYear,
+    names, chartNames, identical, probA,
+  };
+  lastSingle = null;
+  redisplayCompare();
+
+  const tag = state.drawdownMode
+    ? `drawdown · ruin A=${(simA.ruinedFraction * 100).toFixed(1)}% B=${(simB.ruinedFraction * 100).toFixed(1)}%`
+    : `A=${sA.asset}/${sA.horizonYears}y · B=${sB.asset}/${sB.horizonYears}y`;
+  console.log(`sim ${(t1 - t0).toFixed(1)}ms · compare · ${tag}`);
+}
+
+function redisplayCompare() {
+  if (!lastCompare) return;
+  const {
+    simA, simB, sA, sB,
+    sharedHorizon, sharedYears, sharedAge, retirementYear,
+    names, chartNames, identical, probA,
+  } = lastCompare;
+  const factors = displayFactors(simA.years);
+  const dsimA = applyDisplayToSim(simA, factors);
+  const dsimB = applyDisplayToSim(simB, factors);
+  const { yAxisLabel } = currentUnitsStrings();
+
+  renderCompareChart("chart", { A: dsimA, B: dsimB }, {
+    horizonYears: sharedHorizon,
+    currentAge: sharedAge,
+    names,
+    retirementYear,
+    yAxisLabel,
+  });
+
+  ensureOutputSkeleton(state.drawdownMode ? "compare-drawdown" : "compare");
+
+  const xYears = Array.from({ length: sharedYears }, (_, i) => i);
+  renderProbChart("probChart", xYears, probA, {
+    horizonYears: sharedHorizon,
+    currentAge: sharedAge,
+  });
+
+  const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
+  q("probTitle").textContent = state.drawdownMode
+    ? `Probability ${chartNames.A}'s portfolio leads ${chartNames.B}'s`
+    : `Probability ${chartNames.A} finishes ahead of ${chartNames.B}`;
+
   if (identical) {
     q("callout").textContent = "";
     q("narrative").innerHTML = `
@@ -778,22 +886,20 @@ function runCompare() {
     `;
   } else if (state.drawdownMode) {
     q("callout").textContent = calloutText(probA, names);
-    q("narrative").innerHTML = drawdownNarrativeHTML(simA, simB, names, sharedHorizon);
+    q("narrative").innerHTML = drawdownNarrativeHTML(dsimA, dsimB, names, sharedHorizon);
   } else {
     q("callout").textContent = calloutText(probA, names);
-    const aMedian = simA.p50[sharedHorizon];
-    const bMedian = simB.p50[sharedHorizon];
+    const aMedian = dsimA.p50[sharedHorizon];
+    const bMedian = dsimB.p50[sharedHorizon];
     const higherIsA = aMedian >= bMedian;
+    // Regret uses raw paths since it's a pairwise comparison; nominal
+    // factors are monotonic so they don't change A<B vs A>B counts.
     const regret = regretFraction(simA, simB, sharedHorizon, sharedHorizon, higherIsA);
-    q("narrative").innerHTML = narrativeHTML(simA, simB, names, sharedHorizon, regret);
+    q("narrative").innerHTML = narrativeHTML(dsimA, dsimB, names, sharedHorizon, regret);
   }
 
-  q("statbody").innerHTML = statRowsHTML(simA, simB, sA, sB, names, sharedHorizon);
-
-  const tag = state.drawdownMode
-    ? `drawdown · ruin A=${(simA.ruinedFraction * 100).toFixed(1)}% B=${(simB.ruinedFraction * 100).toFixed(1)}%`
-    : `A=${sA.asset}/${sA.horizonYears}y · B=${sB.asset}/${sB.horizonYears}y`;
-  console.log(`sim ${(t1 - t0).toFixed(1)}ms · compare · ${tag}`);
+  q("statbody").innerHTML = statRowsHTML(dsimA, dsimB, sA, sB, names, sharedHorizon);
+  applyUnitsLabel();
 }
 
 function drawdownNarrativeHTML(simA, simB, names, sharedHorizon) {
@@ -881,6 +987,33 @@ els.drawdownToggle.addEventListener("change", () => {
   renderControls();
   run();
 });
+
+// Units toggle — display-only, no resim.
+els.displayOptions.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const u = btn.dataset.units;
+    if (u !== "real" && u !== "nominal") return;
+    if (state.units === u) return;
+    state.units = u;
+    redisplay();
+  });
+});
+
+// Inflation rate (in the Parameters modal). Updates the nominal
+// conversion immediately. No effect in real mode.
+els.inflationInput.addEventListener("input", () => {
+  const n = Number(els.inflationInput.value);
+  if (!Number.isFinite(n) || n < 0) return;
+  state.inflation = n / 100;
+  if (state.units === "nominal") redisplay();
+  else applyUnitsLabel();
+});
+
+function redisplay() {
+  if (lastCompare) redisplayCompare();
+  else if (lastSingle) redisplaySingle();
+  else applyUnitsLabel();
+}
 
 // --- Parameters modal -----------------------------------------------------
 

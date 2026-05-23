@@ -163,13 +163,9 @@ const HOVER_LABEL = {
   align: "left",
 };
 
-// Display units. The simulation runs in real (today's dollars) terms.
-// A future nominal-dollars toggle will swap these strings; everything
-// downstream reads from this object so the flip is a one-liner.
-export const UNITS = {
-  yAxisLabel: "Portfolio value (today's dollars)",
-  chartNote: "All values in today's dollars (CPI-adjusted)",
-};
+// Y-axis label is supplied per render call by main.js, which owns
+// the units state (real vs nominal) and the inflation assumption.
+const DEFAULT_Y_LABEL = "Portfolio value";
 
 // Returns the retirement marker line + shaded post-retirement region
 // to add to a fan chart's layout when drawdown is active.
@@ -214,7 +210,7 @@ function drawdownShapesAndAnnotations({ retirementYear, horizonYears, yMax }) {
 // of outcomes (~p95 of terminal year). Individual sample paths that
 // exceed this ceiling get clipped at the top edge — that's intentional;
 // it keeps the chart's central story stable as paths rotate.
-export function renderChart(containerId, sim, { horizonYears, currentAge, retirementYear = null }) {
+export function renderChart(containerId, sim, { horizonYears, currentAge, retirementYear = null, yAxisLabel = DEFAULT_Y_LABEL }) {
   const data = buildSingleTraces(sim);
   const ticks = buildAxisTicks(horizonYears, currentAge);
   // Cap y-axis off the bulk of the distribution including drawdown.
@@ -244,7 +240,7 @@ export function renderChart(containerId, sim, { horizonYears, currentAge, retire
       showgrid: false, zeroline: false,
     },
     yaxis: {
-      title: { text: UNITS.yAxisLabel, standoff: 10 },
+      title: { text: yAxisLabel, standoff: 10 },
       tickformat: "$,.2s",
       gridcolor: "rgba(0,0,0,0.06)",
       zeroline: false,
@@ -264,7 +260,7 @@ export function renderChart(containerId, sim, { horizonYears, currentAge, retire
 }
 
 // Render compare-mode fan chart (4 visual elements: 2 bands + 2 medians).
-export function renderCompareChart(containerId, sims, { horizonYears, currentAge, names, retirementYear = null }) {
+export function renderCompareChart(containerId, sims, { horizonYears, currentAge, names, retirementYear = null, yAxisLabel = DEFAULT_Y_LABEL }) {
   const data = buildCompareTraces(sims, names);
   const ticks = buildAxisTicks(horizonYears, currentAge);
   const { shapes, annotations } = drawdownShapesAndAnnotations({
@@ -288,7 +284,7 @@ export function renderCompareChart(containerId, sims, { horizonYears, currentAge
       showgrid: false, zeroline: false,
     },
     yaxis: {
-      title: { text: UNITS.yAxisLabel, standoff: 10 },
+      title: { text: yAxisLabel, standoff: 10 },
       tickformat: "$,.2s",
       gridcolor: "rgba(0,0,0,0.06)",
       zeroline: false, rangemode: "tozero",

@@ -36,6 +36,10 @@
       </section>
 
       <section class="chart-wrap">
+        <div class="display-toggle" role="radiogroup" aria-label="Display units">
+          <button class="display-option" data-units="real" type="button" aria-pressed="true">Today's dollars</button>
+          <button class="display-option" data-units="nominal" type="button" aria-pressed="false">Future dollars</button>
+        </div>
         <div id="chart"></div>
         <div class="chart-note" data-role="chartNote"></div>
       </section>
@@ -83,6 +87,27 @@
           <p>Contributions and withdrawals maintain their real purchasing power throughout the projection. A $1,000/month contribution today represents the same purchasing power across all projection years, which is equivalent to that contribution growing with CPI in nominal dollars. The same applies to drawdown withdrawals.</p>
           <p>Profile expected returns are placeholder values consistent with forward-looking capital market assumption frameworks. They will be updated with sourced figures in a future release.</p>
           <p>A future update will add a nominal-dollars toggle for users who want to see the inflated nominal values alongside the real values.</p>
+        </section>
+
+        <section id="inflation-assumption">
+          <h3>Inflation assumption</h3>
+          <p>The future-dollars display converts real (today's dollars) values to nominal future values using a deterministic inflation rate. The default rate is 2.5% per annum, consistent with the RBA's target band midpoint. Users can adjust this rate; the change will affect future-dollars chart values and displayed contribution and withdrawal streams but not the underlying simulation.</p>
+          <div class="param-inline-field">
+            <label for="inflationInput">Inflation rate (annual, %)</label>
+            <input id="inflationInput" type="number" min="0" max="20" step="0.1" value="2.5" />
+          </div>
+          <p>Inflation in this tool is deterministic — every simulated path assumes the same inflation rate. Real-world inflation varies stochastically and across paths, but modelling stochastic inflation is out of scope for this version.</p>
+        </section>
+
+        <section>
+          <h3>Today's dollars vs future dollars</h3>
+          <p>The simulation runs in real (today's dollars) terms. All inputs — contributions, withdrawals, starting balance, profile returns — are denominated in today's purchasing power and stay constant in those terms throughout the projection. This means contributions and withdrawals implicitly grow with inflation in nominal terms to preserve their real value.</p>
+          <p>The display toggle lets you view the same projection in either:</p>
+          <ul>
+            <li><em>Today's dollars.</em> Values are shown in current purchasing power throughout the projection. This is the default. Easier to compare to current financial goals and spending levels.</li>
+            <li><em>Future dollars.</em> Values are shown in inflated nominal dollars at each future year, using a fixed inflation assumption (default 2.5%). Useful for understanding what the projection looks like in the dollars that will actually be circulating at that future date.</li>
+          </ul>
+          <p>The underlying simulation is identical regardless of which display mode is active. Only the displayed units change. Probability of ruin and other dimensionless statistics are the same in both modes.</p>
         </section>
 
         <section>
