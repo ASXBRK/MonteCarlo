@@ -4,6 +4,7 @@ import {
   renderChart, renderCompareChart, renderProbChart, renderBellCurves,
   SAMPLE_PATH_COUNT, sampleTraceIndices,
 } from "./chart.js";
+import { tornadoSchedule, tornadoRedisplay, tornadoClear } from "./tornado.js";
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
@@ -25,6 +26,8 @@ const els = {
   chartNote: document.querySelector('[data-role="chartNote"]'),
   displayOptions: document.querySelectorAll(".display-option"),
   inflationInput: $("inflationInput"),
+  tornado: $("tornado"),
+  targetRuinInput: $("targetRuinInput"),
 };
 
 // Strings driven by units state. The simulation runs in real terms;
@@ -103,11 +106,58 @@ const state = {
   drawdownMode: false,
   units: "real",      // "real" | "nominal"
   inflation: 0.025,   // annual rate used only when units === "nominal"
+  targetRuin: 0.10,   // tornado switches to goal-seek when ruin > this
   scenarios: {
     A: { ...DEFAULTS },
     B: { ...DEFAULTS },
   },
 };
+
+// Build the worker request from scenario A. The worker only ever
+// operates on Scenario A (per spec); compare mode adds a footer note.
+function tornadoRequest() {
+  const s = state.scenarios.A;
+  return {
+    scenario: { ...s },
+    profiles: PROFILES,
+    mode: state.drawdownMode ? "drawdown" : "accumulation",
+    targetRuin: state.targetRuin,
+  };
+}
+
+function tornadoDisplayCtx() {
+  const a = state.scenarios.A;
+  const horizon = state.drawdownMode
+    ? Math.max(1, a.endAge - a.currentAge)
+    : a.horizonYears;
+  return {
+    mode: state.drawdownMode ? "drawdown" : "accumulation",
+    units: state.units,
+    inflation: state.inflation,
+    formatMetric: state.drawdownMode
+      ? (v) => `${v >= 0 ? "+" : "-"}${Math.abs(v * 100).toFixed(1)}pp`
+      : (v) => {
+          const scale = state.units === "nominal" ? Math.pow(1 + state.inflation, horizon) : 1;
+          const scaled = v * scale;
+          const sign = scaled < 0 ? "-" : "+";
+          const abs = Math.abs(scaled);
+          if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+          if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(0)}k`;
+          return `${sign}$${Math.round(abs)}`;
+        },
+  };
+}
+
+function scheduleTornado() {
+  tornadoSchedule(els.tornado, tornadoRequest(), tornadoDisplayCtx(), {
+    compareNote: state.compareMode,
+    expectedBars: state.drawdownMode ? 4 : 4,
+  });
+}
+
+function redisplayTornado() {
+  tornadoRedisplay(tornadoDisplayCtx());
+}
 
 // In drawdown mode the time anchor is (currentAge, endAge) on scenario A.
 function effectiveHorizonYears() {
@@ -600,6 +650,7 @@ function runSingle() {
     ? `drawdown · ret@${s.retirementAge} · withdraw=${s.annualWithdrawal} · ruin=${(sim.ruinedFraction * 100).toFixed(1)}%`
     : `${s.asset} · ${s.horizonYears}y`;
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · single · ${tag}`);
+  scheduleTornado();
 }
 
 function redisplaySingle() {
@@ -847,6 +898,7 @@ function runCompare() {
     ? `drawdown · ruin A=${(simA.ruinedFraction * 100).toFixed(1)}% B=${(simB.ruinedFraction * 100).toFixed(1)}%`
     : `A=${sA.asset}/${sA.horizonYears}y · B=${sB.asset}/${sB.horizonYears}y`;
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · compare · ${tag}`);
+  scheduleTornado();
 }
 
 function redisplayCompare() {
@@ -1002,6 +1054,7 @@ els.displayOptions.forEach((btn) => {
     if (state.units === u) return;
     state.units = u;
     redisplay();
+    redisplayTornado();
   });
 });
 
@@ -1011,9 +1064,25 @@ els.inflationInput.addEventListener("input", () => {
   const n = Number(els.inflationInput.value);
   if (!Number.isFinite(n) || n < 0) return;
   state.inflation = n / 100;
-  if (state.units === "nominal") redisplay();
-  else applyUnitsLabel();
+  if (state.units === "nominal") {
+    redisplay();
+    redisplayTornado();
+  } else {
+    applyUnitsLabel();
+  }
 });
+
+// Target ruin probability — controls when the tornado switches into
+// goal-seek mode. Display-only on existing main chart; the tornado
+// needs a recompute since its mode depends on the comparison.
+if (els.targetRuinInput) {
+  els.targetRuinInput.addEventListener("input", () => {
+    const n = Number(els.targetRuinInput.value);
+    if (!Number.isFinite(n) || n < 0 || n > 100) return;
+    state.targetRuin = n / 100;
+    scheduleTornado();
+  });
+}
 
 function redisplay() {
   if (lastCompare) redisplayCompare();

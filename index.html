@@ -44,6 +44,8 @@
         <div class="chart-note" data-role="chartNote"></div>
       </section>
 
+      <div id="tornado"></div>
+
       <section id="output"></section>
     </div>
 
@@ -159,6 +161,32 @@
           <p>In compare mode, both scenarios run against the same sequence of market shocks. The i-th simulated path of A and the i-th simulated path of B are responses to the same random market under different strategies — not two independent random universes. This isolates the comparison to the strategy decision itself: contributing more always beats contributing less when other inputs are equal, and asset-class comparisons reflect how each profile responds to the same market.</p>
           <p>P(A &gt; B) at year <em>t</em> is the fraction of paired paths where A's value exceeds B's. Ties contribute 0.5 to each side, so identical configurations evaluate to 50% at year 0 rather than 0%.</p>
           <p>When asset classes differ, the same shock produces different returns because higher-volatility profiles amplify it. A z = −1 month gives Growth a −2.55% return and Balanced a −1.77% return; a z = +2.5 month gives them +8.57% and +6.32%. The probability line evolves because the strategies respond differently to the same market, not because they live in different random universes.</p>
+        </section>
+
+        <section id="goal-target">
+          <h3>Goal target (drawdown mode)</h3>
+          <p>The probability of ruin target determines when the tornado chart switches from standard mode to goal-seek mode. If your simulated ruin probability is below this target, the tornado shows what drives your outcome. If your ruin probability is above the target, the tornado switches to goal-seek mode and shows what each input would need to change to bring you to the target.</p>
+          <div class="param-inline-field">
+            <label for="targetRuinInput">Target ruin probability (%)</label>
+            <input id="targetRuinInput" type="number" min="0" max="100" step="1" value="10" />
+          </div>
+          <p>Industry consensus on acceptable success rates: Wade Pfau 90–95%; Blanchett 85–90%; Kitces 80–90%; Vanguard 85–90%; Schwab 85–90%; JP Morgan 80–90%; T. Rowe Price's "Confidence Zone" 80–95%. The 10% default sits in the more conservative half of this consensus, appropriate for a portfolio-only projection that does not model age pension, other retirement income sources, or spending flexibility.</p>
+        </section>
+
+        <section id="tornado-method">
+          <h3>Tornado chart</h3>
+          <p>The tornado chart visualises input sensitivity. Each bar shows how much the projected outcome changes when one input is varied within its plausible range, holding all other inputs constant. Bars are sorted by absolute impact, largest at top.</p>
+          <p>Input perturbation ranges (chosen to represent approximately one standard deviation of plausible real-world variation):</p>
+          <ul>
+            <li>Monthly contribution: ±20%</li>
+            <li>Starting balance: ±20%</li>
+            <li>Time horizon (accumulation): ±5 years</li>
+            <li>Retirement age (drawdown): ±3 years</li>
+            <li>Annual withdrawal (drawdown): ±20%</li>
+            <li>Asset class: ±1 step on the risk ladder</li>
+          </ul>
+          <p>In drawdown mode, if your simulated probability of ruin is above your target, the tornado switches to goal-seek mode. In goal-seek mode, each bar shows the minimum change to one input that would bring you to your target probability of ruin. Inputs that cannot solve the problem alone within reasonable bounds are shown as maxed-out bars with an "insufficient alone" indicator.</p>
+          <p>Tornado computations use a reduced path count (1,000 paths per perturbation, vs. the main chart's 2,000) for performance. The result is illustrative — bar lengths may vary slightly between recomputations due to Monte Carlo noise.</p>
         </section>
 
         <section>

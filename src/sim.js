@@ -91,6 +91,11 @@ export function simulate({
   // layout as preGenZ. Sharing this in compare mode keeps the regime
   // sequence aligned across paired scenarios.
   preGenU = null,
+  // Stride (months per path) of the preGenZ / preGenU arrays. When
+  // omitted, defaults to this call's `months`. Setting it explicitly
+  // lets tornado perturbations with different horizons share a single
+  // over-sized shock matrix without messing up indexing.
+  shockStride = null,
   // Drawdown config. When supplied, accumulation runs up to
   // retirementMonth, then contributions stop and a fixed-real
   // withdrawal of (annualWithdrawal / 12) is taken each month.
@@ -109,6 +114,7 @@ export function simulate({
 
   const yearlyAll = new Float64Array(numPaths * years);
   const ruined = isDrawdown ? new Uint8Array(numPaths) : null;
+  const stride = shockStride != null ? shockStride : months;
 
   for (let p = 0; p < numPaths; p++) {
     let balance = startingBalance;
@@ -119,7 +125,7 @@ export function simulate({
     let regime = 0;
 
     const base = p * years;
-    const zBase = p * months;
+    const zBase = p * stride;
     yearlyAll[base + 0] = balance;
 
     for (let m = 1; m <= months; m++) {
