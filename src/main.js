@@ -4,7 +4,10 @@ import {
   renderChart, renderCompareChart, renderProbChart, renderBellCurves,
   SAMPLE_PATH_COUNT, sampleTraceIndices,
 } from "./chart.js";
-import { tornadoSchedule, tornadoRedisplay, tornadoClear } from "./tornado.js";
+import {
+  tornadoSchedule, tornadoRedisplay, tornadoClear,
+  tornadoHideForCompare, tornadoShowForSingle,
+} from "./tornado.js";
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
@@ -149,13 +152,18 @@ function tornadoDisplayCtx() {
 }
 
 function scheduleTornado() {
+  if (state.compareMode) {
+    tornadoHideForCompare(els.tornado);
+    return;
+  }
+  tornadoShowForSingle(els.tornado);
   tornadoSchedule(els.tornado, tornadoRequest(), tornadoDisplayCtx(), {
-    compareNote: state.compareMode,
-    expectedBars: state.drawdownMode ? 4 : 4,
+    expectedBars: 4,
   });
 }
 
 function redisplayTornado() {
+  if (state.compareMode) return;
   tornadoRedisplay(tornadoDisplayCtx());
 }
 

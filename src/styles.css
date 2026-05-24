@@ -372,6 +372,18 @@ html, body {
   font: inherit;
 }
 
+.tornado-placeholder {
+  background: var(--card);
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  font-style: italic;
+  text-align: center;
+}
+
 /* --- Tornado chart --- */
 
 .tornado {

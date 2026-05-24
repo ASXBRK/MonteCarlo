@@ -266,3 +266,31 @@ export function tornadoClear() {
     hideCallout();
   }
 }
+
+// Compare mode: cancel any pending worker call and swap the panel
+// for a small placeholder. Cached result stays so toggling back to
+// single mode shows it immediately without a fresh compute.
+export function tornadoHideForCompare(container) {
+  if (debounceHandle != null) {
+    clearTimeout(debounceHandle);
+    debounceHandle = null;
+  }
+  computingToken++; // invalidate any in-flight worker reply
+  if (panelEl && panelEl.isConnected) panelEl.remove();
+  panelEl = null;
+  // Render the placeholder in place.
+  let ph = container.querySelector(".tornado-placeholder");
+  if (!ph) {
+    ph = document.createElement("div");
+    ph.className = "tornado-placeholder";
+    ph.textContent = "Sensitivity analysis is available in single-scenario mode.";
+    container.appendChild(ph);
+  }
+}
+
+// Single mode: remove any compare-mode placeholder before the next
+// scheduleTornado() rebuilds the real panel.
+export function tornadoShowForSingle(container) {
+  const ph = container.querySelector(".tornado-placeholder");
+  if (ph) ph.remove();
+}
