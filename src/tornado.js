@@ -37,6 +37,20 @@ const fmtMoneyCompact = (v) => {
 
 const fmtPp = (v) => `${v >= 0 ? "+" : "-"}${Math.abs(v * 100).toFixed(1)}pp`;
 
+// Format an input-side dollar change (applied to a baseline like a
+// monthly contribution or annual withdrawal). Display ctx provides
+// the scaling factor that mirrors the main chart's y-axis.
+function fmtInputDollar(amount, unit, displayCtx) {
+  const scaled = amount * (displayCtx.inputScale || 1);
+  const sign = scaled < 0 ? "-" : "+";
+  const abs = Math.abs(scaled);
+  let body;
+  if (abs >= 1e6) body = `$${(abs / 1e6).toFixed(2)}M`;
+  else if (abs >= 1e3) body = `$${(abs / 1e3).toFixed(abs >= 1e4 ? 0 : 1)}k`;
+  else body = `$${Math.round(abs).toLocaleString("en-US")}`;
+  return `${sign}${body}${unit || ""}`;
+}
+
 // --- DOM / state -------------------------------------------------------
 
 let panelEl = null;
@@ -117,9 +131,13 @@ function renderStandard(result, displayCtx) {
     const seg = (p, cls) =>
       `<div class="tornado-seg ${cls}" style="width:${(Math.abs(p.delta) / maxAbs) * 100}%" title="${p.dir}: ${formatMetric(p.delta)}"></div>`;
 
-    const chips = bar.perturbations.map((p) =>
-      `<span class="tornado-chip ${p.delta >= 0 ? "pos" : "neg"}">${p.dir} ${formatMetric(p.delta)}</span>`
-    ).join(" ");
+    const chips = bar.perturbations.map((p) => {
+      let dirText = p.dir;
+      if (p.dollarChange != null) {
+        dirText += ` (${fmtInputDollar(p.dollarChange, p.unit, displayCtx)})`;
+      }
+      return `<span class="tornado-chip ${p.delta >= 0 ? "pos" : "neg"}">${dirText} ${formatMetric(p.delta)}</span>`;
+    }).join(" ");
 
     return `
       <div class="tornado-row">
@@ -136,13 +154,35 @@ function renderStandard(result, displayCtx) {
   hideCallout();
 }
 
-function renderGoalSeek(result) {
+function goalSeekChangeLabel(bar, displayCtx) {
+  if (bar.insufficient) return "Cannot reach goal alone";
+  if (bar.kind === "pct") {
+    const pct = `${bar.direction}${Math.round(bar.change * 100)}%`;
+    if (bar.dollarChange != null) {
+      return `${pct} (${fmtInputDollar(bar.dollarChange, bar.unit, displayCtx)})`;
+    }
+    return pct;
+  }
+  if (bar.kind === "years") {
+    if (bar.change === 0) return "no change";
+    return `${bar.direction}${bar.change} year${bar.change === 1 ? "" : "s"}`;
+  }
+  if (bar.kind === "asset") {
+    return `Move from ${bar.fromAsset} to ${bar.toAsset}`;
+  }
+  return "";
+}
+
+function renderGoalSeek(result, displayCtx) {
   const titleEl = panelEl.querySelector('[data-role="ttitle"]');
   const subtitleEl = panelEl.querySelector('[data-role="tsubtitle"]');
   titleEl.textContent = "What would bring you to your goal?";
-  subtitleEl.innerHTML = `Your current scenario has a <strong>${(result.baselineRuin * 100).toFixed(1)}%</strong> probability of running out of money, above your <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows the minimum change to one input that would bring you to your goal.`;
+  // Single source of truth for the displayed ruin probability: the
+  // main simulation's value, passed in via displayCtx. The worker's
+  // own 1000-path baseline is used for compute decisions only.
+  const ruin = displayCtx.displayedRuin != null ? displayCtx.displayedRuin : result.baselineRuin;
+  subtitleEl.innerHTML = `Your current scenario has a <strong>${(ruin * 100).toFixed(1)}%</strong> probability of running out of money, above your <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows the minimum change to one input that would bring you to your goal.`;
 
-  // Normalised magnitudes for bar width scaling.
   function widthFor(bar) {
     if (bar.insufficient) return 100;
     if (bar.kind === "pct") return Math.min(100, Math.max(2, bar.change * 100));
@@ -155,9 +195,10 @@ function renderGoalSeek(result) {
   const rows = result.bars.map((bar) => {
     const cls = bar.insufficient ? "insufficient" : "pos";
     const w = widthFor(bar);
+    const label = goalSeekChangeLabel(bar, displayCtx);
     const valueText = bar.insufficient
-      ? `<span class="tornado-chip insufficient">Cannot reach goal alone</span>`
-      : `<span class="tornado-chip pos">${bar.changeLabel}</span>`;
+      ? `<span class="tornado-chip insufficient">${label}</span>`
+      : `<span class="tornado-chip pos">${label}</span>`;
     return `
       <div class="tornado-row">
         <div class="tornado-label">${bar.label}</div>
@@ -216,7 +257,7 @@ export function tornadoRender(container, displayCtx, opts = {}) {
 
 function applyResult(result, displayCtx) {
   panelEl.classList.toggle("computing", false);
-  if (result.mode === "goal-seek") renderGoalSeek(result);
+  if (result.mode === "goal-seek") renderGoalSeek(result, displayCtx);
   else renderStandard(result, displayCtx);
 }
 

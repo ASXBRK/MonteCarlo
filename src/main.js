@@ -133,14 +133,23 @@ function tornadoDisplayCtx() {
   const horizon = state.drawdownMode
     ? Math.max(1, a.endAge - a.currentAge)
     : a.horizonYears;
+  const scale = state.units === "nominal" ? Math.pow(1 + state.inflation, horizon) : 1;
   return {
     mode: state.drawdownMode ? "drawdown" : "accumulation",
     units: state.units,
     inflation: state.inflation,
+    // Used by the renderer to scale input-side dollar amounts. Same
+    // factor as the chart's y-axis so a "+$200/mo" matches the units
+    // the chart values are shown in.
+    inputScale: scale,
+    // Authoritative ruin probability from the main 2000-path sim,
+    // so the goal-seek subtitle matches the main chart's summary.
+    displayedRuin: state.drawdownMode && lastSingle && lastSingle.sim
+      ? lastSingle.sim.ruinedFraction
+      : null,
     formatMetric: state.drawdownMode
       ? (v) => `${v >= 0 ? "+" : "-"}${Math.abs(v * 100).toFixed(1)}pp`
       : (v) => {
-          const scale = state.units === "nominal" ? Math.pow(1 + state.inflation, horizon) : 1;
           const scaled = v * scale;
           const sign = scaled < 0 ? "-" : "+";
           const abs = Math.abs(scaled);

@@ -71,43 +71,38 @@ function neighbourAsset(asset, direction) {
 
 function standardBars(scenario, profiles, mode, shocks, uniforms, stride, baseline) {
   const bars = [];
-  const sign = mode === "drawdown" ? +1 : +1;
-  // For "up" / "down" perturbations, we compute new metric and report
-  // metricNew - baseline. In accumulation we want "up" to mean higher
-  // outcome value; in drawdown we want "up" to mean increase in ruin
-  // (worse outcome) — both render naturally with consistent colouring
-  // since we let the bar's sign drive the colour.
 
   // Monthly contribution: ±20%.
   {
-    const upS = { ...scenario, monthlyContribution: scenario.monthlyContribution * 1.2 };
-    const downS = { ...scenario, monthlyContribution: scenario.monthlyContribution * 0.8 };
+    const baseAmt = scenario.monthlyContribution;
+    const upS = { ...scenario, monthlyContribution: baseAmt * 1.2 };
+    const downS = { ...scenario, monthlyContribution: baseAmt * 0.8 };
     bars.push({
       key: "monthlyContribution",
       label: "Monthly contribution",
       perturbations: [
-        { dir: "+20%", delta: runMetric(upS, profiles, mode, shocks, uniforms, stride) - baseline },
-        { dir: "-20%", delta: runMetric(downS, profiles, mode, shocks, uniforms, stride) - baseline },
+        { dir: "+20%", delta: runMetric(upS, profiles, mode, shocks, uniforms, stride) - baseline, dollarChange:  baseAmt * 0.2, unit: "/mo" },
+        { dir: "-20%", delta: runMetric(downS, profiles, mode, shocks, uniforms, stride) - baseline, dollarChange: -baseAmt * 0.2, unit: "/mo" },
       ],
     });
   }
 
   // Starting balance: ±20%.
   {
-    const upS = { ...scenario, startingBalance: scenario.startingBalance * 1.2 };
-    const downS = { ...scenario, startingBalance: scenario.startingBalance * 0.8 };
+    const baseAmt = scenario.startingBalance;
+    const upS = { ...scenario, startingBalance: baseAmt * 1.2 };
+    const downS = { ...scenario, startingBalance: baseAmt * 0.8 };
     bars.push({
       key: "startingBalance",
       label: "Starting balance",
       perturbations: [
-        { dir: "+20%", delta: runMetric(upS, profiles, mode, shocks, uniforms, stride) - baseline },
-        { dir: "-20%", delta: runMetric(downS, profiles, mode, shocks, uniforms, stride) - baseline },
+        { dir: "+20%", delta: runMetric(upS, profiles, mode, shocks, uniforms, stride) - baseline, dollarChange:  baseAmt * 0.2, unit: "" },
+        { dir: "-20%", delta: runMetric(downS, profiles, mode, shocks, uniforms, stride) - baseline, dollarChange: -baseAmt * 0.2, unit: "" },
       ],
     });
   }
 
   if (mode === "accumulation") {
-    // Time horizon: ±5 years.
     const upH = scenario.horizonYears + 5;
     const downH = Math.max(5, scenario.horizonYears - 5);
     const upS = { ...scenario, horizonYears: upH };
@@ -134,14 +129,15 @@ function standardBars(scenario, profiles, mode, shocks, uniforms, stride, baseli
     });
 
     // Annual withdrawal: ±20%.
-    const upW = { ...scenario, annualWithdrawal: scenario.annualWithdrawal * 1.2 };
-    const downW = { ...scenario, annualWithdrawal: scenario.annualWithdrawal * 0.8 };
+    const baseW = scenario.annualWithdrawal;
+    const upW = { ...scenario, annualWithdrawal: baseW * 1.2 };
+    const downW = { ...scenario, annualWithdrawal: baseW * 0.8 };
     bars.push({
       key: "annualWithdrawal",
       label: "Annual withdrawal",
       perturbations: [
-        { dir: "+20%", delta: runMetric(upW, profiles, mode, shocks, uniforms, stride) - baseline },
-        { dir: "-20%", delta: runMetric(downW, profiles, mode, shocks, uniforms, stride) - baseline },
+        { dir: "+20%", delta: runMetric(upW, profiles, mode, shocks, uniforms, stride) - baseline, dollarChange:  baseW * 0.2, unit: "" },
+        { dir: "-20%", delta: runMetric(downW, profiles, mode, shocks, uniforms, stride) - baseline, dollarChange: -baseW * 0.2, unit: "" },
       ],
     });
   }
@@ -166,7 +162,6 @@ function standardBars(scenario, profiles, mode, shocks, uniforms, stride, baseli
     bars.push({ key: "asset", label: "Asset class", perturbations });
   }
 
-  // Sort by absolute total impact, largest first.
   bars.sort((a, b) => {
     const A = a.perturbations.reduce((s, p) => s + Math.abs(p.delta), 0);
     const B = b.perturbations.reduce((s, p) => s + Math.abs(p.delta), 0);
@@ -243,7 +238,8 @@ function goalSeekBars(scenario, profiles, mode, shocks, uniforms, stride, target
       kind: "pct",
       direction: "+",
       change: r.change,
-      changeLabel: `+${Math.round(r.change * 100)}%`,
+      dollarChange: scenario.monthlyContribution * r.change,
+      unit: "/mo",
       insufficient: !r.found,
     });
   }
@@ -260,7 +256,6 @@ function goalSeekBars(scenario, profiles, mode, shocks, uniforms, stride, target
       kind: "years",
       direction: "+",
       change: r.change,
-      changeLabel: r.change === 0 ? "no change" : `+${r.change} year${r.change === 1 ? "" : "s"}`,
       insufficient: !r.found,
     });
   }
@@ -277,7 +272,8 @@ function goalSeekBars(scenario, profiles, mode, shocks, uniforms, stride, target
       kind: "pct",
       direction: "-",
       change: r.change,
-      changeLabel: `-${Math.round(r.change * 100)}%`,
+      dollarChange: -scenario.annualWithdrawal * r.change,
+      unit: "",
       insufficient: !r.found,
     });
   }
@@ -291,21 +287,16 @@ function goalSeekBars(scenario, profiles, mode, shocks, uniforms, stride, target
       kind: "asset",
       direction: r.change >= 0 ? "+" : "-",
       change: r.change,
-      changeLabel: r.found
-        ? `Move from ${r.fromAsset} to ${r.toAsset}`
-        : `Even Emerging Markets isn't enough`,
+      fromAsset: r.fromAsset,
+      toAsset: r.toAsset || null,
       insufficient: !r.found,
     });
   }
 
-  // For sorting in goal-seek mode: rank "found" bars first (smallest
-  // change = best), with all insufficient bars at the bottom in a
-  // fixed-ish order. We don't have a single "magnitude" across input
-  // types, so we use a normalised severity: pct/years/asset_step.
   function severity(b) {
     if (b.insufficient) return Infinity;
-    if (b.kind === "pct") return b.change;          // already 0..1
-    if (b.kind === "years") return b.change / 10;   // normalised by max
+    if (b.kind === "pct") return b.change;
+    if (b.kind === "years") return b.change / 10;
     if (b.kind === "asset") return Math.abs(b.change) / RISK_LADDER.length;
     return 1;
   }
