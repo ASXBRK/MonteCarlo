@@ -111,6 +111,33 @@
         </section>
 
         <section>
+          <h3>Return distribution and regime switching</h3>
+          <p>The simulation models market returns with a two-state regime-switching variance model. At any given month, the market is in one of two states:</p>
+          <ul>
+            <li><em>Normal.</em> Typical conditions with lower volatility.</li>
+            <li><em>Stress.</em> Occasional periods of elevated volatility.</li>
+          </ul>
+          <p>The market transitions between states with small monthly probabilities, set so that stress periods occur every 7–10 years on average and last about 10 months when they occur. This captures the empirical observation that volatile periods in real markets cluster — the 2008 financial crisis, the 1970s stagflation, COVID-19, and similar episodes were not isolated bad months but coherent stressed regimes.</p>
+          <p>The mean return (μ) is the same in both states — the forward-looking expected return from the profile assumptions is preserved exactly. Only the volatility (σ) differs between states. The weighted average of normal-state and stress-state volatility reproduces the profile's long-run σ assumption.</p>
+          <p>This approach is "forward-looking on what returns are on average, backward-looking on how returns evolve through time." Expected returns and long-run volatilities come from forward-looking capital market assumptions; the time structure (clustering, stress duration, stress amplification) is calibrated to historical market behaviour.</p>
+          <p><strong>What this changes in the output:</strong></p>
+          <ul>
+            <li>Median and 25–75 percentile bands: barely change.</li>
+            <li>5–95 percentile bands: noticeably wider at long horizons — real markets have fatter tails than a single-distribution model captures.</li>
+            <li>Sample paths: some paths visibly show sustained drawdowns followed by recovery, rather than smooth random walks.</li>
+            <li>Drawdown ruin probability: rises modestly because sequence risk is more pronounced under clustered stress.</li>
+          </ul>
+          <p><strong>What this does not capture:</strong></p>
+          <ul>
+            <li>Cross-asset correlation changes during stress (multivariate regime switching is out of scope).</li>
+            <li>Skewness within each state (returns within a state are symmetric).</li>
+            <li>Slow-moving regime shifts beyond the two-state binary.</li>
+            <li>Inflation-specific dynamics.</li>
+          </ul>
+          <p>In compare mode, paired scenarios share the same uniform draws that drive regime transitions, so the regime sequences they see are aligned (identical when profiles match; closely correlated when they differ). This isolates strategy differences from regime luck.</p>
+        </section>
+
+        <section>
           <h3>Why monthly, not daily</h3>
           <p>Under i.i.d. normal sampling, returns drawn at any sub-monthly frequency converge to an indistinguishable terminal distribution once correctly scaled. Daily steps multiply compute by ~21× with no visible change in the bands. Sub-monthly granularity only matters when path-dependent features (rebalancing rules, withdrawal triggers, stop-losses) require finer resolution. None apply here.</p>
           <p>Annual steps would distort the early years, as monthly contributions do not compress cleanly into yearly buckets.</p>

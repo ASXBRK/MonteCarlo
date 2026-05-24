@@ -25,6 +25,17 @@ export function generateShocks(numPaths, months) {
   return out;
 }
 
+// Pre-generate a flat Float64Array of uniform[0,1) draws used to
+// transition the regime state. Same row-major layout as the return
+// shocks. Sharing this across paired scenarios in compare mode keeps
+// the regime sequence (mostly) aligned, so the comparison isolates
+// strategy differences from regime luck.
+export function generateUniforms(numPaths, months) {
+  const out = new Float64Array(numPaths * months);
+  for (let i = 0; i < out.length; i++) out[i] = Math.random();
+  return out;
+}
+
 function quantileSorted(sorted, q) {
   const n = sorted.length;
   if (n === 0) return 0;
@@ -64,25 +75,33 @@ export function simulate({
   startingBalance,
   monthlyContribution,
   mu,
-  sigma,
+  // Regime-switching variance. Long-run σ comes from calibrating the
+  // weighted variance across the two states; that calibration lives
+  // in profiles.js. The engine just consumes per-state σ + transition
+  // probabilities.
+  sigma_normal,
+  sigma_stress,
+  p_stay_normal,
+  p_stay_stress,
   numPaths = NUM_PATHS,
   samplePaths = SAMPLE_PATHS,
-  // Optional shared shock matrix, Float64Array of size numPaths*months
-  // in [path * months + monthIndex] layout (monthIndex 0-based, so step
-  // m=1 reads index 0).
+  // Optional shared N(0,1) shock matrix for monthly returns.
   preGenZ = null,
-  // Optional drawdown config. When supplied, accumulation runs up to
+  // Optional shared U(0,1) draw matrix for regime transitions. Same
+  // layout as preGenZ. Sharing this in compare mode keeps the regime
+  // sequence aligned across paired scenarios.
+  preGenU = null,
+  // Drawdown config. When supplied, accumulation runs up to
   // retirementMonth, then contributions stop and a fixed-real
-  // withdrawal of (annualWithdrawal / 12) is taken each month. Paths
-  // that deplete stay at zero. No defensive bucket, no strategy choice
-  // — V1 is intentionally minimal.
+  // withdrawal of (annualWithdrawal / 12) is taken each month.
   //   { retirementMonth, annualWithdrawal }
   drawdown = null,
 }) {
   const months = horizonYears * 12;
-  const years = horizonYears + 1; // include year 0
+  const years = horizonYears + 1;
   const rMonthly = mu / 12;
-  const sigmaMonthly = sigma / Math.sqrt(12);
+  const sigmaNormalMonthly = sigma_normal / Math.sqrt(12);
+  const sigmaStressMonthly = sigma_stress / Math.sqrt(12);
 
   const isDrawdown = drawdown !== null;
   const retirementMonth = isDrawdown ? drawdown.retirementMonth : months + 1;
@@ -94,6 +113,10 @@ export function simulate({
   for (let p = 0; p < numPaths; p++) {
     let balance = startingBalance;
     let isRuined = false;
+    // 0 = NORMAL, 1 = STRESS. Every path starts in NORMAL — running
+    // a long horizon, the chain converges to the stationary
+    // distribution well within the first few years.
+    let regime = 0;
 
     const base = p * years;
     const zBase = p * months;
@@ -105,15 +128,22 @@ export function simulate({
         continue;
       }
 
+      // Regime transition: stay with probability p_stay; otherwise flip.
+      const u = preGenU ? preGenU[zBase + (m - 1)] : Math.random();
+      if (regime === 0) {
+        if (u >= p_stay_normal) regime = 1;
+      } else {
+        if (u >= p_stay_stress) regime = 0;
+      }
+      const sigmaThis = regime === 0 ? sigmaNormalMonthly : sigmaStressMonthly;
+
       const z = preGenZ ? preGenZ[zBase + (m - 1)] : randn();
-      const r = rMonthly + sigmaMonthly * z;
+      const r = rMonthly + sigmaThis * z;
       balance = balance * (1 + r);
 
       if (m <= retirementMonth) {
-        // Accumulation: contribute, no withdrawal.
         balance += monthlyContribution;
       } else {
-        // Drawdown: withdraw fixed real, mark ruin if depleted.
         balance -= monthlyWithdrawal;
         if (balance <= 0) {
           balance = 0;

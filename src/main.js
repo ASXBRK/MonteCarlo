@@ -1,5 +1,5 @@
 import { PROFILES, DEFAULT_PROFILE } from "./profiles.js";
-import { simulate, generateShocks, NUM_PATHS } from "./sim.js";
+import { simulate, generateShocks, generateUniforms, NUM_PATHS } from "./sim.js";
 import {
   renderChart, renderCompareChart, renderProbChart, renderBellCurves,
   SAMPLE_PATH_COUNT, sampleTraceIndices,
@@ -391,8 +391,8 @@ function buildDrawdownConfig(s) {
   };
 }
 
-function runScenario(s, preGenZ = null) {
-  const { mu, sigma } = PROFILES[s.asset];
+function runScenario(s, preGenZ = null, preGenU = null) {
+  const p = PROFILES[s.asset];
   const horizon = state.drawdownMode
     ? Math.max(1, state.scenarios.A.endAge - state.scenarios.A.currentAge)
     : s.horizonYears;
@@ -400,8 +400,13 @@ function runScenario(s, preGenZ = null) {
     horizonYears: horizon,
     startingBalance: s.startingBalance,
     monthlyContribution: s.monthlyContribution,
-    mu, sigma,
+    mu: p.mu,
+    sigma_normal: p.sigma_normal,
+    sigma_stress: p.sigma_stress,
+    p_stay_normal: p.p_stay_normal,
+    p_stay_stress: p.p_stay_stress,
     preGenZ,
+    preGenU,
     drawdown: buildDrawdownConfig(s),
   });
 }
@@ -811,8 +816,9 @@ function runCompare() {
   const sharedMonths = sharedHorizon * 12;
   const t0 = performance.now();
   const shocks = generateShocks(NUM_PATHS, sharedMonths);
-  const simA = runScenario(sA, shocks);
-  const simB = runScenario(sB, shocks);
+  const uniforms = generateUniforms(NUM_PATHS, sharedMonths);
+  const simA = runScenario(sA, shocks, uniforms);
+  const simB = runScenario(sB, shocks, uniforms);
   const t1 = performance.now();
 
   const baseIdentical =
