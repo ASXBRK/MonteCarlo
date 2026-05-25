@@ -438,10 +438,11 @@ html, body {
 
 .tornado-row {
   display: grid;
-  grid-template-columns: 150px 1fr 200px;
+  grid-template-columns: 150px 1fr;
   align-items: center;
   gap: 12px;
-  min-height: 26px;
+  min-height: 28px;
+  padding: 6px 0;
 }
 
 .tornado-label {
@@ -451,52 +452,51 @@ html, body {
   text-align: right;
 }
 
-.tornado-track {
+/* Bar track. In standard mode it's split into two halves separated by
+   a dashed baseline; in goal-seek mode the bar grows rightward from
+   the left edge. Labels live inline next to each bar end. */
+.ttrack {
   position: relative;
-  height: 18px;
-  background: #f4f6f9;
-  border-radius: 3px;
-  overflow: hidden;
   display: flex;
+  width: 100%;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
 }
 
-.tornado-track.centered .tornado-half {
-  width: 50%;
-  height: 100%;
+.ttrack.centered {
+  /* Two halves of equal width, baseline 1px between them. */
+}
+
+.ttrack.left-anchored {
+  /* Single half occupying the whole track. */
+}
+
+.thalf {
+  flex: 1;
   display: flex;
+  align-items: center;
+  min-width: 0;
 }
-.tornado-track.centered .tornado-half.left {
-  justify-content: flex-end;
-}
-.tornado-track.centered .tornado-half.right {
-  justify-content: flex-start;
+.thalf.left  { flex-direction: row-reverse; }
+.thalf.right { flex-direction: row; }
+
+.tbaseline {
+  flex: 0 0 1px;
+  height: 22px;
+  border-left: 1px dashed rgba(0, 0, 0, 0.30);
 }
 
-.tornado-baseline {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  width: 1px;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.25);
-  border-left: 1px dashed rgba(0, 0, 0, 0.35);
-}
-
-.tornado-track.left-anchored .tornado-baseline {
-  left: 0;
-}
-
-.tornado-seg {
-  height: 100%;
+.tseg {
+  height: 16px;
   border-radius: 2px;
+  flex-shrink: 0;
   transition: width 400ms cubic-bezier(0.25, 0.8, 0.25, 1);
+  min-width: 1px;
 }
 
-/* Improvement (left) vs worsening (right) — the convention is
-   consistent across all three tornado states. */
-.tornado-seg.improve { background: rgb(34, 130, 80); }
-.tornado-seg.worsen  { background: rgb(200, 80, 60); }
-.tornado-seg.insufficient {
+.tseg.improve { background: rgb(34, 130, 80); }
+.tseg.worsen  { background: rgb(200, 80, 60); }
+.tseg.insufficient {
   background: repeating-linear-gradient(
     45deg,
     rgba(110, 110, 110, 0.4),
@@ -506,37 +506,27 @@ html, body {
   );
 }
 
-.tornado-value {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-  justify-content: flex-start;
-  font-variant-numeric: tabular-nums;
+/* Inline labels sit immediately outside the bar end, with text colour
+   matching the bar. Allow wrapping when text exceeds available width. */
+.tlabel {
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 0 10px;
+  flex-shrink: 1;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
+.thalf.left .tlabel  { text-align: right; }
+.thalf.right .tlabel { text-align: left; }
+.ttrack.left-anchored .tlabel { text-align: left; }
 
-.tornado-chip {
-  display: inline-block;
-  padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  background: rgba(28, 90, 180, 0.08);
-  color: rgb(28, 90, 180);
-}
-.tornado-chip.improve {
-  background: rgba(34, 130, 80, 0.10);
-  color: rgb(34, 130, 80);
-}
-.tornado-chip.worsen {
-  background: rgba(200, 80, 60, 0.08);
-  color: rgb(200, 80, 60);
-}
-.tornado-chip.insufficient {
-  background: rgba(110, 110, 110, 0.12);
-  color: var(--ink-soft);
-}
+.tlabel.improve { color: rgb(34, 130, 80); }
+.tlabel.worsen  { color: rgb(200, 80, 60); }
+.tlabel.insufficient { color: var(--ink-soft); font-style: italic; }
+
+.tlabel .tlabel-input   { font-weight: 700; }
+.tlabel .tlabel-outcome { font-weight: 400; opacity: 0.9; }
 
 .tornado-footer {
   margin: 10px 0 0;
@@ -551,7 +541,7 @@ html, body {
 }
 
 /* Placeholder bars during computation. */
-.tornado-row.placeholder .tornado-track { overflow: hidden; }
+.tornado-row.placeholder .ttrack { overflow: hidden; height: 18px; background: #f4f6f9; border-radius: 3px; }
 .tornado-pulse {
   width: 100%;
   height: 100%;

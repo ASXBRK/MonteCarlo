@@ -92,10 +92,9 @@ function showPulsingPlaceholders(barCount) {
     rows += `
       <div class="tornado-row placeholder">
         <div class="tornado-label">&nbsp;</div>
-        <div class="tornado-track">
+        <div class="ttrack">
           <div class="tornado-pulse"></div>
         </div>
-        <div class="tornado-value">&nbsp;</div>
       </div>
     `;
   }
@@ -126,9 +125,6 @@ function renderStandard(result, displayCtx) {
   const subtitleEl = panelEl.querySelector('[data-role="tsubtitle"]');
 
   const isAccumulation = displayCtx.mode === "accumulation";
-  // Improvement direction depends on metric: for accumulation, more
-  // median balance is better (positive delta = improvement); for
-  // drawdown standard, less ruin is better (negative delta = improvement).
   const improvementSign = isAccumulation ? +1 : -1;
 
   if (isAccumulation) {
@@ -148,35 +144,46 @@ function renderStandard(result, displayCtx) {
   }
   if (maxAbs === 0) maxAbs = 1;
 
+  // Bars max at 60% of their half-width; the remaining 40% leaves
+  // room for the inline label without crowding the bar.
+  const MAX_BAR_PCT_OF_HALF = 60;
+
   const bars = panelEl.querySelector('[data-role="tbars"]');
   bars.innerHTML = result.bars.map((bar) => {
-    // Bucket perturbations by improvement vs worsening, NOT by raw
-    // sign of delta. Improvement always goes on the left (green).
     const improving = [];
     const worsening = [];
     for (const p of bar.perturbations) {
       if (p.delta * improvementSign > 0) improving.push(p);
       else if (p.delta * improvementSign < 0) worsening.push(p);
-      // delta === 0 is dropped (no visible bar, nothing to chip)
     }
 
-    const seg = (p, cls) =>
-      `<div class="tornado-seg ${cls}" style="width:${(Math.abs(p.delta) / maxAbs) * 100}%" title="${inputDescriptor(bar, p, displayCtx)}: ${displayCtx.formatMetric(p.delta)}"></div>`;
+    const labelHTML = (p) => {
+      const input = inputDescriptor(bar, p, displayCtx);
+      const outcome = outcomeText(p.delta, displayCtx);
+      return `<span class="tlabel-input">${input}</span> → <span class="tlabel-outcome">${outcome}</span>`;
+    };
 
-    const chip = (p, cls) =>
-      `<span class="tornado-chip ${cls}">${inputDescriptor(bar, p, displayCtx)} → ${outcomeText(p.delta, displayCtx)}</span>`;
+    const segWidth = (p) => (Math.abs(p.delta) / maxAbs) * MAX_BAR_PCT_OF_HALF;
+
+    // Left half: row-reverse so the bar is against the baseline (right
+    // edge of the half) and labels stack outward to the left.
+    const leftItems = improving.map((p) =>
+      `<div class="tseg improve" style="width:${segWidth(p)}%"></div>
+       <div class="tlabel improve">${labelHTML(p)}</div>`
+    ).join("");
+
+    const rightItems = worsening.map((p) =>
+      `<div class="tseg worsen" style="width:${segWidth(p)}%"></div>
+       <div class="tlabel worsen">${labelHTML(p)}</div>`
+    ).join("");
 
     return `
       <div class="tornado-row">
         <div class="tornado-label">${bar.label}</div>
-        <div class="tornado-track centered">
-          <div class="tornado-half left">${improving.map((p) => seg(p, "improve")).join("")}</div>
-          <div class="tornado-baseline"></div>
-          <div class="tornado-half right">${worsening.map((p) => seg(p, "worsen")).join("")}</div>
-        </div>
-        <div class="tornado-value">
-          ${improving.map((p) => chip(p, "improve")).join(" ")}
-          ${worsening.map((p) => chip(p, "worsen")).join(" ")}
+        <div class="ttrack centered">
+          <div class="thalf left">${leftItems}</div>
+          <div class="tbaseline"></div>
+          <div class="thalf right">${rightItems}</div>
         </div>
       </div>
     `;
@@ -214,11 +221,13 @@ function renderGoalSeek(result, displayCtx) {
   subtitleEl.innerHTML = `Your current scenario has a <strong>${(ruin * 100).toFixed(1)}%</strong> probability of running out of money, above your <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows the minimum change to one input that would bring you to your goal.`;
 
   function widthFor(bar) {
-    if (bar.insufficient) return 100;
-    if (bar.kind === "pct") return Math.min(100, Math.max(2, bar.change * 100));
-    if (bar.kind === "years") return Math.min(100, Math.max(2, (bar.change / 10) * 100));
-    if (bar.kind === "asset") return Math.min(100, Math.max(2, (Math.abs(bar.change) / 6) * 100));
-    return 50;
+    // Single-sided; max bar width is 60% of the track so the inline
+    // label has room to sit at the bar's end.
+    if (bar.insufficient) return 60;
+    if (bar.kind === "pct") return Math.min(60, Math.max(2, bar.change * 60));
+    if (bar.kind === "years") return Math.min(60, Math.max(2, (bar.change / 10) * 60));
+    if (bar.kind === "asset") return Math.min(60, Math.max(2, (Math.abs(bar.change) / 6) * 60));
+    return 30;
   }
 
   const bars = panelEl.querySelector('[data-role="tbars"]');
@@ -226,14 +235,13 @@ function renderGoalSeek(result, displayCtx) {
     const cls = bar.insufficient ? "insufficient" : "improve";
     const w = widthFor(bar);
     const label = goalSeekChangeLabel(bar, displayCtx);
-    const valueText = `<span class="tornado-chip ${cls}">${label}</span>`;
     return `
       <div class="tornado-row">
         <div class="tornado-label">${bar.label}</div>
-        <div class="tornado-track left-anchored">
-          <div class="tornado-seg ${cls}" style="width:${w}%"></div>
+        <div class="ttrack left-anchored">
+          <div class="tseg ${cls}" style="width:${w}%"></div>
+          <div class="tlabel ${cls}">${label}</div>
         </div>
-        <div class="tornado-value">${valueText}</div>
       </div>
     `;
   }).join("");
