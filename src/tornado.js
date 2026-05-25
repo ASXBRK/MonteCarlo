@@ -133,7 +133,7 @@ function renderStandard(result, displayCtx) {
   } else {
     titleEl.textContent = "What would improve your retirement security?";
     const ruin = displayCtx.displayedRuin != null ? displayCtx.displayedRuin : result.baselineRuin;
-    subtitleEl.innerHTML = `Your scenario meets your goal: <strong>${(ruin * 100).toFixed(1)}%</strong> ruin probability, below your <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows how much each input change would shift your ruin probability.`;
+    subtitleEl.innerHTML = `Your scenario has a <strong>${(ruin * 100).toFixed(1)}%</strong> probability of running out of money, below the <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows how much each input change would shift your ruin probability.`;
   }
 
   let maxAbs = 0;
@@ -213,12 +213,12 @@ function goalSeekChangeLabel(bar, displayCtx) {
 function renderGoalSeek(result, displayCtx) {
   const titleEl = panelEl.querySelector('[data-role="ttitle"]');
   const subtitleEl = panelEl.querySelector('[data-role="tsubtitle"]');
-  titleEl.textContent = "What would bring you to your goal?";
+  titleEl.textContent = "What would bring your ruin probability below the target?";
   // Single source of truth for the displayed ruin probability: the
   // main simulation's value, passed in via displayCtx. The worker's
   // own 1000-path baseline is used for compute decisions only.
   const ruin = displayCtx.displayedRuin != null ? displayCtx.displayedRuin : result.baselineRuin;
-  subtitleEl.innerHTML = `Your current scenario has a <strong>${(ruin * 100).toFixed(1)}%</strong> probability of running out of money, above your <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows the minimum change to one input that would bring you to your goal.`;
+  subtitleEl.innerHTML = `Your scenario has a <strong>${(ruin * 100).toFixed(1)}%</strong> probability of running out of money, above the <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows the minimum change to one input that would bring ruin probability below the target.`;
 
   function widthFor(bar) {
     // Single-sided; max bar width is 60% of the track so the inline
@@ -248,7 +248,7 @@ function renderGoalSeek(result, displayCtx) {
   bars.innerHTML = rows;
 
   if (result.allInsufficient) {
-    showCallout("No single input change can meet your goal. Multiple changes in combination may be required.");
+    showCallout("No single input change can bring ruin probability below the target. Multiple changes in combination may be required.");
   } else {
     hideCallout();
   }
