@@ -8,6 +8,9 @@ import {
   tornadoSchedule, tornadoRedisplay, tornadoClear,
   tornadoHideForCompare, tornadoShowForSingle,
 } from "./tornado.js";
+import {
+  sequenceRiskShow, sequenceRiskHide, sequenceRiskRedisplay,
+} from "./sequenceRisk.js";
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
@@ -30,6 +33,7 @@ const els = {
   displayOptions: document.querySelectorAll(".display-option"),
   inflationInput: $("inflationInput"),
   tornado: $("tornado"),
+  sequenceRisk: $("sequenceRisk"),
   targetRuinInput: $("targetRuinInput"),
 };
 
@@ -174,6 +178,44 @@ function scheduleTornado() {
 function redisplayTornado() {
   if (state.compareMode) return;
   tornadoRedisplay(tornadoDisplayCtx());
+}
+
+// --- Sequence risk visualiser --------------------------------------------
+
+function sequenceRiskParams() {
+  const s = state.scenarios.A;
+  const profile = PROFILES[s.asset];
+  const retYear = retirementYearsFromAge(s);
+  const horizon = Math.max(1, s.endAge - s.retirementAge);
+  // Starting balance for the visualiser = median real balance at the
+  // user's retirement year, taken from the main sim so it matches the
+  // headline "Median at retirement" tile.
+  const startingBalance = lastSingle && lastSingle.sim
+    ? lastSingle.sim.p50[retYear] || 0
+    : 0;
+  return {
+    mu: profile.mu,
+    sigma: profile.sigma,
+    horizonYears: horizon,
+    startingBalance,
+    annualWithdrawal: s.annualWithdrawal,
+    retirementOffset: retYear,
+    displayCtx: { units: state.units, inflation: state.inflation },
+  };
+}
+
+function refreshSequenceRisk() {
+  // Visualiser only renders when drawdown is on AND compare is off.
+  if (!state.drawdownMode || state.compareMode) {
+    sequenceRiskHide(els.sequenceRisk);
+    return;
+  }
+  sequenceRiskShow(els.sequenceRisk, sequenceRiskParams());
+}
+
+function redisplaySequenceRisk() {
+  if (!state.drawdownMode || state.compareMode) return;
+  sequenceRiskRedisplay({ units: state.units, inflation: state.inflation });
 }
 
 // In drawdown mode the time anchor is (currentAge, endAge) on scenario A.
@@ -668,6 +710,7 @@ function runSingle() {
     : `${s.asset} · ${s.horizonYears}y`;
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · single · ${tag}`);
   scheduleTornado();
+  refreshSequenceRisk();
 }
 
 function redisplaySingle() {
@@ -916,6 +959,7 @@ function runCompare() {
     : `A=${sA.asset}/${sA.horizonYears}y · B=${sB.asset}/${sB.horizonYears}y`;
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · compare · ${tag}`);
   scheduleTornado();
+  refreshSequenceRisk();
 }
 
 function redisplayCompare() {
@@ -1072,6 +1116,7 @@ els.displayOptions.forEach((btn) => {
     state.units = u;
     redisplay();
     redisplayTornado();
+    redisplaySequenceRisk();
   });
 });
 
@@ -1084,6 +1129,7 @@ els.inflationInput.addEventListener("input", () => {
   if (state.units === "nominal") {
     redisplay();
     redisplayTornado();
+    redisplaySequenceRisk();
   } else {
     applyUnitsLabel();
   }
