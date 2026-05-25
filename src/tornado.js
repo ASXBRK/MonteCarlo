@@ -104,17 +104,42 @@ function showPulsingPlaceholders(barCount) {
 
 // --- rendering ---------------------------------------------------------
 
+// Compose the input-side descriptor for a perturbation chip:
+//   - With dollarChange: "+20% (+$600/mo)"
+//   - Asset shift:       "→ Emerging Markets" (worker already prefixed)
+//   - Otherwise:         "+5y", "+3y", etc.
+function inputDescriptor(bar, p, displayCtx) {
+  if (p.dollarChange != null) {
+    return `${p.dir} (${fmtInputDollar(p.dollarChange, p.unit, displayCtx)})`;
+  }
+  return p.dir;
+}
+
+// "+$180k median balance" or "-3.2pp ruin probability".
+function outcomeText(delta, displayCtx) {
+  const metricName = displayCtx.mode === "drawdown" ? "ruin probability" : "median balance";
+  return `${displayCtx.formatMetric(delta)} ${metricName}`;
+}
+
 function renderStandard(result, displayCtx) {
-  const { formatMetric, mode } = displayCtx;
   const titleEl = panelEl.querySelector('[data-role="ttitle"]');
   const subtitleEl = panelEl.querySelector('[data-role="tsubtitle"]');
-  titleEl.textContent = mode === "accumulation"
-    ? "What drives this projection?"
-    : "What drives your retirement outcome?";
-  subtitleEl.textContent = "Each bar shows how much your projected outcome changes when an input is varied within its plausible range.";
 
-  // Max absolute delta to scale bar widths. Each half of the track is
-  // 50%, so a bar with the max-abs delta fills its half exactly.
+  const isAccumulation = displayCtx.mode === "accumulation";
+  // Improvement direction depends on metric: for accumulation, more
+  // median balance is better (positive delta = improvement); for
+  // drawdown standard, less ruin is better (negative delta = improvement).
+  const improvementSign = isAccumulation ? +1 : -1;
+
+  if (isAccumulation) {
+    titleEl.textContent = "What drives this projection?";
+    subtitleEl.textContent = "Each bar shows how much your projected median balance changes when an input is varied within its plausible range.";
+  } else {
+    titleEl.textContent = "What would improve your retirement security?";
+    const ruin = displayCtx.displayedRuin != null ? displayCtx.displayedRuin : result.baselineRuin;
+    subtitleEl.innerHTML = `Your scenario meets your goal: <strong>${(ruin * 100).toFixed(1)}%</strong> ruin probability, below your <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows how much each input change would shift your ruin probability.`;
+  }
+
   let maxAbs = 0;
   for (const bar of result.bars) {
     for (const p of bar.perturbations) {
@@ -125,29 +150,34 @@ function renderStandard(result, displayCtx) {
 
   const bars = panelEl.querySelector('[data-role="tbars"]');
   bars.innerHTML = result.bars.map((bar) => {
-    const left = bar.perturbations.filter((p) => p.delta < 0);
-    const right = bar.perturbations.filter((p) => p.delta >= 0);
+    // Bucket perturbations by improvement vs worsening, NOT by raw
+    // sign of delta. Improvement always goes on the left (green).
+    const improving = [];
+    const worsening = [];
+    for (const p of bar.perturbations) {
+      if (p.delta * improvementSign > 0) improving.push(p);
+      else if (p.delta * improvementSign < 0) worsening.push(p);
+      // delta === 0 is dropped (no visible bar, nothing to chip)
+    }
 
     const seg = (p, cls) =>
-      `<div class="tornado-seg ${cls}" style="width:${(Math.abs(p.delta) / maxAbs) * 100}%" title="${p.dir}: ${formatMetric(p.delta)}"></div>`;
+      `<div class="tornado-seg ${cls}" style="width:${(Math.abs(p.delta) / maxAbs) * 100}%" title="${inputDescriptor(bar, p, displayCtx)}: ${displayCtx.formatMetric(p.delta)}"></div>`;
 
-    const chips = bar.perturbations.map((p) => {
-      let dirText = p.dir;
-      if (p.dollarChange != null) {
-        dirText += ` (${fmtInputDollar(p.dollarChange, p.unit, displayCtx)})`;
-      }
-      return `<span class="tornado-chip ${p.delta >= 0 ? "pos" : "neg"}">${dirText} ${formatMetric(p.delta)}</span>`;
-    }).join(" ");
+    const chip = (p, cls) =>
+      `<span class="tornado-chip ${cls}">${inputDescriptor(bar, p, displayCtx)} → ${outcomeText(p.delta, displayCtx)}</span>`;
 
     return `
       <div class="tornado-row">
         <div class="tornado-label">${bar.label}</div>
         <div class="tornado-track centered">
-          <div class="tornado-half left">${left.map((p) => seg(p, "neg")).join("")}</div>
+          <div class="tornado-half left">${improving.map((p) => seg(p, "improve")).join("")}</div>
           <div class="tornado-baseline"></div>
-          <div class="tornado-half right">${right.map((p) => seg(p, "pos")).join("")}</div>
+          <div class="tornado-half right">${worsening.map((p) => seg(p, "worsen")).join("")}</div>
         </div>
-        <div class="tornado-value">${chips}</div>
+        <div class="tornado-value">
+          ${improving.map((p) => chip(p, "improve")).join(" ")}
+          ${worsening.map((p) => chip(p, "worsen")).join(" ")}
+        </div>
       </div>
     `;
   }).join("");
@@ -193,12 +223,10 @@ function renderGoalSeek(result, displayCtx) {
 
   const bars = panelEl.querySelector('[data-role="tbars"]');
   const rows = result.bars.map((bar) => {
-    const cls = bar.insufficient ? "insufficient" : "pos";
+    const cls = bar.insufficient ? "insufficient" : "improve";
     const w = widthFor(bar);
     const label = goalSeekChangeLabel(bar, displayCtx);
-    const valueText = bar.insufficient
-      ? `<span class="tornado-chip insufficient">${label}</span>`
-      : `<span class="tornado-chip pos">${label}</span>`;
+    const valueText = `<span class="tornado-chip ${cls}">${label}</span>`;
     return `
       <div class="tornado-row">
         <div class="tornado-label">${bar.label}</div>
