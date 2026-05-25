@@ -104,6 +104,38 @@ function stats(returns) {
   return { mean, stddev, geoMean };
 }
 
+// --- y-axis ticks ------------------------------------------------------
+
+// Step size based on the y-max, picked to produce round-number ticks
+// at a useful density (~5–10 ticks across the visible range).
+function pickTickStep(yMax) {
+  if (yMax < 200_000)    return 25_000;
+  if (yMax < 500_000)    return 50_000;
+  if (yMax < 1_000_000)  return 100_000;
+  if (yMax < 2_500_000)  return 250_000;
+  if (yMax < 5_000_000)  return 500_000;
+  if (yMax < 10_000_000) return 1_000_000;
+  return 2_000_000;
+}
+
+function fmtTick(v) {
+  if (v === 0) return "$0";
+  if (v >= 1_000_000) {
+    // parseFloat round-trip strips trailing zeros so $1,250,000 reads
+    // as "$1.25M" not "$1.3M", $1,500,000 as "$1.5M" not "$1.50M".
+    const m = parseFloat((v / 1_000_000).toFixed(2));
+    return `$${m}M`;
+  }
+  return `$${(v / 1000).toFixed(0)}k`;
+}
+
+function buildYTicks(yMax) {
+  const step = pickTickStep(yMax);
+  const vals = [];
+  for (let v = 0; v <= yMax + 1; v += step) vals.push(v);
+  return { vals, text: vals.map(fmtTick) };
+}
+
 // --- formatting --------------------------------------------------------
 
 function fmtMoney(v) {
@@ -215,8 +247,17 @@ function renderInternal(params) {
     },
   ];
 
+  // Y-axis upper bound: 10% headroom above the tallest displayed
+  // point across both paths. Min floor so an all-zero pair of paths
+  // still gets a sane tick range.
+  let yPeak = 0;
+  for (const v of aDisplay) if (v > yPeak) yPeak = v;
+  for (const v of bDisplay) if (v > yPeak) yPeak = v;
+  const yMax = Math.max(yPeak * 1.10, 1000);
+  const yTicks = buildYTicks(yMax);
+
   const layout = {
-    margin: { l: 50, r: 100, t: 14, b: 40 },
+    margin: { l: 60, r: 100, t: 14, b: 40 },
     height: 280,
     paper_bgcolor: "white",
     plot_bgcolor: "white",
@@ -230,9 +271,13 @@ function renderInternal(params) {
       showgrid: false, zeroline: false,
     },
     yaxis: {
-      tickformat: "$,.2s",
+      autorange: false,
+      range: [0, yMax],
+      tickmode: "array",
+      tickvals: yTicks.vals,
+      ticktext: yTicks.text,
       gridcolor: "rgba(0,0,0,0.06)",
-      zeroline: false, rangemode: "tozero",
+      zeroline: false,
     },
     font: PLOTLY_FONT,
     transition: { duration: 600, easing: "cubic-in-out" },
