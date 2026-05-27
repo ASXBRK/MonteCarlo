@@ -129,6 +129,12 @@ function tornadoRequest() {
     profiles: PROFILES,
     mode: state.drawdownMode ? "drawdown" : "accumulation",
     targetRuin: state.targetRuin,
+    // Authoritative ruin from the main 2000-path sim. The worker uses
+    // this for the State 2 / State 3 decision so the chosen state and
+    // the subtitle's quoted ruin probability are always consistent.
+    canonicalRuin: state.drawdownMode && lastSingle && lastSingle.sim
+      ? lastSingle.sim.ruinedFraction
+      : null,
   };
 }
 

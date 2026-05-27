@@ -120,6 +120,27 @@ function outcomeText(delta, displayCtx) {
   return `${displayCtx.formatMetric(delta)} ${metricName}`;
 }
 
+// Classify a perturbation into the "improve" or "worsen" bucket. The
+// primary signal is the sign of (delta * improvementSign). Zero-delta
+// perturbations (common when current ruin is exactly 0% — there's no
+// headroom to improve, but a perturbation in the "intended improvement"
+// direction is still rendered with a 0pp label so the chart isn't empty)
+// fall back to the input's natural intent.
+function classifyPerturbation(bar, p, improvementSign) {
+  const product = p.delta * improvementSign;
+  if (product > 0) return "improve";
+  if (product < 0) return "worsen";
+  // Zero delta. Use the perturbation's input direction.
+  if (bar.key === "asset") return "improve"; // ambiguous; default to improve
+  const isPositive = p.dir.startsWith("+");
+  if (bar.key === "annualWithdrawal") {
+    // Lower withdrawal helps; "+20%" is worsening, "-20%" is improvement.
+    return isPositive ? "worsen" : "improve";
+  }
+  // contribution, balance, horizon, retirement age: "+" is improvement.
+  return isPositive ? "improve" : "worsen";
+}
+
 function renderStandard(result, displayCtx) {
   const titleEl = panelEl.querySelector('[data-role="ttitle"]');
   const subtitleEl = panelEl.querySelector('[data-role="tsubtitle"]');
@@ -133,7 +154,14 @@ function renderStandard(result, displayCtx) {
   } else {
     titleEl.textContent = "What would improve your retirement security?";
     const ruin = displayCtx.displayedRuin != null ? displayCtx.displayedRuin : result.baselineRuin;
-    subtitleEl.innerHTML = `Your scenario has a <strong>${(ruin * 100).toFixed(1)}%</strong> probability of running out of money, below the <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows how much each input change would shift your ruin probability.`;
+    const isZero = ruin === 0;
+    if (isZero) {
+      // No headroom on the improvement side; the user wants to know
+      // which inputs would most threaten the zero-ruin position.
+      subtitleEl.innerHTML = `Your scenario has a <strong>0.0%</strong> probability of running out of money, comfortably below the <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. The bars below show which inputs would most threaten this position if changed in the wrong direction.`;
+    } else {
+      subtitleEl.innerHTML = `Your scenario has a <strong>${(ruin * 100).toFixed(1)}%</strong> probability of running out of money, below the <strong>${(result.targetRuin * 100).toFixed(0)}%</strong> target. Each bar shows how much each input change would shift your ruin probability.`;
+    }
   }
 
   let maxAbs = 0;
@@ -153,8 +181,9 @@ function renderStandard(result, displayCtx) {
     const improving = [];
     const worsening = [];
     for (const p of bar.perturbations) {
-      if (p.delta * improvementSign > 0) improving.push(p);
-      else if (p.delta * improvementSign < 0) worsening.push(p);
+      const side = classifyPerturbation(bar, p, improvementSign);
+      if (side === "improve") improving.push(p);
+      else worsening.push(p);
     }
 
     const labelHTML = (p) => {

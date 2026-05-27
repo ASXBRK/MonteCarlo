@@ -318,7 +318,7 @@ self.addEventListener("message", (ev) => {
 });
 
 function compute(params) {
-  const { scenario, profiles, mode, targetRuin } = params;
+  const { scenario, profiles, mode, targetRuin, canonicalRuin } = params;
 
   // Size shocks for the longest perturbation horizon.
   // - Accumulation: horizon ±5 years → +5y
@@ -330,12 +330,16 @@ function compute(params) {
   const shocks = generateShocks(TORNADO_PATHS, stride);
   const uniforms = generateUniforms(TORNADO_PATHS, stride);
 
-  // Baseline metric & ruin (always compute ruin for mode decision).
+  // Baseline metric & ruin from this worker's 1000-path sim.
   const baselineSim = simulate(buildArgs(scenario, profiles, mode, shocks, uniforms, stride));
   const baseline = mode === "drawdown" ? baselineSim.ruinedFraction : medianTerminal(baselineSim);
   const baselineRuin = baselineSim.ruinedFraction;
 
-  const goalSeek = mode === "drawdown" && baselineRuin > targetRuin;
+  // State decision must use the SAME ruin probability the subtitle
+  // displays — the main 2000-path canonicalRuin when supplied. The
+  // worker's own 1000-path baselineRuin is only used as a fallback.
+  const decisionRuin = (canonicalRuin != null) ? canonicalRuin : baselineRuin;
+  const goalSeek = mode === "drawdown" && decisionRuin > targetRuin;
 
   let bars;
   if (goalSeek) {
@@ -346,7 +350,7 @@ function compute(params) {
 
   return {
     mode: goalSeek ? "goal-seek" : "standard",
-    chartMode: mode,                  // 'accumulation' | 'drawdown'
+    chartMode: mode,
     baseline,
     baselineRuin,
     targetRuin,

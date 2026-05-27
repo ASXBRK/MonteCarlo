@@ -247,13 +247,17 @@ function renderInternal(params) {
     },
   ];
 
-  // Y-axis upper bound: 10% headroom above the tallest displayed
-  // point across both paths. Min floor so an all-zero pair of paths
-  // still gets a sane tick range.
+  // Y-axis upper bound: scan every point across both paths (a path's
+  // true peak is often mid-horizon, well above its terminal). Add 10%
+  // headroom, then snap up to the next tick step so the topmost tick
+  // sits at or above the peak — keeps the chart's range from clipping
+  // a path during transition animations.
+  const allPoints = aDisplay.concat(bDisplay);
   let yPeak = 0;
-  for (const v of aDisplay) if (v > yPeak) yPeak = v;
-  for (const v of bDisplay) if (v > yPeak) yPeak = v;
-  const yMax = Math.max(yPeak * 1.10, 1000);
+  for (const v of allPoints) if (v > yPeak) yPeak = v;
+  const yMaxRaw = Math.max(yPeak * 1.10, 1000);
+  const step = pickTickStep(yMaxRaw);
+  const yMax = Math.ceil(yMaxRaw / step) * step;
   const yTicks = buildYTicks(yMax);
 
   const layout = {
