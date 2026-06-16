@@ -745,8 +745,8 @@ function ensureOutputSkeleton(mode) {
   } else if (mode === "single-drawdown") {
     els.output.innerHTML = `
       <div class="summary single">
-        <div class="stat stat-headline">
-          <div class="stat-label">Probability of ruin</div>
+        <div class="stat stat-headline" title="Portfolio depletion only — not destitution. The Australian age pension is not modelled here, by design, and provides an income floor that continues after portfolio depletion.">
+          <div class="stat-label">Probability of ruin <span class="stat-label-hint">(portfolio depletion)</span></div>
           <div class="stat-value" data-role="ruin">—</div>
         </div>
         <div class="stat">

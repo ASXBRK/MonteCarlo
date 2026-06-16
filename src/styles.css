@@ -133,6 +133,13 @@ html, body {
   border-color: #f0d68c;
 }
 .stat-headline .stat-value { color: #6b4f00; }
+.stat-label-hint {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink-soft);
+  font-size: 10.5px;
+}
 
 .scenario-columns {
   display: grid;

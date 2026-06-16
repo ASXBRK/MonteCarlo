@@ -202,7 +202,7 @@
           <p>The Drawdown toggle extends the simulation past retirement into the decumulation phase. The portfolio continues to compound at the selected asset profile; contributions stop, and a fixed real withdrawal is taken each month. Paths that deplete to zero stay at zero — no floor, no recovery.</p>
           <p><strong>Scope.</strong> This tool models a single investment portfolio in isolation. It does not include age pension entitlement, non-portfolio assets, partner's income, property, or other income sources. Total retirement income for most users will be higher than the portfolio drawdown shown here. For holistic retirement income modelling, this tool should be used alongside other planning resources.</p>
           <p><strong>Withdrawal assumption.</strong> The tool assumes a fixed-real withdrawal strategy (Bengen 1994) — the same real dollar amount withdrawn each year regardless of portfolio performance. Dynamic strategies such as Guyton-Klinger guardrails or fixed-percentage withdrawals produce different outcome distributions and may be added as comparison features in future versions.</p>
-          <p><strong>Probability of ruin.</strong> Percentage of simulated paths where the portfolio depletes to zero at any point during the projection horizon. This is portfolio depletion only; total retirement income for Australian users typically includes age pension and other sources not modelled here.</p>
+          <p><strong>Probability of ruin.</strong> Percentage of simulated paths where the portfolio depletes to zero at any point during the projection horizon. <em>Ruin here means portfolio depletion only — it does not mean destitution.</em> For an Australian user, the age pension (not modelled in this tool, by design) provides an income floor that continues after portfolio depletion. Ruin is the moment the portfolio stops contributing to retirement income, not the moment income stops altogether.</p>
         </section>
 
         <section>
@@ -216,6 +216,22 @@
           </ul>
           <p>The current model captures none of these. Fan widths shown here are likely understated at the tails relative to historical experience. Tools incorporating jump-diffusion, GARCH, or empirical bootstrapping will show wider extremes at the cost of model complexity.</p>
           <p>No fees and no taxes. Returns are real (net of inflation) and pre-cost, so contribution and withdrawal amounts you enter are in today's purchasing power. A future release will add a nominal-dollars toggle.</p>
+        </section>
+
+        <section>
+          <h3>Time diversification: what this tool doesn't capture</h3>
+          <p>The variance ratio measures how dispersion scales with horizon: it's the variance of N-year cumulative returns divided by N times the variance of 1-year returns. Under i.i.d. returns it equals 1 at every horizon. Under <em>mean-reverting</em> returns (the classical case for equities) it falls below 1 — time diversifies, and per-year dispersion narrows with longer horizons. Under <em>persistent</em> returns it rises above 1 — time amplifies dispersion.</p>
+          <p>Historical US data (Asness, Cliff, Ostdiek and others; 1872–present) is roughly:</p>
+          <table class="param-table">
+            <thead><tr><th>Asset</th><th>1y</th><th>5y</th><th>10y</th><th>20y</th><th>30y</th></tr></thead>
+            <tbody>
+              <tr><td>Equities</td><td>1.00</td><td>0.95</td><td>0.85</td><td>0.70</td><td>0.60</td></tr>
+              <tr><td>Bonds (long Treasury)</td><td>1.00</td><td>1.30</td><td>1.65</td><td>2.10</td><td>2.50</td></tr>
+              <tr><td>Bills (T-bills)</td><td>1.00</td><td>1.20</td><td>1.40</td><td>1.65</td><td>1.80</td></tr>
+            </tbody>
+          </table>
+          <p>The counter-intuitive result is the second row. Bond and bill variance ratios <em>rise</em> with horizon because their real returns are driven by inflation persistence — multi-year inflation surprises compound rather than wash out. Time diversifies equities but anti-diversifies bonds and cash in real terms.</p>
+          <p><strong>This tool does not reproduce that.</strong> Its engine assumes i.i.d. returns within each regime state, with no mean reversion and no inflation persistence. The implied variance ratio is approximately 1 for every asset at every horizon, including Cash and Conservative. The historical numbers above come from outside the tool's model; treat them as a known limitation of the projection — long-horizon fan widths for bond-heavy and cash-heavy profiles are likely overstated, and for equity profiles likely understated relative to a model that captured time diversification properly. The tool's strength is showing dispersion at a fixed horizon; the variance-ratio story across horizons is outside its scope.</p>
         </section>
 
         <section>
