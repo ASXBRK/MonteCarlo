@@ -14,6 +14,10 @@ import {
 import {
   firstDecadeShow, firstDecadeHide, firstDecadeRedisplay,
 } from "./firstDecade.js";
+import {
+  computeMaxDrawdowns, drawdownToleranceShow,
+  drawdownToleranceHide, drawdownToleranceUpdateTolerance,
+} from "./drawdownTolerance.js";
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
@@ -38,6 +42,7 @@ const els = {
   tornado: $("tornado"),
   sequenceRisk: $("sequenceRisk"),
   firstDecade: $("firstDecade"),
+  drawdownTolerance: $("drawdownTolerance"),
   targetRuinInput: $("targetRuinInput"),
 };
 
@@ -118,6 +123,7 @@ const state = {
   units: "real",      // "real" | "nominal"
   inflation: 0.025,   // annual rate used only when units === "nominal"
   targetRuin: 0.10,   // tornado switches to goal-seek when ruin > this
+  drawdownTolerance: 0.35,  // share of paths whose worst DD exceeds this
   scenarios: {
     A: { ...DEFAULTS },
     B: { ...DEFAULTS },
@@ -250,6 +256,27 @@ function refreshFirstDecade() {
 function redisplayFirstDecade() {
   if (state.compareMode) return;
   firstDecadeRedisplay({ units: state.units, inflation: state.inflation });
+}
+
+// --- Drawdown-tolerance lens ------------------------------------------
+
+function refreshDrawdownTolerance() {
+  // Single-scenario only (compare mode hides the panel entirely).
+  if (state.compareMode || !lastSingle || !lastSingle.sim) {
+    drawdownToleranceHide(els.drawdownTolerance);
+    return;
+  }
+  if (!lastSingle.maxDD) {
+    lastSingle.maxDD = computeMaxDrawdowns(lastSingle.sim);
+  }
+  drawdownToleranceShow(els.drawdownTolerance, {
+    maxDD: lastSingle.maxDD,
+    tolerance: state.drawdownTolerance,
+    onChange: (newTol) => {
+      state.drawdownTolerance = newTol;
+      drawdownToleranceUpdateTolerance(newTol);
+    },
+  });
 }
 
 // In drawdown mode the time anchor is (currentAge, endAge) on scenario A.
@@ -746,6 +773,7 @@ function runSingle() {
   scheduleTornado();
   refreshSequenceRisk();
   refreshFirstDecade();
+  refreshDrawdownTolerance();
 }
 
 function redisplaySingle() {
@@ -996,6 +1024,7 @@ function runCompare() {
   scheduleTornado();
   refreshSequenceRisk();
   refreshFirstDecade();
+  refreshDrawdownTolerance();
 }
 
 function redisplayCompare() {

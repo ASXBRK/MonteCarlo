@@ -372,6 +372,99 @@ html, body {
   font: inherit;
 }
 
+/* --- Drawdown-tolerance lens --- */
+
+.ddtol {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px 14px;
+  margin-bottom: 16px;
+}
+.ddtol-header { margin-bottom: 10px; }
+.ddtol-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.ddtol-subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
+.ddtol-controls {
+  margin: 8px 0 6px;
+}
+.ddtol-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.ddtol-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ddtol-input-wrap input[type="number"] {
+  width: 64px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ddtol-body {
+  display: grid;
+  grid-template-columns: 1fr 240px;
+  gap: 16px;
+  align-items: start;
+  margin-top: 6px;
+}
+.ddtol-chart { min-width: 0; }
+#ddtolChart { width: 100%; height: 200px; }
+
+.ddtol-stats { font-size: 12.5px; }
+.ddtol-stats-list {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  margin: 0;
+}
+.ddtol-stats-list dt {
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+.ddtol-stats-list dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: right;
+}
+
+.ddtol-headline {
+  margin: 10px 0 4px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.ddtol-footer {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+@media (max-width: 720px) {
+  .ddtol-body { grid-template-columns: 1fr; }
+}
+
 /* --- First-decade conditional outcome panel --- */
 
 .decade {
