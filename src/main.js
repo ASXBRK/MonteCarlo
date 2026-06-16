@@ -11,6 +11,9 @@ import {
 import {
   sequenceRiskShow, sequenceRiskHide, sequenceRiskRedisplay,
 } from "./sequenceRisk.js";
+import {
+  firstDecadeShow, firstDecadeHide, firstDecadeRedisplay,
+} from "./firstDecade.js";
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
@@ -34,6 +37,7 @@ const els = {
   inflationInput: $("inflationInput"),
   tornado: $("tornado"),
   sequenceRisk: $("sequenceRisk"),
+  firstDecade: $("firstDecade"),
   targetRuinInput: $("targetRuinInput"),
 };
 
@@ -222,6 +226,30 @@ function refreshSequenceRisk() {
 function redisplaySequenceRisk() {
   if (!state.drawdownMode || state.compareMode) return;
   sequenceRiskRedisplay({ units: state.units, inflation: state.inflation });
+}
+
+// --- First-decade conditional outcome panel ---------------------------
+
+function refreshFirstDecade() {
+  // Single-scenario only; hide in compare.
+  if (state.compareMode || !lastSingle || !lastSingle.sim) {
+    firstDecadeHide(els.firstDecade);
+    return;
+  }
+  const s = state.scenarios.A;
+  firstDecadeShow(els.firstDecade, {
+    sim: lastSingle.sim,
+    mode: state.drawdownMode ? "drawdown" : "accumulation",
+    horizonYears: lastSingle.horizon,
+    currentAge: lastSingle.currentAge,
+    retirementYear: state.drawdownMode ? retirementYearsFromAge(s) : null,
+    displayCtx: { units: state.units, inflation: state.inflation },
+  });
+}
+
+function redisplayFirstDecade() {
+  if (state.compareMode) return;
+  firstDecadeRedisplay({ units: state.units, inflation: state.inflation });
 }
 
 // In drawdown mode the time anchor is (currentAge, endAge) on scenario A.
@@ -717,6 +745,7 @@ function runSingle() {
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · single · ${tag}`);
   scheduleTornado();
   refreshSequenceRisk();
+  refreshFirstDecade();
 }
 
 function redisplaySingle() {
@@ -966,6 +995,7 @@ function runCompare() {
   console.log(`sim ${(t1 - t0).toFixed(1)}ms · compare · ${tag}`);
   scheduleTornado();
   refreshSequenceRisk();
+  refreshFirstDecade();
 }
 
 function redisplayCompare() {
@@ -1123,6 +1153,7 @@ els.displayOptions.forEach((btn) => {
     redisplay();
     redisplayTornado();
     redisplaySequenceRisk();
+    redisplayFirstDecade();
   });
 });
 
@@ -1136,6 +1167,7 @@ els.inflationInput.addEventListener("input", () => {
     redisplay();
     redisplayTornado();
     redisplaySequenceRisk();
+    redisplayFirstDecade();
   } else {
     applyUnitsLabel();
   }

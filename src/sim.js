@@ -116,6 +116,14 @@ export function simulate({
   const ruined = isDrawdown ? new Uint8Array(numPaths) : null;
   const stride = shockStride != null ? shockStride : months;
 
+  // First-decade pure return: annualised compound growth of (1+r) over
+  // the first min(10, horizonYears) years. Captures market behaviour
+  // alone — contributions / withdrawals deliberately excluded so the
+  // quintile bucketing reflects sequence luck, not cash-flow scale.
+  const decadeYears = Math.min(10, horizonYears);
+  const decadeMonths = decadeYears * 12;
+  const firstDecadeReturn = new Float64Array(numPaths);
+
   for (let p = 0; p < numPaths; p++) {
     let balance = startingBalance;
     let isRuined = false;
@@ -123,6 +131,7 @@ export function simulate({
     // a long horizon, the chain converges to the stationary
     // distribution well within the first few years.
     let regime = 0;
+    let decadeProduct = 1;
 
     const base = p * years;
     const zBase = p * stride;
@@ -145,6 +154,7 @@ export function simulate({
 
       const z = preGenZ ? preGenZ[zBase + (m - 1)] : randn();
       const r = rMonthly + sigmaThis * z;
+      if (m <= decadeMonths) decadeProduct *= 1 + r;
       balance = balance * (1 + r);
 
       if (m <= retirementMonth) {
@@ -163,6 +173,7 @@ export function simulate({
       }
     }
 
+    firstDecadeReturn[p] = Math.pow(decadeProduct, 12 / decadeMonths) - 1;
     if (isRuined) ruined[p] = 1;
   }
 
@@ -219,5 +230,6 @@ export function simulate({
     xYears, p05, p25, p50, p75, p95, deterministic, sampled,
     paths: yearlyAll, numPaths, years,
     ruined, ruinedFraction,
+    firstDecadeReturn, decadeYears,
   };
 }
