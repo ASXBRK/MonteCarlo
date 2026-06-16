@@ -1,5 +1,7 @@
 import { PROFILES, DEFAULT_PROFILE } from "./profiles.js";
-import { simulate, generateShocks, generateUniforms, NUM_PATHS } from "./sim.js";
+import {
+  simulate, generateShocks, generateUniforms, NUM_PATHS, buildGlideSchedule,
+} from "./sim.js";
 import {
   renderChart, renderCompareChart, renderProbChart, renderBellCurves,
   SAMPLE_PATH_COUNT, sampleTraceIndices,
@@ -104,6 +106,13 @@ function applyUnitsLabel() {
   });
 }
 
+// Risk-ladder order matches profiles.js. Used by the glide default
+// helper and by the tornado worker.
+const ASSET_LADDER = [
+  "Cash", "Conservative", "Balanced", "Growth",
+  "High Growth", "Australian Shares", "Emerging Markets",
+];
+
 const DEFAULTS = {
   age: "",
   horizonYears: 30,
@@ -115,6 +124,9 @@ const DEFAULTS = {
   retirementAge: 65,
   endAge: 90,
   annualWithdrawal: 50000,
+  // null when off; { endAsset, glideStartAge, glideEndAge } when on.
+  // The scenario's existing `asset` field doubles as the start profile.
+  glide: null,
 };
 
 const state = {
@@ -200,7 +212,13 @@ function redisplayTornado() {
 
 function sequenceRiskParams() {
   const s = state.scenarios.A;
-  const profile = PROFILES[s.asset];
+  // Under a glide, prefer the end asset for the decumulation
+  // visualiser if the glide completes before retirement; otherwise
+  // fall back to the start asset.
+  let profile = PROFILES[s.asset];
+  if (s.glide && s.retirementAge >= s.glide.glideEndAge) {
+    profile = PROFILES[s.glide.endAsset] || profile;
+  }
   const retYear = retirementYearsFromAge(s);
   const horizon = Math.max(1, s.endAge - s.retirementAge);
   // Starting balance for the visualiser = median real balance at the
@@ -369,17 +387,41 @@ function buildScenarioBlock(id, values) {
       <input type="number" min="0" step="100"
              data-field="monthlyContribution" value="${values.monthlyContribution}" />
     </div>
-    <div class="control">
-      <label>Asset class</label>
+    <div class="control control-asset">
+      <label>${values.glide ? "Start asset" : "Asset class"}</label>
       <select data-field="asset">
         ${Object.keys(PROFILES).map(
           (n) => `<option value="${n}"${n === values.asset ? " selected" : ""}>${n}</option>`
         ).join("")}
       </select>
+      <label class="glide-toggle">
+        <input type="checkbox" data-field="glideEnabled"${values.glide ? " checked" : ""} />
+        <span>Glide to a different profile over time</span>
+      </label>
       <a class="calibration-link" href="#" data-open-params="asset-assumptions">
         <span class="info-glyph" aria-hidden="true">i</span> How these profiles are calibrated
       </a>
     </div>
+    ${values.glide ? `
+      <div class="control">
+        <label>End asset</label>
+        <select data-field="glideEndAsset">
+          ${Object.keys(PROFILES).map(
+            (n) => `<option value="${n}"${n === values.glide.endAsset ? " selected" : ""}>${n}</option>`
+          ).join("")}
+        </select>
+      </div>
+      <div class="control">
+        <label>Glide start age</label>
+        <input type="number" min="0" max="100" step="1"
+               data-field="glideStartAge" value="${values.glide.glideStartAge}" />
+      </div>
+      <div class="control">
+        <label>Glide end age</label>
+        <input type="number" min="0" max="100" step="1"
+               data-field="glideEndAge" value="${values.glide.glideEndAge}" />
+      </div>
+    ` : ""}
     ${drawdownMarkup}
   `;
   block.appendChild(grid);
@@ -430,11 +472,40 @@ function buildSharedBlock() {
 function onFieldChange(id, el) {
   const field = el.dataset.field;
   const raw = el.value;
-  if (field === "age" || field === "asset") {
-    state.scenarios[id][field] = raw;
+  const s = state.scenarios[id];
+
+  if (field === "glideEnabled") {
+    if (el.checked) {
+      // Pick a sensibly-different end asset by default (one step less
+      // risky than the current start, or one more if start is Cash).
+      const idx = ASSET_LADDER.indexOf(s.asset);
+      const endIdx = idx > 0 ? idx - 1 : 1;
+      const endAsset = ASSET_LADDER[endIdx] || s.asset;
+      s.glide = { endAsset, glideStartAge: 50, glideEndAge: 65 };
+    } else {
+      s.glide = null;
+    }
+    renderControls();
+    scheduleRun();
+    return;
+  }
+
+  if (field === "glideEndAsset") {
+    if (s.glide) s.glide.endAsset = raw;
+  } else if (field === "glideStartAge" || field === "glideEndAge") {
+    const n = Number(raw);
+    if (s.glide) s.glide[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
+  } else if (field === "age" || field === "asset") {
+    s[field] = raw;
+    if (field === "asset") {
+      // Asset label switches between "Asset class" and "Start asset"
+      // when glide is on/off; rebuild controls to update the label.
+      // (Cheaper alternative: just update the label text, but a full
+      // rebuild keeps the controls code single-sourced.)
+    }
   } else {
     const n = Number(raw);
-    state.scenarios[id][field] = Number.isFinite(n) ? Math.max(0, n) : 0;
+    s[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
   }
   scheduleRun();
 }
@@ -566,6 +637,25 @@ function runScenario(s, preGenZ = null, preGenU = null) {
   const horizon = state.drawdownMode
     ? Math.max(1, state.scenarios.A.endAge - state.scenarios.A.currentAge)
     : s.horizonYears;
+
+  let glideSchedule = null;
+  if (s.glide) {
+    const endP = PROFILES[s.glide.endAsset];
+    if (endP) {
+      const currentAge = state.drawdownMode
+        ? state.scenarios.A.currentAge
+        : (parseAge(s.age) ?? s.glide.glideStartAge);
+      glideSchedule = buildGlideSchedule({
+        startProfile: p,
+        endProfile: endP,
+        currentAge,
+        glideStartAge: s.glide.glideStartAge,
+        glideEndAge: s.glide.glideEndAge,
+        months: horizon * 12,
+      });
+    }
+  }
+
   return simulate({
     horizonYears: horizon,
     startingBalance: s.startingBalance,
@@ -575,6 +665,7 @@ function runScenario(s, preGenZ = null, preGenU = null) {
     sigma_stress: p.sigma_stress,
     p_stay_normal: p.p_stay_normal,
     p_stay_stress: p.p_stay_stress,
+    glideSchedule,
     preGenZ,
     preGenU,
     drawdown: buildDrawdownConfig(s),

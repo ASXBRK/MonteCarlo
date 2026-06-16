@@ -25,6 +25,38 @@ export function generateShocks(numPaths, months) {
   return out;
 }
 
+// Build a per-month glide schedule by linearly interpolating each of
+// the five profile parameters between startProfile and endProfile over
+// the (glideStartAge → glideEndAge) window. Months before the window
+// hold the start profile; months after hold the end profile.
+//
+// This is an approximation of a continuously-rebalancing blended
+// portfolio — not a literal multi-asset model.
+export function buildGlideSchedule({ startProfile, endProfile, currentAge, glideStartAge, glideEndAge, months }) {
+  const sched = {
+    mu: new Float64Array(months),
+    sigmaNormal: new Float64Array(months),
+    sigmaStress: new Float64Array(months),
+    pStayNormal: new Float64Array(months),
+    pStayStress: new Float64Array(months),
+  };
+  const windowLen = Math.max(1e-9, glideEndAge - glideStartAge);
+  for (let m = 0; m < months; m++) {
+    const age = currentAge + (m + 0.5) / 12;
+    let t;
+    if (age <= glideStartAge) t = 0;
+    else if (age >= glideEndAge) t = 1;
+    else t = (age - glideStartAge) / windowLen;
+    const blend = (a, b) => a + t * (b - a);
+    sched.mu[m]           = blend(startProfile.mu,            endProfile.mu);
+    sched.sigmaNormal[m]  = blend(startProfile.sigma_normal,  endProfile.sigma_normal);
+    sched.sigmaStress[m]  = blend(startProfile.sigma_stress,  endProfile.sigma_stress);
+    sched.pStayNormal[m]  = blend(startProfile.p_stay_normal, endProfile.p_stay_normal);
+    sched.pStayStress[m]  = blend(startProfile.p_stay_stress, endProfile.p_stay_stress);
+  }
+  return sched;
+}
+
 // Pre-generate a flat Float64Array of uniform[0,1) draws used to
 // transition the regime state. Same row-major layout as the return
 // shocks. Sharing this across paired scenarios in compare mode keeps
@@ -51,14 +83,15 @@ function quantileSorted(sorted, q) {
 // plus contribution. If drawdown is provided, post-retirement months
 // strip the contribution and withdraw annualWithdrawal/12 per month.
 function deterministicPath({
-  horizonYears, startingBalance, monthlyContribution, mu, drawdown,
+  horizonYears, startingBalance, monthlyContribution, mu, drawdown, glideSchedule,
 }) {
   const months = horizonYears * 12;
-  const rMonthly = mu / 12;
+  const rMonthlyScalar = mu / 12;
   const yearly = new Array(horizonYears + 1);
   let balance = startingBalance;
   yearly[0] = balance;
   for (let m = 1; m <= months; m++) {
+    const rMonthly = glideSchedule ? glideSchedule.mu[m - 1] / 12 : rMonthlyScalar;
     if (!drawdown || m <= drawdown.retirementMonth) {
       balance = balance * (1 + rMonthly) + monthlyContribution;
     } else {
@@ -96,6 +129,13 @@ export function simulate({
   // lets tornado perturbations with different horizons share a single
   // over-sized shock matrix without messing up indexing.
   shockStride = null,
+  // Optional glide schedule: arrays of length `months` giving the
+  // monthly mu, sigma_normal, sigma_stress, p_stay_normal,
+  // p_stay_stress. When supplied, the inner loop reads from the
+  // schedule and the scalar params above are ignored. When null,
+  // the scalar params are used for every month (the existing
+  // single-profile behaviour, unchanged).
+  glideSchedule = null,
   // Drawdown config. When supplied, accumulation runs up to
   // retirementMonth, then contributions stop and a fixed-real
   // withdrawal of (annualWithdrawal / 12) is taken each month.
@@ -104,9 +144,11 @@ export function simulate({
 }) {
   const months = horizonYears * 12;
   const years = horizonYears + 1;
+  const SQRT12 = Math.sqrt(12);
   const rMonthly = mu / 12;
-  const sigmaNormalMonthly = sigma_normal / Math.sqrt(12);
-  const sigmaStressMonthly = sigma_stress / Math.sqrt(12);
+  const sigmaNormalMonthly = sigma_normal / SQRT12;
+  const sigmaStressMonthly = sigma_stress / SQRT12;
+  const hasGlide = glideSchedule !== null;
 
   const isDrawdown = drawdown !== null;
   const retirementMonth = isDrawdown ? drawdown.retirementMonth : months + 1;
@@ -143,17 +185,26 @@ export function simulate({
         continue;
       }
 
+      // Per-month params: from glide schedule if supplied, else the
+      // scalar constants computed above.
+      const idx = m - 1;
+      const muM = hasGlide ? glideSchedule.mu[idx] / 12 : rMonthly;
+      const sigNorm = hasGlide ? glideSchedule.sigmaNormal[idx] / SQRT12 : sigmaNormalMonthly;
+      const sigStress = hasGlide ? glideSchedule.sigmaStress[idx] / SQRT12 : sigmaStressMonthly;
+      const pSN = hasGlide ? glideSchedule.pStayNormal[idx] : p_stay_normal;
+      const pSS = hasGlide ? glideSchedule.pStayStress[idx] : p_stay_stress;
+
       // Regime transition: stay with probability p_stay; otherwise flip.
       const u = preGenU ? preGenU[zBase + (m - 1)] : Math.random();
       if (regime === 0) {
-        if (u >= p_stay_normal) regime = 1;
+        if (u >= pSN) regime = 1;
       } else {
-        if (u >= p_stay_stress) regime = 0;
+        if (u >= pSS) regime = 0;
       }
-      const sigmaThis = regime === 0 ? sigmaNormalMonthly : sigmaStressMonthly;
+      const sigmaThis = regime === 0 ? sigNorm : sigStress;
 
       const z = preGenZ ? preGenZ[zBase + (m - 1)] : randn();
-      const r = rMonthly + sigmaThis * z;
+      const r = muM + sigmaThis * z;
       if (m <= decadeMonths) decadeProduct *= 1 + r;
       balance = balance * (1 + r);
 
@@ -210,7 +261,7 @@ export function simulate({
   }
 
   const deterministic = deterministicPath({
-    horizonYears, startingBalance, monthlyContribution, mu,
+    horizonYears, startingBalance, monthlyContribution, mu, glideSchedule,
     drawdown: isDrawdown ? {
       retirementMonth,
       annualWithdrawal: drawdown.annualWithdrawal,

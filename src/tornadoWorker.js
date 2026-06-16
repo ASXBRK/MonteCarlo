@@ -3,7 +3,7 @@
 // tornado bars (signed metric deltas) or goal-seek tornado bars
 // (minimum input changes that hit the target ruin probability).
 
-import { simulate, generateShocks, generateUniforms } from "./sim.js";
+import { simulate, generateShocks, generateUniforms, buildGlideSchedule } from "./sim.js";
 
 const TORNADO_PATHS = 1000;
 
@@ -29,6 +29,25 @@ function buildArgs(scenario, profiles, mode, shocks, uniforms, stride) {
     retirementMonth: Math.max(1, (scenario.retirementAge - scenario.currentAge) * 12),
     annualWithdrawal: scenario.annualWithdrawal,
   } : null;
+
+  let glideSchedule = null;
+  if (scenario.glide) {
+    const endP = profiles[scenario.glide.endAsset];
+    if (endP) {
+      const currentAge = mode === "drawdown"
+        ? scenario.currentAge
+        : (scenario.glide.glideStartAge);
+      glideSchedule = buildGlideSchedule({
+        startProfile: p,
+        endProfile: endP,
+        currentAge,
+        glideStartAge: scenario.glide.glideStartAge,
+        glideEndAge: scenario.glide.glideEndAge,
+        months: horizon * 12,
+      });
+    }
+  }
+
   return {
     horizonYears: horizon,
     startingBalance: scenario.startingBalance,
@@ -38,6 +57,7 @@ function buildArgs(scenario, profiles, mode, shocks, uniforms, stride) {
     sigma_stress: p.sigma_stress,
     p_stay_normal: p.p_stay_normal,
     p_stay_stress: p.p_stay_stress,
+    glideSchedule,
     numPaths: TORNADO_PATHS,
     preGenZ: shocks,
     preGenU: uniforms,
@@ -142,8 +162,10 @@ function standardBars(scenario, profiles, mode, shocks, uniforms, stride, baseli
     });
   }
 
-  // Asset class: ±1 step on the ladder.
-  {
+  // Asset class: ±1 step on the ladder. Omitted under a glide path
+  // since the scenario doesn't hold one asset class throughout — the
+  // ±1-step concept is ill-defined.
+  if (!scenario.glide) {
     const upAsset = neighbourAsset(scenario.asset, "up");
     const downAsset = neighbourAsset(scenario.asset, "down");
     const perturbations = [];
@@ -278,8 +300,9 @@ function goalSeekBars(scenario, profiles, mode, shocks, uniforms, stride, target
     });
   }
 
-  // Asset class: smallest step in either direction.
-  {
+  // Asset class: smallest step in either direction. Omitted under a
+  // glide path (single asset class isn't held throughout).
+  if (!scenario.glide) {
     const r = searchAsset({ scenario, profiles, mode, shocks, uniforms, stride, target });
     bars.push({
       key: "asset",
@@ -356,5 +379,6 @@ function compute(params) {
     targetRuin,
     bars,
     allInsufficient: goalSeek && bars.every((b) => b.insufficient),
+    glideActive: !!scenario.glide,
   };
 }

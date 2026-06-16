@@ -234,6 +234,26 @@ html, body {
   accent-color: var(--accent);
 }
 
+.glide-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-top: 4px;
+  cursor: pointer;
+  user-select: none;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+.glide-toggle input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .calibration-link {
   display: inline-flex;
   align-items: center;

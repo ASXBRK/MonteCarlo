@@ -324,6 +324,15 @@ function applyResult(result, displayCtx) {
   panelEl.classList.toggle("computing", false);
   if (result.mode === "goal-seek") renderGoalSeek(result, displayCtx);
   else renderStandard(result, displayCtx);
+  // Glide-active footnote: asset-class lever omitted under a glide.
+  const footer = panelEl.querySelector(".tornado-footer");
+  if (footer) {
+    if (result.glideActive) {
+      footer.textContent = "Asset-class sensitivity is omitted because this scenario uses a glide path (one-step shifts are ill-defined). Tornado bars use a reduced path count for performance; magnitudes are illustrative.";
+    } else {
+      footer.textContent = "Tornado bars use a reduced path count for performance; magnitudes are illustrative.";
+    }
+  }
 }
 
 // Trigger a recompute (debounced). `request` describes the current
