@@ -20,6 +20,9 @@ import {
   computeMaxDrawdowns, drawdownToleranceShow,
   drawdownToleranceHide, drawdownToleranceUpdateTolerance,
 } from "./drawdownTolerance.js";
+import {
+  strategyCompareShow, strategyCompareHide, strategyCompareRedisplay,
+} from "./strategyCompare.js";
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
@@ -45,6 +48,7 @@ const els = {
   sequenceRisk: $("sequenceRisk"),
   firstDecade: $("firstDecade"),
   drawdownTolerance: $("drawdownTolerance"),
+  strategyCompare: $("strategyCompare"),
   targetRuinInput: $("targetRuinInput"),
 };
 
@@ -124,6 +128,7 @@ const DEFAULTS = {
   retirementAge: 65,
   endAge: 90,
   annualWithdrawal: 50000,
+  strategy: "fixed-real",  // "fixed-real" | "guyton-klinger" | "fixed-pct"
   // null when off; { endAsset, glideStartAge, glideEndAge } when on.
   // The scenario's existing `asset` field doubles as the start profile.
   glide: null,
@@ -278,6 +283,26 @@ function redisplayFirstDecade() {
 
 // --- Drawdown-tolerance lens ------------------------------------------
 
+// --- Withdrawal-strategy comparison panel -----------------------------
+
+function refreshStrategyCompare() {
+  if (state.compareMode || !state.drawdownMode) {
+    strategyCompareHide(els.strategyCompare);
+    return;
+  }
+  const s = state.scenarios.A;
+  strategyCompareShow(els.strategyCompare, {
+    scenario: { ...s },
+    profiles: PROFILES,
+    displayCtx: { units: state.units, inflation: state.inflation },
+  });
+}
+
+function redisplayStrategyCompare() {
+  if (state.compareMode || !state.drawdownMode) return;
+  strategyCompareRedisplay({ units: state.units, inflation: state.inflation });
+}
+
 function refreshDrawdownTolerance() {
   // Single-scenario only (compare mode hides the panel entirely).
   if (state.compareMode || !lastSingle || !lastSingle.sim) {
@@ -372,6 +397,12 @@ function buildScenarioBlock(id, values) {
       <label>Annual withdrawal (real $)</label>
       <input type="number" min="0" step="1000"
              data-field="annualWithdrawal" value="${values.annualWithdrawal}" />
+    </div>
+    <div class="control">
+      <label>Withdrawal strategy</label>
+      <select data-field="strategy">
+        ${STRATEGIES.map((opt) => `<option value="${opt.value}"${opt.value === (values.strategy || "fixed-real") ? " selected" : ""}>${opt.label}</option>`).join("")}
+      </select>
     </div>
   ` : "";
 
@@ -495,7 +526,7 @@ function onFieldChange(id, el) {
   } else if (field === "glideStartAge" || field === "glideEndAge") {
     const n = Number(raw);
     if (s.glide) s.glide[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
-  } else if (field === "age" || field === "asset") {
+  } else if (field === "age" || field === "asset" || field === "strategy") {
     s[field] = raw;
     if (field === "asset") {
       // Asset label switches between "Asset class" and "Start asset"
@@ -622,6 +653,12 @@ els.horizonSlider.addEventListener("change", onSliderChange);
 
 // --- sim wrappers ---------------------------------------------------------
 
+const STRATEGIES = [
+  { value: "fixed-real",     label: "Fixed real (Bengen)" },
+  { value: "guyton-klinger", label: "Guyton-Klinger guardrails" },
+  { value: "fixed-pct",      label: "Fixed % of balance" },
+];
+
 function buildDrawdownConfig(s) {
   if (!state.drawdownMode) return null;
   const currentAge = state.scenarios.A.currentAge; // shared anchor
@@ -629,6 +666,7 @@ function buildDrawdownConfig(s) {
   return {
     retirementMonth,
     annualWithdrawal: s.annualWithdrawal,
+    strategy: s.strategy || "fixed-real",
   };
 }
 
@@ -865,6 +903,7 @@ function runSingle() {
   refreshSequenceRisk();
   refreshFirstDecade();
   refreshDrawdownTolerance();
+  refreshStrategyCompare();
 }
 
 function redisplaySingle() {
@@ -1116,6 +1155,7 @@ function runCompare() {
   refreshSequenceRisk();
   refreshFirstDecade();
   refreshDrawdownTolerance();
+  refreshStrategyCompare();
 }
 
 function redisplayCompare() {
@@ -1274,6 +1314,7 @@ els.displayOptions.forEach((btn) => {
     redisplayTornado();
     redisplaySequenceRisk();
     redisplayFirstDecade();
+    redisplayStrategyCompare();
   });
 });
 
@@ -1288,6 +1329,7 @@ els.inflationInput.addEventListener("input", () => {
     redisplayTornado();
     redisplaySequenceRisk();
     redisplayFirstDecade();
+    redisplayStrategyCompare();
   } else {
     applyUnitsLabel();
   }

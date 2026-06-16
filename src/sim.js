@@ -152,10 +152,19 @@ export function simulate({
 
   const isDrawdown = drawdown !== null;
   const retirementMonth = isDrawdown ? drawdown.retirementMonth : months + 1;
-  const monthlyWithdrawal = isDrawdown ? drawdown.annualWithdrawal / 12 : 0;
+  const initialAnnualW = isDrawdown ? drawdown.annualWithdrawal : 0;
+  // Withdrawal strategy. Default "fixed-real" preserves the prior
+  // behaviour exactly (constant monthly withdrawal). "guyton-klinger"
+  // and "fixed-pct" branch inside the year-boundary code below.
+  const strategy = isDrawdown ? (drawdown.strategy || "fixed-real") : "fixed-real";
 
   const yearlyAll = new Float64Array(numPaths * years);
   const ruined = isDrawdown ? new Uint8Array(numPaths) : null;
+  // Per-path real spending totals + worst single-year real-spending cut
+  // (largest one-year % reduction in annual withdrawal). For fixed-real
+  // before ruin the cut is 0; at ruin it becomes 100%.
+  const totalSpending = isDrawdown ? new Float64Array(numPaths) : null;
+  const worstYearCut = isDrawdown ? new Float64Array(numPaths) : null;
   const stride = shockStride != null ? shockStride : months;
 
   // First-decade pure return: annualised compound growth of (1+r) over
@@ -174,6 +183,14 @@ export function simulate({
     // distribution well within the first few years.
     let regime = 0;
     let decadeProduct = 1;
+    // Drawdown per-path state.
+    let currentAnnualW = initialAnnualW;
+    let monthlyW = initialAnnualW / 12;
+    let prevAnnualW = initialAnnualW;
+    let pathWorstCut = 0;
+    let pathTotalSpending = 0;
+    let WR0 = 0;
+    let drawdownStarted = false;
 
     const base = p * years;
     const zBase = p * stride;
@@ -211,10 +228,45 @@ export function simulate({
       if (m <= retirementMonth) {
         balance += monthlyContribution;
       } else {
-        balance -= monthlyWithdrawal;
+        // First month of drawdown: snapshot initial WR for the
+        // strategy rules.
+        if (!drawdownStarted) {
+          drawdownStarted = true;
+          WR0 = balance > 0 ? currentAnnualW / balance : 0;
+        }
+        // At each subsequent drawdown-year boundary, possibly adjust
+        // currentAnnualW per the strategy. Drawdown month index counts
+        // months since retirementMonth (m - retirementMonth); when
+        // (m - retirementMonth - 1) % 12 === 0 AND > 0, a new year has
+        // just begun.
+        const ddIdx = m - retirementMonth - 1;
+        if (ddIdx > 0 && ddIdx % 12 === 0) {
+          prevAnnualW = currentAnnualW;
+          if (strategy === "fixed-pct" && WR0 > 0) {
+            currentAnnualW = WR0 * balance;
+          } else if (strategy === "guyton-klinger" && balance > 0 && WR0 > 0) {
+            const currentWR = currentAnnualW / balance;
+            if (currentWR > WR0 * 1.2) {
+              currentAnnualW = currentAnnualW * 0.9;
+            } else if (currentWR < WR0 * 0.8) {
+              currentAnnualW = currentAnnualW * 1.1;
+            }
+            // else: hold (real-terms unchanged).
+          }
+          // fixed-real: no change.
+          monthlyW = currentAnnualW / 12;
+          const cut = prevAnnualW > 0 ? (prevAnnualW - currentAnnualW) / prevAnnualW : 0;
+          if (cut > pathWorstCut) pathWorstCut = cut;
+        }
+
+        balance -= monthlyW;
+        pathTotalSpending += monthlyW > 0 ? monthlyW : 0;
         if (balance <= 0) {
           balance = 0;
           isRuined = true;
+          // Ruin = the final year's spending dropped to zero — record
+          // a 100% cut so the metric captures the catastrophic case.
+          if (pathWorstCut < 1) pathWorstCut = 1;
         }
       }
       if (balance < 0) balance = 0;
@@ -226,6 +278,10 @@ export function simulate({
 
     firstDecadeReturn[p] = Math.pow(decadeProduct, 12 / decadeMonths) - 1;
     if (isRuined) ruined[p] = 1;
+    if (isDrawdown) {
+      totalSpending[p] = pathTotalSpending;
+      worstYearCut[p] = pathWorstCut;
+    }
   }
 
   // Per-year percentiles.
@@ -282,5 +338,6 @@ export function simulate({
     paths: yearlyAll, numPaths, years,
     ruined, ruinedFraction,
     firstDecadeReturn, decadeYears,
+    totalSpending, worstYearCut, strategy: isDrawdown ? strategy : null,
   };
 }
