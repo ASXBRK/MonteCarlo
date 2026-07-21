@@ -1,14 +1,14 @@
 import { defineConfig } from "vite";
 
-// This app is proxied under the /projections subpath at
-// bradenk.ing/projections. Trailing slash matters: without it, Vite
-// treats the base as a filename prefix rather than a path.
+// Relative base so the same build works in two deployment contexts:
+//   - Direct Vercel preview at monte-carlo-*.vercel.app (root):
+//     assets resolve to /assets/…
+//   - Proxied under bradenk.ing/projections:
+//     assets resolve to /projections/assets/…
 //
-// The BalancePoint sibling branch adds @vitejs/plugin-react + a
-// vitest config; those get merged in when that branch lands. On this
-// vanilla-JS branch we deliberately do NOT apply the React plugin —
-// it injects react-refresh preambles that expect React to be present
-// at runtime and break the client-side boot.
+// Using an absolute "/projections/" here would 404 the preview
+// deployment; relative "./" hands the resolution to the browser
+// against the HTML's own URL and works in both cases.
 export default defineConfig({
-  base: "/projections/",
+  base: "./",
 });
