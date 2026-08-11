@@ -1,25 +1,30 @@
-// Asset class profiles. Each profile carries:
-//   mu             — annual real expected return
-//   sigma          — long-run annual real σ (display only, e.g. bell curves)
-//   sigma_normal   — annual σ during NORMAL regime  (engine input)
-//   sigma_stress   — annual σ during STRESS regime  (engine input)
-//   p_stay_normal  — P(stay NORMAL | currently NORMAL)
-//   p_stay_stress  — P(stay STRESS | currently STRESS)
+// Asset class profiles — firm's proposed assumption set.
 //
-// The two state-dependent σ values are calibrated so that the
-// stationary-distribution-weighted variance equals sigma². Calibration
-// is transparent below: profile inputs are mu + long-run sigma +
-// regime category; the σ_normal / σ_stress numbers are derived.
+// Each profile carries:
+//   incomeReturn   — annual nominal income component of total return
+//   growthReturn   — annual nominal growth component
+//   totalNominal   — sum of the two (annual nominal)
+//   sigma          — long-run annual REAL σ (calibrated; see below)
+//   sigma_normal, sigma_stress — engine inputs, derived from sigma via
+//                     the two-state Markov calibration below
+//   p_stay_normal, p_stay_stress — transition probabilities per regime
+//
+// mu is NOT stored on the profile. Real expected return is derived at
+// simulation time as (1 + totalNominal) / (1 + cpi) - 1, so changing
+// the CPI parameter in the Parameters modal flows through everywhere.
+//
+// σ values are already in real terms (the model's engine convention).
+// The defensive-end σs (Cash 1.5%, Defensive 3%) are deliberately
+// higher than nominal-terms intuition would suggest — real cash and
+// bond variance are dominated by inflation variance, not by their
+// nominal price fluctuations.
 
 const REGIME = {
-  equity:   { p_stay_normal: 0.985, p_stay_stress: 0.90, stressMultiplier: 2.5 },
-  balanced: { p_stay_normal: 0.99,  p_stay_stress: 0.92, stressMultiplier: 2.2 },
   cash:     { p_stay_normal: 0.995, p_stay_stress: 0.85, stressMultiplier: 2.0 },
+  balanced: { p_stay_normal: 0.99,  p_stay_stress: 0.92, stressMultiplier: 2.2 },
+  equity:   { p_stay_normal: 0.985, p_stay_stress: 0.90, stressMultiplier: 2.5 },
 };
 
-// Stationary weights for a 2-state Markov chain with the given
-// "stay" probabilities. Derived from the balance equation
-// w_normal * (1 - p_stay_normal) = w_stress * (1 - p_stay_stress).
 function stationary({ p_stay_normal, p_stay_stress }) {
   const denom = (1 - p_stay_normal) + (1 - p_stay_stress);
   return {
@@ -28,30 +33,83 @@ function stationary({ p_stay_normal, p_stay_stress }) {
   };
 }
 
-function makeProfile(mu, sigma, category) {
+function makeProfile(incomeReturn, growthReturn, sigma, category) {
   const r = REGIME[category];
   const { w_normal, w_stress } = stationary(r);
   const k = r.stressMultiplier;
   const sigma_normal = sigma / Math.sqrt(w_normal + w_stress * k * k);
   const sigma_stress = k * sigma_normal;
+  const totalNominal = incomeReturn + growthReturn;
   return {
-    mu,
-    sigma,
-    sigma_normal,
-    sigma_stress,
+    incomeReturn, growthReturn, totalNominal, sigma,
+    sigma_normal, sigma_stress,
     p_stay_normal: r.p_stay_normal,
     p_stay_stress: r.p_stay_stress,
   };
 }
 
+// Real expected return at a given CPI. Fisher relation.
+export function realMu(profile, cpi) {
+  return (1 + profile.totalNominal) / (1 + cpi) - 1;
+}
+
 export const PROFILES = {
-  Cash:               makeProfile(0.005, 0.015, "cash"),
-  Conservative:       makeProfile(0.020, 0.050, "balanced"),
-  Balanced:           makeProfile(0.035, 0.080, "balanced"),
-  Growth:             makeProfile(0.050, 0.110, "equity"),
-  "High Growth":      makeProfile(0.060, 0.140, "equity"),
-  "Australian Shares":makeProfile(0.065, 0.170, "equity"),
-  "Emerging Markets": makeProfile(0.075, 0.220, "equity"),
+  "Cash":                        makeProfile(0.0350, 0.0000, 0.015, "cash"),
+  "Defensive":                   makeProfile(0.0350, 0.0100, 0.030, "cash"),
+  "Moderately Defensive":        makeProfile(0.0335, 0.0185, 0.045, "balanced"),
+  "Balanced":                    makeProfile(0.0335, 0.0250, 0.060, "balanced"),
+  "Moderate Growth":             makeProfile(0.0385, 0.0300, 0.075, "balanced"),
+  "High Growth – Income":        makeProfile(0.0450, 0.0350, 0.095, "equity"),
+  "High Growth – Capital":       makeProfile(0.0250, 0.0550, 0.095, "equity"),
+  "Accelerated Growth – Income": makeProfile(0.0500, 0.0450, 0.120, "equity"),
+  "Accelerated Growth – Growth": makeProfile(0.0200, 0.0750, 0.120, "equity"),
+  "Residential Property":        makeProfile(0.0450, 0.0500, 0.110, "equity"),
 };
 
-export const DEFAULT_PROFILE = "Growth";
+export const DEFAULT_PROFILE = "Balanced";
+
+// The defensive bucket in drawdown holds Cash.
+export const DEFENSIVE_PROFILE = "Cash";
+
+// Risk ladder for the tornado's asset-class goal-seek and ±1-step
+// perturbations. Each rung represents a distinct risk level. Sibling
+// variants inside a rung differ only in income/growth composition —
+// stepping between them is a null move on the risk ladder. When
+// stepping between rungs, preserve the sibling flavour by index (an
+// "Income" variant in one rung maps to the "Income" variant of the
+// next). Residential Property is NOT on the ladder — it's a distinct
+// asset class, not a step on the diversified risk sequence.
+export const RISK_RUNGS = [
+  { label: "Cash",                 assets: ["Cash"] },
+  { label: "Defensive",            assets: ["Defensive"] },
+  { label: "Moderately Defensive", assets: ["Moderately Defensive"] },
+  { label: "Balanced",             assets: ["Balanced"] },
+  { label: "Moderate Growth",      assets: ["Moderate Growth"] },
+  { label: "High Growth",          assets: ["High Growth – Income", "High Growth – Capital"] },
+  { label: "Accelerated Growth",   assets: ["Accelerated Growth – Income", "Accelerated Growth – Growth"] },
+];
+
+// Find the (rungIndex, variantIndex) of a given asset on the ladder,
+// or null if the asset is off-ladder (Residential Property).
+export function rungOf(asset) {
+  for (let r = 0; r < RISK_RUNGS.length; r++) {
+    const v = RISK_RUNGS[r].assets.indexOf(asset);
+    if (v >= 0) return { rungIndex: r, variantIndex: v };
+  }
+  return null;
+}
+
+// Neighbour asset on the ladder in a given direction ("up" = riskier,
+// "down" = less risky). Preserves variant index when the target rung
+// has multiple siblings; clamps to the target rung's variant count.
+// Returns null when the current asset is off-ladder or the step falls
+// off either end.
+export function neighbourAsset(asset, direction) {
+  const pos = rungOf(asset);
+  if (!pos) return null;
+  const next = direction === "up" ? pos.rungIndex + 1 : pos.rungIndex - 1;
+  if (next < 0 || next >= RISK_RUNGS.length) return null;
+  const rung = RISK_RUNGS[next];
+  const v = Math.min(pos.variantIndex, rung.assets.length - 1);
+  return rung.assets[v];
+}
