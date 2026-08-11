@@ -4,13 +4,15 @@
 // (minimum input changes that hit the target ruin probability).
 
 import { simulate, generateShocks, generateUniforms, buildGlideSchedule } from "./sim.js";
+import { RISK_RUNGS, rungOf, neighbourAsset as ladderNeighbour, realMu } from "./profiles.js";
 
 const TORNADO_PATHS = 1000;
 
-const RISK_LADDER = [
-  "Cash", "Conservative", "Balanced", "Growth",
-  "High Growth", "Australian Shares", "Emerging Markets",
-];
+// Flat sequence of every asset on the ladder — used only by the
+// goal-seek asset search when we exhaustively try every alternative.
+// Residential Property is intentionally excluded (it's a distinct
+// asset class, not a step on the diversified risk ladder).
+const LADDER_FLAT = RISK_RUNGS.flatMap((r) => r.assets);
 
 // Resolve a horizon (in years) for a candidate scenario in either mode.
 function horizonFor(scenario, mode) {
@@ -22,7 +24,13 @@ function horizonFor(scenario, mode) {
 
 // Build the simulate() args for a candidate scenario, reusing shared
 // shocks at the given stride (in months).
-function buildArgs(scenario, profiles, mode, shocks, uniforms, stride) {
+// Worker is strictly sequential (new compute requests replace old
+// pending ones via the caller's token pattern), so a module-level
+// CPI stash is safe and lets us avoid threading `cpi` through every
+// runMetric / searchAsset call site.
+let currentCpi = 0.025;
+
+function buildArgs(scenario, profiles, mode, shocks, uniforms, stride, cpi = currentCpi) {
   const p = profiles[scenario.asset];
   const horizon = horizonFor(scenario, mode);
   const dd = mode === "drawdown" ? {
@@ -37,9 +45,11 @@ function buildArgs(scenario, profiles, mode, shocks, uniforms, stride) {
       const currentAge = mode === "drawdown"
         ? scenario.currentAge
         : (scenario.glide.glideStartAge);
+      // Glide schedule interpolates each profile parameter month by
+      // month; supply real μ derived at the current CPI.
       glideSchedule = buildGlideSchedule({
-        startProfile: p,
-        endProfile: endP,
+        startProfile: { ...p, mu: realMu(p, cpi) },
+        endProfile:   { ...endP, mu: realMu(endP, cpi) },
         currentAge,
         glideStartAge: scenario.glide.glideStartAge,
         glideEndAge: scenario.glide.glideEndAge,
@@ -52,7 +62,7 @@ function buildArgs(scenario, profiles, mode, shocks, uniforms, stride) {
     horizonYears: horizon,
     startingBalance: scenario.startingBalance,
     monthlyContribution: scenario.monthlyContribution,
-    mu: p.mu,
+    mu: realMu(p, cpi),
     sigma_normal: p.sigma_normal,
     sigma_stress: p.sigma_stress,
     p_stay_normal: p.p_stay_normal,
@@ -81,12 +91,11 @@ function runMetric(scenario, profiles, mode, shocks, uniforms, stride) {
 
 // --- standard tornado --------------------------------------------------
 
+// Thin wrapper around the ladder helper in profiles.js — kept here as
+// a stub for backward-compatibility with call sites that used to
+// reach for the worker-local flat ladder.
 function neighbourAsset(asset, direction) {
-  const idx = RISK_LADDER.indexOf(asset);
-  if (idx === -1) return null;
-  const next = direction === "up" ? idx + 1 : idx - 1;
-  if (next < 0 || next >= RISK_LADDER.length) return null;
-  return RISK_LADDER[next];
+  return ladderNeighbour(asset, direction);
 }
 
 function standardBars(scenario, profiles, mode, shocks, uniforms, stride, baseline) {
@@ -163,9 +172,9 @@ function standardBars(scenario, profiles, mode, shocks, uniforms, stride, baseli
   }
 
   // Asset class: ±1 step on the ladder. Omitted under a glide path
-  // since the scenario doesn't hold one asset class throughout — the
-  // ±1-step concept is ill-defined.
-  if (!scenario.glide) {
+  // (±1-step is ill-defined) or when the selected asset is off-ladder
+  // (Residential Property — not part of the diversified risk ladder).
+  if (!scenario.glide && rungOf(scenario.asset) !== null) {
     const upAsset = neighbourAsset(scenario.asset, "up");
     const downAsset = neighbourAsset(scenario.asset, "down");
     const perturbations = [];
@@ -224,20 +233,27 @@ function searchYears({ apply, profiles, mode, shocks, uniforms, stride, target, 
   return { found: false, change: maxYears };
 }
 
-// Search the asset-class ladder in both directions; pick the smallest
-// |step| that meets the target.
+// Goal-seek across the rung-based risk ladder. We step by rung
+// (never between sibling variants of the same rung, since that's a
+// null move on risk), and when the current asset is off-ladder
+// (Residential Property) the search is skipped altogether. The step
+// magnitude reported is rung-distance, so a Balanced→High Growth
+// move counts as 2 rungs regardless of which sibling lands.
 function searchAsset({ scenario, profiles, mode, shocks, uniforms, stride, target }) {
-  const startIdx = RISK_LADDER.indexOf(scenario.asset);
-  if (startIdx === -1) return { found: false, change: 0, fromAsset: scenario.asset };
-  // Generate candidates ordered by absolute step from current.
-  const candidates = [];
-  for (let step = 1; step < RISK_LADDER.length; step++) {
-    if (startIdx + step < RISK_LADDER.length) candidates.push(+step);
-    if (startIdx - step >= 0) candidates.push(-step);
+  const pos = rungOf(scenario.asset);
+  if (!pos) return { found: false, change: 0, fromAsset: scenario.asset };
+  // Candidate rung shifts, ordered by absolute distance from current.
+  const shifts = [];
+  for (let d = 1; d < RISK_RUNGS.length; d++) {
+    if (pos.rungIndex + d < RISK_RUNGS.length) shifts.push(+d);
+    if (pos.rungIndex - d >= 0) shifts.push(-d);
   }
-  candidates.sort((a, b) => Math.abs(a) - Math.abs(b));
-  for (const step of candidates) {
-    const asset = RISK_LADDER[startIdx + step];
+  shifts.sort((a, b) => Math.abs(a) - Math.abs(b));
+  for (const step of shifts) {
+    const rung = RISK_RUNGS[pos.rungIndex + step];
+    // Preserve sibling flavour (income vs growth) by variant index.
+    const v = Math.min(pos.variantIndex, rung.assets.length - 1);
+    const asset = rung.assets[v];
     if (runMetric({ ...scenario, asset }, profiles, mode, shocks, uniforms, stride) <= target) {
       return { found: true, change: step, toAsset: asset, fromAsset: scenario.asset };
     }
@@ -302,7 +318,7 @@ function goalSeekBars(scenario, profiles, mode, shocks, uniforms, stride, target
 
   // Asset class: smallest step in either direction. Omitted under a
   // glide path (single asset class isn't held throughout).
-  if (!scenario.glide) {
+  if (!scenario.glide && rungOf(scenario.asset) !== null) {
     const r = searchAsset({ scenario, profiles, mode, shocks, uniforms, stride, target });
     bars.push({
       key: "asset",
@@ -320,7 +336,7 @@ function goalSeekBars(scenario, profiles, mode, shocks, uniforms, stride, target
     if (b.insufficient) return Infinity;
     if (b.kind === "pct") return b.change;
     if (b.kind === "years") return b.change / 10;
-    if (b.kind === "asset") return Math.abs(b.change) / RISK_LADDER.length;
+    if (b.kind === "asset") return Math.abs(b.change) / RISK_RUNGS.length;
     return 1;
   }
   bars.sort((a, b) => severity(a) - severity(b));
@@ -341,7 +357,8 @@ self.addEventListener("message", (ev) => {
 });
 
 function compute(params) {
-  const { scenario, profiles, mode, targetRuin, canonicalRuin } = params;
+  const { scenario, profiles, mode, targetRuin, canonicalRuin, cpi } = params;
+  currentCpi = (typeof cpi === "number" && Number.isFinite(cpi)) ? cpi : 0.025;
 
   // Size shocks for the longest perturbation horizon.
   // - Accumulation: horizon ±5 years → +5y

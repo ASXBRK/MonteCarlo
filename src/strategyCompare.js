@@ -8,6 +8,7 @@
 // risk against spending volatility differently.
 
 import { simulate, generateShocks, generateUniforms, NUM_PATHS, buildGlideSchedule } from "./sim.js";
+import { realMu } from "./profiles.js";
 
 const STRATEGY_DEFS = [
   { value: "fixed-real",     label: "Fixed real",      colour: "#1c5ab4" },
@@ -63,13 +64,15 @@ function ensurePanel(container) {
   return panelEl;
 }
 
-function buildSchedule(s, profiles, currentAge, months) {
+function buildSchedule(s, profiles, currentAge, months, cpi) {
   if (!s.glide) return null;
   const start = profiles[s.asset];
   const end = profiles[s.glide.endAsset];
   if (!end) return null;
   return buildGlideSchedule({
-    startProfile: start, endProfile: end, currentAge,
+    startProfile: { ...start, mu: realMu(start, cpi) },
+    endProfile:   { ...end,   mu: realMu(end, cpi) },
+    currentAge,
     glideStartAge: s.glide.glideStartAge,
     glideEndAge: s.glide.glideEndAge,
     months,
@@ -80,12 +83,13 @@ function runStrategy(scenario, profiles, strategy, shocks, uniforms, displayCtx)
   const horizon = Math.max(1, scenario.endAge - scenario.currentAge);
   const months = horizon * 12;
   const p = profiles[scenario.asset];
-  const glideSchedule = buildSchedule(scenario, profiles, scenario.currentAge, months);
+  const cpi = displayCtx.inflation;
+  const glideSchedule = buildSchedule(scenario, profiles, scenario.currentAge, months, cpi);
   const sim = simulate({
     horizonYears: horizon,
     startingBalance: scenario.startingBalance,
     monthlyContribution: scenario.monthlyContribution,
-    mu: p.mu,
+    mu: realMu(p, cpi),
     sigma_normal: p.sigma_normal,
     sigma_stress: p.sigma_stress,
     p_stay_normal: p.p_stay_normal,

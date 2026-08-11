@@ -105,7 +105,7 @@ function showPulsingPlaceholders(barCount) {
 
 // Compose the input-side descriptor for a perturbation chip:
 //   - With dollarChange: "+20% (+$600/mo)"
-//   - Asset shift:       "→ Emerging Markets" (worker already prefixed)
+//   - Asset shift:       "→ High Growth – Income" (worker already prefixed)
 //   - Otherwise:         "+5y", "+3y", etc.
 function inputDescriptor(bar, p, displayCtx) {
   if (p.dollarChange != null) {
