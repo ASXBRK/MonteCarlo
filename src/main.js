@@ -1,4 +1,7 @@
-import { PROFILES, DEFAULT_PROFILE } from "./profiles.js";
+import {
+  PROFILES, DEFAULT_PROFILE, DEFENSIVE_PROFILE,
+  RISK_RUNGS, rungOf, neighbourAsset, realMu,
+} from "./profiles.js";
 import {
   simulate, generateShocks, generateUniforms, NUM_PATHS, buildGlideSchedule,
 } from "./sim.js";
@@ -110,12 +113,11 @@ function applyUnitsLabel() {
   });
 }
 
-// Risk-ladder order matches profiles.js. Used by the glide default
-// helper and by the tornado worker.
-const ASSET_LADDER = [
-  "Cash", "Conservative", "Balanced", "Growth",
-  "High Growth", "Australian Shares", "Emerging Markets",
-];
+// Legacy alias — some downstream code used ASSET_LADDER for a simple
+// linear list. The canonical structure now lives in profiles.js as
+// RISK_RUNGS (rungs with sibling variants); this flat list is only
+// used by the glide-default helper.
+const ASSET_LADDER = RISK_RUNGS.flatMap((r) => r.assets);
 
 const DEFAULTS = {
   age: "",
@@ -156,6 +158,9 @@ function tornadoRequest() {
     profiles: PROFILES,
     mode: state.drawdownMode ? "drawdown" : "accumulation",
     targetRuin: state.targetRuin,
+    // CPI drives real μ inside the worker (Fisher), so any change to
+    // the Parameters CPI reruns the tornado with the new real returns.
+    cpi: state.inflation,
     // Authoritative ruin from the main 2000-path sim. The worker uses
     // this for the State 2 / State 3 decision so the chosen state and
     // the subtitle's quoted ruin probability are always consistent.
@@ -233,7 +238,7 @@ function sequenceRiskParams() {
     ? lastSingle.sim.p50[retYear] || 0
     : 0;
   return {
-    mu: profile.mu,
+    mu: realMu(profile, state.inflation),
     sigma: profile.sigma,
     horizonYears: horizon,
     startingBalance,
@@ -344,6 +349,29 @@ const fmtMoneyShort = (v) => {
   return `$${Math.round(v)}`;
 };
 
+// Inline info line under each asset dropdown. Shows the profile's
+// nominal total return (with income/growth split) and the Fisher-
+// derived real return at the current CPI, so the tool's real-terms
+// framing is visible next to the input.
+function assetInfoLine(assetName) {
+  const p = PROFILES[assetName];
+  if (!p) return "";
+  const cpi = state.inflation;
+  const real = realMu(p, cpi);
+  return `${(p.totalNominal * 100).toFixed(1)}% p.a. nominal ` +
+    `(${(p.incomeReturn * 100).toFixed(2)}% income / ${(p.growthReturn * 100).toFixed(2)}% growth) ` +
+    `≈ ${(real * 100).toFixed(2)}% real at ${(cpi * 100).toFixed(1)}% CPI`;
+}
+
+// Update the inline info lines under each visible asset dropdown.
+function applyAssetInfoLines() {
+  for (const id of ["A", "B"]) {
+    const el = document.querySelector(`[data-role="assetInfo-${id}"]`);
+    if (!el) continue;
+    el.textContent = assetInfoLine(state.scenarios[id].asset);
+  }
+}
+
 function parseAge(v) {
   const s = String(v).trim();
   if (s === "") return null;
@@ -425,6 +453,7 @@ function buildScenarioBlock(id, values) {
           (n) => `<option value="${n}"${n === values.asset ? " selected" : ""}>${n}</option>`
         ).join("")}
       </select>
+      <div class="asset-info" data-role="assetInfo-${id}">${assetInfoLine(values.asset)}</div>
       <label class="glide-toggle">
         <input type="checkbox" data-field="glideEnabled"${values.glide ? " checked" : ""} />
         <span>Glide to a different profile over time</span>
@@ -507,11 +536,12 @@ function onFieldChange(id, el) {
 
   if (field === "glideEnabled") {
     if (el.checked) {
-      // Pick a sensibly-different end asset by default (one step less
-      // risky than the current start, or one more if start is Cash).
-      const idx = ASSET_LADDER.indexOf(s.asset);
-      const endIdx = idx > 0 ? idx - 1 : 1;
-      const endAsset = ASSET_LADDER[endIdx] || s.asset;
+      // Default end asset: one rung less risky than the current start
+      // (or one rung riskier if start is at the bottom of the ladder).
+      // Off-ladder starts (Residential Property) fall back to Balanced.
+      const down = neighbourAsset(s.asset, "down");
+      const up = neighbourAsset(s.asset, "up");
+      const endAsset = down || up || "Balanced";
       s.glide = { endAsset, glideStartAge: 50, glideEndAge: 65 };
     } else {
       s.glide = null;
@@ -528,12 +558,7 @@ function onFieldChange(id, el) {
     if (s.glide) s.glide[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
   } else if (field === "age" || field === "asset" || field === "strategy") {
     s[field] = raw;
-    if (field === "asset") {
-      // Asset label switches between "Asset class" and "Start asset"
-      // when glide is on/off; rebuild controls to update the label.
-      // (Cheaper alternative: just update the label text, but a full
-      // rebuild keeps the controls code single-sourced.)
-    }
+    if (field === "asset") applyAssetInfoLines();
   } else {
     const n = Number(raw);
     s[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
@@ -670,8 +695,16 @@ function buildDrawdownConfig(s) {
   };
 }
 
+// Real μ used by the engine is derived from the profile's nominal
+// total return and the current CPI parameter (Fisher). Any profile
+// exposed to buildGlideSchedule needs `mu` on it — synthesise it here.
+function profileWithRealMu(p, cpi) {
+  return { ...p, mu: realMu(p, cpi) };
+}
+
 function runScenario(s, preGenZ = null, preGenU = null) {
   const p = PROFILES[s.asset];
+  const cpi = state.inflation;
   const horizon = state.drawdownMode
     ? Math.max(1, state.scenarios.A.endAge - state.scenarios.A.currentAge)
     : s.horizonYears;
@@ -684,8 +717,8 @@ function runScenario(s, preGenZ = null, preGenU = null) {
         ? state.scenarios.A.currentAge
         : (parseAge(s.age) ?? s.glide.glideStartAge);
       glideSchedule = buildGlideSchedule({
-        startProfile: p,
-        endProfile: endP,
+        startProfile: profileWithRealMu(p, cpi),
+        endProfile: profileWithRealMu(endP, cpi),
         currentAge,
         glideStartAge: s.glide.glideStartAge,
         glideEndAge: s.glide.glideEndAge,
@@ -698,7 +731,7 @@ function runScenario(s, preGenZ = null, preGenU = null) {
     horizonYears: horizon,
     startingBalance: s.startingBalance,
     monthlyContribution: s.monthlyContribution,
-    mu: p.mu,
+    mu: realMu(p, cpi),
     sigma_normal: p.sigma_normal,
     sigma_stress: p.sigma_stress,
     p_stay_normal: p.p_stay_normal,
@@ -823,7 +856,7 @@ function updateSingleOutput(s, dsim) {
     q("range").textContent = `${fmtMoney(dsim.p05[last])} – ${fmtMoney(dsim.p95[last])}`;
   } else {
     q("contrib").textContent = fmtMoney(totalContribFor(s, s.horizonYears, factors));
-    q("steadyLabel").textContent = `Steady return @ ${(PROFILES[s.asset].mu * 100).toFixed(1)}%`;
+    q("steadyLabel").textContent = `Steady return @ ${(realMu(PROFILES[s.asset], state.inflation) * 100).toFixed(1)}% real`;
     q("steady").textContent = fmtMoney(dsim.deterministic[last]);
     q("median").textContent = fmtMoney(dsim.p50[last]);
     q("range").textContent = `${fmtMoney(dsim.p05[last])} – ${fmtMoney(dsim.p95[last])}`;
@@ -1277,7 +1310,10 @@ els.toggle.addEventListener("change", () => {
     // different asset class so the two fans are obviously distinct on
     // first render. Untrained users otherwise read two near-identical
     // fans as a bug.
-    const defaultBAsset = state.scenarios.A.asset === "Balanced" ? "Growth" : "Balanced";
+    // Toggle B to a neighbouring risk rung so the two fans are
+    // obviously distinct on first paint. Balanced picks Moderate Growth
+    // by default; any other selection defaults to Balanced.
+    const defaultBAsset = state.scenarios.A.asset === "Balanced" ? "Moderate Growth" : "Balanced";
     state.scenarios.B = {
       ...state.scenarios.A,
       asset: defaultBAsset,
@@ -1318,21 +1354,19 @@ els.displayOptions.forEach((btn) => {
   });
 });
 
-// Inflation rate (in the Parameters modal). Updates the nominal
-// conversion immediately. No effect in real mode.
+// CPI (Parameters modal). Now dual-purpose: (1) nominal display factor
+// (unchanged), (2) drives the Fisher-derived real μ used by the engine.
+// Changing it must re-simulate everywhere, since every profile's real
+// return shifts with it. run() feeds the tornado / sequence-risk /
+// first-decade / strategy-compare panels via their refresh hooks.
 els.inflationInput.addEventListener("input", () => {
   const n = Number(els.inflationInput.value);
   if (!Number.isFinite(n) || n < 0) return;
   state.inflation = n / 100;
-  if (state.units === "nominal") {
-    redisplay();
-    redisplayTornado();
-    redisplaySequenceRisk();
-    redisplayFirstDecade();
-    redisplayStrategyCompare();
-  } else {
-    applyUnitsLabel();
-  }
+  applyUnitsLabel();
+  applyAssetInfoLines();
+  populateParamsTable();
+  run();
 });
 
 // Target ruin probability — controls when the tornado switches into
@@ -1358,12 +1392,16 @@ function redisplay() {
 let bellCurvesRendered = false;
 
 function populateParamsTable() {
+  const cpi = state.inflation;
   els.paramAssetTable.innerHTML = Object.entries(PROFILES).map(
-    ([name, { mu, sigma }]) => `
+    ([name, p]) => `
       <tr>
         <td>${name}</td>
-        <td>${(mu * 100).toFixed(1)}%</td>
-        <td>${(sigma * 100).toFixed(0)}%</td>
+        <td>${(p.incomeReturn * 100).toFixed(2)}%</td>
+        <td>${(p.growthReturn * 100).toFixed(2)}%</td>
+        <td>${(p.totalNominal * 100).toFixed(2)}%</td>
+        <td>${(realMu(p, cpi) * 100).toFixed(2)}%</td>
+        <td>${(p.sigma * 100).toFixed(1)}%</td>
       </tr>
     `
   ).join("");
