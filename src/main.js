@@ -1389,8 +1389,6 @@ function redisplay() {
 
 // --- Parameters modal -----------------------------------------------------
 
-let bellCurvesRendered = false;
-
 function populateParamsTable() {
   const cpi = state.inflation;
   els.paramAssetTable.innerHTML = Object.entries(PROFILES).map(
@@ -1409,10 +1407,9 @@ function populateParamsTable() {
 
 function openModal(scrollToId = null) {
   els.paramsModal.showModal();
-  if (!bellCurvesRendered) {
-    renderBellCurves("bellCurves", PROFILES);
-    bellCurvesRendered = true;
-  }
+  // Re-render on every open: real μ depends on the current CPI, and
+  // rendering after showModal() lets Plotly measure real dimensions.
+  renderBellCurves("bellCurves", PROFILES, state.inflation);
   if (scrollToId) {
     const target = els.paramsModal.querySelector(`#${scrollToId}`);
     if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });

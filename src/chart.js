@@ -352,39 +352,84 @@ export function renderProbChart(containerId, xYears, probAGreater, { horizonYear
 // Static bell curves overlay for the Parameters modal. One Gaussian
 // per profile, centred at μ, width proportional to σ, peak height
 // normalised to 1 so shapes are directly comparable.
-export function renderBellCurves(containerId, profiles) {
+// Error function approximation (Abramowitz & Stegun 7.1.26), good to
+// ~1.5e-7 — plenty for a hover tooltip's CDF percentage.
+function erf(x) {
+  const sign = x < 0 ? -1 : 1;
+  const ax = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * ax);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-ax * ax);
+  return sign * y;
+}
+
+// P(annual return ≤ x) under N(mu, sigma²).
+function normalCdf(x, mu, sigma) {
+  return 0.5 * (1 + erf((x - mu) / (sigma * Math.SQRT2)));
+}
+
+// Interactive bell curves for the Parameters modal. One normalised
+// Gaussian per profile, centred at its REAL expected return (Fisher-
+// derived from the profile's nominal total and the current CPI).
+//
+// Interactions:
+//  - Click a curve (or its legend entry) to isolate it — every other
+//    profile fades to grey. Click again (or the same legend entry) to
+//    restore all.
+//  - Hover any point on a curve for that profile's stats at that
+//    return level: μ, σ, and the chance of a single year landing at
+//    or below the hovered return.
+export function renderBellCurves(containerId, profiles, cpi = 0.025) {
+  const entries = Object.entries(profiles).map(([name, p]) => ({
+    name,
+    mu: (1 + p.totalNominal) / (1 + cpi) - 1,
+    sigma: p.sigma,
+  }));
+
   let xMin = 0, xMax = 0;
-  for (const { mu, sigma } of Object.values(profiles)) {
-    xMin = Math.min(xMin, (mu - 3 * sigma) * 100);
-    xMax = Math.max(xMax, (mu + 3 * sigma) * 100);
+  for (const e of entries) {
+    xMin = Math.min(xMin, (e.mu - 3 * e.sigma) * 100);
+    xMax = Math.max(xMax, (e.mu + 3 * e.sigma) * 100);
   }
   const step = (xMax - xMin) / 240;
   const xs = [];
   for (let x = xMin; x <= xMax; x += step) xs.push(x);
 
-  const palette = ["#6b8e23", "#3a86c9", "#5e60ce", "#1c5ab4", "#dc5a28", "#b5179e", "#9a031e"];
+  const palette = [
+    "#6b8e23", "#3a86c9", "#5e60ce", "#1c5ab4", "#2e8a8a",
+    "#dc5a28", "#d97b2f", "#b5179e", "#9a031e", "#5b6470",
+  ];
 
-  const traces = Object.entries(profiles).map(([name, { mu, sigma }], i) => {
-    const muPct = mu * 100;
-    const sigmaPct = sigma * 100;
+  const traces = entries.map((e, i) => {
+    const muPct = e.mu * 100;
+    const sigmaPct = e.sigma * 100;
     const ys = xs.map((x) => Math.exp(-Math.pow(x - muPct, 2) / (2 * sigmaPct * sigmaPct)));
+    // Chance of a single year at or below each x, as a percentage.
+    const cdf = xs.map((x) => normalCdf(x, muPct, sigmaPct) * 100);
     return {
-      x: xs, y: ys,
+      x: xs, y: ys, customdata: cdf,
       mode: "lines", type: "scatter",
-      name,
+      name: e.name,
       line: { width: 1.5, color: palette[i % palette.length] },
-      hovertemplate: `${name} · μ=${(mu * 100).toFixed(1)}%, σ=${(sigma * 100).toFixed(0)}%<extra></extra>`,
+      hovertemplate:
+        `<b>${e.name}</b><br>` +
+        `μ ${muPct.toFixed(2)}% real · σ ${sigmaPct.toFixed(1)}%<br>` +
+        `Annual return %{x:.1f}%<br>` +
+        `Chance of a year at or below this: %{customdata:.1f}%` +
+        `<extra></extra>`,
     };
   });
 
   const layout = {
     margin: { l: 10, r: 10, t: 10, b: 50 },
-    height: 220,
+    height: 240,
     paper_bgcolor: "transparent",
     plot_bgcolor: "transparent",
     showlegend: true,
-    legend: { orientation: "h", x: 0.5, xanchor: "center", y: -0.12, font: { size: 11 } },
+    legend: { orientation: "h", x: 0.5, xanchor: "center", y: -0.14, font: { size: 10.5 } },
+    hovermode: "closest",
+    hoverlabel: HOVER_LABEL,
     xaxis: {
+      title: { text: "Annual real return", standoff: 4, font: { size: 11 } },
       ticksuffix: "%",
       zeroline: true,
       zerolinecolor: "rgba(0,0,0,0.25)",
@@ -402,4 +447,42 @@ export function renderBellCurves(containerId, profiles) {
   };
 
   Plotly.newPlot(containerId, traces, layout, { displayModeBar: false, responsive: true });
+
+  // Click-to-isolate. Track selection on the plot div so re-renders
+  // (modal reopen, CPI change) start fresh with no stale handlers —
+  // Plotly.newPlot purges previous plot state including listeners.
+  const gd = typeof containerId === "string" ? document.getElementById(containerId) : containerId;
+  if (!gd || typeof gd.on !== "function") return;
+  let selected = null;
+  const n = traces.length;
+
+  function applySelection() {
+    const opac = [], widths = [];
+    for (let k = 0; k < n; k++) {
+      const active = selected === null || selected === k;
+      opac.push(active ? 1 : 0.15);
+      widths.push(selected === k ? 3 : 1.5);
+    }
+    Plotly.restyle(gd, { opacity: opac, "line.width": widths });
+  }
+
+  function toggle(i) {
+    selected = (selected === i) ? null : i;
+    applySelection();
+  }
+
+  gd.on("plotly_click", (ev) => {
+    if (ev.points && ev.points.length) toggle(ev.points[0].curveNumber);
+  });
+  // Legend click isolates instead of hiding; return false suppresses
+  // Plotly's default visibility toggle.
+  gd.on("plotly_legendclick", (ev) => {
+    toggle(ev.curveNumber);
+    return false;
+  });
+  gd.on("plotly_doubleclick", () => {
+    selected = null;
+    applySelection();
+    return false;
+  });
 }

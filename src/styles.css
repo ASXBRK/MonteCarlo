@@ -1217,8 +1217,15 @@ dialog.modal::backdrop {
 
 .modal-chart {
   width: 100%;
-  height: 220px;
-  margin: 6px 0 12px;
+  height: 240px;
+  margin: 6px 0 4px;
+}
+
+.modal-chart-hint {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  font-style: italic;
+  margin: 0 0 12px;
 }
 
 /* --- responsive --- */
