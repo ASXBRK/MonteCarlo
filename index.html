@@ -83,12 +83,21 @@
           <h3>Asset class assumptions</h3>
           <table class="param-table">
             <thead>
-              <tr><th>Profile</th><th>μ (annual)</th><th>σ (annual)</th></tr>
+              <tr>
+                <th>Profile</th>
+                <th>Income</th>
+                <th>Growth</th>
+                <th>Total (nominal)</th>
+                <th>Real @ current CPI</th>
+                <th>σ (real, annual)</th>
+              </tr>
             </thead>
             <tbody id="paramAssetTable"></tbody>
           </table>
           <div id="bellCurves" class="modal-chart"></div>
-          <p>All figures are real (net of inflation), pre-fee, pre-tax. Source: placeholder values consistent with major forward-looking capital market assumption frameworks (Mercer LTCMA, JP Morgan LTCMA typical ranges); they will be re-sourced against a specific CMA reference in a later update. Not specific to any product or fund.</p>
+          <p>Total returns (nominal) are the firm's proposed assumption set; income and growth splits are shown for reference — the simulation engine consumes total return only and does not model distributions or tax. Real returns are derived at simulation time from total nominal and the CPI parameter above via the Fisher relation, so changing CPI flows through the fan chart, tornado, drawdown, and compare mode without a reload.</p>
+          <p>σ values and regime-switching parameters are model calibrations, not firm-published figures. Defensive-end σs (Cash 1.5%, Defensive 3.0%) are intentionally higher than nominal-terms intuition would suggest: real cash and short-duration variance are dominated by inflation variance rather than nominal price fluctuations.</p>
+          <p>Residential Property's σ is set higher than typical published direct-property volatility, which is understated by appraisal-based valuation smoothing; the model σ is adjusted upward to reflect underlying transaction-price variance.</p>
         </section>
 
         <section>
@@ -231,7 +240,7 @@
             </tbody>
           </table>
           <p>The counter-intuitive result is the second row. Bond and bill variance ratios <em>rise</em> with horizon because their real returns are driven by inflation persistence — multi-year inflation surprises compound rather than wash out. Time diversifies equities but anti-diversifies bonds and cash in real terms.</p>
-          <p><strong>This tool does not reproduce that.</strong> Its engine assumes i.i.d. returns within each regime state, with no mean reversion and no inflation persistence. The implied variance ratio is approximately 1 for every asset at every horizon, including Cash and Conservative. The historical numbers above come from outside the tool's model; treat them as a known limitation of the projection — long-horizon fan widths for bond-heavy and cash-heavy profiles are likely overstated, and for equity profiles likely understated relative to a model that captured time diversification properly. The tool's strength is showing dispersion at a fixed horizon; the variance-ratio story across horizons is outside its scope.</p>
+          <p><strong>This tool does not reproduce that.</strong> Its engine assumes i.i.d. returns within each regime state, with no mean reversion and no inflation persistence. The implied variance ratio is approximately 1 for every asset at every horizon, including the Cash and Defensive profiles. The historical numbers above come from outside the tool's model; treat them as a known limitation of the projection — long-horizon fan widths for bond-heavy and cash-heavy profiles are likely overstated, and for equity profiles likely understated relative to a model that captured time diversification properly. The tool's strength is showing dispersion at a fixed horizon; the variance-ratio story across horizons is outside its scope.</p>
         </section>
 
         <section>
