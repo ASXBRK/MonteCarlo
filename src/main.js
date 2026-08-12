@@ -56,8 +56,6 @@ const els = {
   displayOptions: document.querySelectorAll(".display-option"),
   viewSwitcher: $("viewSwitcher"),
   exportBtn: $("exportBtn"),
-  pretaxBanner: $("pretaxBanner"),
-  pretaxDismiss: $("pretaxDismiss"),
   viewProjection: $("viewProjection"),
   viewLedger: $("viewLedger"),
   showAssetsToggle: $("showAssetsToggle"),
@@ -190,6 +188,7 @@ function mountWorkspace(clientId, scenarioId) {
   applyUnitsLabel();
   populateParamsTable();
   els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
+  syncBracketModeInputs();
 }
 
 // Empty every dynamic mount so the list pages do not sit on top of a
@@ -1696,6 +1695,7 @@ function buildLedgerColumns() {
     { group: "Year", label: "Age", text: (r) => (r.partnerAge != null ? `${r.clientAge} / ${r.partnerAge}` : String(r.clientAge)) },
     { group: "Cashflow", label: "Income", val: (r) => r.income },
     { group: "Cashflow", label: "Expenses", val: (r) => -r.expenses },
+    { group: "Cashflow", label: "Tax", val: (r) => -r.tax },
     { group: "Cashflow", label: "Surplus/(deficit)", val: (r) => r.surplusOrDeficit },
     { group: "Investment flows", label: "Contributions", val: (r) => r.contributions },
     { group: "Investment flows", label: "Withdrawals", val: (r) => -r.withdrawals },
@@ -1748,11 +1748,16 @@ function renderLedgerTable() {
     return `<tr>${cells}</tr>`;
   }).join("");
 
+  const accrued = projection.accruedCgtAtEnd * displayFactor(projection.schedule.months);
+  const foot = accrued > 0.005
+    ? `<div class="ledger-foot">CGT liability accrued at end of projection: ${fmtMoney(accrued)} (assessed on the final year's realised gains; payable after the projection ends).</div>`
+    : "";
   els.ledgerTable.innerHTML = `
     <table class="ledger">
       <thead><tr>${head1}</tr><tr>${head2}</tr></thead>
       <tbody>${body}</tbody>
     </table>
+    ${foot}
   `;
 }
 
@@ -1814,15 +1819,6 @@ els.showPerAssetCols.addEventListener("change", () => {
   renderLedgerTable();
 });
 
-// Pre-tax banner: dismissible per session.
-if (!sessionStorage.getItem("pretaxBannerDismissed")) {
-  els.pretaxBanner.hidden = false;
-}
-els.pretaxDismiss.addEventListener("click", () => {
-  try { sessionStorage.setItem("pretaxBannerDismissed", "1"); } catch { /* fine */ }
-  els.pretaxBanner.hidden = true;
-});
-
 // --- summary strip ------------------------------------------------------
 
 function renderSummaryStrip() {
@@ -1863,6 +1859,12 @@ function renderSummaryStrip() {
       <div class="stat stat-headline">
         <div class="stat-label">First shortfall</div>
         <div class="stat-value">Age ${shortfall.clientAge} (${shortfall.fyLabel})</div>
+      </div>
+    ` : ""}
+    ${projection.accruedCgtAtEnd > 0.005 ? `
+      <div class="stat">
+        <div class="stat-label">CGT accrued at end</div>
+        <div class="stat-value">${fmtMoney(projection.accruedCgtAtEnd * displayFactor(months))}</div>
       </div>
     ` : ""}
   `;
@@ -1926,6 +1928,21 @@ els.paramsBtn.addEventListener("click", () => openModal());
 els.paramsModal.querySelector(".modal-close").addEventListener("click", () => els.paramsModal.close());
 els.paramsModal.addEventListener("click", (e) => {
   if (e.target === els.paramsModal) els.paramsModal.close();
+});
+
+// Bracket-mode toggle (Parameters modal): indexed real-constant vs
+// frozen-nominal thresholds. Scenario-level assumption, like CPI.
+const bracketModeInputs = document.querySelectorAll('input[name="bracketMode"]');
+function syncBracketModeInputs() {
+  bracketModeInputs.forEach((r) => { r.checked = r.value === state.assumptions.bracketMode; });
+}
+bracketModeInputs.forEach((r) => {
+  r.addEventListener("change", () => {
+    if (!r.checked) return;
+    state.assumptions.bracketMode = r.value === "frozen" ? "frozen" : "indexed";
+    saveState();
+    refreshOutputs();
+  });
 });
 
 els.inflationInput.addEventListener("change", () => {

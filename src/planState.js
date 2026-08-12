@@ -176,7 +176,7 @@ export function defaultState(profiles = {}, now = new Date()) {
       fundingOrder: [asset.id],
     },
     display: { units: "real" },
-    assumptions: { cpi: 0.025 },
+    assumptions: { cpi: 0.025, bracketMode: "indexed" },
   };
 }
 
@@ -448,7 +448,10 @@ export function hydrate(json, profiles = {}) {
       },
       settings: normaliseSettings(raw.settings, assets),
       display: { units: raw.display?.units === "nominal" ? "nominal" : "real" },
-      assumptions: { cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025 },
+      assumptions: {
+        cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,
+        bracketMode: raw.assumptions?.bracketMode === "frozen" ? "frozen" : "indexed",
+      },
     };
     // Single households must not carry partner/joint owners.
     if (plan.household === "single") {

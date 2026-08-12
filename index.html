@@ -63,10 +63,6 @@
       <section id="summaryStrip" class="summary-strip" aria-live="polite"></section>
 
       <section class="chart-wrap output-shell" aria-label="Projection output">
-        <div id="pretaxBanner" class="pretax-banner" hidden>
-          <span>Pre-tax projection — income tax, CGT, franking and distribution treatment arrive with the tax engine (next phase).</span>
-          <button id="pretaxDismiss" class="pretax-dismiss" type="button" aria-label="Dismiss">×</button>
-        </div>
         <div class="output-head">
           <div class="seg-toggle" id="viewSwitcher" role="tablist" aria-label="Output view">
             <button class="seg-option active" type="button" data-view="projection" role="tab" aria-selected="true">Projection</button>
@@ -195,6 +191,20 @@
           <p>This approach is "forward-looking on what returns are on average, backward-looking on how returns evolve through time." Expected returns and long-run volatilities come from forward-looking capital market assumptions; the time structure (clustering, stress duration, stress amplification) is calibrated to historical market behaviour.</p>
         </section>
 
+        <section id="tax-assumptions">
+          <h3>Tax</h3>
+          <p>The projection models resident individual income tax on each person's attributed income: income rows they own, distribution income from assets they own (joint assets split 50/50), less each asset's ICR as a deduction. Marginal brackets, the Medicare levy with shading-in (single thresholds per person), and the low income tax offset are applied per person per financial year. Franked distribution income is grossed up and the franking credit applied as a refundable offset — a person's net tax can be negative (a refund, which increases household cashflow).</p>
+          <p>Income tax for a financial year is deducted from household cashflow within that year, spread evenly across the months in which the income arises — a PAYG-withholding approximation. Net refunds are credited in the final month of the year.</p>
+          <p>Capital gains tax uses one pooled cost base per asset (no parcels). Contributions, one-off inflows, invested surplus, and reinvested distributions add to the pool; any sale — an explicit withdrawal, an outbound one-off, or a deficit-funding draw — consumes a proportional slice, and the difference is a realised gain or loss. Sales before 1 July 2027 apply the 50% discount (holdings are assumed to satisfy the 12-month rule except amounts added in the same financial year, which are treated as coming proportionally from new money). At 1 July 2027 every asset's pool resets to market value under the enacted deemed-reacquisition transition — gains accrued before that date are not taxed at that point at the level this tool models. From that date the pool is CPI-indexed (constant in real terms) and tax on gains is the greater of the marginal calculation and the 30% minimum, with capital losses carried forward per person against future gains only. CGT on a year's gains is paid as a single household outflow in July of the following year; the final year's assessment cannot be paid inside the projection and is reported as an accrued liability.</p>
+          <p>Not modelled, by design: SAPTO, HELP repayments, the Medicare levy surcharge, Division 293, family Medicare thresholds, and trusts, companies, or superannuation. Assets marked as not CGT assets never generate capital gains tax.</p>
+          <div class="param-inline-field">
+            <span>Tax bracket indexation</span>
+            <label><input type="radio" name="bracketMode" value="indexed" checked /> Indexed (real-constant)</label>
+            <label><input type="radio" name="bracketMode" value="frozen" /> No indexation (bracket creep)</label>
+          </div>
+          <p><em>Indexed</em> holds brackets, Medicare thresholds, and LITO constant in real terms from FY2027–28 onward — the model of CPI-indexed tax settings, exact in today's dollars. <em>No indexation</em> freezes the FY2027–28 nominal settings, so in real terms every threshold shrinks by CPI each year and tax quietly rises.</p>
+        </section>
+
         <section>
           <h3>Deterministic projection</h3>
           <p>The projection steps month by month. Each month, in order: assets grow at their expected return; contributions, withdrawals, and one-off amounts are applied to their target assets; household income and expenses are netted; a surplus is spent or invested per your setting; a deficit is drawn from your assets in the funding order, draining each to zero before the next.</p>
@@ -229,7 +239,7 @@
             <li>Occasional jumps and regime shifts</li>
           </ul>
           <p>Fan widths shown here are likely understated at the tails relative to historical experience. Tools incorporating jump-diffusion, GARCH, or empirical bootstrapping will show wider extremes at the cost of model complexity.</p>
-          <p>No fees beyond the explicit per-portfolio fee inputs, and no taxes. Returns are real (net of inflation) and pre-cost, so contribution and withdrawal amounts you enter are in today's purchasing power.</p>
+          <p>No fees beyond the explicit per-asset ICR inputs. Personal income tax, franking, and CGT are modelled per the Tax section above; the Monte Carlo overlay remains pre-tax until it is rewired. Contribution and withdrawal amounts you enter are in today's purchasing power.</p>
         </section>
 
         <section>
@@ -251,7 +261,7 @@
         <section>
           <h3>Scope</h3>
           <p>This tool projects investment assets — balances, contributions, withdrawals, and costs — under the firm's capital market assumptions, in real terms, with an optional Monte Carlo view of outcome dispersion.</p>
-          <p>It is analytical, not prescriptive: it presents projections and tradeoffs without recommending one option over another. It does not model tax, age pension entitlement, non-portfolio assets, or product selection.</p>
+          <p>It is analytical, not prescriptive: it presents projections and tradeoffs without recommending one option over another. It models personal income tax, franking, and CGT (see the Tax section); it does not model age pension entitlement, non-portfolio assets, or product selection.</p>
         </section>
       </div>
     </dialog>

@@ -1066,34 +1066,6 @@ html, body {
 
 .output-shell { padding: 14px 16px 10px; }
 
-.pretax-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  background: #fdf6e4;
-  border: 1px solid #e8d9a8;
-  border-radius: 8px;
-  color: #6b4f00;
-  font-size: 12.5px;
-  padding: 8px 12px;
-  margin-bottom: 12px;
-}
-
-.pretax-dismiss {
-  font: inherit;
-  font-size: 16px;
-  line-height: 1;
-  color: #6b4f00;
-  background: transparent;
-  border: none;
-  padding: 2px 6px;
-  cursor: pointer;
-  border-radius: 6px;
-  flex: 0 0 auto;
-}
-.pretax-dismiss:hover { background: rgba(107, 79, 0, 0.1); }
-
 .output-head {
   display: flex;
   align-items: center;
@@ -1181,6 +1153,14 @@ html, body {
 
 .ledger tbody tr:nth-child(even) { background: #fafbfc; }
 .ledger tbody tr:last-child td { border-bottom: none; }
+
+.ledger-foot {
+  font-size: 12px;
+  color: var(--ink-soft);
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  background: #fafbfc;
+}
 
 /* --- Parameters modal inline field --- */
 
