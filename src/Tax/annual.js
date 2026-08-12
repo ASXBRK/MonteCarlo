@@ -26,7 +26,7 @@
 //     thresholds/k equals marginalTax(x·k)/k with nominal thresholds,
 //     where k = (1+cpi)^(fyStartYear − 2027).
 
-import { LEG, marginalTax, medicareLevy } from "./engine.js";
+import { LEG, marginalTax, marginalTaxNonResident, medicareLevy } from "./engine.js";
 
 export const FRANKING_RATE = 30 / 70; // credit per $ of franked distribution
 
@@ -71,6 +71,14 @@ export function bracketSettings(fyStartYear, bracketMode, cpi) {
 //                    full real value, pre-reform gains already
 //                    discounted; negative = a current-year net loss
 //   capitalLossCarryFwd  prior-year losses carried in
+//   taxProfile       { residency: "resident"|"nonResident",
+//                      medicareExempt } (C3). Non-residents: no
+//                    tax-free threshold (non-resident brackets), no
+//                    Medicare, no LITO. Franking credits stay
+//                    refundable and CGT mechanics are NOT
+//                    differentiated for non-residents — disclosed
+//                    simplifications. Medicare-exempt residents skip
+//                    the levy only.
 //
 // Returns { incomeTax, medicare, lito, frankingCredits, netIncomeTax,
 //           cgtTax, taxableIncome, taxableGain, lossCarryFwd }.
@@ -87,11 +95,14 @@ export function assessPerson({
   distributions = { franked: 0, unfranked: 0 },
   netCapitalGain = 0,
   capitalLossCarryFwd = 0,
+  taxProfile = null,
 }) {
   const { key, k } = bracketSettings(fyStartYear, bracketMode, cpi);
-  const tax = (x) => marginalTax(x * k, key) / k;
-  const levy = (x) => medicareLevy(x * k) / k;
-  const lito = (x) => litoAmount(x * k) / k;
+  const nonResident = taxProfile?.residency === "nonResident";
+  const noLevy = nonResident || taxProfile?.medicareExempt === true;
+  const tax = (x) => (nonResident ? marginalTaxNonResident(x * k, key) : marginalTax(x * k, key)) / k;
+  const levy = (x) => (noLevy ? 0 : medicareLevy(x * k) / k);
+  const lito = (x) => (nonResident ? 0 : litoAmount(x * k) / k);
 
   const franked = Math.max(0, distributions.franked || 0);
   const unfranked = Math.max(0, distributions.unfranked || 0);

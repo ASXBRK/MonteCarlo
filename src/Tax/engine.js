@@ -62,6 +62,27 @@ export const LEG = Object.freeze({
   },
   defaultBracketYear: '2027-28',
 
+  // Non-resident individuals: no tax-free threshold, no Medicare, no
+  // LITO. Current legislated rates (unchanged by the resident
+  // bottom-bracket cuts across these years).
+  bracketsNonResident: {
+    '2025-26': [
+      [0, 135000, 0.30],
+      [135000, 190000, 0.37],
+      [190000, Infinity, 0.45],
+    ],
+    '2026-27': [
+      [0, 135000, 0.30],
+      [135000, 190000, 0.37],
+      [190000, Infinity, 0.45],
+    ],
+    '2027-28': [
+      [0, 135000, 0.30],
+      [135000, 190000, 0.37],
+      [190000, Infinity, 0.45],
+    ],
+  },
+
   buckets: {
     A: 'Asset purchased AND sold before 1 July 2027 — old rules only',
     B: 'Asset purchased before, sold after 1 July 2027 — split treatment',
@@ -100,14 +121,24 @@ export function fyForDate(d) {
   return `${start}-${String(start + 1).slice(-2)}`;
 }
 
-export function marginalTax(income, fy) {
-  const brackets = LEG.brackets[fy] || LEG.brackets[LEG.defaultBracketYear];
+export function taxFromBrackets(income, brackets) {
   let tax = 0;
   for (const [floor, ceiling, rate] of brackets) {
     if (income <= floor) break;
     tax += (Math.min(income, ceiling) - floor) * rate;
   }
   return tax;
+}
+
+export function marginalTax(income, fy) {
+  return taxFromBrackets(income, LEG.brackets[fy] || LEG.brackets[LEG.defaultBracketYear]);
+}
+
+export function marginalTaxNonResident(income, fy) {
+  return taxFromBrackets(
+    income,
+    LEG.bracketsNonResident[fy] || LEG.bracketsNonResident[LEG.defaultBracketYear]
+  );
 }
 
 function marginalOnGain(otherIncome, gain, fy) {

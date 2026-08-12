@@ -70,6 +70,57 @@ describe("assessPerson — known values", () => {
   });
 });
 
+describe("assessPerson — tax profile (C3)", () => {
+  it("non-resident: non-resident brackets, no Medicare, no LITO", () => {
+    // $100k FY2027-28 non-resident: 100,000 × 30% = $30,000 flat —
+    // no tax-free threshold, no levy, no offset. Resident: $22,252.
+    const nr = assessPerson({
+      fyStartYear: 2027, ordinaryIncome: 100000,
+      taxProfile: { residency: "nonResident", medicareExempt: false },
+    });
+    expect(nr.incomeTax).toBeCloseTo(30000, 6);
+    expect(nr.medicare).toBe(0);
+    expect(nr.lito).toBe(0);
+    expect(nr.netIncomeTax).toBeCloseTo(30000, 6);
+    const res = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    expect(res.netIncomeTax).toBeCloseTo(22252, 6);
+  });
+
+  it("non-resident LITO stays zero at low income; franking stays refundable", () => {
+    const nr = assessPerson({
+      fyStartYear: 2027, distributions: { franked: 7000, unfranked: 0 },
+      taxProfile: { residency: "nonResident", medicareExempt: false },
+    });
+    // Taxable 10,000 → 3,000 tax at 30%; credits 3,000 refundable → net 0.
+    expect(nr.incomeTax).toBeCloseTo(3000, 6);
+    expect(nr.lito).toBe(0);
+    expect(nr.netIncomeTax).toBeCloseTo(0, 6);
+  });
+
+  it("Medicare exemption zeroes the levy for the exempt person only", () => {
+    const exempt = assessPerson({
+      fyStartYear: 2027, ordinaryIncome: 100000,
+      taxProfile: { residency: "resident", medicareExempt: true },
+    });
+    const applies = assessPerson({
+      fyStartYear: 2027, ordinaryIncome: 100000,
+      taxProfile: { residency: "resident", medicareExempt: false },
+    });
+    expect(exempt.medicare).toBe(0);
+    expect(exempt.netIncomeTax).toBeCloseTo(20252, 6);
+    expect(applies.medicare).toBeCloseTo(2000, 6);
+  });
+
+  it("non-resident brackets follow the bracket-mode scaling", () => {
+    const at = (bracketMode, fy) => assessPerson({
+      fyStartYear: fy, bracketMode, cpi: 0.025, ordinaryIncome: 100000,
+      taxProfile: { residency: "nonResident", medicareExempt: false },
+    }).netIncomeTax;
+    expect(at("frozen", 2027)).toBeCloseTo(at("indexed", 2027), 8);
+    expect(at("frozen", 2046)).toBeGreaterThan(at("indexed", 2046) + 500); // creeps into 37%
+  });
+});
+
 describe("assessPerson — bracket modes over time", () => {
   const at = (fyStartYear, bracketMode) =>
     assessPerson({ fyStartYear, bracketMode, cpi: 0.025, ordinaryIncome: 100000 }).netIncomeTax;

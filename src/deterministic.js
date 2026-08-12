@@ -414,6 +414,7 @@ export function projectPlan(state, profiles = PROFILES) {
         distributions: { franked: measured[p].franked, unfranked: measured[p].unfranked },
         netCapitalGain: 0,
         capitalLossCarryFwd: lossCarryFwd[p],
+        taxProfile: state.plan[p]?.taxProfile ?? null,
       });
       assessed[p] = a;
       spreadTax(a.netIncomeTax, measured[p].incomeMonths, yearEnd(y) - 1);
@@ -443,6 +444,7 @@ export function projectPlan(state, profiles = PROFILES) {
         distributions: { franked: measured[p].franked, unfranked: measured[p].unfranked },
         netCapitalGain: real[p].netCapitalGain,
         capitalLossCarryFwd: lossCarryFwd[p],
+        taxProfile: state.plan[p]?.taxProfile ?? null,
       });
       lossCarryFwd[p] = a2.lossCarryFwd;
       newPending[p] = a2.cgtTax;

@@ -610,6 +610,49 @@ function renderPlanBar() {
       </div>
     </div>
     <div class="plan-derived">${planSummaryText(p)}</div>
+    ${taxProfileHTML(p)}
+  `;
+}
+
+// Per-person tax profile (C3): residency + Medicare feed the tax
+// engine; the Centrelink flag is captured but inert.
+function taxProfileHTML(p) {
+  const couple = p.household === "couple";
+  const residency = (prefix, tp) => `
+    <select data-plan-field="${prefix}Residency" aria-label="Tax residency">
+      <option value="resident"${tp.residency !== "nonResident" ? " selected" : ""}>Australian resident</option>
+      <option value="nonResident"${tp.residency === "nonResident" ? " selected" : ""}>Non-resident</option>
+    </select>`;
+  const medicare = (prefix, tp) => `
+    <select data-plan-field="${prefix}Medicare" aria-label="Medicare levy">
+      <option value="applies"${!tp.medicareExempt ? " selected" : ""}>Applies</option>
+      <option value="exempt"${tp.medicareExempt ? " selected" : ""}>Exempt</option>
+    </select>`;
+  const centrelink = (prefix, tp) => `
+    <label class="ptg-check">
+      <input type="checkbox" data-plan-field="${prefix}Centrelink"${tp.centrelinkEligible ? " checked" : ""} />
+      <span>Yes</span>
+    </label>`;
+  const both = (fieldHTML) =>
+    fieldHTML("clientTax", p.client.taxProfile) +
+    (couple ? fieldHTML("partnerTax", p.partner.taxProfile) : "");
+  return `
+    <div class="plan-tax">
+      <div class="cf-section-title">Tax profile</div>
+      <div class="plan-tax-grid${couple ? " ptg-couple" : ""}">
+        <span></span>
+        <span class="ptg-head">Client</span>
+        ${couple ? `<span class="ptg-head">Partner</span>` : ""}
+        <label>Tax residency</label>
+        ${both(residency)}
+        <label>Medicare levy</label>
+        ${both(medicare)}
+        <label>Eligible for Centrelink benefits
+          <span class="coming-soon-tag" title="No engine effect yet">Used when Centrelink modelling arrives</span>
+        </label>
+        ${both(centrelink)}
+      </div>
+    </div>
   `;
 }
 
@@ -617,11 +660,25 @@ els.planBar.addEventListener("change", (e) => {
   const field = e.target.dataset.planField;
   if (!field) return;
   const p = state.plan;
+  const tpFrom = (person, prefix) => {
+    const cur = person?.taxProfile ?? {};
+    return {
+      residency: field === `${prefix}Residency` ? e.target.value : cur.residency,
+      medicareExempt: field === `${prefix}Medicare` ? e.target.value === "exempt" : cur.medicareExempt,
+      centrelinkEligible: field === `${prefix}Centrelink` ? e.target.checked : cur.centrelinkEligible,
+    };
+  };
   const next = {
     household: p.household,
-    client: { currentAge: field === "clientAge" ? e.target.value : p.client.currentAge },
+    client: {
+      currentAge: field === "clientAge" ? e.target.value : p.client.currentAge,
+      taxProfile: tpFrom(p.client, "clientTax"),
+    },
     partner: p.partner
-      ? { currentAge: field === "partnerAge" ? e.target.value : p.partner.currentAge }
+      ? {
+          currentAge: field === "partnerAge" ? e.target.value : p.partner.currentAge,
+          taxProfile: tpFrom(p.partner, "partnerTax"),
+        }
       : null,
     endAge: field === "endAge" ? e.target.value : p.endAge,
     start: {

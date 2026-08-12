@@ -8,7 +8,7 @@ import {
   partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
   removeAsset, ownerWindow, fyLabelForAge, horizonYears,
   serialize, hydrate, summarise, planSummaryText, annualisedAmount,
-  tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
+  tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear, clampTaxProfile,
 } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 
@@ -199,7 +199,7 @@ describe("migration", () => {
     };
     const s = hydrate(JSON.stringify(v1), PROFILES);
     expect(s).not.toBeNull();
-    expect(s.schemaVersion).toBe(3);
+    expect(s.schemaVersion).toBe(SCHEMA_VERSION);
     expect(s.plan.household).toBe("single");
     expect(s.plan.client.currentAge).toBe(45);
     expect(s.plan.start).toEqual({ year: 2025, month: 7 });
@@ -378,5 +378,48 @@ describe("one-off grid helpers (C2)", () => {
     expect(canEditOneOffYear({ start: { year: 2026, month: 7 } }, 0)).toBe(true);
     expect(canEditOneOffYear({ start: { year: 2026, month: 8 } }, 0)).toBe(false);
     expect(canEditOneOffYear({ start: { year: 2026, month: 8 } }, 1)).toBe(true);
+  });
+});
+
+describe("schema v4 migration (C3)", () => {
+  it("v3 blobs gain default tax profiles for both persons", () => {
+    const v3 = {
+      schemaVersion: 3,
+      plan: {
+        household: "couple",
+        client: { currentAge: 45 },
+        partner: { currentAge: 43 },
+        endAge: 90,
+        start: { year: 2026, month: 7 },
+      },
+      assets: [{ id: "a1", name: "A", include: true, owner: "client", distributions: "reinvest",
+                 balance: 1000, allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0,
+                 cgtAsset: false, costBase: null }],
+      cashflows: { income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [] },
+      settings: { surplus: { mode: "spend", assetId: null }, fundingOrder: ["a1"] },
+      display: { units: "real" },
+      assumptions: { cpi: 0.025 },
+    };
+    const s = hydrate(JSON.stringify(v3), PROFILES);
+    expect(s).not.toBeNull();
+    expect(s.schemaVersion).toBe(4);
+    const def = { residency: "resident", medicareExempt: false, centrelinkEligible: false };
+    expect(s.plan.client.taxProfile).toEqual(def);
+    expect(s.plan.partner.taxProfile).toEqual(def);
+  });
+
+  it("explicit v4 tax profiles survive a serialize/hydrate round trip", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.plan.client.taxProfile = { residency: "nonResident", medicareExempt: true, centrelinkEligible: true };
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.plan.client.taxProfile)
+      .toEqual({ residency: "nonResident", medicareExempt: true, centrelinkEligible: true });
+  });
+
+  it("clampTaxProfile defends junk", () => {
+    expect(clampTaxProfile(null))
+      .toEqual({ residency: "resident", medicareExempt: false, centrelinkEligible: false });
+    expect(clampTaxProfile({ residency: "martian", medicareExempt: "yes", centrelinkEligible: 1 }))
+      .toEqual({ residency: "resident", medicareExempt: false, centrelinkEligible: false });
   });
 });

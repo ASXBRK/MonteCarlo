@@ -1,4 +1,4 @@
-// Plan/asset state model — schemaVersion 3.
+// Plan/asset state model — schemaVersion 4.
 //
 // Pure functions only — no DOM, no storage. main.js owns persistence
 // (localStorage) and rendering; this module owns shape, defaults,
@@ -17,7 +17,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 // --- id generation ---------------------------------------------------
 
@@ -29,10 +29,24 @@ export function uid(prefix = "id") {
 
 // --- defaults ---------------------------------------------------------
 
+// Per-person tax profile (C3). centrelinkEligible is captured but
+// inert until Centrelink modelling arrives.
+export function defaultTaxProfile() {
+  return { residency: "resident", medicareExempt: false, centrelinkEligible: false };
+}
+
+export function clampTaxProfile(raw) {
+  return {
+    residency: raw?.residency === "nonResident" ? "nonResident" : "resident",
+    medicareExempt: raw?.medicareExempt === true,
+    centrelinkEligible: raw?.centrelinkEligible === true,
+  };
+}
+
 export function defaultPlan(now = new Date()) {
   return {
     household: "single",
-    client: { currentAge: 40 },
+    client: { currentAge: 40, taxProfile: defaultTaxProfile() },
     partner: null,
     endAge: 90,
     start: { year: now.getFullYear(), month: now.getMonth() + 1 },
@@ -263,11 +277,20 @@ export function clampPlan(plan) {
   if (endAge <= clientAge) endAge = clientAge + 1;
   const household = plan.household === "couple" ? "couple" : "single";
   const partner = household === "couple"
-    ? { currentAge: clampInt(plan.partner?.currentAge ?? clientAge, 18, 100) }
+    ? {
+        currentAge: clampInt(plan.partner?.currentAge ?? clientAge, 18, 100),
+        taxProfile: clampTaxProfile(plan.partner?.taxProfile),
+      }
     : null;
   const year = clampInt(plan.start?.year, 1900, 2200);
   const month = clampInt(plan.start?.month, 1, 12);
-  return { household, client: { currentAge: clientAge }, partner, endAge, start: { year, month } };
+  return {
+    household,
+    client: { currentAge: clientAge, taxProfile: clampTaxProfile(plan.client?.taxProfile) },
+    partner,
+    endAge,
+    start: { year, month },
+  };
 }
 
 // Clamp a cashflow with client-anchored ages into the plan window.
@@ -463,15 +486,23 @@ function migrateV2toV3(raw) {
   };
 }
 
+// v3 (Phase A.2) → v4 (C3): per-person tax profiles. clampPlan stamps
+// the defaults (resident / Medicare applies / not Centrelink
+// eligible), so the migration only advances the version gate.
+function migrateV3toV4(raw) {
+  return { ...raw, schemaVersion: 4 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
-// forward. Returns a clamped v3 state or null (caller falls back to
+// forward. Returns a clamped v4 state or null (caller falls back to
 // defaults). Never throws.
 export function hydrate(json, profiles = {}) {
   try {
     let raw = JSON.parse(json);
     if (!raw || typeof raw !== "object") return null;
-    if (raw.schemaVersion === 1) raw = migrateV2toV3(migrateV1toV2(raw));
-    else if (raw.schemaVersion === 2) raw = migrateV2toV3(raw);
+    if (raw.schemaVersion === 1) raw = migrateV3toV4(migrateV2toV3(migrateV1toV2(raw)));
+    else if (raw.schemaVersion === 2) raw = migrateV3toV4(migrateV2toV3(raw));
+    else if (raw.schemaVersion === 3) raw = migrateV3toV4(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
