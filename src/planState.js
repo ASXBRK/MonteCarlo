@@ -180,6 +180,41 @@ export function defaultState(profiles = {}, now = new Date()) {
   };
 }
 
+// --- one-off grid helpers (C2) -------------------------------------------
+//
+// The Cashflow view's editable one-off cells manage exactly one
+// table-sourced lump sum per asset+FY; input-panel-sourced rows for
+// the same cell live alongside untouched.
+
+export function tableLumpSumFor(lumpSums, assetId, age) {
+  return lumpSums.find(
+    (l) => l.source === "table" && l.assetId === assetId && l.age === age
+  ) || null;
+}
+
+// Upsert (or delete, when value is 0/empty/invalid) the table-sourced
+// one-off for an asset+FY. value is signed: +inflow / −outflow.
+export function upsertTableLumpSum(lumpSums, assetId, age, value) {
+  const existing = tableLumpSumFor(lumpSums, assetId, age);
+  const rest = lumpSums.filter((l) => l !== existing);
+  const v = Number(value);
+  if (!Number.isFinite(v) || v === 0) return rest;
+  return [...rest, {
+    id: existing?.id ?? uid("ls"),
+    assetId,
+    amount: Math.abs(v),
+    direction: v < 0 ? "out" : "in",
+    age,
+    source: "table",
+  }];
+}
+
+// Convention 5: one-offs fire in July; a partial first year starting
+// after July has no firing July, so its grid cell is not editable.
+export function canEditOneOffYear(plan, planYear) {
+  return planYear > 0 || plan.start.month === 7;
+}
+
 // Report period: FY start years (or null = unbounded). Display state,
 // not plan state — it only narrows what the output views show.
 export function clampReportPeriod(raw) {

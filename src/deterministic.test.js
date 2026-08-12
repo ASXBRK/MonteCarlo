@@ -292,6 +292,19 @@ describe("output view reconciliation (C1)", () => {
     expect(out.schedule.oneOffsByAssetYear.x[3]).toBe(20000); // age 43 → year 3
     expect(out.yearly[3].perAssetDetail.x.oneOffs).toBeCloseTo(20000, 6);
   });
+
+  it("a table-sourced one-off is engine-identical to an input-sourced one (C2)", () => {
+    const mk = (source) => mkState({
+      endAge: 50,
+      cashflows: {
+        lumpSums: [{ id: "l1", assetId: "a1", amount: 25000, direction: "out", age: 45, source }],
+      },
+    });
+    const a = projectPlan(mk("input"));
+    const b = projectPlan(mk("table"));
+    expect(Array.from(b.monthly.combined)).toEqual(Array.from(a.monthly.combined));
+    expect(b.yearly[5].oneOffsNet).toBe(a.yearly[5].oneOffsNet);
+  });
 });
 
 describe("tax — regression guards", () => {

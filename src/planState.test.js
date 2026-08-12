@@ -8,6 +8,7 @@ import {
   partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
   removeAsset, ownerWindow, fyLabelForAge, horizonYears,
   serialize, hydrate, summarise, planSummaryText, annualisedAmount,
+  tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
 } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 
@@ -339,5 +340,43 @@ describe("allocation (carried from A.1)", () => {
   it("allocation summaries unchanged", () => {
     expect(allocationTotalNominal({ mode: "custom", incomePct: 4, growthPct: 3.5 }, PROFILES)).toBeCloseTo(0.075);
     expect(allocationSummary({ mode: "profile", profile: "Balanced" }, PROFILES)).toBe("Balanced");
+  });
+});
+
+describe("one-off grid helpers (C2)", () => {
+  const input = { id: "in1", assetId: "a1", amount: 5000, direction: "in", age: 45, source: "input" };
+
+  it("creates, updates, and deletes the table-sourced entry", () => {
+    let ls = upsertTableLumpSum([input], "a1", 45, -20000);
+    expect(ls).toHaveLength(2);
+    const t = tableLumpSumFor(ls, "a1", 45);
+    expect(t).toMatchObject({ assetId: "a1", age: 45, amount: 20000, direction: "out", source: "table" });
+
+    // Update keeps the id and flips direction.
+    const ls2 = upsertTableLumpSum(ls, "a1", 45, 7500);
+    const t2 = tableLumpSumFor(ls2, "a1", 45);
+    expect(t2.id).toBe(t.id);
+    expect(t2).toMatchObject({ amount: 7500, direction: "in" });
+
+    // Zero / empty / junk deletes; the input-sourced row survives.
+    for (const cleared of [0, "", "abc", null]) {
+      const ls3 = upsertTableLumpSum(ls2, "a1", 45, cleared);
+      expect(tableLumpSumFor(ls3, "a1", 45)).toBeNull();
+      expect(ls3).toContainEqual(input);
+    }
+  });
+
+  it("cells are keyed by asset AND age", () => {
+    let ls = upsertTableLumpSum([], "a1", 45, 1000);
+    ls = upsertTableLumpSum(ls, "a1", 50, 2000);
+    ls = upsertTableLumpSum(ls, "a2", 45, 3000);
+    expect(ls).toHaveLength(3);
+    expect(tableLumpSumFor(ls, "a1", 50).amount).toBe(2000);
+  });
+
+  it("first-FY editing follows convention 5", () => {
+    expect(canEditOneOffYear({ start: { year: 2026, month: 7 } }, 0)).toBe(true);
+    expect(canEditOneOffYear({ start: { year: 2026, month: 8 } }, 0)).toBe(false);
+    expect(canEditOneOffYear({ start: { year: 2026, month: 8 } }, 1)).toBe(true);
   });
 });

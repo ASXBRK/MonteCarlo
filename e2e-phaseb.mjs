@@ -222,6 +222,59 @@ check("live recompute: shortfall moves earlier (age 41)",
   (await tile("First shortfall")) === "Age 41 (FY2027–28)",
   await tile("First shortfall"));
 
+// --- 6. C2: in-grid one-off editing ------------------------------------------
+await seed(portfolioOnly);
+await clickView("cashflow");
+const oneOffCell = (col) => page.locator(
+  `#viewCashflow .tl tbody tr`,
+  { has: page.locator(".tl-label", { hasText: "Portfolio" }) }
+).first().locator(`td:nth-child(${col + 2})`); // +1 label col, nth-child is 1-based
+
+// Edit year-10 (FY36–37): type −20,000 → outflow lump sum, source "table".
+await oneOffCell(10).click();
+await page.fill("#viewCashflow .tl-cell-input", "-20000");
+await page.press("#viewCashflow .tl-cell-input", "Enter");
+await page.waitForTimeout(100);
+check("grid edit: cell shows the outflow", (await oneOffCell(10).innerText()) === "(20,000)",
+  await oneOffCell(10).innerText());
+check("grid edit: end balance moved (100k − 20k)",
+  (await tile("Projected end balance")) === "$80,000",
+  await tile("Projected end balance"));
+check("grid edit: input panel shows the from-table row",
+  /from table/i.test(await page.locator("#investSection").innerText()));
+
+// Assets view reflects it too.
+await clickView("assets");
+labels = await rowLabels("#viewAssets");
+check("grid edit: assets view gains the one-off row", labels.includes("One-off amounts"));
+
+// Reload → persisted.
+await page.goto(URL, { waitUntil: "networkidle" });
+await page.waitForSelector("#summaryStrip .stat");
+await clickView("cashflow");
+check("grid edit persists across reload", (await oneOffCell(10).innerText()) === "(20,000)");
+
+// Clearing the cell deletes the table-sourced entry.
+await oneOffCell(10).click();
+await page.fill("#viewCashflow .tl-cell-input", "");
+await page.press("#viewCashflow .tl-cell-input", "Enter");
+await page.waitForTimeout(100);
+check("clearing the cell removes the entry", (await oneOffCell(10).innerText()) === "–");
+check("end balance restored", (await tile("Projected end balance")) === "$100,000");
+check("from-table row gone from the input panel",
+  !/from table/i.test(await page.locator("#investSection").innerText()));
+
+// First-FY blocking: an August start has no firing July in year 0.
+await seed({ ...portfolioOnly, plan: { ...portfolioOnly.plan, start: { year: 2026, month: 8 } } });
+await clickView("cashflow");
+const blocked = oneOffCell(0);
+check("first-FY cell is blocked with an explanation",
+  (await blocked.getAttribute("data-ls-blocked")) === "1" &&
+  ((await blocked.getAttribute("title")) || "").includes("partial first year"));
+await blocked.click();
+check("blocked cell refuses editing",
+  (await page.locator("#viewCashflow .tl-cell-input").count()) === 0);
+
 check("no unexpected console/page errors", errors.length === 0, errors.join(" ;; "));
 
 await browser.close();

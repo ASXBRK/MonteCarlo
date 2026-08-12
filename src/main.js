@@ -15,6 +15,7 @@ import {
   removeAsset, ownerWindow, fyLabelForAge,
   clampInt, clampNumber, serialize, hydrate,
   summarise, planSummaryText, allocationSummary, ALLOC_PCT_MAX,
+  tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
 } from "./planState.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan } from "./deterministic.js";
@@ -1914,10 +1915,72 @@ function buildCashflowGroups() {
     { title: "One-off amounts", rows: included.map((a) => ({
       label: a.name,
       cell: (y) => projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0,
-      always: true, // C2 makes these editable; keep the grid stable
+      always: true, // editable grid — keep every cell present
+      cellAttrs: (y) => oneOffCellAttrs(a.id, y),
     })) },
   ];
 }
+
+// In-grid one-off editing (C2): each cell shows the NET of all
+// one-offs for that asset+FY; editing manages the single table-sourced
+// lump sum alongside any input-panel rows (marked with a dot).
+function oneOffCellAttrs(assetId, y) {
+  if (!canEditOneOffYear(state.plan, y)) {
+    return ` data-ls-blocked="1" title="This partial first year starts after July, so its annual amounts are skipped (already made earlier in the FY) — a one-off here would have no effect."`;
+  }
+  const age = state.plan.client.currentAge + y;
+  const hasInput = state.cashflows.lumpSums.some(
+    (l) => l.source === "input" && l.assetId === assetId && l.age === age
+  );
+  return ` data-ls-asset="${assetId}" data-ls-y="${y}" tabindex="0"` +
+    (hasInput ? ` data-ls-mixed="1" title="Includes amounts entered in the input panel — this cell edits only the table-sourced amount."` : "");
+}
+
+function startOneOffCellEdit(td) {
+  const assetId = td.dataset.lsAsset;
+  const y = Number(td.dataset.lsY);
+  const age = state.plan.client.currentAge + y;
+  const existing = tableLumpSumFor(state.cashflows.lumpSums, assetId, age);
+  const current = existing
+    ? (existing.direction === "out" ? -existing.amount : existing.amount)
+    : "";
+  td.innerHTML = `<input type="number" step="any" class="tl-cell-input" value="${current}"
+                         aria-label="One-off amount (positive = inflow, negative = outflow, today's dollars)" />`;
+  const input = td.querySelector("input");
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (apply) => {
+    if (done) return;
+    done = true;
+    if (apply) {
+      const v = input.value.trim() === "" ? 0 : Number(input.value);
+      state.cashflows.lumpSums = upsertTableLumpSum(state.cashflows.lumpSums, assetId, age, v);
+      saveState();
+      renderCashflows(); // input panel's one-off list mirrors the grid
+      refreshOutputs();  // re-renders the grid, removing the input
+    } else {
+      renderCashflowView();
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") finish(true);
+    else if (e.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+els.viewCashflow.addEventListener("click", (e) => {
+  const td = e.target.closest("td[data-ls-asset]");
+  if (!td || td.querySelector("input")) return;
+  startOneOffCellEdit(td);
+});
+els.viewCashflow.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  const td = e.target.closest?.("td[data-ls-asset]");
+  if (!td || td.querySelector("input")) return;
+  startOneOffCellEdit(td);
+});
 
 function renderCashflowView() {
   renderTransposed(els.viewCashflow, buildCashflowGroups(), accruedCgtFooter());
