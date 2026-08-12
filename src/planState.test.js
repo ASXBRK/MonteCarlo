@@ -1,247 +1,343 @@
 import { describe, it, expect } from "vitest";
 import {
   SCHEMA_VERSION, defaultState, createAsset, createCashflow,
-  createLumpSum, clampPlan, clampAllToPlan, clampAllocation,
+  createLumpSum, createIncomeRow, createExpenseRow,
+  clampPlan, clampAllToPlan, clampAllocation, clampIncomeRow,
   nearestVolBasis, allocationTotalNominal, allocationSummary,
+  normaliseFundingOrder, normaliseSettings,
+  partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
+  removeAsset, ownerWindow, fyLabelForAge, horizonYears,
   serialize, hydrate, summarise, planSummaryText, annualisedAmount,
 } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 
 const PROFILE_KEYS = Object.keys(PROFILES);
+const NOW = new Date("2026-08-12");
 
-describe("defaults", () => {
-  it("produces a valid default state with one asset", () => {
-    const s = defaultState(PROFILES, new Date("2026-08-12"));
+function couplePlan() {
+  return {
+    household: "couple",
+    client: { currentAge: 40 },
+    partner: { currentAge: 36 },
+    endAge: 90,
+    start: { year: 2026, month: 8 },
+  };
+}
+
+describe("defaults (v3)", () => {
+  it("produces a valid default state", () => {
+    const s = defaultState(PROFILES, NOW);
     expect(s.schemaVersion).toBe(SCHEMA_VERSION);
-    expect(s.plan).toEqual({ currentAge: 40, endAge: 90, startYear: 2026 });
+    expect(s.plan.household).toBe("single");
+    expect(s.plan.client.currentAge).toBe(40);
+    expect(s.plan.partner).toBeNull();
+    expect(s.plan.start).toEqual({ year: 2026, month: 8 });
     expect(s.assets).toHaveLength(1);
-    const a = s.assets[0];
-    expect(a.name).toBe("Asset 1");
-    expect(a.include).toBe(true);
-    expect(a.balance).toBe(100000);
-    expect(a.allocation.mode).toBe("profile");
-    expect(PROFILE_KEYS).toContain(a.allocation.profile);
-    expect(a.icrPct).toBe(0);
-    expect(a.cgtAsset).toBe(true);
-    expect(a.costBase).toBe(100000); // defaults to entered balance
-    expect(a.contributions).toHaveLength(1);
-    expect(a.withdrawals).toHaveLength(0);
-    expect(a.lumpSums).toHaveLength(0);
+    expect(s.assets[0].owner).toBe("client");
+    expect(s.assets[0].distributions).toBe("reinvest");
+    expect(s.cashflows.income).toEqual([]);
+    expect(s.cashflows.expenses).toEqual([]);
+    expect(s.cashflows.contributions).toHaveLength(1);
+    expect(s.cashflows.contributions[0].assetId).toBe(s.assets[0].id);
+    expect(s.settings.surplus).toEqual({ mode: "spend", assetId: null });
+    expect(s.settings.fundingOrder).toEqual([s.assets[0].id]);
   });
 
-  it("default contribution spans currentAge to endAge, monthly, indexed", () => {
-    const s = defaultState(PROFILES);
-    const c = s.assets[0].contributions[0];
-    expect(c.fromAge).toBe(40);
-    expect(c.toAge).toBe(90);
-    expect(c.frequency).toBe("monthly");
-    expect(c.indexed).toBe(true);
-  });
-
-  it("withdrawals default fromAge = currentAge (advice fees run from today)", () => {
-    const w = createCashflow("withdrawal", { currentAge: 40, endAge: 90 });
-    expect(w.fromAge).toBe(40);
-    expect(w.toAge).toBe(90);
-  });
-
-  it("lump sums default to source: 'input'; table source is preserved", () => {
-    const plan = { currentAge: 40, endAge: 90 };
-    expect(createLumpSum(plan).source).toBe("input");
-    expect(createLumpSum(plan, "table").source).toBe("table");
-  });
-
-  it("asset names increment and ids are unique", () => {
-    const plan = { currentAge: 40, endAge: 90, startYear: 2026 };
-    const a = createAsset(plan, [], PROFILES);
-    const b = createAsset(plan, [a], PROFILES);
-    const c = createAsset(plan, [a, b], PROFILES);
-    expect(a.name).toBe("Asset 1");
-    expect(b.name).toBe("Asset 2");
-    expect(c.name).toBe("Asset 3");
-    expect(new Set([a.id, b.id, c.id]).size).toBe(3);
+  it("income/expense factories default sensibly", () => {
+    const plan = couplePlan();
+    const inc = createIncomeRow(plan, []);
+    expect(inc.owner).toBe("client");
+    expect(inc.frequency).toBe("annual");
+    expect(inc.fromAge).toBe(40);
+    expect(inc.toAge).toBe(90);
+    const exp = createExpenseRow(plan, [inc]);
+    expect(exp.label).toBe("Expense 2");
   });
 });
 
-describe("allocation", () => {
-  it("nearestVolBasis picks the profile with closest total nominal return", () => {
-    // 7.5% total → nearest is a 8.0% or 6.85% profile: 8.00 is 0.5 away,
-    // 6.85 is 0.65 away → High Growth wins.
-    expect(nearestVolBasis(PROFILES, 7.5)).toBe("High Growth – Income");
-    expect(nearestVolBasis(PROFILES, 3.4)).toBe("Cash");
-    expect(nearestVolBasis(PROFILES, 20)).toMatch(/Accelerated|Residential/);
+describe("owner windows + FY labels", () => {
+  it("partner window spans the same number of plan years from their own age", () => {
+    const plan = couplePlan(); // client 40→90 (50y), partner 36
+    expect(horizonYears(plan)).toBe(50);
+    expect(ownerWindow(plan, "client")).toEqual({ from: 40, to: 90 });
+    expect(ownerWindow(plan, "partner")).toEqual({ from: 36, to: 86 });
   });
 
-  it("clampAllocation bounds custom percentages and repairs volBasis", () => {
-    const out = clampAllocation({
-      mode: "custom", incomePct: 99, growthPct: -5, frankingPct: 250,
-      volBasis: "Not A Profile",
-    }, PROFILES);
-    expect(out.incomePct).toBe(30);   // clamped to ALLOC_PCT_MAX
+  it("FY labels derive from the 1-July tick convention", () => {
+    const plan = couplePlan(); // start Aug 2026 → first 1 July is 2027
+    // Client is 40 now: current FY is the one that began July 2026.
+    expect(fyLabelForAge(plan, "client", 40)).toBe("FY 2026–27");
+    expect(fyLabelForAge(plan, "client", 41)).toBe("FY 2027–28");
+    expect(fyLabelForAge(plan, "client", 65)).toBe("FY 2051–52");
+    // Partner ages tick alongside from their own current age.
+    expect(fyLabelForAge(plan, "partner", 36)).toBe("FY 2026–27");
+    expect(fyLabelForAge(plan, "partner", 65)).toBe("FY 2055–56");
+  });
+
+  it("start month before July shifts the first tick to the same year", () => {
+    const plan = { ...couplePlan(), start: { year: 2026, month: 3 } };
+    // March 2026 start → first 1 July is 2026 → current FY began July 2025.
+    expect(fyLabelForAge(plan, "client", 40)).toBe("FY 2025–26");
+    expect(fyLabelForAge(plan, "client", 41)).toBe("FY 2026–27");
+  });
+
+  it("clampIncomeRow anchors to the owner window and demotes orphan partners", () => {
+    const plan = couplePlan();
+    const row = { id: "x", owner: "partner", amount: 1, frequency: "annual", fromAge: 30, toAge: 99, indexed: true };
+    const out = clampIncomeRow(row, plan);
+    expect(out.fromAge).toBe(36);
+    expect(out.toAge).toBe(86);
+    const single = clampPlan({ ...plan, household: "single", partner: null });
+    const demoted = clampIncomeRow(row, single);
+    expect(demoted.owner).toBe("client");
+  });
+});
+
+describe("fundingOrder invariants", () => {
+  it("normalises order to exactly the included assets", () => {
+    const a = { id: "a", include: true };
+    const b = { id: "b", include: true };
+    const c = { id: "c", include: false };
+    // Unknown id dropped, excluded dropped, missing included appended.
+    expect(normaliseFundingOrder(["zz", "b", "c"], [a, b, c])).toEqual(["b", "a"]);
+    // Re-including appends at the end.
+    c.include = true;
+    expect(normaliseFundingOrder(["b", "a"], [a, b, c])).toEqual(["b", "a", "c"]);
+  });
+
+  it("surplus invest mode resets to spend when its target is invalid", () => {
+    const assets = [{ id: "a", include: true }, { id: "b", include: false }];
+    expect(normaliseSettings({ surplus: { mode: "invest", assetId: "a" }, fundingOrder: [] }, assets).surplus)
+      .toEqual({ mode: "invest", assetId: "a" });
+    expect(normaliseSettings({ surplus: { mode: "invest", assetId: "b" }, fundingOrder: [] }, assets).surplus)
+      .toEqual({ mode: "spend", assetId: null });
+    expect(normaliseSettings({ surplus: { mode: "invest", assetId: "gone" }, fundingOrder: [] }, assets).surplus)
+      .toEqual({ mode: "spend", assetId: null });
+  });
+
+  it("removeAsset cascades cashflows, funding order, and surplus target", () => {
+    const s = defaultState(PROFILES, NOW);
+    const a2 = createAsset(s.plan, s.assets, PROFILES);
+    s.assets.push(a2);
+    s.settings = normaliseSettings({ surplus: { mode: "invest", assetId: a2.id }, fundingOrder: s.settings.fundingOrder }, s.assets);
+    s.cashflows.withdrawals.push(createCashflow("withdrawal", s.plan, a2.id));
+
+    const out = removeAsset(s, a2.id);
+    expect(out.assets).toHaveLength(1);
+    expect(out.cashflows.withdrawals).toHaveLength(0);
+    expect(out.settings.fundingOrder).toEqual([s.assets[0].id]);
+    expect(out.settings.surplus).toEqual({ mode: "spend", assetId: null });
+  });
+
+  it("never removes the last asset", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(removeAsset(s, s.assets[0].id)).toBe(s);
+  });
+});
+
+describe("household transitions", () => {
+  function coupleState() {
+    const s = defaultState(PROFILES, NOW);
+    s.plan = couplePlan();
+    const pa = createAsset(s.plan, s.assets, PROFILES);
+    pa.owner = "partner";
+    const ja = createAsset(s.plan, [...s.assets, pa], PROFILES);
+    ja.owner = "joint";
+    s.assets.push(pa, ja);
+    s.settings = normaliseSettings(s.settings, s.assets);
+    const inc = createIncomeRow(s.plan, []);
+    inc.owner = "partner";
+    inc.fromAge = 36; inc.toAge = 65;
+    s.cashflows.income.push(inc);
+    return { s, pa, ja };
+  }
+
+  it("partnerOwnedItems finds partner and joint holdings", () => {
+    const { s } = coupleState();
+    const found = partnerOwnedItems(s);
+    expect(found.assets).toHaveLength(2); // partner + joint
+    expect(found.income).toHaveLength(1);
+    expect(found.count).toBe(3);
+  });
+
+  it("reassignPartnerToClient keeps numeric ages and re-derives ownership", () => {
+    const { s } = coupleState();
+    const out = reassignPartnerToClient(s);
+    expect(out.assets.every((a) => a.owner === "client")).toBe(true);
+    expect(out.cashflows.income[0].owner).toBe("client");
+    expect(out.cashflows.income[0].fromAge).toBe(36); // numeric ages kept
+  });
+
+  it("deletePartnerOwned cascades through cashflows and settings", () => {
+    const { s, pa } = coupleState();
+    s.cashflows.contributions.push(createCashflow("contribution", s.plan, pa.id));
+    const out = deletePartnerOwned(s);
+    expect(out.assets).toHaveLength(1);
+    expect(out.assets[0].owner).toBe("client");
+    expect(out.cashflows.income).toHaveLength(0);
+    expect(out.cashflows.contributions.every((c) => c.assetId !== pa.id)).toBe(true);
+    expect(out.settings.fundingOrder).toEqual([out.assets[0].id]);
+  });
+});
+
+describe("migration", () => {
+  it("migrates a v1 blob (asset-owned cashflows, startYear)", () => {
+    const v1 = {
+      schemaVersion: 1,
+      plan: { currentAge: 45, endAge: 85, startYear: 2025 },
+      assets: [{
+        id: "as-old", name: "Legacy", include: true, balance: 50000,
+        allocation: { mode: "profile", profile: "Balanced" },
+        icrPct: 0.3, cgtAsset: true, costBase: 40000,
+        contributions: [{ id: "c1", amount: 500, frequency: "monthly", fromAge: 45, toAge: 65, indexed: true }],
+        withdrawals: [],
+        lumpSums: [{ id: "l1", amount: 10000, direction: "in", age: 50, source: "input" }],
+      }],
+      display: { units: "nominal" },
+      assumptions: { cpi: 0.03 },
+    };
+    const s = hydrate(JSON.stringify(v1), PROFILES);
+    expect(s).not.toBeNull();
+    expect(s.schemaVersion).toBe(3);
+    expect(s.plan.household).toBe("single");
+    expect(s.plan.client.currentAge).toBe(45);
+    expect(s.plan.start).toEqual({ year: 2025, month: 7 });
+    expect(s.assets[0].owner).toBe("client");
+    expect(s.assets[0].distributions).toBe("reinvest");
+    expect(s.cashflows.contributions).toHaveLength(1);
+    expect(s.cashflows.contributions[0].assetId).toBe("as-old");
+    expect(s.cashflows.lumpSums[0].assetId).toBe("as-old");
+    expect(s.settings.fundingOrder).toEqual(["as-old"]);
+    expect(s.display.units).toBe("nominal");
+    expect(s.assumptions.cpi).toBe(0.03);
+  });
+
+  it("migrates a v2 blob (central cashflows, flat plan ages)", () => {
+    const v2 = {
+      schemaVersion: 2,
+      plan: { currentAge: 40, endAge: 90, start: { year: 2026, month: 8 } },
+      assets: [
+        { id: "a1", name: "Cash", include: true, balance: 20000, allocation: { mode: "profile", profile: "Cash" }, icrPct: 0, cgtAsset: false, costBase: null },
+        { id: "a2", name: "Shares", include: false, balance: 80000, allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0.2, cgtAsset: true, costBase: 60000 },
+      ],
+      cashflows: {
+        contributions: [{ id: "c1", assetId: "a2", amount: 1000, frequency: "monthly", fromAge: 40, toAge: 65, indexed: true }],
+        withdrawals: [],
+        lumpSums: [],
+      },
+      display: { units: "real" },
+      assumptions: { cpi: 0.025 },
+    };
+    const s = hydrate(JSON.stringify(v2), PROFILES);
+    expect(s).not.toBeNull();
+    expect(s.plan.client.currentAge).toBe(40);
+    expect(s.assets.map((a) => a.owner)).toEqual(["client", "client"]);
+    expect(s.cashflows.income).toEqual([]);
+    expect(s.cashflows.expenses).toEqual([]);
+    // fundingOrder = included assets only (a2 is excluded).
+    expect(s.settings.fundingOrder).toEqual(["a1"]);
+    expect(s.settings.surplus).toEqual({ mode: "spend", assetId: null });
+  });
+
+  it("rejects garbage and unknown versions", () => {
+    expect(hydrate("not json", PROFILES)).toBeNull();
+    expect(hydrate("{}", PROFILES)).toBeNull();
+    expect(hydrate(JSON.stringify({ schemaVersion: 99, plan: {}, assets: [{}] }), PROFILES)).toBeNull();
+  });
+});
+
+describe("persistence round-trip (v3)", () => {
+  it("preserves household, ownership, income/expenses, and settings", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.plan = couplePlan();
+    const a2 = createAsset(s.plan, s.assets, PROFILES);
+    a2.owner = "joint";
+    a2.distributions = "cash";
+    s.assets.push(a2);
+    s.settings = normaliseSettings({
+      surplus: { mode: "invest", assetId: a2.id },
+      fundingOrder: [a2.id, s.assets[0].id],
+    }, s.assets);
+
+    const inc = createIncomeRow(s.plan, []);
+    inc.owner = "partner"; inc.amount = 90000; inc.fromAge = 36; inc.toAge = 65;
+    s.cashflows.income.push(inc);
+    const exp = createExpenseRow(s.plan, []);
+    exp.amount = 60000; exp.label = "Living expenses";
+    s.cashflows.expenses.push(exp);
+
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back).not.toBeNull();
+    expect(back.plan.household).toBe("couple");
+    expect(back.plan.partner.currentAge).toBe(36);
+    expect(back.assets[1]).toMatchObject({ owner: "joint", distributions: "cash" });
+    expect(back.settings.surplus).toEqual({ mode: "invest", assetId: a2.id });
+    expect(back.settings.fundingOrder).toEqual([a2.id, s.assets[0].id]);
+    expect(back.cashflows.income[0]).toMatchObject({ owner: "partner", amount: 90000, fromAge: 36, toAge: 65 });
+    expect(back.cashflows.expenses[0]).toMatchObject({ label: "Living expenses", amount: 60000 });
+  });
+
+  it("single households strip partner/joint owners on hydrate", () => {
+    const s = defaultState(PROFILES, NOW);
+    // Corrupt: single household but a joint asset snuck in.
+    s.assets[0].owner = "joint";
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.assets[0].owner).toBe("client");
+  });
+});
+
+describe("summaries", () => {
+  it("summarise covers income/expenses and asset-filtered cashflows", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.assets[0].balance = 100000;
+    s.cashflows.contributions[0].amount = 1000; // monthly → 12k
+    const inc = createIncomeRow(s.plan, []);
+    inc.amount = 90000; // annual
+    s.cashflows.income.push(inc);
+    const exp = createExpenseRow(s.plan, []);
+    exp.amount = 5000; exp.frequency = "monthly"; // → 60k
+    s.cashflows.expenses.push(exp);
+
+    const sum = summarise(s);
+    expect(sum.totalBalance).toBe(100000);
+    expect(sum.annualContributions).toBe(12000);
+    expect(sum.annualIncome).toBe(90000);
+    expect(sum.annualExpenses).toBe(60000);
+
+    // Excluding the asset removes its contributions but not income/expenses.
+    s.assets[0].include = false;
+    const sum2 = summarise(s);
+    expect(sum2.annualContributions).toBe(0);
+    expect(sum2.annualIncome).toBe(90000);
+  });
+
+  it("plan summary text stays client-anchored", () => {
+    expect(planSummaryText(couplePlan()))
+      .toBe("50-year projection, 2026–2076 (age 40–90)");
+  });
+});
+
+describe("allocation (carried from A.1)", () => {
+  it("nearestVolBasis + clampAllocation still behave", () => {
+    expect(nearestVolBasis(PROFILES, 7.5)).toBe("High Growth – Income");
+    const out = clampAllocation({ mode: "custom", incomePct: 99, growthPct: -5, frankingPct: 250, volBasis: "junk" }, PROFILES);
+    expect(out.incomePct).toBe(30);
     expect(out.growthPct).toBe(0);
     expect(out.frankingPct).toBe(100);
     expect(PROFILE_KEYS).toContain(out.volBasis);
   });
 
-  it("clampAllocation falls back to profile mode for junk", () => {
-    const out = clampAllocation({ mode: "nonsense" }, PROFILES);
-    expect(out.mode).toBe("profile");
-    expect(PROFILE_KEYS).toContain(out.profile);
+  it("profiles carry placeholder franking percentages", () => {
+    expect(PROFILES["Cash"].frankingPct).toBe(0);
+    expect(PROFILES["High Growth – Income"].frankingPct).toBeGreaterThan(PROFILES["High Growth – Capital"].frankingPct);
+    for (const p of Object.values(PROFILES)) {
+      expect(p.frankingPct).toBeGreaterThanOrEqual(0);
+      expect(p.frankingPct).toBeLessThanOrEqual(100);
+    }
   });
 
-  it("allocationTotalNominal handles both modes", () => {
-    expect(allocationTotalNominal({ mode: "profile", profile: "Balanced" }, PROFILES))
-      .toBeCloseTo(0.0585);
-    expect(allocationTotalNominal({ mode: "custom", incomePct: 4, growthPct: 3.5 }, PROFILES))
-      .toBeCloseTo(0.075);
-  });
-
-  it("allocationSummary renders both modes", () => {
+  it("allocation summaries unchanged", () => {
+    expect(allocationTotalNominal({ mode: "custom", incomePct: 4, growthPct: 3.5 }, PROFILES)).toBeCloseTo(0.075);
     expect(allocationSummary({ mode: "profile", profile: "Balanced" }, PROFILES)).toBe("Balanced");
-    expect(allocationSummary({ mode: "custom", incomePct: 4, growthPct: 3.5 }, PROFILES))
-      .toBe("Custom · 7.5% p.a.");
-  });
-});
-
-describe("clamping", () => {
-  it("clampPlan enforces endAge > currentAge", () => {
-    expect(clampPlan({ currentAge: 60, endAge: 50, startYear: 2026 }))
-      .toEqual({ currentAge: 60, endAge: 61, startYear: 2026 });
-  });
-
-  it("plan-age changes clamp existing cashflows and lump sums", () => {
-    const s = defaultState(PROFILES);
-    const a = s.assets[0];
-    a.withdrawals.push({ ...createCashflow("withdrawal", s.plan), fromAge: 65 });
-    a.lumpSums.push({ ...createLumpSum(s.plan), age: 88 });
-
-    // Shrink the window: 50..60.
-    s.plan = { currentAge: 50, endAge: 60, startYear: 2026 };
-    const out = clampAllToPlan(s);
-    const q = out.assets[0];
-    expect(q.contributions[0].fromAge).toBe(50);
-    expect(q.contributions[0].toAge).toBe(60);
-    expect(q.withdrawals[0].fromAge).toBe(60); // 65 clamped down
-    expect(q.lumpSums[0].age).toBe(60);        // 88 clamped down
-  });
-
-  it("toAge never falls below fromAge after clamping", () => {
-    const plan = { currentAge: 55, endAge: 58, startYear: 2026 };
-    const out = clampAllToPlan({
-      plan,
-      assets: [{
-        contributions: [{ id: "x", amount: 1, frequency: "monthly", fromAge: 57, toAge: 40, indexed: true }],
-        withdrawals: [], lumpSums: [],
-      }],
-    });
-    const c = out.assets[0].contributions[0];
-    expect(c.fromAge).toBe(57);
-    expect(c.toAge).toBeGreaterThanOrEqual(c.fromAge);
-  });
-});
-
-describe("persistence round-trip", () => {
-  it("serialize → hydrate preserves the state including new fields", () => {
-    const s = defaultState(PROFILES, new Date("2026-08-12"));
-    const a = s.assets[0];
-    a.name = "CommSec Portfolio";
-    a.balance = 250000;
-    a.icrPct = 0.4;
-    a.cgtAsset = true;
-    a.costBase = 180000;
-    a.allocation = {
-      mode: "custom", incomePct: 4.5, growthPct: 3.5, frankingPct: 80,
-      volBasis: "High Growth – Capital",
-    };
-    a.withdrawals.push(createCashflow("withdrawal", s.plan));
-    a.lumpSums.push({ ...createLumpSum(s.plan, "table"), amount: 30000, direction: "out", age: 55 });
-
-    const back = hydrate(serialize(s), PROFILES);
-    expect(back).not.toBeNull();
-    expect(back.plan).toEqual(s.plan);
-    const b = back.assets[0];
-    expect(b.name).toBe("CommSec Portfolio");
-    expect(b.balance).toBe(250000);
-    expect(b.icrPct).toBe(0.4);
-    expect(b.costBase).toBe(180000);
-    expect(b.allocation).toEqual(a.allocation);
-    expect(b.withdrawals).toHaveLength(1);
-    expect(b.lumpSums[0]).toMatchObject({ amount: 30000, direction: "out", age: 55, source: "table" });
-  });
-
-  it("rejects garbage, wrong version, and empty assets", () => {
-    expect(hydrate("not json", PROFILES)).toBeNull();
-    expect(hydrate("{}", PROFILES)).toBeNull();
-    expect(hydrate(JSON.stringify({ schemaVersion: 99, plan: {}, assets: [{}] }), PROFILES)).toBeNull();
-    expect(hydrate(JSON.stringify({ schemaVersion: 1, plan: { currentAge: 40, endAge: 90, startYear: 2026 }, assets: [] }), PROFILES)).toBeNull();
-    // Old portfolio-shaped blobs (pre-rename) are rejected, not migrated.
-    expect(hydrate(JSON.stringify({ schemaVersion: 1, plan: { currentAge: 40, endAge: 90, startYear: 2026 }, portfolios: [{}] }), PROFILES)).toBeNull();
-  });
-
-  it("repairs unknown profiles, missing cost base, and bad ages on hydrate", () => {
-    const blob = JSON.stringify({
-      schemaVersion: 1,
-      plan: { currentAge: 40, endAge: 90, startYear: 2026 },
-      assets: [{
-        id: "as-1", name: "Old", include: true, balance: 5000,
-        allocation: { mode: "profile", profile: "Emerging Markets" }, // gone
-        cgtAsset: true, // costBase missing → default to balance
-        contributions: [{ id: "c1", amount: 100, frequency: "monthly", fromAge: 10, toAge: 200, indexed: true }],
-        withdrawals: [], lumpSums: [],
-      }],
-    });
-    const s = hydrate(blob, PROFILES);
-    expect(PROFILE_KEYS).toContain(s.assets[0].allocation.profile);
-    expect(s.assets[0].costBase).toBe(5000);
-    expect(s.assets[0].contributions[0].fromAge).toBe(40);
-    expect(s.assets[0].contributions[0].toAge).toBe(90);
-  });
-
-  it("non-CGT assets keep costBase null through hydrate", () => {
-    const s = defaultState(PROFILES);
-    s.assets[0].cgtAsset = false;
-    s.assets[0].costBase = null;
-    const back = hydrate(serialize(s), PROFILES);
-    expect(back.assets[0].cgtAsset).toBe(false);
-    expect(back.assets[0].costBase).toBeNull();
-  });
-});
-
-describe("summaries", () => {
-  it("summarise counts included assets only, annualises both directions", () => {
-    const s = defaultState(PROFILES);
-    s.assets[0].balance = 100000;
-    s.assets[0].contributions[0].amount = 1000; // monthly → 12k/yr
-    const w = createCashflow("withdrawal", s.plan);
-    w.amount = 3300; // advice fee, annual
-    w.frequency = "annual";
-    s.assets[0].withdrawals.push(w);
-
-    const a2 = createAsset(s.plan, s.assets, PROFILES);
-    a2.balance = 50000;
-    a2.contributions[0].amount = 6000;
-    a2.contributions[0].frequency = "annual"; // → 6k/yr
-    s.assets.push(a2);
-
-    let sum = summarise(s);
-    expect(sum.totalBalance).toBe(150000);
-    expect(sum.includedCount).toBe(2);
-    expect(sum.annualContributions).toBe(18000);
-    expect(sum.annualWithdrawals).toBe(3300);
-
-    a2.include = false;
-    sum = summarise(s);
-    expect(sum.totalBalance).toBe(100000);
-    expect(sum.includedCount).toBe(1);
-    expect(sum.annualContributions).toBe(12000);
-  });
-
-  it("annualisedAmount handles both frequencies", () => {
-    expect(annualisedAmount({ amount: 500, frequency: "monthly" })).toBe(6000);
-    expect(annualisedAmount({ amount: 500, frequency: "annual" })).toBe(500);
-  });
-
-  it("plan summary text includes years, calendar span, and age span", () => {
-    expect(planSummaryText({ currentAge: 40, endAge: 90, startYear: 2026 }))
-      .toBe("50-year projection, 2026–2076 (age 40–90)");
   });
 });

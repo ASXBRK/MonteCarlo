@@ -1,39 +1,41 @@
-// Phase A — multi-asset input panel + plan state model.
+// Phase A.2 — household, income & expenses, surplus/deficit settings.
 //
 // This file owns rendering and persistence; src/planState.js owns the
-// state shape, defaults, validation, and derived summaries (pure +
-// unit-tested). The projection engine arrives in Phase B — the chart
-// mount renders a placeholder until then.
+// state shape (schemaVersion 3), defaults, validation, migration, and
+// derived summaries. The ledger that consumes these inputs arrives in
+// Phase B; tax in B.1 — income is captured gross and the UI says so.
 
 import { PROFILES, realMu } from "./profiles.js";
 import {
   defaultState, createAsset, createCashflow, createLumpSum,
-  clampPlan, clampAllToPlan, clampAllocation, nearestVolBasis,
+  createIncomeRow, createExpenseRow,
+  clampPlan, clampAllToPlan, clampAllocation, clampIncomeRow,
+  nearestVolBasis, normaliseSettings, normaliseFundingOrder,
+  partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
+  removeAsset, ownerWindow, fyLabelForAge,
   clampInt, clampNumber, serialize, hydrate,
   summarise, planSummaryText, allocationSummary, ALLOC_PCT_MAX,
 } from "./planState.js";
 import { renderBellCurves } from "./chart.js";
 
 // Legacy insight modules (firstDecade, drawdownTolerance, tornado,
-// sequenceRisk) are stubbed out this phase. Their source files stay in
-// the repo untouched and their mounts remain in index.html; they return
-// as collapsed accordions in the insights phase. Deliberately NOT
-// imported while disabled — tornado.js spins up a Web Worker at module
-// scope, so a static import would run it.
+// sequenceRisk) are stubbed out. Deliberately NOT imported while
+// disabled — tornado.js spins up a Web Worker at module scope. They
+// return as collapsed accordions in the insights phase.
 const LEGACY_INSIGHTS_ENABLED = false;
 
 const STORAGE_KEY = "projectionPlanner.v1";
 const PROFILE_KEYS = Object.keys(PROFILES);
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const $ = (id) => document.getElementById(id);
 
 const els = {
-  planCurrentAge: $("planCurrentAge"),
-  planEndAge: $("planEndAge"),
-  planStartYear: $("planStartYear"),
-  planSummary: document.querySelector('[data-role="planSummary"]'),
+  planBar: $("planBar"),
   assets: $("assets"),
   addAssetBtn: $("addAssetBtn"),
+  cashflows: $("cashflows"),
+  settingsPanel: $("settingsPanel"),
   summaryStrip: $("summaryStrip"),
   chartNote: document.querySelector('[data-role="chartNote"]'),
   displayOptions: document.querySelectorAll(".display-option"),
@@ -47,9 +49,9 @@ const els = {
 
 let state = loadState();
 // UI-only runtime state — none of this is persisted.
-const collapsed = new Map();          // assetId → bool
-const allocMemory = new Map();        // assetId → { profile?, custom? } last-used per mode
-const volBasisTouched = new Set();    // assetIds where the user overrode volBasis
+const collapsed = new Map();
+const allocMemory = new Map();
+const volBasisTouched = new Set();
 
 function loadState() {
   try {
@@ -72,37 +74,125 @@ function findAsset(aid) {
   return state.assets.find((a) => a.id === aid) || null;
 }
 
-// --- formatting ---------------------------------------------------------
+function findRow(kind, id) {
+  return state.cashflows[kind]?.find((r) => r.id === id) || null;
+}
 
 const fmtMoney = (v) =>
   v.toLocaleString("en-AU", { style: "currency", currency: "AUD", maximumFractionDigits: 0 });
 
+function escapeHTML(s) {
+  return String(s)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+const isCouple = () => state.plan.household === "couple";
+
 // --- plan bar -----------------------------------------------------------
 
 function renderPlanBar() {
-  els.planCurrentAge.value = state.plan.currentAge;
-  els.planEndAge.value = state.plan.endAge;
-  els.planStartYear.value = state.plan.startYear;
-  els.planSummary.textContent = planSummaryText(state.plan);
+  const p = state.plan;
+  els.planBar.innerHTML = `
+    <div class="plan-field">
+      <label>Household</label>
+      <div class="seg-toggle">
+        <button class="seg-option${p.household === "single" ? " active" : ""}" type="button"
+                data-plan-action="household" data-value="single">Single</button>
+        <button class="seg-option${p.household === "couple" ? " active" : ""}" type="button"
+                data-plan-action="household" data-value="couple">Couple</button>
+      </div>
+    </div>
+    <div class="plan-field">
+      <label>${isCouple() ? "Client age" : "Current age"}</label>
+      <input type="number" min="18" max="100" step="1" value="${p.client.currentAge}"
+             data-plan-field="clientAge" />
+    </div>
+    ${isCouple() ? `
+      <div class="plan-field">
+        <label>Partner age</label>
+        <input type="number" min="18" max="100" step="1" value="${p.partner.currentAge}"
+               data-plan-field="partnerAge" />
+      </div>
+    ` : ""}
+    <div class="plan-field">
+      <label>Projection end age</label>
+      <input type="number" min="19" max="120" step="1" value="${p.endAge}"
+             data-plan-field="endAge" />
+    </div>
+    <div class="plan-field">
+      <label>Start</label>
+      <div class="plan-start">
+        <select data-plan-field="startMonth">
+          ${MONTH_NAMES.map((m, i) =>
+            `<option value="${i + 1}"${p.start.month === i + 1 ? " selected" : ""}>${m}</option>`
+          ).join("")}
+        </select>
+        <input type="number" min="1900" max="2200" step="1" value="${p.start.year}"
+               data-plan-field="startYear" />
+      </div>
+    </div>
+    <div class="plan-derived">${planSummaryText(p)}</div>
+  `;
 }
 
-function onPlanChange() {
-  const next = clampPlan({
-    currentAge: els.planCurrentAge.value,
-    endAge: els.planEndAge.value,
-    startYear: els.planStartYear.value,
-  });
-  state.plan = next;
-  state = clampAllToPlan(state); // silently clamp existing rows
+els.planBar.addEventListener("change", (e) => {
+  const field = e.target.dataset.planField;
+  if (!field) return;
+  const p = state.plan;
+  const next = {
+    household: p.household,
+    client: { currentAge: field === "clientAge" ? e.target.value : p.client.currentAge },
+    partner: p.partner
+      ? { currentAge: field === "partnerAge" ? e.target.value : p.partner.currentAge }
+      : null,
+    endAge: field === "endAge" ? e.target.value : p.endAge,
+    start: {
+      year: field === "startYear" ? e.target.value : p.start.year,
+      month: field === "startMonth" ? e.target.value : p.start.month,
+    },
+  };
+  state.plan = clampPlan(next);
+  state = clampAllToPlan(state);
   saveState();
-  renderPlanBar();
-  renderAssets(); // row values may have been clamped
-  renderSummaryStrip();
-}
+  renderAll();
+});
 
-for (const el of [els.planCurrentAge, els.planEndAge, els.planStartYear]) {
-  el.addEventListener("change", onPlanChange);
-}
+els.planBar.addEventListener("click", (e) => {
+  const btn = e.target.closest('[data-plan-action="household"]');
+  if (!btn) return;
+  const target = btn.dataset.value;
+  if (target === state.plan.household) return;
+
+  if (target === "couple") {
+    state.plan = clampPlan({
+      ...state.plan,
+      household: "couple",
+      partner: { currentAge: state.plan.client.currentAge },
+    });
+  } else {
+    // Couple → single: never orphan an owner.
+    const owned = partnerOwnedItems(state);
+    if (owned.count > 0) {
+      const reassign = window.confirm(
+        `${owned.count} item(s) are owned by the partner (or jointly): ` +
+        `${owned.assets.map((a) => a.name).concat(owned.income.map((r) => r.label)).join(", ")}.\n\n` +
+        `OK — reassign them to the client.\nCancel — choose what else to do.`
+      );
+      if (reassign) {
+        state = reassignPartnerToClient(state);
+      } else {
+        const del = window.confirm("Delete the partner-owned items instead? Cancel keeps the household as a couple.");
+        if (!del) { renderPlanBar(); return; } // abort the switch
+        state = deletePartnerOwned(state);
+      }
+    }
+    state.plan = clampPlan({ ...state.plan, household: "single", partner: null });
+  }
+  state = clampAllToPlan(state);
+  saveState();
+  renderAll();
+});
 
 // --- asset cards ------------------------------------------------------
 
@@ -112,67 +202,10 @@ function profileOptions(selected) {
   ).join("");
 }
 
-function cashflowRowHTML(aid, kind, cf) {
-  return `
-    <div class="cf-row" data-cfid="${cf.id}">
-      <div class="cf-cell">
-        <label>Amount ($)</label>
-        <input type="number" min="0" step="100" value="${cf.amount}"
-               data-aid="${aid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="amount" />
-      </div>
-      <div class="cf-cell">
-        <label>Frequency</label>
-        <select data-aid="${aid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="frequency">
-          <option value="monthly"${cf.frequency === "monthly" ? " selected" : ""}>Monthly</option>
-          <option value="annual"${cf.frequency === "annual" ? " selected" : ""}>Annual</option>
-        </select>
-      </div>
-      <div class="cf-cell">
-        <label>From age</label>
-        <input type="number" min="18" max="120" step="1" value="${cf.fromAge}"
-               data-aid="${aid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="fromAge" />
-      </div>
-      <div class="cf-cell">
-        <label>To age</label>
-        <input type="number" min="18" max="120" step="1" value="${cf.toAge}"
-               data-aid="${aid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="toAge" />
-      </div>
-      <div class="cf-cell cf-indexed">
-        <label>Indexed</label>
-        <input type="checkbox"${cf.indexed ? " checked" : ""}
-               data-aid="${aid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="indexed"
-               title="Indexed cashflows keep their real value; non-indexed are fixed in nominal dollars and shrink by CPI each year in real terms." />
-      </div>
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-aid="${aid}" data-kind="${kind}" data-cfid="${cf.id}">×</button>
-    </div>
-  `;
-}
-
-function lumpSumRowHTML(aid, ls) {
-  return `
-    <div class="cf-row cf-row-lump" data-cfid="${ls.id}">
-      <div class="cf-cell">
-        <label>Amount ($)${ls.source === "table" ? ' <span class="cf-tag">from table</span>' : ""}</label>
-        <input type="number" min="0" step="1000" value="${ls.amount}"
-               data-aid="${aid}" data-kind="lumpSums" data-cfid="${ls.id}" data-field="amount" />
-      </div>
-      <div class="cf-cell">
-        <label>Direction</label>
-        <select data-aid="${aid}" data-kind="lumpSums" data-cfid="${ls.id}" data-field="direction">
-          <option value="in"${ls.direction === "in" ? " selected" : ""}>In (deposit)</option>
-          <option value="out"${ls.direction === "out" ? " selected" : ""}>Out (withdrawal)</option>
-        </select>
-      </div>
-      <div class="cf-cell">
-        <label>At age</label>
-        <input type="number" min="18" max="120" step="1" value="${ls.age}"
-               data-aid="${aid}" data-kind="lumpSums" data-cfid="${ls.id}" data-field="age" />
-      </div>
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-aid="${aid}" data-kind="lumpSums" data-cfid="${ls.id}">×</button>
-    </div>
-  `;
+function ownerOptions(selected) {
+  return ["client", "partner", "joint"].map(
+    (o) => `<option value="${o}"${o === selected ? " selected" : ""}>${o[0].toUpperCase()}${o.slice(1)}</option>`
+  ).join("");
 }
 
 function allocationSectionHTML(a) {
@@ -251,7 +284,7 @@ function assetCardHTML(a) {
               aria-label="${isCollapsed ? "Expand" : "Collapse"}"
               data-action="toggle-collapse" data-aid="${a.id}">▸</button>
       <span class="pcard-name" data-role="headName">${escapeHTML(a.name)}</span>
-      <span class="pcard-meta" data-role="headMeta">${escapeHTML(allocationSummary(a.allocation, PROFILES))} · ${fmtMoney(a.balance)}</span>
+      <span class="pcard-meta" data-role="headMeta">${escapeHTML(allocationSummary(a.allocation, PROFILES))} · ${fmtMoney(a.balance)}${isCouple() ? ` · ${a.owner}` : ""}</span>
       <label class="pcard-include" title="Include in projection totals">
         <input type="checkbox"${a.include ? " checked" : ""}
                data-action="toggle-include" data-aid="${a.id}" />
@@ -269,12 +302,18 @@ function assetCardHTML(a) {
 
   const body = `
     <div class="pcard-body">
-      <div class="pcard-details">
+      <div class="pcard-details${isCouple() ? " with-owner" : ""}">
         <div class="cf-cell pcard-name-cell">
           <label>Name</label>
           <input type="text" value="${escapeHTML(a.name)}" maxlength="60"
                  data-aid="${a.id}" data-field="name" />
         </div>
+        ${isCouple() ? `
+          <div class="cf-cell">
+            <label>Owner</label>
+            <select data-aid="${a.id}" data-field="owner">${ownerOptions(a.owner)}</select>
+          </div>
+        ` : ""}
         <div class="cf-cell">
           <label>Current value ($)</label>
           <input type="number" min="0" step="1000" value="${a.balance}"
@@ -283,6 +322,17 @@ function assetCardHTML(a) {
       </div>
 
       ${allocationSectionHTML(a)}
+
+      <div class="cf-section">
+        <div class="cf-section-title">Distributions</div>
+        <div class="seg-toggle" role="radiogroup" aria-label="Distribution treatment">
+          <button class="seg-option${a.distributions === "reinvest" ? " active" : ""}" type="button"
+                  data-action="distributions" data-aid="${a.id}" data-value="reinvest">Reinvested</button>
+          <button class="seg-option${a.distributions === "cash" ? " active" : ""}" type="button"
+                  data-action="distributions" data-aid="${a.id}" data-value="cash">Paid as cash</button>
+        </div>
+        <p class="helper-text">Reinvested distributions stay in the asset. Paid-as-cash distributions enter the household ledger as the owner's income in that financial year.</p>
+      </div>
 
       <div class="cf-section">
         <div class="cf-section-title">Costs</div>
@@ -314,42 +364,16 @@ function assetCardHTML(a) {
         ` : ""}
         <p class="helper-text">Used for capital gains tax modelling in a future version.</p>
       </div>
-
-      <div class="cf-section">
-        <div class="cf-section-title">Contributions</div>
-        ${a.contributions.map((c) => cashflowRowHTML(a.id, "contributions", c)).join("")}
-        <button class="add-row-btn" type="button" data-action="add-row" data-aid="${a.id}" data-kind="contributions">+ Add contribution</button>
-      </div>
-
-      <div class="cf-section">
-        <div class="cf-section-title">Withdrawals</div>
-        ${a.withdrawals.map((w) => cashflowRowHTML(a.id, "withdrawals", w)).join("")}
-        <button class="add-row-btn" type="button" data-action="add-row" data-aid="${a.id}" data-kind="withdrawals">+ Add withdrawal</button>
-      </div>
-
-      <div class="cf-section">
-        <div class="cf-section-title">Lump sums</div>
-        ${a.lumpSums.map((l) => lumpSumRowHTML(a.id, l)).join("")}
-        <button class="add-row-btn" type="button" data-action="add-row" data-aid="${a.id}" data-kind="lumpSums">+ Add lump sum</button>
-      </div>
     </div>
   `;
 
   return `<div class="pcard${excluded ? " excluded" : ""}" data-aid="${a.id}">${head}${body}</div>`;
 }
 
-function escapeHTML(s) {
-  return String(s)
-    .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-}
-
 function renderAssets() {
   els.assets.innerHTML = state.assets.map(assetCardHTML).join("");
 }
 
-// Targeted header refresh so typing in name/balance doesn't rebuild
-// the card (which would drop input focus).
 function refreshCardHead(aid) {
   const a = findAsset(aid);
   const card = els.assets.querySelector(`.pcard[data-aid="${aid}"]`);
@@ -357,7 +381,7 @@ function refreshCardHead(aid) {
   const nameEl = card.querySelector('[data-role="headName"]');
   const metaEl = card.querySelector('[data-role="headMeta"]');
   if (nameEl) nameEl.textContent = a.name;
-  if (metaEl) metaEl.textContent = `${allocationSummary(a.allocation, PROFILES)} · ${fmtMoney(a.balance)}`;
+  if (metaEl) metaEl.textContent = `${allocationSummary(a.allocation, PROFILES)} · ${fmtMoney(a.balance)}${isCouple() ? ` · ${a.owner}` : ""}`;
 }
 
 function refreshAllocTotal(aid) {
@@ -369,8 +393,6 @@ function refreshAllocTotal(aid) {
   }
 }
 
-// If the user hasn't manually chosen a volatility basis, keep it
-// tracking the nearest-return profile as income/growth change.
 function retargetVolBasis(aid) {
   const a = findAsset(aid);
   if (!a || a.allocation.mode !== "custom" || volBasisTouched.has(aid)) return;
@@ -382,50 +404,347 @@ function retargetVolBasis(aid) {
   }
 }
 
-// --- field mutation (delegated) -------------------------------------------
+// --- central cashflows section ------------------------------------------
 
-// 'input' events: write state, refresh summaries, never rebuild DOM
-// (keeps focus). 'change' events additionally clamp and sync the field.
-els.assets.addEventListener("input", (e) => {
-  applyFieldEdit(e.target, false);
+function assetOptions(selected) {
+  return state.assets.map(
+    (a) => `<option value="${a.id}"${a.id === selected ? " selected" : ""}>${escapeHTML(a.name)}</option>`
+  ).join("");
+}
+
+function fySpan(kind, row, which, owner) {
+  const age = which === "from" ? row.fromAge : (which === "to" ? row.toAge : row.age);
+  return `<span class="fy-label" data-role="fy-${row.id}-${which}">${fyLabelForAge(state.plan, owner, age)}</span>`;
+}
+
+function incomeRowHTML(r) {
+  return `
+    <div class="cf-row cf-row-income${isCouple() ? " with-owner" : ""}" data-cfid="${r.id}">
+      <div class="cf-cell">
+        <label>Label</label>
+        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
+               data-kind="income" data-cfid="${r.id}" data-field="label" />
+      </div>
+      ${isCouple() ? `
+        <div class="cf-cell">
+          <label>Owner</label>
+          <select data-kind="income" data-cfid="${r.id}" data-field="owner">
+            <option value="client"${r.owner === "client" ? " selected" : ""}>Client</option>
+            <option value="partner"${r.owner === "partner" ? " selected" : ""}>Partner</option>
+          </select>
+        </div>
+      ` : ""}
+      <div class="cf-cell">
+        <label>Gross amount ($)</label>
+        <input type="number" min="0" step="1000" value="${r.amount}"
+               data-kind="income" data-cfid="${r.id}" data-field="amount" />
+      </div>
+      <div class="cf-cell">
+        <label>Frequency</label>
+        <select data-kind="income" data-cfid="${r.id}" data-field="frequency">
+          <option value="monthly"${r.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${r.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </div>
+      <div class="cf-cell">
+        <label>From age ${fySpan("income", r, "from", r.owner)}</label>
+        <input type="number" min="18" max="120" step="1" value="${r.fromAge}"
+               data-kind="income" data-cfid="${r.id}" data-field="fromAge" />
+      </div>
+      <div class="cf-cell">
+        <label>To age ${fySpan("income", r, "to", r.owner)}</label>
+        <input type="number" min="18" max="120" step="1" value="${r.toAge}"
+               data-kind="income" data-cfid="${r.id}" data-field="toAge" />
+      </div>
+      <div class="cf-cell cf-indexed">
+        <label>Indexed</label>
+        <input type="checkbox"${r.indexed ? " checked" : ""}
+               data-kind="income" data-cfid="${r.id}" data-field="indexed" />
+      </div>
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-kind="income" data-cfid="${r.id}">×</button>
+    </div>
+  `;
+}
+
+function expenseRowHTML(r) {
+  return `
+    <div class="cf-row cf-row-expense" data-cfid="${r.id}">
+      <div class="cf-cell">
+        <label>Label</label>
+        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
+               data-kind="expenses" data-cfid="${r.id}" data-field="label" />
+      </div>
+      <div class="cf-cell">
+        <label>Amount ($)</label>
+        <input type="number" min="0" step="1000" value="${r.amount}"
+               data-kind="expenses" data-cfid="${r.id}" data-field="amount" />
+      </div>
+      <div class="cf-cell">
+        <label>Frequency</label>
+        <select data-kind="expenses" data-cfid="${r.id}" data-field="frequency">
+          <option value="monthly"${r.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${r.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </div>
+      <div class="cf-cell">
+        <label>From age ${fySpan("expenses", r, "from", "client")}</label>
+        <input type="number" min="18" max="120" step="1" value="${r.fromAge}"
+               data-kind="expenses" data-cfid="${r.id}" data-field="fromAge" />
+      </div>
+      <div class="cf-cell">
+        <label>To age ${fySpan("expenses", r, "to", "client")}</label>
+        <input type="number" min="18" max="120" step="1" value="${r.toAge}"
+               data-kind="expenses" data-cfid="${r.id}" data-field="toAge" />
+      </div>
+      <div class="cf-cell cf-indexed">
+        <label>Indexed</label>
+        <input type="checkbox"${r.indexed ? " checked" : ""}
+               data-kind="expenses" data-cfid="${r.id}" data-field="indexed" />
+      </div>
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-kind="expenses" data-cfid="${r.id}">×</button>
+    </div>
+  `;
+}
+
+function contributionRowHTML(kind, cf) {
+  return `
+    <div class="cf-row cf-row-asset" data-cfid="${cf.id}">
+      <div class="cf-cell">
+        <label>Asset</label>
+        <select data-kind="${kind}" data-cfid="${cf.id}" data-field="assetId">${assetOptions(cf.assetId)}</select>
+      </div>
+      <div class="cf-cell">
+        <label>Amount ($)</label>
+        <input type="number" min="0" step="100" value="${cf.amount}"
+               data-kind="${kind}" data-cfid="${cf.id}" data-field="amount" />
+      </div>
+      <div class="cf-cell">
+        <label>Frequency</label>
+        <select data-kind="${kind}" data-cfid="${cf.id}" data-field="frequency">
+          <option value="monthly"${cf.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${cf.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </div>
+      <div class="cf-cell">
+        <label>From age ${fySpan(kind, cf, "from", "client")}</label>
+        <input type="number" min="18" max="120" step="1" value="${cf.fromAge}"
+               data-kind="${kind}" data-cfid="${cf.id}" data-field="fromAge" />
+      </div>
+      <div class="cf-cell">
+        <label>To age ${fySpan(kind, cf, "to", "client")}</label>
+        <input type="number" min="18" max="120" step="1" value="${cf.toAge}"
+               data-kind="${kind}" data-cfid="${cf.id}" data-field="toAge" />
+      </div>
+      <div class="cf-cell cf-indexed">
+        <label>Indexed</label>
+        <input type="checkbox"${cf.indexed ? " checked" : ""}
+               data-kind="${kind}" data-cfid="${cf.id}" data-field="indexed" />
+      </div>
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-kind="${kind}" data-cfid="${cf.id}">×</button>
+    </div>
+  `;
+}
+
+function lumpSumRowHTML(ls) {
+  return `
+    <div class="cf-row cf-row-lump" data-cfid="${ls.id}">
+      <div class="cf-cell">
+        <label>Asset${ls.source === "table" ? ' <span class="cf-tag">from table</span>' : ""}</label>
+        <select data-kind="lumpSums" data-cfid="${ls.id}" data-field="assetId">${assetOptions(ls.assetId)}</select>
+      </div>
+      <div class="cf-cell">
+        <label>Amount ($)</label>
+        <input type="number" min="0" step="1000" value="${ls.amount}"
+               data-kind="lumpSums" data-cfid="${ls.id}" data-field="amount" />
+      </div>
+      <div class="cf-cell">
+        <label>Direction</label>
+        <select data-kind="lumpSums" data-cfid="${ls.id}" data-field="direction">
+          <option value="in"${ls.direction === "in" ? " selected" : ""}>In (deposit)</option>
+          <option value="out"${ls.direction === "out" ? " selected" : ""}>Out (withdrawal)</option>
+        </select>
+      </div>
+      <div class="cf-cell">
+        <label>At age ${fySpan("lumpSums", ls, "at", "client")}</label>
+        <input type="number" min="18" max="120" step="1" value="${ls.age}"
+               data-kind="lumpSums" data-cfid="${ls.id}" data-field="age" />
+      </div>
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-kind="lumpSums" data-cfid="${ls.id}">×</button>
+    </div>
+  `;
+}
+
+function renderCashflows() {
+  const cf = state.cashflows;
+  els.cashflows.innerHTML = `
+    <div class="cf-panel">
+      <div class="cf-section">
+        <div class="cf-section-title">Income</div>
+        <p class="helper-text">Enter income before tax. Tax is calculated from a later phase.</p>
+        ${cf.income.map(incomeRowHTML).join("")}
+        <button class="add-row-btn" type="button" data-action="add-row" data-kind="income">+ Add income</button>
+      </div>
+      <div class="cf-section">
+        <div class="cf-section-title">Expenses</div>
+        ${cf.expenses.map(expenseRowHTML).join("")}
+        <button class="add-row-btn" type="button" data-action="add-row" data-kind="expenses">+ Add expense</button>
+      </div>
+      <div class="cf-section">
+        <div class="cf-section-title">Contributions</div>
+        ${cf.contributions.map((c) => contributionRowHTML("contributions", c)).join("")}
+        <button class="add-row-btn" type="button" data-action="add-row" data-kind="contributions">+ Add contribution</button>
+      </div>
+      <div class="cf-section">
+        <div class="cf-section-title">Withdrawals</div>
+        ${cf.withdrawals.map((w) => contributionRowHTML("withdrawals", w)).join("")}
+        <button class="add-row-btn" type="button" data-action="add-row" data-kind="withdrawals">+ Add withdrawal</button>
+      </div>
+      <div class="cf-section">
+        <div class="cf-section-title">Lump sums</div>
+        ${cf.lumpSums.map(lumpSumRowHTML).join("")}
+        <button class="add-row-btn" type="button" data-action="add-row" data-kind="lumpSums">+ Add lump sum</button>
+      </div>
+    </div>
+  `;
+}
+
+// --- settings section ------------------------------------------------------
+
+function renderSettings() {
+  const s = state.settings;
+  const includedAssets = state.assets.filter((a) => a.include);
+  const orderItems = s.fundingOrder.map((id, i) => {
+    const a = findAsset(id);
+    if (!a) return "";
+    return `
+      <div class="order-item">
+        <span class="order-pos">${i + 1}.</span>
+        <span class="order-name">${escapeHTML(a.name)}</span>
+        <span class="order-controls">
+          <button type="button" class="order-btn" data-action="order-up" data-aid="${id}"
+                  ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
+          <button type="button" class="order-btn" data-action="order-down" data-aid="${id}"
+                  ${i === s.fundingOrder.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button>
+        </span>
+      </div>
+    `;
+  }).join("");
+
+  els.settingsPanel.innerHTML = `
+    <div class="cf-panel">
+      <div class="cf-section">
+        <div class="cf-section-title">Surplus treatment</div>
+        <div class="settings-row">
+          <select data-settings-field="surplusMode">
+            <option value="spend"${s.surplus.mode === "spend" ? " selected" : ""}>Spend (additional expenses)</option>
+            <option value="invest"${s.surplus.mode === "invest" ? " selected" : ""}>Invest to…</option>
+          </select>
+          ${s.surplus.mode === "invest" ? `
+            <select data-settings-field="surplusAsset">
+              ${includedAssets.map((a) =>
+                `<option value="${a.id}"${a.id === s.surplus.assetId ? " selected" : ""}>${escapeHTML(a.name)}</option>`
+              ).join("")}
+            </select>
+          ` : ""}
+        </div>
+        <p class="helper-text">When income exceeds expenses, the surplus is ${s.surplus.mode === "invest" ? "invested into the selected asset" : "treated as additional spending and disappears from the projection"}.</p>
+      </div>
+      <div class="cf-section">
+        <div class="cf-section-title">Deficit funding order</div>
+        <div class="order-list">${orderItems}</div>
+        <p class="helper-text">When expenses exceed income, money is drawn from these assets in this order.</p>
+      </div>
+    </div>
+  `;
+}
+
+els.settingsPanel.addEventListener("change", (e) => {
+  const field = e.target.dataset.settingsField;
+  if (!field) return;
+  if (field === "surplusMode") {
+    if (e.target.value === "invest") {
+      const first = state.assets.find((a) => a.include);
+      state.settings.surplus = { mode: "invest", assetId: first ? first.id : null };
+      state.settings = normaliseSettings(state.settings, state.assets);
+    } else {
+      state.settings.surplus = { mode: "spend", assetId: null };
+    }
+  } else if (field === "surplusAsset") {
+    state.settings.surplus = { mode: "invest", assetId: e.target.value };
+    state.settings = normaliseSettings(state.settings, state.assets);
+  }
+  saveState();
+  renderSettings();
 });
-els.assets.addEventListener("change", (e) => {
-  applyFieldEdit(e.target, true);
+
+els.settingsPanel.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  const { action, aid } = btn.dataset;
+  if (action !== "order-up" && action !== "order-down") return;
+  const order = [...state.settings.fundingOrder];
+  const i = order.indexOf(aid);
+  const j = action === "order-up" ? i - 1 : i + 1;
+  if (i < 0 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  state.settings.fundingOrder = normaliseFundingOrder(order, state.assets);
+  saveState();
+  renderSettings();
 });
+
+// --- field mutation (delegated over assets + cashflows) ---------------------
+
+for (const container of [els.assets, els.cashflows]) {
+  container.addEventListener("input", (e) => applyFieldEdit(e.target, false));
+  container.addEventListener("change", (e) => applyFieldEdit(e.target, true));
+}
 
 function applyFieldEdit(el, commit) {
-  const aid = el.dataset.aid;
   const field = el.dataset.field;
-  if (!aid || !field) return;
-  const a = findAsset(aid);
-  if (!a) return;
+  if (!field) return;
 
-  const kind = el.dataset.kind;
-  let structural = false;
-  if (kind) {
-    const row = a[kind]?.find((r) => r.id === el.dataset.cfid);
+  if (el.dataset.kind) {
+    const row = findRow(el.dataset.kind, el.dataset.cfid);
     if (!row) return;
-    applyRowEdit(a, kind, row, field, el, commit);
-  } else {
-    structural = applyAssetEdit(a, field, el, commit);
+    applyRowEdit(el.dataset.kind, row, field, el, commit);
+    saveState();
+    renderSummaryStrip();
+    return;
   }
 
+  const aid = el.dataset.aid;
+  const a = findAsset(aid);
+  if (!a) return;
+  const structural = applyAssetEdit(a, field, el, commit);
   saveState();
   if (structural) {
     renderAssets();
+    renderSettings(); // names/inclusion feed the funding order list
+    renderCashflows(); // asset selects show names
   } else {
     refreshCardHead(aid);
   }
   renderSummaryStrip();
 }
 
-// Returns true when the edit needs a structural re-render (e.g. the
-// CGT checkbox toggling the cost-base field's existence).
 function applyAssetEdit(a, field, el, commit) {
   switch (field) {
-    case "name":
+    case "name": {
       a.name = commit ? (el.value.trim() || a.name) : el.value;
-      if (commit) el.value = a.name;
+      if (commit) {
+        el.value = a.name;
+        // Funding order + cashflow asset selects display the name.
+        renderSettings();
+        refreshAssetSelects();
+      }
+      return false;
+    }
+    case "owner":
+      if (["client", "partner", "joint"].includes(el.value)) a.owner = el.value;
       return false;
     case "balance":
       a.balance = clampNumber(el.value, 0);
@@ -437,9 +756,9 @@ function applyAssetEdit(a, field, el, commit) {
       return false;
     case "cgtAsset": {
       a.cgtAsset = el.checked;
-      if (a.cgtAsset && a.costBase == null) a.costBase = a.balance; // default on first tick
+      if (a.cgtAsset && a.costBase == null) a.costBase = a.balance;
       if (!a.cgtAsset) a.costBase = null;
-      return true; // cost-base field appears/disappears
+      return true;
     }
     case "costBase":
       a.costBase = clampNumber(el.value, 0);
@@ -475,16 +794,39 @@ function applyAssetEdit(a, field, el, commit) {
     case "alloc.volBasis":
       if (a.allocation.mode === "custom" && PROFILE_KEYS.includes(el.value)) {
         a.allocation.volBasis = el.value;
-        volBasisTouched.add(a.id); // user override — stop auto-tracking
+        volBasisTouched.add(a.id);
       }
       return false;
   }
   return false;
 }
 
-function applyRowEdit(a, kind, row, field, el, commit) {
+function applyRowEdit(kind, row, field, el, commit) {
   const plan = state.plan;
+  const owner = kind === "income" ? row.owner : "client";
+  const win = ownerWindow(plan, owner);
+
   switch (field) {
+    case "label":
+      row.label = commit ? (el.value.trim() || row.label) : el.value;
+      if (commit) el.value = row.label;
+      break;
+    case "owner": { // income rows only
+      if (el.value !== "client" && el.value !== "partner") break;
+      row.owner = el.value;
+      // Keep numeric ages; re-clamp into the new owner's window and
+      // re-derive FY labels.
+      const clamped = clampIncomeRow(row, plan);
+      row.fromAge = clamped.fromAge;
+      row.toAge = clamped.toAge;
+      syncRowInput(el, "fromAge", row.fromAge);
+      syncRowInput(el, "toAge", row.toAge);
+      updateFyLabels(row, kind);
+      break;
+    }
+    case "assetId":
+      if (findAsset(el.value)) row.assetId = el.value;
+      break;
     case "amount":
       row.amount = clampNumber(el.value, 0);
       if (commit) el.value = row.amount;
@@ -499,33 +841,56 @@ function applyRowEdit(a, kind, row, field, el, commit) {
       row.direction = el.value === "out" ? "out" : "in";
       break;
     case "fromAge": {
-      if (!commit) return; // ages validate on commit only
-      const v = clampInt(el.value, plan.currentAge, plan.endAge);
+      if (!commit) return;
+      const v = clampInt(el.value, win.from, win.to);
       row.fromAge = v;
-      if (row.toAge < v) row.toAge = v;
+      if (row.toAge < v) { row.toAge = v; syncRowInput(el, "toAge", v); }
       flagIfClamped(el, v);
-      syncRowAges(el, row);
+      updateFyLabels(row, kind);
       break;
     }
     case "toAge": {
       if (!commit) return;
-      const v = clampInt(el.value, row.fromAge, plan.endAge);
+      const v = clampInt(el.value, row.fromAge, win.to);
       row.toAge = v;
       flagIfClamped(el, v);
+      updateFyLabels(row, kind);
       break;
     }
     case "age": { // lump sum
       if (!commit) return;
-      const v = clampInt(el.value, plan.currentAge, plan.endAge);
+      const v = clampInt(el.value, plan.client.currentAge, plan.endAge);
       row.age = v;
       flagIfClamped(el, v);
+      updateFyLabels(row, kind);
       break;
     }
   }
 }
 
-// Inline validation feedback: if the committed value differs from what
-// the user typed, snap the field to the clamped value and flash it.
+function syncRowInput(el, field, value) {
+  const rowEl = el.closest(".cf-row");
+  const sib = rowEl?.querySelector(`[data-field="${field}"]`);
+  if (sib) sib.value = value;
+}
+
+function updateFyLabels(row, kind) {
+  const owner = kind === "income" ? row.owner : "client";
+  const set = (which, age) => {
+    const el = document.querySelector(`[data-role="fy-${row.id}-${which}"]`);
+    if (el) el.textContent = fyLabelForAge(state.plan, owner, age);
+  };
+  if (kind === "lumpSums") set("at", row.age);
+  else { set("from", row.fromAge); set("to", row.toAge); }
+}
+
+function refreshAssetSelects() {
+  for (const sel of els.cashflows.querySelectorAll('[data-field="assetId"]')) {
+    const current = sel.value;
+    sel.innerHTML = assetOptions(current);
+  }
+}
+
 function flagIfClamped(el, clampedValue) {
   const typed = Number(el.value);
   el.value = clampedValue;
@@ -535,43 +900,7 @@ function flagIfClamped(el, clampedValue) {
   }
 }
 
-// When fromAge pushes toAge, reflect it in the sibling input.
-function syncRowAges(el, row) {
-  const rowEl = el.closest(".cf-row");
-  const toEl = rowEl?.querySelector('[data-field="toAge"]');
-  if (toEl) toEl.value = row.toAge;
-}
-
-// --- allocation mode switching -----------------------------------------------
-
-// Switching modes preserves the other mode's last values within the
-// session (allocMemory). First switch to custom seeds income/growth
-// from the current profile's split and pre-selects that profile as the
-// volatility basis — the natural starting point.
-function switchAllocMode(a, mode) {
-  if (a.allocation.mode === mode) return;
-  const mem = allocMemory.get(a.id) || {};
-  mem[a.allocation.mode] = a.allocation; // stash outgoing mode
-  if (mode === "custom") {
-    if (mem.custom) {
-      a.allocation = mem.custom;
-    } else {
-      const p = PROFILES[a.allocation.profile] || {};
-      const incomePct = +((p.incomeReturn ?? 0) * 100).toFixed(2);
-      const growthPct = +((p.growthReturn ?? 0) * 100).toFixed(2);
-      a.allocation = clampAllocation({
-        mode: "custom",
-        incomePct, growthPct, frankingPct: 0,
-        volBasis: a.allocation.profile,
-      }, PROFILES);
-    }
-  } else {
-    a.allocation = mem.profile || clampAllocation({ mode: "profile", profile: null }, PROFILES);
-  }
-  allocMemory.set(a.id, mem);
-}
-
-// --- structural actions (delegated clicks) ----------------------------------
+// --- structural actions ------------------------------------------------------
 
 els.assets.addEventListener("click", (e) => {
   const target = e.target.closest("[data-action]");
@@ -583,29 +912,38 @@ els.assets.addEventListener("click", (e) => {
 
   switch (action) {
     case "toggle-collapse": {
-      // Ignore clicks that were really on the include checkbox/remove btn.
       if (e.target.closest(".pcard-include") || e.target.closest(".pcard-remove")) return;
       collapsed.set(aid, !(collapsed.get(aid) === true));
       renderAssets();
       break;
     }
     case "toggle-include": {
+      const wasSurplusTarget = state.settings.surplus.assetId === aid && e.target.checked === false;
+      if (wasSurplusTarget) {
+        const ok = window.confirm(`"${a.name}" is the surplus investment target. Excluding it reverts surplus treatment to Spend. Continue?`);
+        if (!ok) { e.target.checked = true; return; }
+      }
       a.include = e.target.checked;
+      state.settings = normaliseSettings(state.settings, state.assets);
       saveState();
       els.assets.querySelector(`.pcard[data-aid="${aid}"]`)?.classList.toggle("excluded", !a.include);
+      renderSettings();
       renderSummaryStrip();
       break;
     }
     case "remove-asset": {
       if (state.assets.length <= 1) return;
-      if (!window.confirm(`Remove "${a.name}"? Its inputs will be lost.`)) return;
-      state.assets = state.assets.filter((x) => x.id !== aid);
+      const isSurplusTarget = state.settings.surplus.assetId === aid;
+      const msg = isSurplusTarget
+        ? `Remove "${a.name}"? It is the surplus investment target — surplus treatment will revert to Spend, and the asset's cashflow rows will be deleted.`
+        : `Remove "${a.name}"? Its cashflow rows will be deleted too.`;
+      if (!window.confirm(msg)) return;
+      state = removeAsset(state, aid);
       collapsed.delete(aid);
       allocMemory.delete(aid);
       volBasisTouched.delete(aid);
       saveState();
-      renderAssets();
-      renderSummaryStrip();
+      renderAll();
       break;
     }
     case "alloc-mode": {
@@ -615,35 +953,72 @@ els.assets.addEventListener("click", (e) => {
       renderSummaryStrip();
       break;
     }
-    case "add-row": {
-      const kind = target.dataset.kind;
-      if (kind === "lumpSums") a.lumpSums.push(createLumpSum(state.plan));
-      else if (kind === "withdrawals") a.withdrawals.push(createCashflow("withdrawal", state.plan));
-      else if (kind === "contributions") a.contributions.push(createCashflow("contribution", state.plan));
-      saveState();
-      renderAssets();
-      renderSummaryStrip();
+    case "distributions": {
+      const v = target.dataset.value === "cash" ? "cash" : "reinvest";
+      if (a.distributions !== v) {
+        a.distributions = v;
+        saveState();
+        renderAssets();
+      }
       break;
     }
-    case "remove-row": {
-      const kind = target.dataset.kind;
-      const cfid = target.dataset.cfid;
-      if (a[kind]) a[kind] = a[kind].filter((r) => r.id !== cfid);
-      saveState();
-      renderAssets();
-      renderSummaryStrip();
-      break;
+  }
+});
+
+function switchAllocMode(a, mode) {
+  if (a.allocation.mode === mode) return;
+  const mem = allocMemory.get(a.id) || {};
+  mem[a.allocation.mode] = a.allocation;
+  if (mode === "custom") {
+    if (mem.custom) {
+      a.allocation = mem.custom;
+    } else {
+      const p = PROFILES[a.allocation.profile] || {};
+      a.allocation = clampAllocation({
+        mode: "custom",
+        incomePct: +((p.incomeReturn ?? 0) * 100).toFixed(2),
+        growthPct: +((p.growthReturn ?? 0) * 100).toFixed(2),
+        frankingPct: p.frankingPct ?? 0,
+        volBasis: a.allocation.profile,
+      }, PROFILES);
     }
+  } else {
+    a.allocation = mem.profile || clampAllocation({ mode: "profile", profile: null }, PROFILES);
+  }
+  allocMemory.set(a.id, mem);
+}
+
+els.cashflows.addEventListener("click", (e) => {
+  const target = e.target.closest("[data-action]");
+  if (!target) return;
+  const { action, kind, cfid } = target.dataset;
+  const cf = state.cashflows;
+
+  if (action === "add-row") {
+    const firstAsset = state.assets[0]?.id ?? null;
+    if (kind === "income") cf.income.push(createIncomeRow(state.plan, cf.income));
+    else if (kind === "expenses") cf.expenses.push(createExpenseRow(state.plan, cf.expenses));
+    else if (kind === "contributions") cf.contributions.push(createCashflow("contribution", state.plan, firstAsset));
+    else if (kind === "withdrawals") cf.withdrawals.push(createCashflow("withdrawal", state.plan, firstAsset));
+    else if (kind === "lumpSums") cf.lumpSums.push(createLumpSum(state.plan, firstAsset));
+    saveState();
+    renderCashflows();
+    renderSummaryStrip();
+  } else if (action === "remove-row") {
+    if (cf[kind]) cf[kind] = cf[kind].filter((r) => r.id !== cfid);
+    saveState();
+    renderCashflows();
+    renderSummaryStrip();
   }
 });
 
 els.addAssetBtn.addEventListener("click", () => {
   const a = createAsset(state.plan, state.assets, PROFILES);
   state.assets.push(a);
+  state.settings = normaliseSettings(state.settings, state.assets); // appends to funding order
   collapsed.set(a.id, false);
   saveState();
-  renderAssets();
-  renderSummaryStrip();
+  renderAll();
 });
 
 // --- summary strip ------------------------------------------------------
@@ -658,6 +1033,14 @@ function renderSummaryStrip() {
     <div class="stat">
       <div class="stat-label">Assets included</div>
       <div class="stat-value">${s.includedCount} of ${state.assets.length}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Gross income (annualised)</div>
+      <div class="stat-value">${fmtMoney(s.annualIncome)} /yr</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Expenses (annualised)</div>
+      <div class="stat-value">${fmtMoney(s.annualExpenses)} /yr</div>
     </div>
     <div class="stat">
       <div class="stat-label">Contributions (annualised)</div>
@@ -710,7 +1093,6 @@ els.displayOptions.forEach((btn) => {
     state.display.units = u;
     saveState();
     applyUnitsLabel();
-    // Phase B: re-render projection in the selected units.
   });
 });
 
@@ -727,6 +1109,7 @@ function populateParamsTable() {
         <td>${(p.totalNominal * 100).toFixed(2)}%</td>
         <td>${(realMu(p, cpi) * 100).toFixed(2)}%</td>
         <td>${(p.sigma * 100).toFixed(1)}%</td>
+        <td>${p.frankingPct}%</td>
       </tr>
     `
   ).join("");
@@ -758,14 +1141,19 @@ els.inflationInput.addEventListener("change", () => {
   applyUnitsLabel();
   populateParamsTable();
   renderBellCurves("bellCurves", PROFILES, state.assumptions.cpi);
-  // Phase B: re-run projection (real returns derive from CPI).
 });
 
 // --- boot -----------------------------------------------------------------
 
-renderPlanBar();
-renderAssets();
-renderSummaryStrip();
+function renderAll() {
+  renderPlanBar();
+  renderAssets();
+  renderCashflows();
+  renderSettings();
+  renderSummaryStrip();
+}
+
+renderAll();
 renderChartPlaceholder();
 applyUnitsLabel();
 populateParamsTable();

@@ -16,27 +16,24 @@
         </div>
       </header>
 
-      <section class="plan-bar" aria-label="Plan details">
-        <div class="plan-field">
-          <label for="planCurrentAge">Current age</label>
-          <input id="planCurrentAge" type="number" min="18" max="100" step="1" />
-        </div>
-        <div class="plan-field">
-          <label for="planEndAge">Projection end age</label>
-          <input id="planEndAge" type="number" min="19" max="120" step="1" />
-        </div>
-        <div class="plan-field">
-          <label for="planStartYear">Start year</label>
-          <input id="planStartYear" type="number" min="1900" max="2200" step="1" />
-        </div>
-        <div class="plan-derived" data-role="planSummary"></div>
-      </section>
+      <section id="planBar" class="plan-bar" aria-label="Plan details"></section>
 
       <section aria-label="Assets">
+        <h2 class="section-heading">Assets</h2>
         <div id="assets" class="portfolio-stack"></div>
         <div class="portfolio-actions">
           <button id="addAssetBtn" class="btn-text" type="button">+ Add asset</button>
         </div>
+      </section>
+
+      <section aria-label="Cashflows">
+        <h2 class="section-heading">Cashflows</h2>
+        <div id="cashflows"></div>
+      </section>
+
+      <section aria-label="Settings">
+        <h2 class="section-heading">Surplus &amp; deficit settings</h2>
+        <div id="settingsPanel"></div>
       </section>
 
       <section id="summaryStrip" class="summary-strip" aria-live="polite"></section>
@@ -92,6 +89,7 @@
                 <th>Total (nominal)</th>
                 <th>Real @ current CPI</th>
                 <th>σ (real, annual)</th>
+                <th>Franking</th>
               </tr>
             </thead>
             <tbody id="paramAssetTable"></tbody>
@@ -102,6 +100,8 @@
           <p>σ values and regime-switching parameters are model calibrations, not firm-published figures. Defensive-end σs (Cash 1.5%, Defensive 3.0%) are intentionally higher than nominal-terms intuition would suggest: real cash and short-duration variance are dominated by inflation variance rather than nominal price fluctuations.</p>
           <p>Residential Property's σ is set higher than typical published direct-property volatility, which is understated by appraisal-based valuation smoothing; the model σ is adjusted upward to reflect underlying transaction-price variance.</p>
           <p>Assets with a custom allocation use their entered income + growth return as the expected return, and borrow σ and regime-switching parameters from their selected volatility basis profile.</p>
+          <p>Franking percentages are placeholder assumptions pending firm confirmation — high for Australian-equity-heavy profiles whose income is dominated by franked dividends, zero for cash, fixed-interest-dominant profiles, and direct property. They are captured now and consumed by the tax phase.</p>
+          <p>In couple households the projection timeline is anchored to the client's age; the partner ages alongside from their own current age. The projection ends at the client's end age with both alive throughout — no mortality modelling.</p>
         </section>
 
         <section>

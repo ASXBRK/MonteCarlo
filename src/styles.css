@@ -407,6 +407,137 @@ html, body {
   vertical-align: middle;
 }
 
+/* --- section headings --- */
+
+.section-heading {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 4px 0 10px;
+  letter-spacing: 0.01em;
+}
+
+/* --- plan bar extensions --- */
+
+.plan-start {
+  display: flex;
+  gap: 6px;
+}
+.plan-start select {
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+}
+.plan-start input { width: 84px; }
+
+/* --- central cashflows / settings panel --- */
+
+.cf-panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cf-panel .cf-section:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.cf-row-income {
+  grid-template-columns: 1.3fr 1.2fr 1fr 0.9fr 0.9fr 0.6fr 32px;
+}
+.cf-row-income.with-owner {
+  grid-template-columns: 1.2fr 0.9fr 1.1fr 1fr 0.9fr 0.9fr 0.6fr 32px;
+}
+.cf-row-expense {
+  grid-template-columns: 1.3fr 1.2fr 1fr 0.9fr 0.9fr 0.6fr 32px;
+}
+.cf-row-asset {
+  grid-template-columns: 1.2fr 1.2fr 1fr 0.9fr 0.9fr 0.6fr 32px;
+}
+
+.fy-label {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink-soft);
+  opacity: 0.85;
+  font-size: 10px;
+  margin-left: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- settings: surplus + funding order --- */
+
+.settings-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.settings-row select {
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 13.5px;
+}
+
+.order-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 420px;
+}
+.order-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fafbfc;
+}
+.order-pos {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  width: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.order-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  flex: 1;
+}
+.order-controls { display: flex; gap: 4px; }
+.order-btn {
+  font: inherit;
+  font-size: 13px;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.order-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.order-btn:disabled { opacity: 0.35; cursor: default; }
+
+@media (max-width: 900px) {
+  .cf-row-income, .cf-row-income.with-owner, .cf-row-expense, .cf-row-asset {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 /* Inline validation: field snapped to its clamped value. */
 .field-clamped {
   border-color: #d97b2f !important;

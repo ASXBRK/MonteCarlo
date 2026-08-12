@@ -33,7 +33,13 @@ function stationary({ p_stay_normal, p_stay_stress }) {
   };
 }
 
-function makeProfile(incomeReturn, growthReturn, sigma, category) {
+// frankingPct: franking level of the profile's income component,
+// 0–100. PLACEHOLDER values pending firm confirmation — set high for
+// Australian-equity-heavy profiles (their income is dominated by
+// franked dividends), zero for cash / fixed-interest-dominant
+// profiles and direct property (rent is unfranked). Inert until the
+// v1.1 tax phase consumes them.
+function makeProfile(incomeReturn, growthReturn, sigma, category, frankingPct = 0) {
   const r = REGIME[category];
   const { w_normal, w_stress } = stationary(r);
   const k = r.stressMultiplier;
@@ -45,6 +51,7 @@ function makeProfile(incomeReturn, growthReturn, sigma, category) {
     sigma_normal, sigma_stress,
     p_stay_normal: r.p_stay_normal,
     p_stay_stress: r.p_stay_stress,
+    frankingPct,
   };
 }
 
@@ -54,16 +61,17 @@ export function realMu(profile, cpi) {
 }
 
 export const PROFILES = {
-  "Cash":                        makeProfile(0.0350, 0.0000, 0.015, "cash"),
-  "Defensive":                   makeProfile(0.0350, 0.0100, 0.030, "cash"),
-  "Moderately Defensive":        makeProfile(0.0335, 0.0185, 0.045, "balanced"),
-  "Balanced":                    makeProfile(0.0335, 0.0250, 0.060, "balanced"),
-  "Moderate Growth":             makeProfile(0.0385, 0.0300, 0.075, "balanced"),
-  "High Growth – Income":        makeProfile(0.0450, 0.0350, 0.095, "equity"),
-  "High Growth – Capital":       makeProfile(0.0250, 0.0550, 0.095, "equity"),
-  "Accelerated Growth – Income": makeProfile(0.0500, 0.0450, 0.120, "equity"),
-  "Accelerated Growth – Growth": makeProfile(0.0200, 0.0750, 0.120, "equity"),
-  "Residential Property":        makeProfile(0.0450, 0.0500, 0.110, "equity"),
+  //                                          income  growth  sigma  category  franking%
+  "Cash":                        makeProfile(0.0350, 0.0000, 0.015, "cash",      0),
+  "Defensive":                   makeProfile(0.0350, 0.0100, 0.030, "cash",      0),
+  "Moderately Defensive":        makeProfile(0.0335, 0.0185, 0.045, "balanced", 15),
+  "Balanced":                    makeProfile(0.0335, 0.0250, 0.060, "balanced", 25),
+  "Moderate Growth":             makeProfile(0.0385, 0.0300, 0.075, "balanced", 30),
+  "High Growth – Income":        makeProfile(0.0450, 0.0350, 0.095, "equity",   50),
+  "High Growth – Capital":       makeProfile(0.0250, 0.0550, 0.095, "equity",   30),
+  "Accelerated Growth – Income": makeProfile(0.0500, 0.0450, 0.120, "equity",   60),
+  "Accelerated Growth – Growth": makeProfile(0.0200, 0.0750, 0.120, "equity",   35),
+  "Residential Property":        makeProfile(0.0450, 0.0500, 0.110, "equity",    0),
 };
 
 export const DEFAULT_PROFILE = "Balanced";
