@@ -17,6 +17,13 @@ import {
   summarise, planSummaryText, allocationSummary, ALLOC_PCT_MAX,
 } from "./planState.js";
 import { renderBellCurves } from "./chart.js";
+import {
+  createIndex, normaliseIndex, findActive, findClient,
+  newClient, renameClient, deleteClient, switchClient,
+  newScenario, duplicateScenario, renameScenario, deleteScenario,
+  switchScenario, touchScenario,
+  exportClientFile, exportScenarioFile, importFile,
+} from "./workspace.js";
 
 // Legacy insight modules (firstDecade, drawdownTolerance, tornado,
 // sequenceRisk) are stubbed out. Deliberately NOT imported while
@@ -24,13 +31,13 @@ import { renderBellCurves } from "./chart.js";
 // return as collapsed accordions in the insights phase.
 const LEGACY_INSIGHTS_ENABLED = false;
 
-const STORAGE_KEY = "projectionPlanner.v1";
 const PROFILE_KEYS = Object.keys(PROFILES);
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const $ = (id) => document.getElementById(id);
 
 const els = {
+  workspaceBar: $("workspaceBar"),
   planBar: $("planBar"),
   assets: $("assets"),
   addAssetBtn: $("addAssetBtn"),
@@ -47,30 +54,333 @@ const els = {
   inflationInput: $("inflationInput"),
 };
 
-// --- state + persistence ----------------------------------------------
+// --- workspace + persistence ----------------------------------------------
+//
+// Hierarchy: Client → Scenarios. The index lives under INDEX_KEY; each
+// scenario's full plan state lives under its own key. A legacy single
+// blob (from either historical key) migrates into "Client 1 /
+// Scenario 1" on first load — this also recovers data from the earlier
+// storage-key rotation that made saved plans appear to vanish.
 
-let state = loadState();
+const INDEX_KEY = "planner.workspace.v1";
+const LEGACY_KEYS = ["projectionPlanner.v1", "portfolioPlanner.v1"];
+const scenarioKey = (id) => `planner.scenario.${id}`;
+
+function readRaw(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function writeRaw(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* non-fatal */ }
+}
+function removeRaw(key) {
+  try { localStorage.removeItem(key); } catch { /* non-fatal */ }
+}
+function readJSON(key) {
+  try { const v = readRaw(key); return v ? JSON.parse(v) : null; } catch { return null; }
+}
+
+function loadWorkspaceIndex() {
+  const existing = normaliseIndex(readJSON(INDEX_KEY));
+  if (existing) return existing;
+  // First run (or corrupt index): migrate any legacy single blob into
+  // Client 1 / Scenario 1. hydrate() migrates old schema versions on
+  // the subsequent load.
+  const fresh = createIndex(Date.now());
+  for (const key of LEGACY_KEYS) {
+    const blob = readRaw(key);
+    if (blob) { writeRaw(scenarioKey(fresh.activeScenarioId), blob); break; }
+  }
+  writeRaw(INDEX_KEY, JSON.stringify(fresh));
+  return fresh;
+}
+
+let workspace = loadWorkspaceIndex();
+
+function loadActiveState() {
+  const blob = readRaw(scenarioKey(workspace.activeScenarioId));
+  if (blob) {
+    const s = hydrate(blob, PROFILES);
+    if (s) return s;
+  }
+  return defaultState(PROFILES);
+}
+
+let state = loadActiveState();
 // UI-only runtime state — none of this is persisted.
 const collapsed = new Map();
 const allocMemory = new Map();
 const volBasisTouched = new Set();
 
-function loadState() {
-  try {
-    const blob = localStorage.getItem(STORAGE_KEY);
-    if (blob) {
-      const s = hydrate(blob, PROFILES);
-      if (s) return s;
-    }
-  } catch { /* storage unavailable — fall through to defaults */ }
-  return defaultState(PROFILES);
+function resetRuntimeUiState() {
+  collapsed.clear();
+  allocMemory.clear();
+  volBasisTouched.clear();
 }
 
-function saveState() {
-  try {
-    localStorage.setItem(STORAGE_KEY, serialize(state));
-  } catch { /* quota/unavailable — non-fatal */ }
+function saveWorkspace() {
+  writeRaw(INDEX_KEY, JSON.stringify(workspace));
 }
+
+// Autosave: every mutation writes the active scenario's blob and
+// touches its updatedAt in the index.
+function saveState() {
+  writeRaw(scenarioKey(workspace.activeScenarioId), serialize(state));
+  workspace = touchScenario(workspace, workspace.activeScenarioId, Date.now());
+  saveWorkspace();
+}
+
+// Switch the live plan state to the workspace's active scenario.
+function activateScenarioState() {
+  state = loadActiveState();
+  resetRuntimeUiState();
+  saveWorkspace();
+  renderAll();
+}
+
+// --- workspace bar (client / scenario chips + menus) -----------------------
+
+let openMenu = null; // "client" | "scenario" | null
+
+function renderWorkspaceBar() {
+  const { client, scenario } = findActive(workspace);
+  if (!client || !scenario) return;
+
+  const clientList = workspace.clients.map((c) => `
+    <button class="ws-item${c.id === client.id ? " current" : ""}" type="button"
+            data-ws-action="switch-client" data-id="${c.id}">${escapeHTML(c.name)}</button>
+  `).join("");
+
+  const scenarioList = client.scenarios.map((s) => `
+    <button class="ws-item${s.id === scenario.id ? " current" : ""}" type="button"
+            data-ws-action="switch-scenario" data-id="${s.id}">${escapeHTML(s.name)}</button>
+  `).join("");
+
+  els.workspaceBar.innerHTML = `
+    <div class="ws-chip">
+      <span class="ws-kind">Client</span>
+      <button class="ws-name" type="button" data-ws-action="rename-client"
+              title="Click to rename">${escapeHTML(client.name)}</button>
+      <button class="ws-menu-btn" type="button" data-ws-action="menu-client" aria-label="Client menu">▾</button>
+      <div class="ws-menu" data-role="menu-client" ${openMenu === "client" ? "" : "hidden"}>
+        ${clientList}
+        <div class="ws-divider"></div>
+        <button class="ws-item" type="button" data-ws-action="new-client">New client</button>
+        <button class="ws-item" type="button" data-ws-action="export-client">Export client…</button>
+        <button class="ws-item" type="button" data-ws-action="import-file">Import…</button>
+        <button class="ws-item danger" type="button" data-ws-action="delete-client"
+                ${workspace.clients.length <= 1 ? "disabled" : ""}>Delete client</button>
+      </div>
+    </div>
+    <span class="ws-sep">/</span>
+    <div class="ws-chip">
+      <span class="ws-kind">Scenario</span>
+      <button class="ws-name" type="button" data-ws-action="rename-scenario"
+              title="Click to rename">${escapeHTML(scenario.name)}</button>
+      <button class="ws-menu-btn" type="button" data-ws-action="menu-scenario" aria-label="Scenario menu">▾</button>
+      <div class="ws-menu" data-role="menu-scenario" ${openMenu === "scenario" ? "" : "hidden"}>
+        ${scenarioList}
+        <div class="ws-divider"></div>
+        <button class="ws-item" type="button" data-ws-action="new-scenario">New scenario</button>
+        <button class="ws-item" type="button" data-ws-action="duplicate-scenario">Duplicate scenario</button>
+        <button class="ws-item" type="button" data-ws-action="export-scenario">Export scenario…</button>
+        <button class="ws-item danger" type="button" data-ws-action="delete-scenario"
+                ${client.scenarios.length <= 1 ? "disabled" : ""}>Delete scenario</button>
+      </div>
+    </div>
+  `;
+}
+
+// Inline rename: swap the name button for a text input; Enter/blur
+// commits, Escape aborts.
+function startInlineRename(nameBtn, currentName, commit) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "ws-rename-input";
+  input.value = currentName;
+  input.maxLength = 80;
+  nameBtn.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (apply) => {
+    if (done) return;
+    done = true;
+    if (apply) commit(input.value);
+    renderWorkspaceBar();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") finish(true);
+    else if (e.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+function sanitiseFilename(name) {
+  return name.replace(/[^\w\- ]+/g, "_").trim() || "export";
+}
+
+function downloadJSON(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${sanitiseFilename(filename)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+const getScenarioState = (id) => readJSON(scenarioKey(id));
+
+// Hidden file input, created once, for Import…
+const importInput = document.createElement("input");
+importInput.type = "file";
+importInput.accept = ".json,application/json";
+importInput.style.display = "none";
+document.body.appendChild(importInput);
+importInput.addEventListener("change", () => {
+  const file = importInput.files?.[0];
+  importInput.value = "";
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let parsed = null;
+    try { parsed = JSON.parse(String(reader.result)); } catch { /* handled below */ }
+    const res = importFile(workspace, parsed, {
+      hydrateState: (json) => hydrate(json, PROFILES),
+      now: Date.now(),
+    });
+    if (res.error) {
+      window.alert(`Import failed: ${res.error}`);
+      return;
+    }
+    for (const w of res.writes) {
+      writeRaw(scenarioKey(w.scenarioId), serialize(w.state));
+    }
+    workspace = res.index;
+    activateScenarioState();
+  };
+  reader.readAsText(file);
+});
+
+els.workspaceBar.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-ws-action]");
+  if (!btn) return;
+  const action = btn.dataset.wsAction;
+  const { client, scenario } = findActive(workspace);
+
+  switch (action) {
+    case "menu-client":
+      openMenu = openMenu === "client" ? null : "client";
+      renderWorkspaceBar();
+      break;
+    case "menu-scenario":
+      openMenu = openMenu === "scenario" ? null : "scenario";
+      renderWorkspaceBar();
+      break;
+    case "rename-client":
+      startInlineRename(btn, client.name, (name) => {
+        workspace = renameClient(workspace, client.id, name);
+        saveWorkspace();
+      });
+      break;
+    case "rename-scenario":
+      startInlineRename(btn, scenario.name, (name) => {
+        workspace = renameScenario(workspace, client.id, scenario.id, name);
+        saveWorkspace();
+      });
+      break;
+    case "switch-client": {
+      openMenu = null;
+      if (btn.dataset.id === client.id) { renderWorkspaceBar(); break; }
+      workspace = switchClient(workspace, btn.dataset.id);
+      activateScenarioState();
+      break;
+    }
+    case "switch-scenario": {
+      openMenu = null;
+      if (btn.dataset.id === scenario.id) { renderWorkspaceBar(); break; }
+      workspace = switchScenario(workspace, client.id, btn.dataset.id);
+      activateScenarioState();
+      break;
+    }
+    case "new-client": {
+      openMenu = null;
+      const r = newClient(workspace, Date.now());
+      writeRaw(scenarioKey(r.scenarioId), serialize(defaultState(PROFILES)));
+      workspace = r.index;
+      activateScenarioState();
+      break;
+    }
+    case "new-scenario": {
+      openMenu = null;
+      const r = newScenario(workspace, client.id, Date.now());
+      writeRaw(scenarioKey(r.scenarioId), serialize(defaultState(PROFILES)));
+      workspace = r.index;
+      activateScenarioState();
+      break;
+    }
+    case "duplicate-scenario": {
+      openMenu = null;
+      const r = duplicateScenario(workspace, client.id, scenario.id, Date.now());
+      // Deep copy via the serialized blob — never a shared reference.
+      const blob = readRaw(scenarioKey(scenario.id)) ?? serialize(state);
+      writeRaw(scenarioKey(r.scenarioId), blob);
+      workspace = r.index;
+      activateScenarioState();
+      break;
+    }
+    case "delete-client": {
+      openMenu = null;
+      if (!window.confirm(`Delete client "${client.name}" and all of its scenarios? This cannot be undone.`)) {
+        renderWorkspaceBar(); break;
+      }
+      const r = deleteClient(workspace, client.id);
+      if (!r) break;
+      for (const id of r.removedScenarioIds) removeRaw(scenarioKey(id));
+      workspace = r.index;
+      activateScenarioState();
+      break;
+    }
+    case "delete-scenario": {
+      openMenu = null;
+      if (!window.confirm(`Delete scenario "${scenario.name}"? This cannot be undone.`)) {
+        renderWorkspaceBar(); break;
+      }
+      const r = deleteScenario(workspace, client.id, scenario.id);
+      if (!r) break;
+      removeRaw(scenarioKey(r.removedScenarioId));
+      workspace = r.index;
+      activateScenarioState();
+      break;
+    }
+    case "export-client": {
+      openMenu = null;
+      const file = exportClientFile(workspace, client.id, getScenarioState);
+      if (file) downloadJSON(client.name, file);
+      renderWorkspaceBar();
+      break;
+    }
+    case "export-scenario": {
+      openMenu = null;
+      const file = exportScenarioFile(workspace, client.id, scenario.id, getScenarioState);
+      if (file) downloadJSON(`${client.name} - ${scenario.name}`, file);
+      renderWorkspaceBar();
+      break;
+    }
+    case "import-file":
+      openMenu = null;
+      renderWorkspaceBar();
+      importInput.click();
+      break;
+  }
+});
+
+// Close menus on outside click.
+document.addEventListener("click", (e) => {
+  if (openMenu && !e.target.closest(".ws-chip")) {
+    openMenu = null;
+    renderWorkspaceBar();
+  }
+});
 
 function findAsset(aid) {
   return state.assets.find((a) => a.id === aid) || null;
@@ -1117,6 +1427,13 @@ function renderSummaryStrip() {
 // --- chart placeholder (Phase B replaces this) ------------------------------
 
 function renderChartPlaceholder() {
+  // Plotly loads from a CDN; if that's blocked (corporate networks),
+  // boot must survive — fall back to a text placeholder.
+  if (typeof Plotly === "undefined") {
+    const el = $("chart");
+    if (el) el.innerHTML = `<p class="helper-text" style="text-align:center;padding:40px 0;">Chart unavailable (Plotly failed to load). Inputs and autosave still work.</p>`;
+    return;
+  }
   Plotly.newPlot("chart", [], {
     paper_bgcolor: "white",
     plot_bgcolor: "white",
@@ -1207,6 +1524,7 @@ els.inflationInput.addEventListener("change", () => {
 // --- boot -----------------------------------------------------------------
 
 function renderAll() {
+  renderWorkspaceBar();
   renderPlanBar();
   renderAssets();
   renderCashflows();

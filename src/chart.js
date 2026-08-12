@@ -379,6 +379,7 @@ function normalCdf(x, mu, sigma) {
 //    return level: μ, σ, and the chance of a single year landing at
 //    or below the hovered return.
 export function renderBellCurves(containerId, profiles, cpi = 0.025) {
+  if (typeof Plotly === "undefined") return; // CDN blocked — table still informs
   const entries = Object.entries(profiles).map(([name, p]) => ({
     name,
     mu: (1 + p.totalNominal) / (1 + cpi) - 1,
