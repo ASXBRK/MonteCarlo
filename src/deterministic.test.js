@@ -657,3 +657,144 @@ describe("D2 — lifestyle assets", () => {
     expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
   });
 });
+
+// --- Phase D3: liabilities, offsets, amortisation ------------------------------
+
+describe("D3 — liabilities", () => {
+  const bigAsset = () => mkAsset({ allocation: zeroRealAlloc(), balance: 2000000 });
+  const loan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 100000, interestRatePct: 6, termYears: 10, repayment: "pi",
+    ioYears: 5, deductible: false, linkedAssetId: null, offsetAssetId: null,
+    ...over,
+  });
+  const withLoan = (l, over = {}) => ({
+    ...mkState({ endAge: 40 + (over.years ?? 11), assets: [bigAsset()], ...over }),
+    liabilities: [l],
+  });
+
+  it("P&I amortisation pays off at exactly the term's final month", () => {
+    const out = projectPlan(withLoan(loan(), { years: 11 }));
+    // 10-year term from a July start: 120 payments, balance zero at
+    // the end of plan year 9; year 10 has no loan activity.
+    expect(out.yearly[8].liabilities.lb1.closing).toBeGreaterThan(0);
+    expect(out.yearly[9].liabilities.lb1.closing).toBeCloseTo(0, 6);
+    expect(out.yearly[10].liabilities.lb1.interest).toBeCloseTo(0, 8);
+    expect(out.yearly[10].liabilities.lb1.principal).toBeCloseTo(0, 8);
+    // Nominal principal repaid = the full loan: Σ principal × infl.
+    // Spot-check year 0 payment total against the level payment.
+    const pmt = 100000 * 0.005 / (1 - Math.pow(1.005, -120));
+    let expectReal = 0;
+    for (let m = 0; m < 12; m++) expectReal += pmt / Math.pow(1.025, m / 12);
+    const y0 = out.yearly[0].liabilities.lb1;
+    expect(y0.interest + y0.principal).toBeCloseTo(expectReal, 4);
+    // Net assets = assets − liabilities, every year.
+    for (const r of out.yearly) {
+      expect(r.netAssets).toBeCloseTo(r.closingBalance - r.liabilitiesClosing, 8);
+    }
+  });
+
+  it("IO holds the balance flat (nominal), then P&I retires the remainder", () => {
+    const out = projectPlan(withLoan(loan({ repayment: "io", ioYears: 2, termYears: 12 }), { years: 13 }));
+    // During IO the nominal balance is unchanged → real closing decays at CPI.
+    expect(out.yearly[0].liabilities.lb1.principal).toBeCloseTo(0, 8);
+    expect(out.yearly[1].liabilities.lb1.closing).toBeCloseTo(100000 / Math.pow(1.025, 2), 4);
+    // Year-0 interest is 500/mo nominal, deflated.
+    let expInterest = 0;
+    for (let m = 0; m < 12; m++) expInterest += 500 / Math.pow(1.025, m / 12);
+    expect(out.yearly[0].liabilities.lb1.interest).toBeCloseTo(expInterest, 4);
+    // Then amortises to zero over the remaining 10 years.
+    expect(out.yearly[11].liabilities.lb1.closing).toBeCloseTo(0, 6);
+  });
+
+  it("nominal-fixed repayments decay at CPI in real terms", () => {
+    const out = projectPlan(withLoan(loan({ repayment: "io", ioYears: 20, termYears: 25 }), { years: 12 }));
+    const pay = (y) => out.yearly[y].liabilities.lb1.interest + out.yearly[y].liabilities.lb1.principal;
+    expect(pay(11) / pay(1)).toBeCloseTo(1 / Math.pow(1.025, 10), 6);
+  });
+
+  it("an offset reduces interest and the offset asset earns only on the excess", () => {
+    // IO loan 100k @ 6% offset by a 150k financial asset with a real
+    // 3% growth rate: interest accrues on (100k − offsetNominal); the
+    // asset's return applies to the excess over the loan while the
+    // offset portion decays at CPI (earning nothing nominally).
+    const offsetAsset = mkAsset({ id: "off", balance: 150000,
+      allocation: { mode: "custom", incomePct: 0, growthPct: 5.575, frankingPct: 0, volBasis: "Balanced" } });
+    const s = {
+      ...mkState({ endAge: 41, assets: [offsetAsset] }),
+      liabilities: [loan({ repayment: "io", ioYears: 5, termYears: 25, offsetAssetId: "off" })],
+    };
+    const out = projectPlan(s);
+    // Month 0: growth applies to 50k excess at ~0.2457%/mo; offset
+    // portion (100k) decays at CPI. Interest = (100k − balNominal
+    // capped at loan)×0.005 = 0 up to full offset → fully offset.
+    expect(out.yearly[0].liabilities.lb1.interest).toBeCloseTo(0, 6);
+    // The asset must NOT grow at the full rate on its whole balance.
+    const fullRate = Math.pow(1.055750 / 1.025, 1 / 12) - 1;
+    const naive = 150000 * Math.pow(1 + fullRate, 12);
+    expect(out.monthly.perAsset.off[12]).toBeLessThan(naive - 1000);
+    expect(out.monthly.perAsset.off[12]).toBeGreaterThan(150000 * 0.97);
+  });
+
+  it("deductible interest reduces the owner's taxable income (known value)", () => {
+    const mk = (deductible, owner = "client") => projectPlan({
+      ...mkState({
+        endAge: 41,
+        assets: [mkAsset({ allocation: growthOnlyAlloc() })],
+        cashflows: { income: [salary(100000 / 12)] },
+      }),
+      liabilities: [loan({ balance: 200000, interestRatePct: 5, repayment: "io", ioYears: 10, termYears: 25, deductible, owner })],
+    });
+    const ded = mk(true);
+    const not = mk(false);
+    const interestReal = ded.yearly[0].liabilities.lb1.interest;
+    expect(interestReal).toBeGreaterThan(9800); // ~10k nominal deflated
+    expect(ded.yearly[0].taxDetail.client.taxableIncome)
+      .toBeCloseTo(not.yearly[0].taxDetail.client.taxableIncome - interestReal, 4);
+    expect(ded.yearly[0].tax).toBeLessThan(not.yearly[0].tax);
+  });
+
+  it("joint deductible interest splits 50/50 between owners", () => {
+    const couplePlanOver = {
+      plan: {
+        household: "married",
+        client: { currentAge: 40 },
+        partner: { currentAge: 40 },
+      },
+    };
+    const out = projectPlan({
+      ...mkState({
+        endAge: 41,
+        ...couplePlanOver,
+        assets: [mkAsset({ allocation: growthOnlyAlloc() })],
+        cashflows: {
+          income: [
+            salary(100000 / 12),
+            { ...salary(100000 / 12), id: "sal2", owner: "partner" },
+          ],
+        },
+      }),
+      liabilities: [loan({ balance: 200000, interestRatePct: 5, repayment: "io", ioYears: 10, termYears: 25, deductible: true, owner: "joint" })],
+    });
+    const interestReal = out.yearly[0].liabilities.lb1.interest;
+    expect(out.yearly[0].taxDetail.client.taxableIncome)
+      .toBeCloseTo(100000 - interestReal / 2, 4);
+    expect(out.yearly[0].taxDetail.partner.taxableIncome)
+      .toBeCloseTo(100000 - interestReal / 2, 4);
+  });
+
+  it("regression gate: liability-free scenarios are bit-identical", () => {
+    const base = mkState({
+      endAge: 50,
+      cashflows: { contributions: [cf({ amount: 500, toAge: 50 })] },
+    });
+    const withEmpty = { ...JSON.parse(JSON.stringify(base)), liabilities: [] };
+    const a = projectPlan(base);
+    const b = projectPlan(withEmpty);
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+    for (let y = 0; y < a.yearly.length; y++) {
+      expect(a.yearly[y].tax).toBe(b.yearly[y].tax);
+      expect(a.yearly[y].netAssets).toBe(a.yearly[y].closingBalance);
+    }
+  });
+});

@@ -47,12 +47,12 @@
 
       <section id="investSection" aria-label="Investment cashflows"></section>
 
-      <section class="ff-section placeholder-section" aria-label="Liabilities">
-        <div class="ff-head">
-          <h2 class="section-heading">Liabilities</h2>
-          <span class="coming-soon-tag">Coming soon</span>
+      <section aria-label="Liabilities">
+        <h2 class="section-heading">Liabilities</h2>
+        <div id="liabilities" class="portfolio-stack"></div>
+        <div class="portfolio-actions">
+          <button id="addLiabilityBtn" class="btn-text" type="button">+ Add liability</button>
         </div>
-        <p class="placeholder-body">Loans, mortgages, and offset accounts will be modelled here in a future version.</p>
       </section>
 
       <section class="ff-section placeholder-section" aria-label="Superannuation">
@@ -245,6 +245,7 @@
           <p>Plan years are Australian financial years (1 July – 30 June). Annual cashflows and one-off amounts are applied in July, the first month of each financial year — in a partial first year that starts after July, that year's annual amounts are assumed to have already been made and are skipped. Monthly cashflows simply run for the months in the projection.</p>
           <p>An explicit withdrawal larger than its asset's balance takes what is there; the remainder is recorded as <em>unfunded</em> rather than drawn from other assets — a withdrawal is an instruction about a specific asset. A household deficit that outlives every asset in the funding order is also unfunded. Unfunded amounts mean the plan's outflows exceed available funds; the projection reports when that first happens and by how much in total.</p>
           <p>Asset returns are expected returns net of ICR, converted to real terms at the CPI setting and compounded monthly. Because the deterministic projection uses expected returns, it will sit above the Monte Carlo median when both are on screen — see "Why a deterministic projection sits above the Monte Carlo median" below.</p>
+          <p>Liabilities amortise monthly in nominal dollars: interest accrues on the loan balance net of any offset account, repayments follow the standard level-payment formula (interest-only periods pay interest as charged, then principal-and-interest over the remaining term), and payments enter household cashflow like any outflow — because they are nominal-fixed, their real burden falls at CPI over time. The offset portion of an offset account earns nothing nominally (its real value declines by CPI); only the excess above the loan earns the asset's return. Deductible interest joins the owner's deductions (joint loans split 50/50). v1 limitations, by design: one constant interest rate for the whole projection, no extra or early repayments, and no redraw.</p>
         </section>
 
         <section>

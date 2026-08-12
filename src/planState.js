@@ -297,6 +297,53 @@ export function createLifestyleAsset(plan, existing = []) {
 export const isLifestyle = (a) => a?.class === "lifestyle";
 export const isFinancial = (a) => !isLifestyle(a);
 
+// --- liabilities (D3) --------------------------------------------------------
+
+export const LIABILITY_TYPES = ["mortgage", "investment", "personal", "other"];
+
+export function createLiability(plan, existing = []) {
+  return {
+    id: uid("lb"),
+    name: `Loan ${existing.length + 1}`,
+    type: "mortgage",
+    owner: "client",
+    balance: 0,
+    interestRatePct: 6.0, // nominal p.a.
+    termYears: 25,
+    repayment: "pi",      // "pi" | "io" (ioYears of IO, then P&I)
+    ioYears: 5,
+    deductible: false,    // interest deducts against the owner's income
+    linkedAssetId: null,  // informational; used by D4 purchases
+    offsetAssetId: null,  // financial asset whose balance offsets interest
+  };
+}
+
+export function clampLiability(l, plan, assets) {
+  const financialIds = new Set(assets.filter((a) => isFinancial(a)).map((a) => a.id));
+  const allIds = new Set(assets.map((a) => a.id));
+  const type = LIABILITY_TYPES.includes(l.type) ? l.type : "mortgage";
+  return {
+    id: typeof l.id === "string" && l.id ? l.id : uid("lb"),
+    name: typeof l.name === "string" && l.name.trim() ? l.name : "Loan",
+    type,
+    owner: ["client", "partner", "joint"].includes(l.owner) && (l.owner === "client" || plan.partner)
+      ? l.owner : "client",
+    balance: clampNumber(l.balance, 0),
+    interestRatePct: clampNumber(l.interestRatePct ?? 6, 0, 30),
+    termYears: clampInt(l.termYears ?? 25, 1, 50),
+    repayment: l.repayment === "io" ? "io" : "pi",
+    ioYears: clampInt(l.ioYears ?? 5, 1, 30),
+    deductible: l.deductible === true,
+    linkedAssetId: allIds.has(l.linkedAssetId) ? l.linkedAssetId : null,
+    offsetAssetId: financialIds.has(l.offsetAssetId) ? l.offsetAssetId : null,
+  };
+}
+
+export function normaliseLiabilities(liabilities, plan, assets) {
+  if (!Array.isArray(liabilities)) return [];
+  return liabilities.map((l) => clampLiability(l, plan, assets));
+}
+
 function nextAssetNumber(existing) {
   let max = 0;
   for (const a of existing) {
@@ -320,6 +367,7 @@ export function defaultState(profiles = {}, now = new Date()) {
       withdrawals: [],
       lumpSums: [],
     },
+    liabilities: [],
     settings: {
       surplus: { mode: "spend", assetId: null },
       fundingOrder: [asset.id],
@@ -490,7 +538,8 @@ export function clampAllToPlan(state) {
     lumpSums: state.cashflows.lumpSums.map((l) => clampLumpSum(l, plan)),
   };
   const settings = normaliseSettings(state.settings, assets);
-  return { ...state, plan, assets, cashflows, settings };
+  const liabilities = normaliseLiabilities(state.liabilities, plan, assets);
+  return { ...state, plan, assets, cashflows, settings, liabilities };
 }
 
 export function normaliseSettings(settings, assets) {
@@ -525,7 +574,10 @@ export function reassignPartnerToClient(state) {
   const income = state.cashflows.income.map((r) =>
     r.owner === "partner" ? { ...r, owner: "client" } : r
   );
-  return { ...state, assets, cashflows: { ...state.cashflows, income } };
+  const liabilities = (state.liabilities ?? []).map((l) =>
+    l.owner === "partner" || l.owner === "joint" ? { ...l, owner: "client" } : l
+  );
+  return { ...state, assets, cashflows: { ...state.cashflows, income }, liabilities };
 }
 
 // Delete everything partner-owned (income rows; partner/joint assets
@@ -542,7 +594,14 @@ export function deletePartnerOwned(state) {
     lumpSums: cf.lumpSums.filter((l) => !removedIds.has(l.assetId)),
   };
   const settings = normaliseSettings(state.settings, keepAssets);
-  return { ...state, assets: keepAssets, cashflows, settings };
+  const liabilities = (state.liabilities ?? [])
+    .filter((l) => l.owner !== "partner" && l.owner !== "joint")
+    .map((l) => ({
+      ...l,
+      linkedAssetId: removedIds.has(l.linkedAssetId) ? null : l.linkedAssetId,
+      offsetAssetId: removedIds.has(l.offsetAssetId) ? null : l.offsetAssetId,
+    }));
+  return { ...state, assets: keepAssets, cashflows, settings, liabilities };
 }
 
 // Remove one asset with full cascade. Never removes the last asset.
@@ -561,7 +620,12 @@ export function removeAsset(state, assetId) {
     lumpSums: cf.lumpSums.filter((l) => l.assetId !== assetId),
   };
   const settings = normaliseSettings(state.settings, assets);
-  return { ...state, assets, cashflows, settings };
+  const liabilities = (state.liabilities ?? []).map((l) => ({
+    ...l,
+    linkedAssetId: l.linkedAssetId === assetId ? null : l.linkedAssetId,
+    offsetAssetId: l.offsetAssetId === assetId ? null : l.offsetAssetId,
+  }));
+  return { ...state, assets, cashflows, settings, liabilities };
 }
 
 // --- persistence + migration ------------------------------------------------
@@ -681,6 +745,7 @@ export function hydrate(json, profiles = {}) {
         withdrawals: hydrateCashflows(cf.withdrawals, plan, assetIds),
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
       },
+      liabilities: normaliseLiabilities(raw.liabilities, plan, assets),
       settings: normaliseSettings(raw.settings, assets),
       display: {
         units: raw.display?.units === "nominal" ? "nominal" : "real",

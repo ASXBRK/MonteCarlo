@@ -17,7 +17,9 @@ import {
   planSummaryText, allocationSummary, ALLOC_PCT_MAX,
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
   personDisplayName, resolveEndBasis,
+  createLiability, LIABILITY_TYPES, normaliseLiabilities,
 } from "./planState.js";
+import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
@@ -51,8 +53,10 @@ const els = {
   planBar: $("planBar"),
   assets: $("assets"),
   lifestyleAssets: $("lifestyleAssets"),
+  liabilities: $("liabilities"),
   addAssetBtn: $("addAssetBtn"),
   addLifestyleBtn: $("addLifestyleBtn"),
+  addLiabilityBtn: $("addLiabilityBtn"),
   incomeSection: $("incomeSection"),
   expensesSection: $("expensesSection"),
   investSection: $("investSection"),
@@ -211,7 +215,7 @@ function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
   for (const el of [els.planBar, els.incomeSection, els.expensesSection, els.assets,
-                    els.lifestyleAssets, els.investSection, els.settingsPanel, els.summaryStrip,
+                    els.lifestyleAssets, els.liabilities, els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
                     els.viewTax, els.viewAssumptions]) {
     el.innerHTML = "";
@@ -1793,6 +1797,157 @@ els.addAssetBtn.addEventListener("click", () => {
   renderAll();
 });
 
+// --- liabilities section (D3) --------------------------------------------------
+
+function liabilityDerivedText(l) {
+  if (!(l.balance > 0)) return "Enter a balance to see repayments.";
+  const i = monthlyRate(l);
+  const pmt = levelPayment(l.balance, i, termMonths(l) - ioMonths(l));
+  const ioPart = l.repayment === "io"
+    ? `interest-only ≈ ${fmtMoney(l.balance * i)}/mo for ${l.ioYears}y, then `
+    : "";
+  // Payoff FY from the live projection (offsets can shorten it).
+  let payoff = "beyond projection";
+  if (projection) {
+    const rows = projection.yearly;
+    for (let y = 0; y < rows.length; y++) {
+      const lr = rows[y].liabilities?.[l.id];
+      if (!lr) break;
+      const prev = y === 0 ? l.balance : rows[y - 1].liabilities[l.id].closing;
+      if (lr.closing < 0.005 && prev > 0.005) { payoff = rows[y].fyLabel; break; }
+    }
+  }
+  return `${ioPart}≈ ${fmtMoney(pmt)}/mo · paid off ${payoff}`;
+}
+
+function liabilityCardHTML(l) {
+  const financialAssets = state.assets.filter((a) => a.class !== "lifestyle");
+  const opt = (list, sel) => `<option value=""${!sel ? " selected" : ""}>None</option>` +
+    list.map((a) => `<option value="${a.id}"${a.id === sel ? " selected" : ""}>${escapeHTML(a.name)}</option>`).join("");
+  return `
+    <div class="pcard" data-lid="${l.id}">
+      <div class="pcard-head">
+        <span class="pcard-name">${escapeHTML(l.name)}</span>
+        <span class="pcard-meta">${liabilityDerivedText(l)}</span>
+        <button class="pcard-remove" type="button" data-liab-action="remove" data-lid="${l.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Name</label>
+            <input type="text" maxlength="60" value="${escapeHTML(l.name)}" data-lid="${l.id}" data-lfield="name" />
+          </div>
+          <div class="cf-cell">
+            <label>Type</label>
+            <select data-lid="${l.id}" data-lfield="type">
+              ${LIABILITY_TYPES.map((t) => `<option value="${t}"${l.type === t ? " selected" : ""}>${t[0].toUpperCase()}${t.slice(1)}</option>`).join("")}
+            </select>
+          </div>
+          ${isCouple() ? `
+            <div class="cf-cell">
+              <label>Owner</label>
+              <select data-lid="${l.id}" data-lfield="owner">${ownerOptions(l.owner)}</select>
+            </div>
+          ` : ""}
+          <div class="cf-cell">
+            <label>Balance ($)</label>
+            <input type="number" min="0" step="1000" value="${l.balance}" data-lid="${l.id}" data-lfield="balance" />
+          </div>
+          <div class="cf-cell">
+            <label>Interest rate (% p.a.)</label>
+            <input type="number" min="0" max="30" step="0.05" value="${l.interestRatePct}" data-lid="${l.id}" data-lfield="interestRatePct" />
+          </div>
+          <div class="cf-cell">
+            <label>Term (years)</label>
+            <input type="number" min="1" max="50" step="1" value="${l.termYears}" data-lid="${l.id}" data-lfield="termYears" />
+          </div>
+          <div class="cf-cell">
+            <label>Repayments</label>
+            <div class="seg-toggle">
+              <button class="seg-option${l.repayment === "pi" ? " active" : ""}" type="button"
+                      data-liab-action="repayment" data-lid="${l.id}" data-value="pi">P&amp;I</button>
+              <button class="seg-option${l.repayment === "io" ? " active" : ""}" type="button"
+                      data-liab-action="repayment" data-lid="${l.id}" data-value="io">Interest only</button>
+            </div>
+          </div>
+          ${l.repayment === "io" ? `
+            <div class="cf-cell">
+              <label>IO period (years)</label>
+              <input type="number" min="1" max="30" step="1" value="${l.ioYears}" data-lid="${l.id}" data-lfield="ioYears" />
+            </div>
+          ` : ""}
+          <div class="cf-cell">
+            <label>Interest deductible</label>
+            <label class="ptg-check">
+              <input type="checkbox"${l.deductible ? " checked" : ""} data-lid="${l.id}" data-lfield="deductible" />
+              <span>Deducts against ${l.owner === "joint" ? "both owners'" : "the owner's"} income</span>
+            </label>
+          </div>
+          <div class="cf-cell">
+            <label>Relates to / secured by</label>
+            <select data-lid="${l.id}" data-lfield="linkedAssetId">${opt(state.assets, l.linkedAssetId)}</select>
+          </div>
+          <div class="cf-cell">
+            <label>Offset account</label>
+            <select data-lid="${l.id}" data-lfield="offsetAssetId">${opt(financialAssets, l.offsetAssetId)}</select>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderLiabilities() {
+  els.liabilities.innerHTML = (state.liabilities ?? []).map(liabilityCardHTML).join("");
+}
+
+function findLiability(lid) {
+  return (state.liabilities ?? []).find((l) => l.id === lid) || null;
+}
+
+els.liabilities.addEventListener("change", (e) => {
+  const field = e.target.dataset.lfield;
+  const l = findLiability(e.target.dataset.lid);
+  if (!field || !l) return;
+  if (field === "name") l.name = e.target.value.trim() || l.name;
+  else if (field === "type") l.type = e.target.value;
+  else if (field === "owner") l.owner = e.target.value;
+  else if (field === "balance") l.balance = clampNumber(e.target.value, 0);
+  else if (field === "interestRatePct") l.interestRatePct = clampNumber(e.target.value, 0, 30);
+  else if (field === "termYears") l.termYears = clampInt(e.target.value, 1, 50);
+  else if (field === "ioYears") l.ioYears = clampInt(e.target.value, 1, 30);
+  else if (field === "deductible") l.deductible = e.target.checked;
+  else if (field === "linkedAssetId") l.linkedAssetId = e.target.value || null;
+  else if (field === "offsetAssetId") l.offsetAssetId = e.target.value || null;
+  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets);
+  saveState();
+  refreshOutputs();
+  renderLiabilities();
+});
+
+els.liabilities.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-liab-action]");
+  if (!btn) return;
+  const l = findLiability(btn.dataset.lid);
+  if (!l) return;
+  if (btn.dataset.liabAction === "remove") {
+    if (!window.confirm(`Remove "${l.name}"?`)) return;
+    state.liabilities = state.liabilities.filter((x) => x.id !== l.id);
+  } else if (btn.dataset.liabAction === "repayment") {
+    l.repayment = btn.dataset.value === "io" ? "io" : "pi";
+  }
+  saveState();
+  refreshOutputs();
+  renderLiabilities();
+});
+
+els.addLiabilityBtn.addEventListener("click", () => {
+  state.liabilities = [...(state.liabilities ?? []), createLiability(state.plan, state.liabilities ?? [])];
+  saveState();
+  refreshOutputs();
+  renderLiabilities();
+});
+
 els.addLifestyleBtn.addEventListener("click", () => {
   const a = createLifestyleAsset(state.plan, state.assets);
   state.assets.push(a);
@@ -2155,9 +2310,15 @@ function buildCashflowGroups() {
     ? state.assets.find((a) => a.id === state.settings.surplus.assetId)
     : null;
 
+  const liabilityRows = (state.liabilities ?? []).flatMap((l) => [
+    { label: `${l.name} — interest`, cell: (y) => -(yl[y].liabilities?.[l.id]?.interest ?? 0) },
+    { label: `${l.name} — principal`, cell: (y) => -(yl[y].liabilities?.[l.id]?.principal ?? 0) },
+  ]);
+
   return [
     { title: "Income", rows: incomeRows },
     { title: "Expenses", rows: expenseRows },
+    ...(liabilityRows.length ? [{ title: "Liabilities", rows: liabilityRows }] : []),
     { title: null, rows: [
       { label: "Tax", cell: (y) => -yl[y].tax },
       { label: "Surplus / (deficit)", cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
@@ -2298,6 +2459,23 @@ function buildAssetsGroups(entity) {
     ];
     if (lifestyle.length) {
       groups.splice(2, 0, { title: "Lifestyle assets", rows: lifestyle.map(closingRow) });
+    }
+    const liabs = state.liabilities ?? [];
+    if (liabs.length) {
+      groups.push({
+        title: "Liabilities",
+        rows: [
+          ...liabs.map((l) => ({
+            label: l.name,
+            cell: (y) => -(yl[y].liabilities?.[l.id]?.closing ?? 0),
+          })),
+          { label: "Total liabilities", cell: (y) => -yl[y].liabilitiesClosing, always: true, cls: "tl-total" },
+        ],
+      });
+      groups.push({
+        title: null,
+        rows: [{ label: "NET ASSETS", cell: (y) => yl[y].netAssets, always: true, cls: "tl-total" }],
+      });
     }
     return groups;
   }
@@ -2588,6 +2766,7 @@ function renderAll() {
   renderCashflows();
   renderSettings();
   refreshOutputs();
+  renderLiabilities(); // after refreshOutputs — payoff FYs read the projection
 }
 
 window.addEventListener("hashchange", handleRoute);

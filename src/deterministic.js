@@ -41,6 +41,7 @@
 
 import { PROFILES } from "./profiles.js";
 import { buildSchedules, firstFyStartYear } from "./schedule.js";
+import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { assessPerson } from "./Tax/annual.js";
 import {
   createPool, poolAdd, poolConsume, poolNewFy,
@@ -134,6 +135,35 @@ export function projectPlan(state, profiles = PROFILES) {
   const combined = new Float64Array(months + 1);
   combined[0] = ids.reduce((s, id) => s + bal[id], 0);
 
+  // --- liabilities (D3): simulated in NOMINAL dollars, deflated at the
+  // ledger. Repayments are nominal-fixed (basis-None behaviour), so
+  // their real burden falls at CPI. Constant rate for the projection
+  // (v1 limitation, disclosed).
+  const liabs = (state.liabilities ?? []).filter((l) => l.balance > 0);
+  const liabMeta = {};
+  const loanBal = {}; // nominal
+  const offsetLoansByAsset = {}; // assetId → [liability ids]
+  for (const l of liabs) {
+    const i = monthlyRate(l);
+    const termM = termMonths(l);
+    const ioM = ioMonths(l);
+    const offsetId = l.offsetAssetId && l.offsetAssetId in bal && !meta[l.offsetAssetId].lifestyle
+      ? l.offsetAssetId : null;
+    liabMeta[l.id] = {
+      i,
+      termM,
+      ioM,
+      startMonth: 0, // D4 planned purchases will start loans mid-projection
+      pmtPI: levelPayment(l.balance, i, termM - ioM),
+      offsetId,
+      deductible: l.deductible === true,
+      shares: ownerShares(l, couple),
+    };
+    loanBal[l.id] = l.balance;
+    if (offsetId) (offsetLoansByAsset[offsetId] ??= []).push(l.id);
+  }
+  const inflAt = (m) => Math.pow(1 + cpi, m / 12);
+
   // Lifestyle assets are illiquid to the engine: never funding
   // sources, never surplus targets (defensive — settings invariants
   // already exclude them).
@@ -193,6 +223,11 @@ export function projectPlan(state, profiles = PROFILES) {
     openingBalance: 0,
     closingBalance: 0,
     perAssetClosing: {},
+    // Per-liability detail (D3), real dollars; closing filled at year
+    // end. netAssets = asset closing − liability closing total.
+    liabilities: Object.fromEntries(liabs.map((l) => [l.id, { interest: 0, principal: 0, closing: 0 }])),
+    liabilitiesClosing: 0,
+    netAssets: 0,
     // Per-asset flow detail for the Assets view: opening + contributions
     // − withdrawals + oneOffs − deficitFunding + surplusInvested +
     // growth = closing, per asset.
@@ -256,9 +291,23 @@ export function projectPlan(state, profiles = PROFILES) {
         }
       }
 
-      // a. Growth (mode-dependent rate).
+      // a. Growth (mode-dependent rate). An offset asset earns its
+      // return only on the excess above the loan balance(s) it offsets;
+      // the offset portion earns nothing nominally (its real value
+      // decays at CPI) — it is "earning" the loan rate implicitly via
+      // the interest saved.
+      const cpiDecayMonthly = Math.pow(1 / (1 + cpi), 1 / 12) - 1;
       for (const id of ids) {
-        const g = bal[id] * meta[id].rate;
+        let g;
+        const offsetting = offsetLoansByAsset[id];
+        if (offsetting) {
+          const loanReal = offsetting.reduce((s, lid) => s + loanBal[lid], 0) / inflAt(m);
+          const excess = Math.max(0, bal[id] - loanReal);
+          const offsetPortion = bal[id] - excess;
+          g = excess * meta[id].rate + offsetPortion * cpiDecayMonthly;
+        } else {
+          g = bal[id] * meta[id].rate;
+        }
         bal[id] += g;
         if (row) {
           row.growth += g;
@@ -331,6 +380,39 @@ export function projectPlan(state, profiles = PROFILES) {
         }
       }
 
+      // c2. Liabilities (D3): accrue interest on the offset-reduced
+      // nominal balance, pay the contractual amount (IO = interest as
+      // charged; P&I = the level payment; final month part-pays), and
+      // deflate for the ledger. Deductible interest joins the owner's
+      // deductions like ICR.
+      let loanPayReal = 0;
+      for (const l of liabs) {
+        const md = liabMeta[l.id];
+        const b0 = loanBal[l.id];
+        if (b0 <= 0 || m < md.startMonth) continue;
+        const mRel = m - md.startMonth;
+        const infl = inflAt(m);
+        const offsetNom = md.offsetId ? Math.min(bal[md.offsetId] * infl, b0) : 0;
+        const interest = (b0 - offsetNom) * md.i;
+        const contractual = mRel < md.ioM ? interest : md.pmtPI;
+        const payment = Math.min(Math.max(contractual, 0), b0 + interest);
+        let b1 = b0 + interest - payment;
+        if (b1 < 1e-9) b1 = 0;
+        loanBal[l.id] = b1;
+        const defl = 1 / infl;
+        loanPayReal += payment * defl;
+        const interestReal = interest * defl;
+        if (md.deductible && interestReal > 0) {
+          for (const p of persons) {
+            if (md.shares[p]) acc[p].deductions += interestReal * md.shares[p];
+          }
+        }
+        if (row) {
+          row.liabilities[l.id].interest += interestReal;
+          row.liabilities[l.id].principal += (payment - interest) * defl;
+        }
+      }
+
       // d. Household position, including tax outflows (decision 14).
       const inc = schedule.income[m] + cashDist;
       for (const p of persons) {
@@ -342,7 +424,7 @@ export function projectPlan(state, profiles = PROFILES) {
       }
       const exp = schedule.expenses[m];
       const tax = (taxOut ? taxOut[m] : 0) + (m === first ? cgtDue : 0);
-      const net = inc - exp - tax;
+      const net = inc - exp - tax - loanPayReal;
       if (row) {
         row.income += inc;
         row.cashDistributions += cashDist;
@@ -413,9 +495,11 @@ export function projectPlan(state, profiles = PROFILES) {
     // Pool objects are immutable, so a shallow copy snapshots them.
     const balSnap = { ...bal };
     const poolSnap = { ...pools };
+    const loanSnap = { ...loanBal };
     const measured = runYear(y, { taxOut: null, cgtDue, row: null, trackUnfunded: false });
     Object.assign(bal, balSnap);
     pools = poolSnap;
+    Object.assign(loanBal, loanSnap);
 
     // Assess income tax per person on the measured components.
     const assessed = {};
@@ -446,6 +530,13 @@ export function projectPlan(state, profiles = PROFILES) {
       row.perAssetClosing[id] = series[id][yearEnd(y)];
       row.perAssetDetail[id].closing = series[id][yearEnd(y)];
     }
+    const deflEnd = 1 / Math.pow(1 + cpi, yearEnd(y) / 12);
+    for (const l of liabs) {
+      const closingReal = loanBal[l.id] * deflEnd;
+      row.liabilities[l.id].closing = closingReal;
+      row.liabilitiesClosing += closingReal;
+    }
+    row.netAssets = row.closingBalance - row.liabilitiesClosing;
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.
