@@ -18,8 +18,10 @@ import {
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
 } from "./planState.js";
 import { renderBellCurves } from "./chart.js";
-import { projectPlan } from "./deterministic.js";
+import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
+import { realThreshold, LITO } from "./Tax/annual.js";
+import { LEG } from "./Tax/engine.js";
 import {
   createIndex, normaliseIndex, findActive, findClient,
   newClient, renameClient, deleteClient, switchClient,
@@ -206,7 +208,8 @@ function unmountWorkspace() {
   $("chart").innerHTML = "";
   for (const el of [els.planBar, els.incomeSection, els.expensesSection, els.assets,
                     els.investSection, els.settingsPanel, els.summaryStrip,
-                    els.viewCashflow, els.assetsEntity, els.assetsTable]) {
+                    els.viewCashflow, els.assetsEntity, els.assetsTable,
+                    els.viewTax, els.viewAssumptions]) {
     el.innerHTML = "";
   }
   els.shortfallNote.hidden = true;
@@ -1657,6 +1660,8 @@ function renderActiveView() {
   if (activeView === "projection") renderProjectionChart();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
+  else if (activeView === "tax") renderTaxView();
+  else if (activeView === "assumptions") renderAssumptionsView();
 }
 
 els.viewRail.addEventListener("click", (e) => {
@@ -1875,6 +1880,10 @@ function visibleTransposed(groups) {
 
 function renderTransposed(mountEl, groups, footerHTML = "") {
   const { yearIdxs, vGroups } = visibleTransposed(groups);
+  if (vGroups.length === 0) {
+    mountEl.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Nothing to show for this scenario — rows appear as soon as they have a nonzero year.</p>`;
+    return;
+  }
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const head = `<tr><th class="tl-corner"></th>${
     yearIdxs.map((y) => `<th class="tl-year">${fyShortLabel(firstFyStartYear(state.plan.start) + y)}</th>`).join("")
@@ -1886,6 +1895,7 @@ function renderTransposed(mountEl, groups, footerHTML = "") {
     const rows = g.rows.map((r) => {
       const cells = yearIdxs.map((y) => {
         if (r.text) return `<td class="tl-num">${escapeHTML(String(r.cell(y)))}</td>`;
+        if (r.pct) return `<td class="tl-num">${r.cell(y).toFixed(2)}%</td>`;
         return `<td class="tl-num"${r.cellAttrs ? r.cellAttrs(y) : ""}>${fmtLedgerCell(r.cell(y) * factor(y))}</td>`;
       }).join("");
       return `<tr class="${r.cls || ""}" ${r.rowAttrs || ""}><th class="tl-label">${escapeHTML(r.label)}</th>${cells}</tr>`;
@@ -1911,8 +1921,11 @@ function exportTransposedCSV(viewName, groups) {
   for (const g of vGroups) {
     if (g.title) lines.push(esc(g.title));
     for (const r of g.rows) {
-      const cells = yearIdxs.map((y) =>
-        r.text ? esc(String(r.cell(y))) : (r.cell(y) * factor(y)).toFixed(2));
+      const cells = yearIdxs.map((y) => {
+        if (r.text) return esc(String(r.cell(y)));
+        if (r.pct) return esc(`${r.cell(y).toFixed(2)}%`);
+        return (r.cell(y) * factor(y)).toFixed(2);
+      });
       lines.push([esc(r.label), ...cells].join(","));
     }
   }
@@ -2120,6 +2133,101 @@ function renderAssetsView() {
   renderTransposed(els.assetsTable, buildAssetsGroups(assetsEntity));
 }
 
+// --- View: Tax (C4) -----------------------------------------------------------
+
+function buildTaxGroups() {
+  const yl = projection.yearly;
+  const td = (y, p) => yl[y].taxDetail?.[p] ?? null;
+  const personGroup = (p, title) => ({
+    title,
+    rows: [
+      { label: "Taxable income", cell: (y) => td(y, p)?.taxableIncome ?? 0 },
+      { label: "Gross tax", cell: (y) => -(td(y, p)?.grossTax ?? 0) },
+      { label: "Medicare levy", cell: (y) => -(td(y, p)?.medicare ?? 0) },
+      { label: "LITO", cell: (y) => td(y, p)?.lito ?? 0 },
+      { label: "Franking credits", cell: (y) => td(y, p)?.frankingCredits ?? 0 },
+      { label: "Net income tax", cell: (y) => -(td(y, p)?.incomeTax ?? 0), cls: "tl-total" },
+      { label: "CGT payable", cell: (y) => -(td(y, p)?.cgt ?? 0) },
+    ],
+  });
+  const groups = [personGroup("client", "Client")];
+  if (isCouple()) groups.push(personGroup("partner", "Partner"));
+  groups.push({
+    title: "Household",
+    rows: [{ label: "Total tax", cell: (y) => -yl[y].tax, cls: "tl-total" }],
+  });
+  return groups;
+}
+
+function renderTaxView() {
+  const note = `<p class="chart-note-inline">Income tax rows accrue in the year shown (spread through the year, PAYG-style). CGT payable shows the year of <em>payment</em> — gains realised in a year are assessed then and paid the following July.</p>`;
+  renderTransposed(els.viewTax, buildTaxGroups(), note + accruedCgtFooter());
+}
+
+// --- View: Assumptions (C4) -----------------------------------------------------
+//
+// The audit trail for "what assumptions did this projection use" —
+// economic settings plus tax thresholds through time under the active
+// bracket mode.
+
+function buildAssumptionsGroups() {
+  const included = state.assets.filter((a) => a.include);
+  const cpi = state.assumptions.cpi;
+  const mode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
+  const f0 = firstFyStartYear(state.plan.start);
+  const thr = (nominal) => (y) => realThreshold(nominal, f0 + y, mode, cpi);
+
+  const economic = [
+    { label: "CPI (% p.a.)", cell: () => cpi * 100, pct: true, always: true },
+  ];
+  for (const a of included) {
+    const { incomeNominal, growthNominal } = assetReturnComponents(a);
+    const gross = incomeNominal + growthNominal;
+    const netReal = (1 + gross - a.icrPct / 100) / (1 + cpi) - 1;
+    economic.push({ label: `${a.name} — gross return, nominal (% p.a.)`, cell: () => gross * 100, pct: true, always: true });
+    economic.push({ label: `${a.name} — ICR (% p.a.)`, cell: () => a.icrPct, pct: true });
+    economic.push({ label: `${a.name} — net real return (% p.a.)`, cell: () => netReal * 100, pct: true, always: true });
+  }
+
+  // Resident bracket floors are identical across the covered tables
+  // (only the second bracket's RATE steps 16→15→14); the 30/37/45
+  // thresholds are stable labels.
+  const residentRows = [
+    { label: "Tax-free threshold (to)", cell: thr(18200), always: true },
+    { label: "30% bracket from", cell: thr(45000), always: true },
+    { label: "37% bracket from", cell: thr(135000), always: true },
+    { label: "45% bracket from", cell: thr(190000), always: true },
+    { label: "Medicare levy shading-in from", cell: thr(LEG.medicareLowerSingle), always: true },
+    { label: "Medicare full 2% levy from", cell: thr(LEG.medicareUpperSingle), always: true },
+    { label: "LITO maximum offset", cell: thr(LITO.maxOffset), always: true },
+    { label: "LITO taper begins", cell: thr(LITO.taper1Threshold), always: true },
+    { label: "LITO cut-out", cell: thr(LITO.taper2Threshold + LITO.taper2Base / LITO.taper2Rate), always: true },
+  ];
+
+  const groups = [
+    { title: "Economic", rows: economic },
+    { title: "Tax settings (resident, per person)", rows: residentRows },
+  ];
+
+  const anyNonResident = [state.plan.client, state.plan.partner]
+    .some((p) => p?.taxProfile?.residency === "nonResident");
+  if (anyNonResident) {
+    groups.push({
+      title: "Tax settings (non-resident — 30% from the first dollar)",
+      rows: [
+        { label: "37% bracket from", cell: thr(135000), always: true },
+        { label: "45% bracket from", cell: thr(190000), always: true },
+      ],
+    });
+  }
+  return groups;
+}
+
+function renderAssumptionsView() {
+  const caption = `<p class="chart-note-inline">Under “Indexed”, threshold rows are flat in today's dollars — that is what CPI-indexed tax settings mean. Under “No indexation” they shrink in real terms each year after FY2027–28 (bracket creep). Future dollars shows the nominal picture. The bracket mode is set in Parameters.</p>`;
+  renderTransposed(els.viewAssumptions, buildAssumptionsGroups(), caption);
+}
+
 // --- exports -----------------------------------------------------------------
 
 function exportNameBase() {
@@ -2142,6 +2250,8 @@ els.exportBtn.addEventListener("click", () => {
   if (activeView === "projection") exportProjectionPNG();
   else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
+  else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());
+  else if (activeView === "assumptions") exportTransposedCSV("assumptions", buildAssumptionsGroups());
 });
 
 els.showAssetsToggle.addEventListener("change", () => {

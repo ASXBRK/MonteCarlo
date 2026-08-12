@@ -1360,6 +1360,13 @@ html, body {
   background: #fafbfc;
 }
 
+.chart-note-inline {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin: 6px 2px 8px;
+  line-height: 1.5;
+}
+
 /* --- Parameters modal inline field --- */
 
 .param-inline-field {

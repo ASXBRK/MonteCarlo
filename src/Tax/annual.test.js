@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assessPerson, litoAmount, bracketSettings, FRANKING_RATE } from "./annual.js";
+import { assessPerson, litoAmount, bracketSettings, realThreshold, FRANKING_RATE } from "./annual.js";
 
 describe("litoAmount (legislated schedule)", () => {
   it("matches the published taper points", () => {
@@ -67,6 +67,19 @@ describe("assessPerson — known values", () => {
     const c = assessPerson({ fyStartYear: 2027, ordinaryIncome: 1000, deductions: 50000 });
     expect(c.taxableIncome).toBe(0);
     expect(c.netIncomeTax).toBe(0);
+  });
+});
+
+describe("realThreshold (C4 assumptions rows)", () => {
+  it("indexed mode holds thresholds flat in real terms", () => {
+    expect(realThreshold(18200, 2027, "indexed", 0.025)).toBe(18200);
+    expect(realThreshold(18200, 2047, "indexed", 0.025)).toBe(18200);
+  });
+
+  it("frozen mode shrinks thresholds by CPI after FY2027-28", () => {
+    expect(realThreshold(18200, 2027, "frozen", 0.025)).toBe(18200);
+    expect(realThreshold(18200, 2037, "frozen", 0.025))
+      .toBeCloseTo(18200 / Math.pow(1.025, 10), 8);
   });
 });
 

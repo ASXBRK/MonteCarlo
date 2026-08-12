@@ -103,9 +103,9 @@ await seed(portfolioOnly);
 check("portfolio-only: end balance tile = current value ($100,000)",
   (await tile("Projected end balance")) === "$100,000",
   await tile("Projected end balance"));
-check("rail shows greyed coming-soon entries",
-  await page.locator('#viewRail [data-view="tax"]').isDisabled() &&
-  await page.locator("#viewRail .rail-item:disabled").count() >= 5);
+check("rail shows greyed coming-soon entries (Super/Liabilities/Net assets)",
+  await page.locator('#viewRail [data-view="tax"]').isEnabled() &&
+  (await page.locator("#viewRail .rail-item:disabled").count()) === 3);
 
 await clickView("cashflow");
 let labels = await rowLabels("#viewCashflow");
@@ -274,6 +274,55 @@ check("first-FY cell is blocked with an explanation",
 await blocked.click();
 check("blocked cell refuses editing",
   (await page.locator("#viewCashflow .tl-cell-input").count()) === 0);
+
+// --- 7. C4: Tax + Assumptions views -------------------------------------------
+const salaried = mkState({
+  endAge: 45,
+  assets: [mkAsset("a1", "Portfolio", 100000, {
+    allocation: { mode: "custom", incomePct: 0, growthPct: 2.5, frankingPct: 0, volBasis: "Balanced" },
+  })],
+  cashflows: {
+    income: [{ id: "i1", label: "Salary", owner: "client", amount: 100000 / 12, frequency: "monthly", fromAge: 40, toAge: 45, indexed: true }],
+  },
+});
+await seed(salaried);
+const cellsOf = async (container, label) => {
+  const tr = page.locator(`${container} .tl tbody tr`, { has: page.locator(".tl-label", { hasText: label }) }).first();
+  return (await tr.innerText()).split("\t").slice(1);
+};
+
+await page.click('#viewRail [data-view="tax"]');
+await page.waitForSelector("#viewTax .tl");
+labels = await rowLabels("#viewTax");
+check("tax view: per-person rows + household total; zero rows hidden",
+  labels.includes("Taxable income") && labels.includes("Gross tax") &&
+  labels.includes("Medicare levy") && labels.includes("Net income tax") &&
+  labels.includes("Total tax") && !labels.includes("LITO") && !labels.includes("CGT payable"),
+  labels.join("|"));
+const taxable = await cellsOf("#viewTax", "Taxable income");
+const netTax = await cellsOf("#viewTax", "Net income tax");
+check("tax view: FY27–28 taxable income 100,000 and net tax (22,252)",
+  taxable[1] === "100,000" && netTax[1] === "(22,252)",
+  `${taxable[1]} / ${netTax[1]}`);
+
+const dlTax = await Promise.all([
+  page.waitForEvent("download"),
+  page.click("#exportBtn"),
+]).then(([d]) => d.suggestedFilename());
+check("tax CSV filename", /-tax\.csv$/.test(dlTax), dlTax);
+
+await page.click('#viewRail [data-view="assumptions"]');
+await page.waitForSelector("#viewAssumptions .tl");
+labels = await rowLabels("#viewAssumptions");
+check("assumptions view: economic + threshold rows",
+  labels.includes("CPI (% p.a.)") &&
+  labels.some((l) => l.includes("net real return")) &&
+  labels.includes("Tax-free threshold (to)") && labels.includes("LITO cut-out"),
+  labels.join("|"));
+const tft = await cellsOf("#viewAssumptions", "Tax-free threshold (to)");
+check("assumptions: indexed mode holds the tax-free threshold flat in today's dollars",
+  tft[0] === "18,200" && tft[tft.length - 1] === "18,200",
+  tft.join("|"));
 
 check("no unexpected console/page errors", errors.length === 0, errors.join(" ;; "));
 

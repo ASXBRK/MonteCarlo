@@ -51,6 +51,13 @@ export function litoAmount(taxableIncome) {
   return Math.max(0, LITO.taper2Base - (taxableIncome - LITO.taper2Threshold) * LITO.taper2Rate);
 }
 
+// A nominal threshold's value in real (today's) dollars for a FY under
+// the active bracket mode — the Assumptions view's row math. Indexed:
+// constant; frozen: shrinks by CPI each year after FY2027-28.
+export function realThreshold(nominal, fyStartYear, bracketMode, cpi) {
+  return nominal / bracketSettings(fyStartYear, bracketMode, cpi).k;
+}
+
 // Bracket-table key and real-scaling factor for a FY (see header).
 export function bracketSettings(fyStartYear, bracketMode, cpi) {
   const key =

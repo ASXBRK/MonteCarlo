@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { projectPlan, assetMonthlyRate } from "./deterministic.js";
+import { projectPlan, assetMonthlyRate, assetReturnComponents } from "./deterministic.js";
 
 // Minimal v3-shaped state factory. Custom allocations pin exact
 // returns without depending on profile values.
@@ -291,6 +291,27 @@ describe("output view reconciliation (C1)", () => {
     const out = projectPlan(comprehensive());
     expect(out.schedule.oneOffsByAssetYear.x[3]).toBe(20000); // age 43 → year 3
     expect(out.yearly[3].perAssetDetail.x.oneOffs).toBeCloseTo(20000, 6);
+  });
+
+  it("taxDetail carries the full per-person assessment (C4 Tax view)", () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ allocation: growthOnlyAlloc() })],
+      cashflows: { income: [salary(100000 / 12)] },
+    });
+    const d = projectPlan(s).yearly[1].taxDetail.client; // FY2027-28
+    expect(d.taxableIncome).toBeCloseTo(100000, 4);
+    expect(d.grossTax).toBeCloseTo(20252, 4);
+    expect(d.medicare).toBeCloseTo(2000, 4);
+    expect(d.lito).toBe(0);
+    expect(d.incomeTax).toBeCloseTo(22252, 4); // net = gross + medicare − lito − credits
+  });
+
+  it("assumptions net real return matches the engine's rate (C4)", () => {
+    const a = mkAsset({ icrPct: 0.5 });
+    const { incomeNominal, growthNominal } = assetReturnComponents(a);
+    const netRealAnnual = (1 + incomeNominal + growthNominal - 0.005) / 1.025 - 1;
+    expect(Math.pow(1 + assetMonthlyRate(a, 0.025), 12) - 1).toBeCloseTo(netRealAnnual, 12);
   });
 
   it("a table-sourced one-off is engine-identical to an input-sourced one (C2)", () => {

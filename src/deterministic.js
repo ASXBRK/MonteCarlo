@@ -451,6 +451,10 @@ export function projectPlan(state, profiles = PROFILES) {
     }
 
     const detail = (p) => persons.includes(p) ? {
+      taxableIncome: assessed[p].taxableIncome,
+      grossTax: assessed[p].incomeTax,
+      medicare: assessed[p].medicare,
+      lito: assessed[p].lito,
       incomeTax: assessed[p].netIncomeTax,
       cgt: cgtDueDetail[p],
       frankingCredits: assessed[p].frankingCredits,
