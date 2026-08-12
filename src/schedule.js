@@ -140,6 +140,13 @@ export function buildSchedules(state) {
     };
   }
 
+  // Per-row FY totals for the transposed output views (one line per
+  // entered row) — filled alongside the monthly arrays.
+  const rowTotals = { income: {}, expenses: {} };
+  // Net one-off amounts per asset per FY (signed) for the one-off grid.
+  const oneOffsByAssetYear = {};
+  for (const id of includedIds) oneOffsByAssetYear[id] = new Float64Array(planYears);
+
   // A regular cashflow row is active in plan year y iff the anchor
   // owner's age that year lies in [fromAge, toAge] (inclusive of both
   // boundary plan years — convention 4).
@@ -148,13 +155,16 @@ export function buildSchedules(state) {
     return age >= row.fromAge && age <= row.toAge;
   };
 
-  // Accumulate a regular row into a target Float64Array.
-  const applyRegular = (row, owner, target, sign = 1) => {
+  // Accumulate a regular row into a target Float64Array (and its
+  // per-FY totals when a `totals` array is supplied).
+  const applyRegular = (row, owner, target, totals = null) => {
     if (row.amount <= 0) return;
     if (row.frequency === "monthly") {
       for (let m = 0; m < months; m++) {
         if (activeInYear(row, owner, yearOfMonth[m])) {
-          target[m] += sign * realAmountAt(row, m, cpi);
+          const v = realAmountAt(row, m, cpi);
+          target[m] += v;
+          if (totals) totals[yearOfMonth[m]] += v;
         }
       }
     } else { // annual — fires in July (convention 5)
@@ -162,19 +172,25 @@ export function buildSchedules(state) {
         if (!activeInYear(row, owner, y)) continue;
         const jm = julyMonthIndex(plan, y);
         if (jm == null) continue; // partial first year without a firing July
-        target[jm] += sign * realAmountAt(row, jm, cpi);
+        const v = realAmountAt(row, jm, cpi);
+        target[jm] += v;
+        if (totals) totals[y] += v;
       }
     }
   };
 
   for (const row of state.cashflows.income) {
-    applyRegular(row, row.owner, income);
+    rowTotals.income[row.id] = new Float64Array(planYears);
+    applyRegular(row, row.owner, income, rowTotals.income[row.id]);
     const ownerArr = row.owner === "partner" && incomeByOwner.partner
       ? incomeByOwner.partner
       : incomeByOwner.client;
     applyRegular(row, row.owner, ownerArr);
   }
-  for (const row of state.cashflows.expenses) applyRegular(row, "client", expenses);
+  for (const row of state.cashflows.expenses) {
+    rowTotals.expenses[row.id] = new Float64Array(planYears);
+    applyRegular(row, "client", expenses, rowTotals.expenses[row.id]);
+  }
 
   for (const row of state.cashflows.contributions) {
     const flows = assetFlows[row.assetId];
@@ -195,7 +211,9 @@ export function buildSchedules(state) {
     if (y < 0 || y >= planYears) continue;
     const jm = julyMonthIndex(plan, y);
     if (jm == null) continue;
-    flows.oneOffs[jm] += ls.direction === "out" ? -ls.amount : ls.amount;
+    const signed = ls.direction === "out" ? -ls.amount : ls.amount;
+    flows.oneOffs[jm] += signed;
+    oneOffsByAssetYear[ls.assetId][y] += signed;
   }
 
   return {
@@ -210,5 +228,7 @@ export function buildSchedules(state) {
     incomeByOwner,
     expenses,
     assetFlows,
+    rowTotals,
+    oneOffsByAssetYear,
   };
 }

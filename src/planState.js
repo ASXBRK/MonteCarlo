@@ -175,9 +175,19 @@ export function defaultState(profiles = {}, now = new Date()) {
       surplus: { mode: "spend", assetId: null },
       fundingOrder: [asset.id],
     },
-    display: { units: "real" },
+    display: { units: "real", reportPeriod: { from: null, to: null } },
     assumptions: { cpi: 0.025, bracketMode: "indexed" },
   };
+}
+
+// Report period: FY start years (or null = unbounded). Display state,
+// not plan state — it only narrows what the output views show.
+export function clampReportPeriod(raw) {
+  const fy = (v) => (Number.isInteger(v) && v >= 1900 && v <= 3000 ? v : null);
+  const from = fy(raw?.from);
+  const to = fy(raw?.to);
+  if (from != null && to != null && to < from) return { from, to: from };
+  return { from, to };
 }
 
 // --- validation / clamping ---------------------------------------------
@@ -447,7 +457,10 @@ export function hydrate(json, profiles = {}) {
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
       },
       settings: normaliseSettings(raw.settings, assets),
-      display: { units: raw.display?.units === "nominal" ? "nominal" : "real" },
+      display: {
+        units: raw.display?.units === "nominal" ? "nominal" : "real",
+        reportPeriod: clampReportPeriod(raw.display?.reportPeriod),
+      },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,
         bracketMode: raw.assumptions?.bracketMode === "frozen" ? "frozen" : "indexed",

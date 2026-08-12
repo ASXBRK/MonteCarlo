@@ -162,6 +162,7 @@ export function projectPlan(state, profiles = PROFILES) {
     clientAge: schedule.clientAges[y],
     partnerAge: schedule.partnerAges ? schedule.partnerAges[y] : null,
     income: 0,
+    cashDistributions: 0, // portion of income that is paid-out distributions
     expenses: 0,
     tax: 0,
     surplusOrDeficit: 0,
@@ -177,6 +178,13 @@ export function projectPlan(state, profiles = PROFILES) {
     openingBalance: 0,
     closingBalance: 0,
     perAssetClosing: {},
+    // Per-asset flow detail for the Assets view: opening + contributions
+    // − withdrawals + oneOffs − deficitFunding + surplusInvested +
+    // growth = closing, per asset.
+    perAssetDetail: Object.fromEntries(ids.map((id) => [id, {
+      opening: 0, contributions: 0, withdrawals: 0, oneOffs: 0,
+      deficitFunding: 0, surplusInvested: 0, growth: 0, closing: 0,
+    }])),
   });
 
   // Run one plan year's months. opts:
@@ -237,7 +245,10 @@ export function projectPlan(state, profiles = PROFILES) {
       for (const id of ids) {
         const g = bal[id] * meta[id].rate;
         bal[id] += g;
-        if (row) row.growth += g;
+        if (row) {
+          row.growth += g;
+          row.perAssetDetail[id].growth += g;
+        }
       }
 
       // b. Distribution + deduction accrual on the grown balance.
@@ -272,22 +283,34 @@ export function projectPlan(state, profiles = PROFILES) {
         if (contrib > 0) {
           bal[id] += contrib;
           if (meta[id].cgt) pools[id] = poolAdd(pools[id], contrib);
-          if (row) row.contributions += contrib;
+          if (row) {
+            row.contributions += contrib;
+            row.perAssetDetail[id].contributions += contrib;
+          }
         }
         const wd = flows.withdrawals[m];
         if (wd > 0) {
           const paid = sell(id, wd, m);
-          if (row) row.withdrawals += paid;
+          if (row) {
+            row.withdrawals += paid;
+            row.perAssetDetail[id].withdrawals += paid;
+          }
           recordUnfunded(wd - paid, m);
         }
         const oneOff = flows.oneOffs[m];
         if (oneOff > 0) {
           bal[id] += oneOff;
           if (meta[id].cgt) pools[id] = poolAdd(pools[id], oneOff);
-          if (row) row.oneOffsNet += oneOff;
+          if (row) {
+            row.oneOffsNet += oneOff;
+            row.perAssetDetail[id].oneOffs += oneOff;
+          }
         } else if (oneOff < 0) {
           const paid = sell(id, -oneOff, m);
-          if (row) row.oneOffsNet -= paid;
+          if (row) {
+            row.oneOffsNet -= paid;
+            row.perAssetDetail[id].oneOffs -= paid;
+          }
           recordUnfunded(-oneOff - paid, m);
         }
       }
@@ -306,6 +329,7 @@ export function projectPlan(state, profiles = PROFILES) {
       const net = inc - exp - tax;
       if (row) {
         row.income += inc;
+        row.cashDistributions += cashDist;
         row.expenses += exp;
         row.tax += tax;
         row.surplusOrDeficit += net;
@@ -315,7 +339,10 @@ export function projectPlan(state, profiles = PROFILES) {
         if (surplusTargetId) {
           bal[surplusTargetId] += net;
           if (meta[surplusTargetId].cgt) pools[surplusTargetId] = poolAdd(pools[surplusTargetId], net);
-          if (row) row.surplusInvested += net;
+          if (row) {
+            row.surplusInvested += net;
+            row.perAssetDetail[surplusTargetId].surplusInvested += net;
+          }
         }
         // "spend" → disappears.
       } else if (net < 0) {
@@ -324,7 +351,10 @@ export function projectPlan(state, profiles = PROFILES) {
           if (shortfall <= 0) break;
           const paid = sell(id, shortfall, m);
           shortfall -= paid;
-          if (row) row.deficitFundedFromAssets += paid;
+          if (row) {
+            row.deficitFundedFromAssets += paid;
+            row.perAssetDetail[id].deficitFunding += paid;
+          }
         }
         recordUnfunded(shortfall, m);
       }
@@ -392,9 +422,13 @@ export function projectPlan(state, profiles = PROFILES) {
     // Pass 2 — the real year, with the PAYG spread applied.
     const row = mkYearRow(y);
     row.openingBalance = combined[yearStart(y)];
+    for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     const real = runYear(y, { taxOut: taxOutArr, cgtDue, row, trackUnfunded: true });
     row.closingBalance = combined[yearEnd(y)];
-    for (const id of ids) row.perAssetClosing[id] = series[id][yearEnd(y)];
+    for (const id of ids) {
+      row.perAssetClosing[id] = series[id][yearEnd(y)];
+      row.perAssetDetail[id].closing = series[id][yearEnd(y)];
+    }
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.

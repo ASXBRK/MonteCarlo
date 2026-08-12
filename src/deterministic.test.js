@@ -230,6 +230,70 @@ const salary = (amount, over = {}) => ({
   fromAge: 40, toAge: 120, indexed: true, assetId: null, ...over,
 });
 
+// --- Phase C1: per-line and per-asset reconciliation --------------------------
+
+describe("output view reconciliation (C1)", () => {
+  const comprehensive = () => mkState({
+    endAge: 50,
+    assets: [
+      mkAsset({ id: "x", balance: 50000 }),
+      mkAsset({ id: "y", balance: 30000, allocation: zeroRealAlloc(), distributions: "cash" }),
+    ],
+    fundingOrder: ["x", "y"],
+    surplus: { mode: "invest", assetId: "x" },
+    cashflows: {
+      income: [
+        { id: "i1", label: "Salary", owner: "client", amount: 4000, frequency: "monthly", fromAge: 40, toAge: 45, indexed: true },
+        { id: "i2", label: "Bonus", owner: "client", amount: 5000, frequency: "annual", fromAge: 40, toAge: 42, indexed: true },
+      ],
+      expenses: [
+        { id: "e1", label: "Living", amount: 3000, frequency: "monthly", fromAge: 40, toAge: 120, indexed: true },
+        { id: "e2", label: "Travel", amount: 8000, frequency: "annual", fromAge: 46, toAge: 50, indexed: false },
+      ],
+      contributions: [cf({ assetId: "x", amount: 250, toAge: 50 })],
+      withdrawals: [cf({ id: "w", assetId: "y", amount: 300, fromAge: 47, toAge: 50 })],
+      lumpSums: [{ id: "l1", assetId: "x", amount: 20000, direction: "in", age: 43, source: "input" }],
+    },
+  });
+
+  it("per-line income/expense FY totals reconcile with the ledger rows", () => {
+    const out = projectPlan(comprehensive());
+    const rt = out.schedule.rowTotals;
+    for (let y = 0; y < out.yearly.length; y++) {
+      const r = out.yearly[y];
+      const incomeLines = Object.values(rt.income).reduce((s, arr) => s + arr[y], 0);
+      expect(incomeLines + r.cashDistributions).toBeCloseTo(r.income, 6);
+      const expenseLines = Object.values(rt.expenses).reduce((s, arr) => s + arr[y], 0);
+      expect(expenseLines).toBeCloseTo(r.expenses, 6);
+    }
+  });
+
+  it("per-asset detail blocks reconcile and sum to the combined closing", () => {
+    const out = projectPlan(comprehensive());
+    for (const r of out.yearly) {
+      let totalClosing = 0;
+      for (const d of Object.values(r.perAssetDetail)) {
+        expect(d.opening + d.contributions - d.withdrawals + d.oneOffs
+          - d.deficitFunding + d.surplusInvested + d.growth).toBeCloseTo(d.closing, 6);
+        totalClosing += d.closing;
+      }
+      expect(totalClosing).toBeCloseTo(r.closingBalance, 6);
+      // Detail totals also reconcile with the household row.
+      const sum = (k) => Object.values(r.perAssetDetail).reduce((s, d) => s + d[k], 0);
+      expect(sum("contributions")).toBeCloseTo(r.contributions, 6);
+      expect(sum("withdrawals")).toBeCloseTo(r.withdrawals, 6);
+      expect(sum("deficitFunding")).toBeCloseTo(r.deficitFundedFromAssets, 6);
+      expect(sum("growth")).toBeCloseTo(r.growth, 6);
+    }
+  });
+
+  it("one-off asset-year totals match the schedule's monthly one-offs", () => {
+    const out = projectPlan(comprehensive());
+    expect(out.schedule.oneOffsByAssetYear.x[3]).toBe(20000); // age 43 → year 3
+    expect(out.yearly[3].perAssetDetail.x.oneOffs).toBeCloseTo(20000, 6);
+  });
+});
+
 describe("tax — regression guards", () => {
   it("portfolio-only, cgtAsset:false, no income → zero tax everywhere", () => {
     const s = mkState({ endAge: 60 });

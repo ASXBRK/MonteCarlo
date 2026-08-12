@@ -64,9 +64,14 @@
 
       <section class="chart-wrap output-shell" aria-label="Projection output">
         <div class="output-head">
-          <div class="seg-toggle" id="viewSwitcher" role="tablist" aria-label="Output view">
-            <button class="seg-option active" type="button" data-view="projection" role="tab" aria-selected="true">Projection</button>
-            <button class="seg-option" type="button" data-view="ledger" role="tab" aria-selected="false">Ledger</button>
+          <div class="period-select" aria-label="Report period">
+            <label>From <select id="periodFrom"></select></label>
+            <label>To <select id="periodTo"></select></label>
+            <div class="seg-toggle period-presets">
+              <button class="seg-option" type="button" data-preset="all">All</button>
+              <button class="seg-option" type="button" data-preset="10">Next 10</button>
+              <button class="seg-option" type="button" data-preset="20">Next 20</button>
+            </div>
           </div>
           <div class="output-actions">
             <div class="display-toggle" role="radiogroup" aria-label="Display units">
@@ -76,20 +81,34 @@
             <button id="exportBtn" class="btn-text" type="button">Export PNG</button>
           </div>
         </div>
-        <div id="viewProjection">
-          <label class="chart-opt">
-            <input type="checkbox" id="showAssetsToggle" />
-            <span>Show individual assets</span>
-          </label>
-          <div id="chart"></div>
-          <p id="shortfallNote" class="shortfall-note" hidden></p>
-        </div>
-        <div id="viewLedger" hidden>
-          <label class="chart-opt">
-            <input type="checkbox" id="showPerAssetCols" />
-            <span>Show per-asset columns</span>
-          </label>
-          <div id="ledgerTable" class="ledger-wrap"></div>
+        <div class="output-body">
+          <nav id="viewRail" class="view-rail" aria-label="Output views">
+            <button class="rail-item active" type="button" data-view="projection">Projection</button>
+            <button class="rail-item" type="button" data-view="cashflow">Cashflow</button>
+            <button class="rail-item" type="button" data-view="assets">Assets</button>
+            <button class="rail-item" type="button" data-view="tax" disabled title="Coming soon">Tax</button>
+            <button class="rail-item" type="button" data-view="assumptions" disabled title="Coming soon">Assumptions</button>
+            <button class="rail-item" type="button" disabled title="Coming soon">Super</button>
+            <button class="rail-item" type="button" disabled title="Coming soon">Liabilities</button>
+            <button class="rail-item" type="button" disabled title="Coming soon">Net assets</button>
+          </nav>
+          <div class="view-canvas">
+            <div id="viewProjection">
+              <label class="chart-opt">
+                <input type="checkbox" id="showAssetsToggle" />
+                <span>Show individual assets</span>
+              </label>
+              <div id="chart"></div>
+              <p id="shortfallNote" class="shortfall-note" hidden></p>
+            </div>
+            <div id="viewCashflow" hidden></div>
+            <div id="viewAssets" hidden>
+              <div id="assetsEntity" class="seg-toggle entity-select" role="tablist" aria-label="Asset"></div>
+              <div id="assetsTable"></div>
+            </div>
+            <div id="viewTax" hidden></div>
+            <div id="viewAssumptions" hidden></div>
+          </div>
         </div>
         <div class="chart-note" data-role="chartNote"></div>
       </section>

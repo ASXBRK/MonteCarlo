@@ -18,7 +18,7 @@ import {
 } from "./planState.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan } from "./deterministic.js";
-import { nominalFactor } from "./schedule.js";
+import { nominalFactor, firstFyStartYear } from "./schedule.js";
 import {
   createIndex, normaliseIndex, findActive, findClient,
   newClient, renameClient, deleteClient, switchClient,
@@ -54,14 +54,20 @@ const els = {
   summaryStrip: $("summaryStrip"),
   chartNote: document.querySelector('[data-role="chartNote"]'),
   displayOptions: document.querySelectorAll(".display-option"),
-  viewSwitcher: $("viewSwitcher"),
+  viewRail: $("viewRail"),
   exportBtn: $("exportBtn"),
   viewProjection: $("viewProjection"),
-  viewLedger: $("viewLedger"),
+  viewCashflow: $("viewCashflow"),
+  viewAssets: $("viewAssets"),
+  viewTax: $("viewTax"),
+  viewAssumptions: $("viewAssumptions"),
+  assetsEntity: $("assetsEntity"),
+  assetsTable: $("assetsTable"),
   showAssetsToggle: $("showAssetsToggle"),
-  showPerAssetCols: $("showPerAssetCols"),
   shortfallNote: $("shortfallNote"),
-  ledgerTable: $("ledgerTable"),
+  periodFrom: $("periodFrom"),
+  periodTo: $("periodTo"),
+  periodPresets: document.querySelectorAll(".period-presets [data-preset]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
   paramAssetTable: $("paramAssetTable"),
@@ -198,7 +204,8 @@ function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
   for (const el of [els.planBar, els.incomeSection, els.expensesSection, els.assets,
-                    els.investSection, els.settingsPanel, els.summaryStrip, els.ledgerTable]) {
+                    els.investSection, els.settingsPanel, els.summaryStrip,
+                    els.viewCashflow, els.assetsEntity, els.assetsTable]) {
     el.innerHTML = "";
   }
   els.shortfallNote.hidden = true;
@@ -1558,7 +1565,7 @@ els.addAssetBtn.addEventListener("click", () => {
 let projection = null;
 let activeView = "projection";
 let showAssets = false;
-let showPerAssetColumns = false;
+let assetsEntity = "all"; // Assets view entity selector: "all" | assetId
 
 function recomputeProjection() {
   projection = projectPlan(state);
@@ -1568,22 +1575,38 @@ function recomputeProjection() {
 // that displays engine output.
 function refreshOutputs() {
   recomputeProjection();
+  renderPeriodSelector();
   renderSummaryStrip();
   renderActiveView();
 }
 
+const VIEW_MOUNTS = {
+  projection: () => els.viewProjection,
+  cashflow: () => els.viewCashflow,
+  assets: () => els.viewAssets,
+  tax: () => els.viewTax,
+  assumptions: () => els.viewAssumptions,
+};
+
 function renderActiveView() {
-  els.viewProjection.hidden = activeView !== "projection";
-  els.viewLedger.hidden = activeView !== "ledger";
+  for (const [name, mount] of Object.entries(VIEW_MOUNTS)) {
+    mount().hidden = name !== activeView;
+  }
   els.exportBtn.textContent = activeView === "projection" ? "Export PNG" : "Export CSV";
-  for (const btn of els.viewSwitcher.querySelectorAll("[data-view]")) {
-    const active = btn.dataset.view === activeView;
-    btn.classList.toggle("active", active);
-    btn.setAttribute("aria-selected", active ? "true" : "false");
+  for (const btn of els.viewRail.querySelectorAll("[data-view]")) {
+    btn.classList.toggle("active", btn.dataset.view === activeView);
   }
   if (activeView === "projection") renderProjectionChart();
-  else renderLedgerTable();
+  else if (activeView === "cashflow") renderCashflowView();
+  else if (activeView === "assets") renderAssetsView();
 }
+
+els.viewRail.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-view]");
+  if (!btn || btn.disabled || btn.dataset.view === activeView) return;
+  activeView = btn.dataset.view;
+  renderActiveView();
+});
 
 const isNominal = () => state.display.units === "nominal";
 const displayFactor = (m) => (isNominal() ? nominalFactor(m, state.assumptions.cpi) : 1);
@@ -1592,6 +1615,79 @@ const displayFactor = (m) => (isNominal() ? nominalFactor(m, state.assumptions.c
 function endMonthOfYear(y) {
   return projection.schedule.monthsInFirstYear + 12 * y;
 }
+
+// Month index at the START of plan year y.
+function startMonthOfYear(y) {
+  return y === 0 ? 0 : projection.schedule.monthsInFirstYear + 12 * (y - 1);
+}
+
+// --- report period (display state, persisted per scenario) -------------------
+
+const fyShortLabel = (fyStart) =>
+  `FY${String(fyStart % 100).padStart(2, "0")}–${String((fyStart + 1) % 100).padStart(2, "0")}`;
+
+// Resolve the persisted {from, to} FY start years into clamped plan
+// year indices [a, b].
+function periodYears() {
+  const years = projection.schedule.planYears;
+  const f0 = firstFyStartYear(state.plan.start);
+  const rp = state.display.reportPeriod || { from: null, to: null };
+  let a = rp.from != null ? rp.from - f0 : 0;
+  let b = rp.to != null ? rp.to - f0 : years - 1;
+  a = Math.max(0, Math.min(years - 1, a));
+  b = Math.max(a, Math.min(years - 1, b));
+  return { a, b };
+}
+
+function renderPeriodSelector() {
+  const years = projection.schedule.planYears;
+  const f0 = firstFyStartYear(state.plan.start);
+  const { a, b } = periodYears();
+  const options = (sel) => {
+    let html = "";
+    for (let y = 0; y < years; y++) {
+      html += `<option value="${f0 + y}">${fyShortLabel(f0 + y)}</option>`;
+    }
+    sel.innerHTML = html;
+  };
+  options(els.periodFrom);
+  options(els.periodTo);
+  els.periodFrom.value = String(f0 + a);
+  els.periodTo.value = String(f0 + b);
+  const isAll = a === 0 && b === years - 1;
+  els.periodPresets.forEach((btn) => {
+    const p = btn.dataset.preset;
+    const active =
+      (p === "all" && isAll) ||
+      (p !== "all" && a === 0 && b === Math.min(years - 1, Number(p) - 1) && !isAll);
+    btn.classList.toggle("active", active);
+  });
+}
+
+function setReportPeriod(from, to) {
+  state.display.reportPeriod = { from, to };
+  saveState();
+  renderPeriodSelector();
+  renderActiveView();
+}
+
+els.periodFrom.addEventListener("change", () => {
+  const from = Number(els.periodFrom.value);
+  const to = Math.max(from, Number(els.periodTo.value));
+  setReportPeriod(from, to);
+});
+els.periodTo.addEventListener("change", () => {
+  const to = Number(els.periodTo.value);
+  const from = Math.min(to, Number(els.periodFrom.value));
+  setReportPeriod(from, to);
+});
+els.periodPresets.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const p = btn.dataset.preset;
+    if (p === "all") setReportPeriod(null, null);
+    else setReportPeriod(null, firstFyStartYear(state.plan.start) + Number(p) - 1);
+  });
+});
 
 // --- View 1: projection chart -----------------------------------------------
 
@@ -1635,12 +1731,13 @@ function renderProjectionChart() {
     }
   }
 
-  // FY tick labels at plan-year starts, thinned to ~10.
-  const yearStartIdx = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
-  const step = Math.max(1, Math.ceil(schedule.planYears / 10));
+  // FY tick labels at plan-year starts within the report period,
+  // thinned to ~10.
+  const { a: perA, b: perB } = periodYears();
+  const step = Math.max(1, Math.ceil((perB - perA + 1) / 10));
   const tickvals = [], ticktext = [];
-  for (let y = 0; y < schedule.planYears; y += step) {
-    tickvals.push(yearStartIdx(y));
+  for (let y = perA; y <= perB; y += step) {
+    tickvals.push(startMonthOfYear(y));
     ticktext.push(schedule.fyLabels[y]);
   }
 
@@ -1673,7 +1770,10 @@ function renderProjectionChart() {
     hovermode: "x unified",
     showlegend: showAssets,
     legend: { orientation: "h", y: -0.18, x: 0.5, xanchor: "center" },
-    xaxis: { tickmode: "array", tickvals, ticktext, showgrid: false, zeroline: false },
+    xaxis: {
+      tickmode: "array", tickvals, ticktext, showgrid: false, zeroline: false,
+      range: [startMonthOfYear(perA), endMonthOfYear(perB)],
+    },
     yaxis: {
       title: { text: `Balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
       tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
@@ -1683,41 +1783,16 @@ function renderProjectionChart() {
   }, { displayModeBar: false, responsive: true });
 }
 
-// --- View 2: ledger table -----------------------------------------------------
-
-// Column model shared by the renderer and the CSV export. Numeric
-// columns that are zero for every row are hidden automatically.
-function buildLedgerColumns() {
-  const included = state.assets.filter((a) => a.include);
-  const couple = isCouple();
-  const cols = [
-    { group: "Year", label: "FY", text: (r) => r.fyLabel },
-    { group: "Year", label: "Age", text: (r) => (r.partnerAge != null ? `${r.clientAge} / ${r.partnerAge}` : String(r.clientAge)) },
-    { group: "Cashflow", label: "Income", val: (r) => r.income },
-    { group: "Cashflow", label: "Expenses", val: (r) => -r.expenses },
-    { group: "Cashflow", label: "Tax", val: (r) => -r.tax },
-    { group: "Cashflow", label: "Surplus/(deficit)", val: (r) => r.surplusOrDeficit },
-    { group: "Investment flows", label: "Contributions", val: (r) => r.contributions },
-    { group: "Investment flows", label: "Withdrawals", val: (r) => -r.withdrawals },
-    { group: "Investment flows", label: "One-offs", val: (r) => r.oneOffsNet },
-    { group: "Investment flows", label: "Surplus invested", val: (r) => r.surplusInvested },
-    { group: "Investment flows", label: "Deficit funding", val: (r) => -r.deficitFundedFromAssets },
-    { group: "Investment flows", label: "Unfunded", val: (r) => r.unfundedCashflow },
-    { group: "Assets", label: "Growth", val: (r) => r.growth },
-    { group: "Assets", label: "Closing balance", val: (r) => r.closingBalance },
-  ];
-  if (showPerAssetColumns) {
-    for (const a of included) {
-      cols.push({ group: "Per-asset closing", label: a.name, val: (r) => r.perAssetClosing[a.id] ?? 0 });
-    }
-  }
-  const rows = projection.yearly;
-  const visible = cols.filter((c) => {
-    if (c.text) return true;
-    return rows.some((r) => Math.abs(c.val(r)) >= 0.005);
-  });
-  return { visible, rows, couple };
-}
+// --- transposed table infrastructure (shared by every table view) ------------
+//
+// Years as columns, line items as rows. Groups are visual bands; a
+// numeric row hides when every visible year is zero (the transposed
+// equivalent of Phase B's column hiding) unless marked `always`
+// (subtotals/totals). The renderer and the CSV export consume the same
+// group model, so the CSV always matches the visible cells.
+//
+// Row shape: { label, cell(y) → number, always?, cls?, text? (string
+// cells, exempt from hiding + scaling) }.
 
 function fmtLedgerCell(v) {
   if (Math.abs(v) < 0.005) return "–";
@@ -1725,40 +1800,204 @@ function fmtLedgerCell(v) {
   return v < 0 ? `(${s})` : s;
 }
 
-function renderLedgerTable() {
-  const { visible, rows } = buildLedgerColumns();
+// Filter groups down to the visible period + visible rows.
+function visibleTransposed(groups) {
+  const { a, b } = periodYears();
+  const yearIdxs = [];
+  for (let y = a; y <= b; y++) yearIdxs.push(y);
+  const vGroups = groups
+    .map((g) => ({
+      ...g,
+      rows: g.rows.filter((r) =>
+        r.always || r.text || yearIdxs.some((y) => Math.abs(r.cell(y)) >= 0.005)),
+    }))
+    .filter((g) => g.rows.length > 0);
+  return { yearIdxs, vGroups };
+}
 
-  // Group header row with colspans.
-  const groups = [];
-  for (const c of visible) {
-    const last = groups[groups.length - 1];
-    if (last && last.name === c.group) last.span += 1;
-    else groups.push({ name: c.group, span: 1 });
-  }
-
-  const head1 = groups.map((g) => `<th colspan="${g.span}" class="lg-group">${escapeHTML(g.name)}</th>`).join("");
-  const head2 = visible.map((c) => `<th>${escapeHTML(c.label)}</th>`).join("");
-
-  const body = rows.map((r, y) => {
-    const factor = isNominal() ? nominalFactor(endMonthOfYear(y), state.assumptions.cpi) : 1;
-    const cells = visible.map((c) => {
-      if (c.text) return `<td class="lg-text">${escapeHTML(c.text(r))}</td>`;
-      return `<td class="lg-num">${fmtLedgerCell(c.val(r) * factor)}</td>`;
+function renderTransposed(mountEl, groups, footerHTML = "") {
+  const { yearIdxs, vGroups } = visibleTransposed(groups);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const head = `<tr><th class="tl-corner"></th>${
+    yearIdxs.map((y) => `<th class="tl-year">${fyShortLabel(firstFyStartYear(state.plan.start) + y)}</th>`).join("")
+  }</tr>`;
+  const body = vGroups.map((g) => {
+    const gh = g.title
+      ? `<tr class="tl-group"><th colspan="${yearIdxs.length + 1}">${escapeHTML(g.title)}</th></tr>`
+      : "";
+    const rows = g.rows.map((r) => {
+      const cells = yearIdxs.map((y) => {
+        if (r.text) return `<td class="tl-num">${escapeHTML(String(r.cell(y)))}</td>`;
+        return `<td class="tl-num"${r.cellAttrs ? r.cellAttrs(y) : ""}>${fmtLedgerCell(r.cell(y) * factor(y))}</td>`;
+      }).join("");
+      return `<tr class="${r.cls || ""}" ${r.rowAttrs || ""}><th class="tl-label">${escapeHTML(r.label)}</th>${cells}</tr>`;
     }).join("");
-    return `<tr>${cells}</tr>`;
+    return gh + rows;
   }).join("");
+  mountEl.innerHTML = `
+    <div class="tl-wrap">
+      <table class="tl"><thead>${head}</thead><tbody>${body}</tbody></table>
+    </div>
+    ${footerHTML}
+  `;
+}
 
+function exportTransposedCSV(viewName, groups) {
+  const { yearIdxs, vGroups } = visibleTransposed(groups);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const esc = (s) => `"${String(s).replaceAll('"', '""')}"`;
+  const f0 = firstFyStartYear(state.plan.start);
+  const lines = [
+    ["Item", ...yearIdxs.map((y) => fyShortLabel(f0 + y))].map(esc).join(","),
+  ];
+  for (const g of vGroups) {
+    if (g.title) lines.push(esc(g.title));
+    for (const r of g.rows) {
+      const cells = yearIdxs.map((y) =>
+        r.text ? esc(String(r.cell(y))) : (r.cell(y) * factor(y)).toFixed(2));
+      lines.push([esc(r.label), ...cells].join(","));
+    }
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${exportNameBase()}-${viewName}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+const accruedCgtFooter = () => {
   const accrued = projection.accruedCgtAtEnd * displayFactor(projection.schedule.months);
-  const foot = accrued > 0.005
+  return accrued > 0.005
     ? `<div class="ledger-foot">CGT liability accrued at end of projection: ${fmtMoney(accrued)} (assessed on the final year's realised gains; payable after the projection ends).</div>`
     : "";
-  els.ledgerTable.innerHTML = `
-    <table class="ledger">
-      <thead><tr>${head1}</tr><tr>${head2}</tr></thead>
-      <tbody>${body}</tbody>
-    </table>
-    ${foot}
-  `;
+};
+
+// --- View: Cashflow -----------------------------------------------------------
+
+function buildCashflowGroups() {
+  const yl = projection.yearly;
+  const rt = projection.schedule.rowTotals;
+  const couple = isCouple();
+  const included = state.assets.filter((a) => a.include);
+
+  const incomeRows = state.cashflows.income.map((rw) => ({
+    label: couple ? `${rw.label} (${rw.owner})` : rw.label,
+    cell: (y) => rt.income[rw.id]?.[y] ?? 0,
+  }));
+  incomeRows.push({ label: "Distributions paid as cash", cell: (y) => yl[y].cashDistributions });
+  incomeRows.push({ label: "Total income", cell: (y) => yl[y].income, always: true, cls: "tl-total" });
+
+  const expenseRows = state.cashflows.expenses.map((rw) => ({
+    label: rw.label,
+    cell: (y) => -(rt.expenses[rw.id]?.[y] ?? 0),
+  }));
+  expenseRows.push({ label: "Total expenses", cell: (y) => -yl[y].expenses, always: true, cls: "tl-total" });
+
+  const surplusTarget = state.settings.surplus.mode === "invest"
+    ? state.assets.find((a) => a.id === state.settings.surplus.assetId)
+    : null;
+
+  return [
+    { title: "Income", rows: incomeRows },
+    { title: "Expenses", rows: expenseRows },
+    { title: null, rows: [
+      { label: "Tax", cell: (y) => -yl[y].tax },
+      { label: "Surplus / (deficit)", cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
+    ] },
+    { title: "Funding", rows: [
+      { label: surplusTarget ? `Surplus invested (to ${surplusTarget.name})` : "Surplus invested",
+        cell: (y) => yl[y].surplusInvested },
+      { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },
+      { label: "Unfunded cashflow", cell: (y) => yl[y].unfundedCashflow },
+    ] },
+    { title: "One-off amounts", rows: included.map((a) => ({
+      label: a.name,
+      cell: (y) => projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0,
+      always: true, // C2 makes these editable; keep the grid stable
+    })) },
+  ];
+}
+
+function renderCashflowView() {
+  renderTransposed(els.viewCashflow, buildCashflowGroups(), accruedCgtFooter());
+}
+
+// --- View: Assets ---------------------------------------------------------------
+//
+// Entity selector (Consolidated | each asset) — the reusable pattern
+// the future Super view repeats (consolidated | per fund).
+
+function renderEntitySelector(mountEl, entities, active, onSelect) {
+  mountEl.innerHTML = entities.map((e) => `
+    <button class="seg-option${e.id === active ? " active" : ""}" type="button"
+            role="tab" aria-selected="${e.id === active}" data-entity="${e.id}">${escapeHTML(e.label)}</button>
+  `).join("");
+  mountEl.onclick = (ev) => {
+    const btn = ev.target.closest("[data-entity]");
+    if (!btn || btn.dataset.entity === active) return;
+    onSelect(btn.dataset.entity);
+  };
+}
+
+function assetDetailRows(get) {
+  return [
+    { label: "Opening balance", cell: (y) => get(y).opening, always: true },
+    { label: "Contributions", cell: (y) => get(y).contributions },
+    { label: "Withdrawals", cell: (y) => -get(y).withdrawals },
+    { label: "One-off amounts", cell: (y) => get(y).oneOffs },
+    { label: "Deficit funding", cell: (y) => -get(y).deficitFunding },
+    { label: "Surplus invested", cell: (y) => get(y).surplusInvested },
+    { label: "Growth", cell: (y) => get(y).growth },
+  ];
+}
+
+function buildAssetsGroups(entity) {
+  const yl = projection.yearly;
+  const included = state.assets.filter((a) => a.include);
+
+  if (entity === "all") {
+    const combined = assetDetailRows((y) => ({
+      opening: yl[y].openingBalance,
+      contributions: yl[y].contributions,
+      withdrawals: yl[y].withdrawals,
+      oneOffs: yl[y].oneOffsNet,
+      deficitFunding: yl[y].deficitFundedFromAssets,
+      surplusInvested: yl[y].surplusInvested,
+      growth: yl[y].growth,
+    }));
+    combined.push({ label: "Tax attributable", cell: (y) => -yl[y].tax });
+    combined.push({ label: "Closing balance", cell: (y) => yl[y].closingBalance, always: true, cls: "tl-total" });
+    const byAsset = included.map((a) => ({
+      label: a.name,
+      cell: (y) => yl[y].perAssetClosing[a.id] ?? 0,
+    }));
+    byAsset.push({ label: "Total", cell: (y) => yl[y].closingBalance, always: true, cls: "tl-total" });
+    return [
+      { title: "Combined", rows: combined },
+      { title: "Closing balance by asset", rows: byAsset },
+    ];
+  }
+
+  const zero = { opening: 0, contributions: 0, withdrawals: 0, oneOffs: 0, deficitFunding: 0, surplusInvested: 0, growth: 0, closing: 0 };
+  const name = included.find((a) => a.id === entity)?.name ?? "Asset";
+  const rows = assetDetailRows((y) => yl[y].perAssetDetail[entity] ?? zero);
+  rows.push({ label: "Closing balance", cell: (y) => (yl[y].perAssetDetail[entity] ?? zero).closing, always: true, cls: "tl-total" });
+  return [{ title: name, rows }];
+}
+
+function renderAssetsView() {
+  const included = state.assets.filter((a) => a.include);
+  if (assetsEntity !== "all" && !included.some((a) => a.id === assetsEntity)) {
+    assetsEntity = "all"; // entity was removed/excluded
+  }
+  renderEntitySelector(
+    els.assetsEntity,
+    [{ id: "all", label: "Consolidated" }, ...included.map((a) => ({ id: a.id, label: a.name }))],
+    assetsEntity,
+    (id) => { assetsEntity = id; renderAssetsView(); }
+  );
+  renderTransposed(els.assetsTable, buildAssetsGroups(assetsEntity));
 }
 
 // --- exports -----------------------------------------------------------------
@@ -1779,44 +2018,15 @@ function exportProjectionPNG() {
   });
 }
 
-function exportLedgerCSV() {
-  const { visible, rows } = buildLedgerColumns();
-  const esc = (s) => `"${String(s).replaceAll('"', '""')}"`;
-  const header = visible.map((c) => esc(c.label)).join(",");
-  const lines = rows.map((r, y) => {
-    const factor = isNominal() ? nominalFactor(endMonthOfYear(y), state.assumptions.cpi) : 1;
-    return visible.map((c) => (c.text ? esc(c.text(r)) : (c.val(r) * factor).toFixed(2))).join(",");
-  });
-  const blob = new Blob([[header, ...lines].join("\n")], { type: "text/csv" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${exportNameBase()}-ledger.csv`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
 els.exportBtn.addEventListener("click", () => {
   if (activeView === "projection") exportProjectionPNG();
-  else exportLedgerCSV();
-});
-
-// --- output shell wiring --------------------------------------------------------
-
-els.viewSwitcher.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-view]");
-  if (!btn || btn.dataset.view === activeView) return;
-  activeView = btn.dataset.view;
-  renderActiveView();
+  else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
+  else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
 });
 
 els.showAssetsToggle.addEventListener("change", () => {
   showAssets = els.showAssetsToggle.checked;
   renderProjectionChart();
-});
-
-els.showPerAssetCols.addEventListener("change", () => {
-  showPerAssetColumns = els.showPerAssetCols.checked;
-  renderLedgerTable();
 });
 
 // --- summary strip ------------------------------------------------------

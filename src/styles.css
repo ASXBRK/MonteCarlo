@@ -1105,60 +1105,165 @@ html, body {
   margin: 8px 0 4px;
 }
 
-/* --- ledger table --- */
+/* --- output body: view rail + canvas (C1) --- */
 
-.ledger-wrap {
+.output-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.view-rail {
+  flex: 0 0 128px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid var(--line);
+  padding-right: 10px;
+}
+
+.rail-item {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  color: var(--ink-soft);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.rail-item:hover:not(:disabled) { background: #eef1f5; color: var(--ink); }
+.rail-item.active { background: var(--accent-soft); color: var(--accent); }
+.rail-item:disabled { opacity: 0.4; cursor: default; }
+
+.view-canvas {
+  flex: 1 1 auto;
+  min-width: 0; /* allow the table wrap to scroll, not the page */
+}
+
+@media (max-width: 900px) {
+  .output-body { flex-direction: column; }
+  .view-rail {
+    flex: none;
+    flex-direction: row;
+    flex-wrap: wrap;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    padding: 0 0 8px;
+  }
+}
+
+/* --- report period selector --- */
+
+.period-select {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  flex-wrap: wrap;
+}
+
+.period-select label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.period-select select {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--ink);
+}
+
+.period-presets { margin: 0; }
+
+/* --- transposed ledger tables (years as columns) --- */
+
+.tl-wrap {
   overflow-x: auto;
   margin: 4px 0 6px;
   border: 1px solid var(--line);
   border-radius: 8px;
 }
 
-.ledger {
-  border-collapse: collapse;
+.tl {
+  border-collapse: separate;
+  border-spacing: 0;
   width: 100%;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.ledger th, .ledger td {
+.tl th, .tl td {
   padding: 5px 10px;
   border-bottom: 1px solid var(--line);
 }
 
-.ledger thead th {
+.tl thead th {
   background: #f4f6f9;
   color: var(--ink-soft);
   font-weight: 600;
   text-align: right;
-  position: sticky;
-  top: 0;
 }
 
-.ledger thead .lg-group {
+.tl .tl-corner,
+.tl .tl-label {
+  position: sticky;
+  left: 0;
+  background: white;
+  text-align: left;
+  font-weight: 500;
+  color: var(--ink);
+  min-width: 190px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid var(--line);
+}
+.tl .tl-corner { background: #f4f6f9; }
+
+.tl .tl-group th {
+  background: #eef1f5;
+  color: var(--ink-soft);
   font-size: 11px;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   text-align: left;
-  border-bottom: none;
-  padding-bottom: 1px;
+  position: sticky;
+  left: 0;
 }
 
-.ledger thead tr:nth-child(2) th:first-child,
-.ledger thead tr:nth-child(2) th:nth-child(2) { text-align: left; }
+.tl .tl-num { text-align: right; }
 
-.ledger .lg-num { text-align: right; }
-.ledger .lg-text { text-align: left; color: var(--ink-soft); }
+.tl .tl-total th,
+.tl .tl-total td {
+  font-weight: 700;
+  border-top: 1px solid #d5dae2;
+  background: #fafbfc;
+}
 
-.ledger tbody tr:nth-child(even) { background: #fafbfc; }
-.ledger tbody tr:last-child td { border-bottom: none; }
+.tl tbody tr:last-child th,
+.tl tbody tr:last-child td { border-bottom: none; }
+
+.entity-select { margin-bottom: 8px; flex-wrap: wrap; }
 
 .ledger-foot {
   font-size: 12px;
   color: var(--ink-soft);
   padding: 8px 12px;
-  border-top: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 8px;
   background: #fafbfc;
 }
 
