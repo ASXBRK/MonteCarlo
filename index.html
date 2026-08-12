@@ -32,10 +32,10 @@
         <div class="plan-derived" data-role="planSummary"></div>
       </section>
 
-      <section aria-label="Portfolios">
-        <div id="portfolios" class="portfolio-stack"></div>
+      <section aria-label="Assets">
+        <div id="assets" class="portfolio-stack"></div>
         <div class="portfolio-actions">
-          <button id="addPortfolioBtn" class="btn-text" type="button">+ Add portfolio</button>
+          <button id="addAssetBtn" class="btn-text" type="button">+ Add asset</button>
         </div>
       </section>
 
@@ -101,6 +101,7 @@
           <p>Total returns (nominal) are the firm's proposed assumption set; income and growth splits are shown for reference — the simulation engine consumes total return only and does not model distributions or tax. Real returns are derived at simulation time from total nominal and the CPI parameter above via the Fisher relation, so changing CPI flows through every projection without a reload.</p>
           <p>σ values and regime-switching parameters are model calibrations, not firm-published figures. Defensive-end σs (Cash 1.5%, Defensive 3.0%) are intentionally higher than nominal-terms intuition would suggest: real cash and short-duration variance are dominated by inflation variance rather than nominal price fluctuations.</p>
           <p>Residential Property's σ is set higher than typical published direct-property volatility, which is understated by appraisal-based valuation smoothing; the model σ is adjusted upward to reflect underlying transaction-price variance.</p>
+          <p>Assets with a custom allocation use their entered income + growth return as the expected return, and borrow σ and regime-switching parameters from their selected volatility basis profile.</p>
         </section>
 
         <section>
@@ -189,7 +190,7 @@
 
         <section>
           <h3>Scope</h3>
-          <p>This tool projects investment portfolios — balances, contributions, withdrawals, and fees — under the firm's capital market assumptions, in real terms, with an optional Monte Carlo view of outcome dispersion.</p>
+          <p>This tool projects investment assets — balances, contributions, withdrawals, and costs — under the firm's capital market assumptions, in real terms, with an optional Monte Carlo view of outcome dispersion.</p>
           <p>It is analytical, not prescriptive: it presents projections and tradeoffs without recommending one option over another. It does not model tax, age pension entitlement, non-portfolio assets, or product selection.</p>
         </section>
       </div>

@@ -318,6 +318,95 @@ html, body {
   margin: 12px 0 16px;
 }
 
+/* --- allocation section --- */
+
+.seg-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: #eef1f5;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px;
+  margin-bottom: 10px;
+}
+
+.seg-option {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  background: transparent;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.seg-option.active {
+  background: white;
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.alloc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1.4fr;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+
+.alloc-grid-profile { grid-template-columns: minmax(200px, 320px); }
+.alloc-grid-vol { grid-template-columns: minmax(200px, 320px); }
+
+.alloc-total-value {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.helper-text {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+/* --- CGT section --- */
+
+.cgt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 8px;
+}
+.cgt-toggle input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+
+/* --- lump sum provenance tag --- */
+
+.cf-tag {
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
 /* Inline validation: field snapped to its clamped value. */
 .field-clamped {
   border-color: #d97b2f !important;
