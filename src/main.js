@@ -1,1396 +1,540 @@
-import {
-  PROFILES, DEFAULT_PROFILE, DEFENSIVE_PROFILE,
-  RISK_RUNGS, rungOf, neighbourAsset, realMu,
-} from "./profiles.js";
-import {
-  simulate, generateShocks, generateUniforms, NUM_PATHS, buildGlideSchedule,
-} from "./sim.js";
-import {
-  renderChart, renderCompareChart, renderProbChart, renderBellCurves,
-  SAMPLE_PATH_COUNT, sampleTraceIndices,
-} from "./chart.js";
-import {
-  tornadoSchedule, tornadoRedisplay, tornadoClear,
-  tornadoHideForCompare, tornadoShowForSingle,
-} from "./tornado.js";
-import {
-  sequenceRiskShow, sequenceRiskHide, sequenceRiskRedisplay,
-} from "./sequenceRisk.js";
-import {
-  firstDecadeShow, firstDecadeHide, firstDecadeRedisplay,
-} from "./firstDecade.js";
-import {
-  computeMaxDrawdowns, drawdownToleranceShow,
-  drawdownToleranceHide, drawdownToleranceUpdateTolerance,
-} from "./drawdownTolerance.js";
-import {
-  strategyCompareShow, strategyCompareHide, strategyCompareRedisplay,
-} from "./strategyCompare.js";
+// Phase A — multi-portfolio input panel + plan state model.
+//
+// This file owns rendering and persistence; src/planState.js owns the
+// state shape, defaults, validation, and derived summaries (pure +
+// unit-tested). The projection engine arrives in Phase B — the chart
+// mount renders a placeholder until then.
 
-const prefersReducedMotion = () =>
-  typeof window !== "undefined" &&
-  typeof window.matchMedia === "function" &&
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+import { PROFILES, realMu } from "./profiles.js";
+import {
+  defaultState, createPortfolio, createCashflow, createLumpSum,
+  clampPlan, clampAllToPlan, clampCashflow, clampLumpSum,
+  clampInt, clampNumber, serialize, hydrate,
+  summarise, planSummaryText,
+} from "./planState.js";
+import { renderBellCurves } from "./chart.js";
+
+// Legacy insight modules (firstDecade, drawdownTolerance, tornado,
+// sequenceRisk) are stubbed out this phase. Their source files stay in
+// the repo untouched and their mounts remain in index.html; they return
+// as collapsed accordions in the insights phase. Deliberately NOT
+// imported while disabled — tornado.js spins up a Web Worker at module
+// scope, so a static import would run it.
+const LEGACY_INSIGHTS_ENABLED = false;
+
+const STORAGE_KEY = "portfolioPlanner.v1";
+const PROFILE_KEYS = Object.keys(PROFILES);
 
 const $ = (id) => document.getElementById(id);
 
 const els = {
-  toggle: $("compareToggle"),
-  drawdownToggle: $("drawdownToggle"),
-  scenarios: $("scenarios"),
-  horizonSlider: $("horizonSlider"),
-  sliderLabel: document.querySelector('[data-role="sliderLabel"]'),
-  output: $("output"),
+  planCurrentAge: $("planCurrentAge"),
+  planEndAge: $("planEndAge"),
+  planStartYear: $("planStartYear"),
+  planSummary: document.querySelector('[data-role="planSummary"]'),
+  portfolios: $("portfolios"),
+  addPortfolioBtn: $("addPortfolioBtn"),
+  summaryStrip: $("summaryStrip"),
+  chartNote: document.querySelector('[data-role="chartNote"]'),
+  displayOptions: document.querySelectorAll(".display-option"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
   paramAssetTable: $("paramAssetTable"),
-  chartNote: document.querySelector('[data-role="chartNote"]'),
-  displayOptions: document.querySelectorAll(".display-option"),
   inflationInput: $("inflationInput"),
-  tornado: $("tornado"),
-  sequenceRisk: $("sequenceRisk"),
-  firstDecade: $("firstDecade"),
-  drawdownTolerance: $("drawdownTolerance"),
-  strategyCompare: $("strategyCompare"),
-  targetRuinInput: $("targetRuinInput"),
 };
 
-// Strings driven by units state. The simulation runs in real terms;
-// nominal is a display transform applied year-by-year by displayFactors.
-function currentUnitsStrings() {
-  if (state.units === "real") {
-    return {
-      yAxisLabel: "Portfolio value (today's dollars)",
-      chartNote: "All values in today's dollars (CPI-adjusted)",
-    };
+// --- state + persistence ----------------------------------------------
+
+let state = loadState();
+// Collapse state is UI-only — not persisted, keyed by portfolio id.
+const collapsed = new Map();
+
+function loadState() {
+  try {
+    const blob = localStorage.getItem(STORAGE_KEY);
+    if (blob) {
+      const s = hydrate(blob, PROFILE_KEYS);
+      if (s) return s;
+    }
+  } catch { /* storage unavailable — fall through to defaults */ }
+  return defaultState(PROFILE_KEYS);
+}
+
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, serialize(state));
+  } catch { /* quota/unavailable — non-fatal */ }
+}
+
+function findPortfolio(pid) {
+  return state.portfolios.find((p) => p.id === pid) || null;
+}
+
+// --- formatting ---------------------------------------------------------
+
+const fmtMoney = (v) =>
+  v.toLocaleString("en-AU", { style: "currency", currency: "AUD", maximumFractionDigits: 0 });
+
+// --- plan bar -----------------------------------------------------------
+
+function renderPlanBar() {
+  els.planCurrentAge.value = state.plan.currentAge;
+  els.planEndAge.value = state.plan.endAge;
+  els.planStartYear.value = state.plan.startYear;
+  els.planSummary.textContent = planSummaryText(state.plan);
+}
+
+function onPlanChange() {
+  const next = clampPlan({
+    currentAge: els.planCurrentAge.value,
+    endAge: els.planEndAge.value,
+    startYear: els.planStartYear.value,
+  });
+  state.plan = next;
+  state = clampAllToPlan(state); // silently clamp existing rows
+  saveState();
+  renderPlanBar();
+  renderPortfolios(); // row values may have been clamped
+  renderSummaryStrip();
+}
+
+for (const el of [els.planCurrentAge, els.planEndAge, els.planStartYear]) {
+  el.addEventListener("change", onPlanChange);
+}
+
+// --- portfolio cards ------------------------------------------------------
+
+function profileOptions(selected) {
+  return PROFILE_KEYS.map(
+    (k) => `<option value="${k}"${k === selected ? " selected" : ""}>${k}</option>`
+  ).join("");
+}
+
+function cashflowRowHTML(pid, kind, cf) {
+  return `
+    <div class="cf-row" data-cfid="${cf.id}">
+      <div class="cf-cell">
+        <label>Amount ($)</label>
+        <input type="number" min="0" step="100" value="${cf.amount}"
+               data-pid="${pid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="amount" />
+      </div>
+      <div class="cf-cell">
+        <label>Frequency</label>
+        <select data-pid="${pid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="frequency">
+          <option value="monthly"${cf.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${cf.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </div>
+      <div class="cf-cell">
+        <label>From age</label>
+        <input type="number" min="18" max="120" step="1" value="${cf.fromAge}"
+               data-pid="${pid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="fromAge" />
+      </div>
+      <div class="cf-cell">
+        <label>To age</label>
+        <input type="number" min="18" max="120" step="1" value="${cf.toAge}"
+               data-pid="${pid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="toAge" />
+      </div>
+      <div class="cf-cell cf-indexed">
+        <label>Indexed</label>
+        <input type="checkbox"${cf.indexed ? " checked" : ""}
+               data-pid="${pid}" data-kind="${kind}" data-cfid="${cf.id}" data-field="indexed"
+               title="Indexed cashflows keep their real value; non-indexed are fixed in nominal dollars and shrink by CPI each year in real terms." />
+      </div>
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-pid="${pid}" data-kind="${kind}" data-cfid="${cf.id}">×</button>
+    </div>
+  `;
+}
+
+function lumpSumRowHTML(pid, ls) {
+  return `
+    <div class="cf-row cf-row-lump" data-cfid="${ls.id}">
+      <div class="cf-cell">
+        <label>Amount ($)</label>
+        <input type="number" min="0" step="1000" value="${ls.amount}"
+               data-pid="${pid}" data-kind="lumpSums" data-cfid="${ls.id}" data-field="amount" />
+      </div>
+      <div class="cf-cell">
+        <label>Direction</label>
+        <select data-pid="${pid}" data-kind="lumpSums" data-cfid="${ls.id}" data-field="direction">
+          <option value="in"${ls.direction === "in" ? " selected" : ""}>In (deposit)</option>
+          <option value="out"${ls.direction === "out" ? " selected" : ""}>Out (withdrawal)</option>
+        </select>
+      </div>
+      <div class="cf-cell">
+        <label>At age</label>
+        <input type="number" min="18" max="120" step="1" value="${ls.age}"
+               data-pid="${pid}" data-kind="lumpSums" data-cfid="${ls.id}" data-field="age" />
+      </div>
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-pid="${pid}" data-kind="lumpSums" data-cfid="${ls.id}">×</button>
+    </div>
+  `;
+}
+
+function portfolioCardHTML(p) {
+  const isCollapsed = collapsed.get(p.id) === true;
+  const excluded = !p.include;
+
+  const head = `
+    <div class="pcard-head" data-action="toggle-collapse" data-pid="${p.id}">
+      <button class="pcard-chevron${isCollapsed ? "" : " open"}" type="button"
+              aria-label="${isCollapsed ? "Expand" : "Collapse"}"
+              data-action="toggle-collapse" data-pid="${p.id}">▸</button>
+      <span class="pcard-name" data-role="headName">${escapeHTML(p.name)}</span>
+      <span class="pcard-meta" data-role="headMeta">${escapeHTML(p.profile || "")} · ${fmtMoney(p.balance)}</span>
+      <label class="pcard-include" title="Include in projection totals">
+        <input type="checkbox"${p.include ? " checked" : ""}
+               data-action="toggle-include" data-pid="${p.id}" />
+        <span>Include</span>
+      </label>
+      ${state.portfolios.length > 1 ? `
+        <button class="pcard-remove" type="button" data-action="remove-portfolio" data-pid="${p.id}">Remove</button>
+      ` : ""}
+    </div>
+  `;
+
+  if (isCollapsed) {
+    return `<div class="pcard${excluded ? " excluded" : ""}" data-pid="${p.id}">${head}</div>`;
   }
-  const pct = (state.inflation * 100).toFixed(1).replace(/\.0$/, "");
-  return {
-    yAxisLabel: "Portfolio value (future dollars)",
-    chartNote: `All values in future dollars (nominal, ${pct}% inflation assumed)`,
-  };
+
+  const body = `
+    <div class="pcard-body">
+      <div class="pcard-details">
+        <div class="cf-cell pcard-name-cell">
+          <label>Name</label>
+          <input type="text" value="${escapeHTML(p.name)}" maxlength="60"
+                 data-pid="${p.id}" data-field="name" />
+        </div>
+        <div class="cf-cell">
+          <label>Risk profile</label>
+          <select data-pid="${p.id}" data-field="profile">${profileOptions(p.profile)}</select>
+        </div>
+        <div class="cf-cell">
+          <label>Starting balance ($)</label>
+          <input type="number" min="0" step="1000" value="${p.balance}"
+                 data-pid="${p.id}" data-field="balance" />
+        </div>
+      </div>
+
+      <div class="pcard-fees">
+        <div class="cf-cell">
+          <label>Adviser fee (% p.a.)</label>
+          <input type="number" min="0" max="100" step="0.01" value="${p.fees.adviserPct}"
+                 data-pid="${p.id}" data-field="fees.adviserPct" />
+        </div>
+        <div class="cf-cell">
+          <label>ICR (% p.a.)</label>
+          <input type="number" min="0" max="100" step="0.01" value="${p.fees.icrPct}"
+                 data-pid="${p.id}" data-field="fees.icrPct" />
+        </div>
+        <div class="cf-cell">
+          <label>Flat fee ($ p.a.)</label>
+          <input type="number" min="0" step="10" value="${p.fees.flatPa}"
+                 data-pid="${p.id}" data-field="fees.flatPa" />
+        </div>
+      </div>
+
+      <div class="cf-section">
+        <div class="cf-section-title">Contributions</div>
+        ${p.contributions.map((c) => cashflowRowHTML(p.id, "contributions", c)).join("")}
+        <button class="add-row-btn" type="button" data-action="add-row" data-pid="${p.id}" data-kind="contributions">+ Add contribution</button>
+      </div>
+
+      <div class="cf-section">
+        <div class="cf-section-title">Withdrawals</div>
+        ${p.withdrawals.map((w) => cashflowRowHTML(p.id, "withdrawals", w)).join("")}
+        <button class="add-row-btn" type="button" data-action="add-row" data-pid="${p.id}" data-kind="withdrawals">+ Add withdrawal</button>
+      </div>
+
+      <div class="cf-section">
+        <div class="cf-section-title">Lump sums</div>
+        ${p.lumpSums.map((l) => lumpSumRowHTML(p.id, l)).join("")}
+        <button class="add-row-btn" type="button" data-action="add-row" data-pid="${p.id}" data-kind="lumpSums">+ Add lump sum</button>
+      </div>
+    </div>
+  `;
+
+  return `<div class="pcard${excluded ? " excluded" : ""}" data-pid="${p.id}">${head}${body}</div>`;
 }
 
-// Returns an array of length `years` where factors[t] = (1+i)^t in
-// nominal mode, or null in real mode (meaning "no conversion").
-function displayFactors(years) {
-  if (state.units === "real") return null;
-  const r = state.inflation;
-  const out = new Array(years);
-  for (let y = 0; y < years; y++) out[y] = Math.pow(1 + r, y);
-  return out;
+function escapeHTML(s) {
+  return String(s)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
-function scaleArr(arr, factors) {
-  if (!factors) return arr;
-  return arr.map((v, i) => v * factors[i]);
+function renderPortfolios() {
+  els.portfolios.innerHTML = state.portfolios.map(portfolioCardHTML).join("");
 }
 
-// Returns a sim-shaped object with bands / deterministic / sampled
-// arrays scaled by factors. paths/numPaths/years/ruined* are left
-// alone — they're either raw or dimensionless.
-function applyDisplayToSim(sim, factors) {
-  if (!factors) return sim;
-  return {
-    ...sim,
-    p05: scaleArr(sim.p05, factors),
-    p25: scaleArr(sim.p25, factors),
-    p50: scaleArr(sim.p50, factors),
-    p75: scaleArr(sim.p75, factors),
-    p95: scaleArr(sim.p95, factors),
-    deterministic: scaleArr(sim.deterministic, factors),
-    sampled: sim.sampled.map((row) => row.map((v, i) => v * factors[i])),
-  };
+// Targeted header refresh so typing in name/balance doesn't rebuild
+// the card (which would drop input focus).
+function refreshCardHead(pid) {
+  const p = findPortfolio(pid);
+  const card = els.portfolios.querySelector(`.pcard[data-pid="${pid}"]`);
+  if (!p || !card) return;
+  const nameEl = card.querySelector('[data-role="headName"]');
+  const metaEl = card.querySelector('[data-role="headMeta"]');
+  if (nameEl) nameEl.textContent = p.name;
+  if (metaEl) metaEl.textContent = `${p.profile || ""} · ${fmtMoney(p.balance)}`;
 }
+
+// --- field mutation (delegated) -------------------------------------------
+
+// 'input' events: write state, refresh summaries, never rebuild DOM
+// (keeps focus). 'change' events additionally clamp and sync the field.
+els.portfolios.addEventListener("input", (e) => {
+  applyFieldEdit(e.target, false);
+});
+els.portfolios.addEventListener("change", (e) => {
+  applyFieldEdit(e.target, true);
+});
+
+function applyFieldEdit(el, commit) {
+  const pid = el.dataset.pid;
+  const field = el.dataset.field;
+  if (!pid || !field) return;
+  const p = findPortfolio(pid);
+  if (!p) return;
+
+  const kind = el.dataset.kind;
+  if (kind) {
+    const row = p[kind]?.find((r) => r.id === el.dataset.cfid);
+    if (!row) return;
+    applyRowEdit(p, kind, row, field, el, commit);
+  } else {
+    applyPortfolioEdit(p, field, el, commit);
+  }
+
+  saveState();
+  refreshCardHead(pid);
+  renderSummaryStrip();
+}
+
+function applyPortfolioEdit(p, field, el, commit) {
+  switch (field) {
+    case "name":
+      p.name = el.value.trim() || p.name;
+      if (!commit) p.name = el.value; // allow transient empty while typing
+      break;
+    case "profile":
+      p.profile = PROFILE_KEYS.includes(el.value) ? el.value : p.profile;
+      break;
+    case "balance":
+      p.balance = clampNumber(el.value, 0);
+      if (commit) el.value = p.balance;
+      break;
+    case "fees.adviserPct":
+      p.fees.adviserPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = p.fees.adviserPct;
+      break;
+    case "fees.icrPct":
+      p.fees.icrPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = p.fees.icrPct;
+      break;
+    case "fees.flatPa":
+      p.fees.flatPa = clampNumber(el.value, 0);
+      if (commit) el.value = p.fees.flatPa;
+      break;
+  }
+}
+
+function applyRowEdit(p, kind, row, field, el, commit) {
+  const plan = state.plan;
+  switch (field) {
+    case "amount":
+      row.amount = clampNumber(el.value, 0);
+      if (commit) el.value = row.amount;
+      break;
+    case "frequency":
+      row.frequency = el.value === "annual" ? "annual" : "monthly";
+      break;
+    case "indexed":
+      row.indexed = el.checked;
+      break;
+    case "direction":
+      row.direction = el.value === "out" ? "out" : "in";
+      break;
+    case "fromAge": {
+      if (!commit) return; // ages validate on commit only
+      const v = clampInt(el.value, plan.currentAge, plan.endAge);
+      row.fromAge = v;
+      if (row.toAge < v) row.toAge = v;
+      flagIfClamped(el, v);
+      syncRowAges(el, row);
+      break;
+    }
+    case "toAge": {
+      if (!commit) return;
+      const v = clampInt(el.value, row.fromAge, plan.endAge);
+      row.toAge = v;
+      flagIfClamped(el, v);
+      break;
+    }
+    case "age": { // lump sum
+      if (!commit) return;
+      const v = clampInt(el.value, plan.currentAge, plan.endAge);
+      row.age = v;
+      flagIfClamped(el, v);
+      break;
+    }
+  }
+}
+
+// Inline validation feedback: if the committed value differs from what
+// the user typed, snap the field to the clamped value and flash it.
+function flagIfClamped(el, clampedValue) {
+  const typed = Number(el.value);
+  el.value = clampedValue;
+  if (Number.isFinite(typed) && typed !== clampedValue) {
+    el.classList.add("field-clamped");
+    setTimeout(() => el.classList.remove("field-clamped"), 1200);
+  }
+}
+
+// When fromAge pushes toAge, reflect it in the sibling input.
+function syncRowAges(el, row) {
+  const rowEl = el.closest(".cf-row");
+  const toEl = rowEl?.querySelector('[data-field="toAge"]');
+  if (toEl) toEl.value = row.toAge;
+}
+
+// --- structural actions (delegated clicks) ----------------------------------
+
+els.portfolios.addEventListener("click", (e) => {
+  const target = e.target.closest("[data-action]");
+  if (!target) return;
+  const action = target.dataset.action;
+  const pid = target.dataset.pid;
+  const p = findPortfolio(pid);
+  if (!p) return;
+
+  switch (action) {
+    case "toggle-collapse": {
+      // Ignore clicks that were really on the include checkbox/remove btn.
+      if (e.target.closest(".pcard-include") || e.target.closest(".pcard-remove")) return;
+      collapsed.set(pid, !(collapsed.get(pid) === true));
+      renderPortfolios();
+      break;
+    }
+    case "toggle-include": {
+      p.include = e.target.checked;
+      saveState();
+      els.portfolios.querySelector(`.pcard[data-pid="${pid}"]`)?.classList.toggle("excluded", !p.include);
+      renderSummaryStrip();
+      break;
+    }
+    case "remove-portfolio": {
+      if (state.portfolios.length <= 1) return;
+      if (!window.confirm(`Remove "${p.name}"? Its inputs will be lost.`)) return;
+      state.portfolios = state.portfolios.filter((x) => x.id !== pid);
+      collapsed.delete(pid);
+      saveState();
+      renderPortfolios();
+      renderSummaryStrip();
+      break;
+    }
+    case "add-row": {
+      const kind = target.dataset.kind;
+      if (kind === "lumpSums") p.lumpSums.push(createLumpSum(state.plan));
+      else if (kind === "withdrawals") p.withdrawals.push(createCashflow("withdrawal", state.plan));
+      else if (kind === "contributions") p.contributions.push(createCashflow("contribution", state.plan));
+      saveState();
+      renderPortfolios();
+      renderSummaryStrip();
+      break;
+    }
+    case "remove-row": {
+      const kind = target.dataset.kind;
+      const cfid = target.dataset.cfid;
+      if (p[kind]) p[kind] = p[kind].filter((r) => r.id !== cfid);
+      saveState();
+      renderPortfolios();
+      renderSummaryStrip();
+      break;
+    }
+  }
+});
+
+els.addPortfolioBtn.addEventListener("click", () => {
+  const p = createPortfolio(state.plan, state.portfolios, PROFILE_KEYS);
+  state.portfolios.push(p);
+  collapsed.set(p.id, false);
+  saveState();
+  renderPortfolios();
+  renderSummaryStrip();
+});
+
+// --- summary strip ------------------------------------------------------
+
+function renderSummaryStrip() {
+  const s = summarise(state);
+  els.summaryStrip.innerHTML = `
+    <div class="stat">
+      <div class="stat-label">Total starting balance</div>
+      <div class="stat-value">${fmtMoney(s.totalBalance)}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Portfolios included</div>
+      <div class="stat-value">${s.includedCount} of ${state.portfolios.length}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Regular contributions (annualised)</div>
+      <div class="stat-value">${fmtMoney(s.annualContributions)} /yr</div>
+    </div>
+  `;
+}
+
+// --- chart placeholder (Phase B replaces this) ------------------------------
+
+function renderChartPlaceholder() {
+  Plotly.newPlot("chart", [], {
+    paper_bgcolor: "white",
+    plot_bgcolor: "white",
+    xaxis: { visible: false },
+    yaxis: { visible: false },
+    annotations: [{
+      text: "Projection engine arrives in Phase B",
+      xref: "paper", yref: "paper", x: 0.5, y: 0.5,
+      showarrow: false,
+      font: { size: 15, color: "#5b6470", family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" },
+    }],
+    margin: { l: 20, r: 20, t: 20, b: 20 },
+  }, { displayModeBar: false, responsive: true });
+}
+
+// --- display units toggle ----------------------------------------------------
 
 function applyUnitsLabel() {
-  const s = currentUnitsStrings();
-  if (els.chartNote) els.chartNote.textContent = s.chartNote;
+  const nominal = state.display.units === "nominal";
+  const pct = (state.assumptions.cpi * 100).toFixed(1).replace(/\.0$/, "");
+  els.chartNote.textContent = nominal
+    ? `All values in future dollars (nominal, ${pct}% inflation assumed)`
+    : "All values in today's dollars (CPI-adjusted)";
   els.displayOptions.forEach((btn) => {
-    const active = btn.dataset.units === state.units;
+    const active = btn.dataset.units === state.display.units;
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", active ? "true" : "false");
   });
 }
 
-// Legacy alias — some downstream code used ASSET_LADDER for a simple
-// linear list. The canonical structure now lives in profiles.js as
-// RISK_RUNGS (rungs with sibling variants); this flat list is only
-// used by the glide-default helper.
-const ASSET_LADDER = RISK_RUNGS.flatMap((r) => r.assets);
-
-const DEFAULTS = {
-  age: "",
-  horizonYears: 30,
-  startingBalance: 50000,
-  monthlyContribution: 1000,
-  asset: DEFAULT_PROFILE,
-  // Drawdown fields — only consulted when drawdownMode is on.
-  currentAge: 40,
-  retirementAge: 65,
-  endAge: 90,
-  annualWithdrawal: 50000,
-  strategy: "fixed-real",  // "fixed-real" | "guyton-klinger" | "fixed-pct"
-  // null when off; { endAsset, glideStartAge, glideEndAge } when on.
-  // The scenario's existing `asset` field doubles as the start profile.
-  glide: null,
-};
-
-const state = {
-  compareMode: false,
-  drawdownMode: false,
-  units: "real",      // "real" | "nominal"
-  inflation: 0.025,   // annual rate used only when units === "nominal"
-  targetRuin: 0.10,   // tornado switches to goal-seek when ruin > this
-  drawdownTolerance: 0.35,  // share of paths whose worst DD exceeds this
-  scenarios: {
-    A: { ...DEFAULTS },
-    B: { ...DEFAULTS },
-  },
-};
-
-// Build the worker request from scenario A. The worker only ever
-// operates on Scenario A (per spec); compare mode adds a footer note.
-function tornadoRequest() {
-  const s = state.scenarios.A;
-  return {
-    scenario: { ...s },
-    profiles: PROFILES,
-    mode: state.drawdownMode ? "drawdown" : "accumulation",
-    targetRuin: state.targetRuin,
-    // CPI drives real μ inside the worker (Fisher), so any change to
-    // the Parameters CPI reruns the tornado with the new real returns.
-    cpi: state.inflation,
-    // Authoritative ruin from the main 2000-path sim. The worker uses
-    // this for the State 2 / State 3 decision so the chosen state and
-    // the subtitle's quoted ruin probability are always consistent.
-    canonicalRuin: state.drawdownMode && lastSingle && lastSingle.sim
-      ? lastSingle.sim.ruinedFraction
-      : null,
-  };
-}
-
-function tornadoDisplayCtx() {
-  const a = state.scenarios.A;
-  const horizon = state.drawdownMode
-    ? Math.max(1, a.endAge - a.currentAge)
-    : a.horizonYears;
-  const scale = state.units === "nominal" ? Math.pow(1 + state.inflation, horizon) : 1;
-  return {
-    mode: state.drawdownMode ? "drawdown" : "accumulation",
-    units: state.units,
-    inflation: state.inflation,
-    // Used by the renderer to scale input-side dollar amounts. Same
-    // factor as the chart's y-axis so a "+$200/mo" matches the units
-    // the chart values are shown in.
-    inputScale: scale,
-    // Authoritative ruin probability from the main 2000-path sim,
-    // so the goal-seek subtitle matches the main chart's summary.
-    displayedRuin: state.drawdownMode && lastSingle && lastSingle.sim
-      ? lastSingle.sim.ruinedFraction
-      : null,
-    formatMetric: state.drawdownMode
-      ? (v) => `${v >= 0 ? "+" : "-"}${Math.abs(v * 100).toFixed(1)}pp`
-      : (v) => {
-          const scaled = v * scale;
-          const sign = scaled < 0 ? "-" : "+";
-          const abs = Math.abs(scaled);
-          if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
-          if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(0)}k`;
-          return `${sign}$${Math.round(abs)}`;
-        },
-  };
-}
-
-function scheduleTornado() {
-  if (state.compareMode) {
-    tornadoHideForCompare(els.tornado);
-    return;
-  }
-  tornadoShowForSingle(els.tornado);
-  tornadoSchedule(els.tornado, tornadoRequest(), tornadoDisplayCtx(), {
-    expectedBars: 4,
-  });
-}
-
-function redisplayTornado() {
-  if (state.compareMode) return;
-  tornadoRedisplay(tornadoDisplayCtx());
-}
-
-// --- Sequence risk visualiser --------------------------------------------
-
-function sequenceRiskParams() {
-  const s = state.scenarios.A;
-  // Under a glide, prefer the end asset for the decumulation
-  // visualiser if the glide completes before retirement; otherwise
-  // fall back to the start asset.
-  let profile = PROFILES[s.asset];
-  if (s.glide && s.retirementAge >= s.glide.glideEndAge) {
-    profile = PROFILES[s.glide.endAsset] || profile;
-  }
-  const retYear = retirementYearsFromAge(s);
-  const horizon = Math.max(1, s.endAge - s.retirementAge);
-  // Starting balance for the visualiser = median real balance at the
-  // user's retirement year, taken from the main sim so it matches the
-  // headline "Median at retirement" tile.
-  const startingBalance = lastSingle && lastSingle.sim
-    ? lastSingle.sim.p50[retYear] || 0
-    : 0;
-  return {
-    mu: realMu(profile, state.inflation),
-    sigma: profile.sigma,
-    horizonYears: horizon,
-    startingBalance,
-    annualWithdrawal: s.annualWithdrawal,
-    retirementOffset: retYear,
-    displayCtx: { units: state.units, inflation: state.inflation },
-  };
-}
-
-function refreshSequenceRisk() {
-  // Visualiser only renders when drawdown is on AND compare is off.
-  if (!state.drawdownMode || state.compareMode) {
-    sequenceRiskHide(els.sequenceRisk);
-    return;
-  }
-  sequenceRiskShow(els.sequenceRisk, sequenceRiskParams());
-}
-
-function redisplaySequenceRisk() {
-  if (!state.drawdownMode || state.compareMode) return;
-  sequenceRiskRedisplay({ units: state.units, inflation: state.inflation });
-}
-
-// --- First-decade conditional outcome panel ---------------------------
-
-function refreshFirstDecade() {
-  // Single-scenario only; hide in compare.
-  if (state.compareMode || !lastSingle || !lastSingle.sim) {
-    firstDecadeHide(els.firstDecade);
-    return;
-  }
-  const s = state.scenarios.A;
-  firstDecadeShow(els.firstDecade, {
-    sim: lastSingle.sim,
-    mode: state.drawdownMode ? "drawdown" : "accumulation",
-    horizonYears: lastSingle.horizon,
-    currentAge: lastSingle.currentAge,
-    retirementYear: state.drawdownMode ? retirementYearsFromAge(s) : null,
-    displayCtx: { units: state.units, inflation: state.inflation },
-  });
-}
-
-function redisplayFirstDecade() {
-  if (state.compareMode) return;
-  firstDecadeRedisplay({ units: state.units, inflation: state.inflation });
-}
-
-// --- Drawdown-tolerance lens ------------------------------------------
-
-// --- Withdrawal-strategy comparison panel -----------------------------
-
-function refreshStrategyCompare() {
-  if (state.compareMode || !state.drawdownMode) {
-    strategyCompareHide(els.strategyCompare);
-    return;
-  }
-  const s = state.scenarios.A;
-  strategyCompareShow(els.strategyCompare, {
-    scenario: { ...s },
-    profiles: PROFILES,
-    displayCtx: { units: state.units, inflation: state.inflation },
-  });
-}
-
-function redisplayStrategyCompare() {
-  if (state.compareMode || !state.drawdownMode) return;
-  strategyCompareRedisplay({ units: state.units, inflation: state.inflation });
-}
-
-function refreshDrawdownTolerance() {
-  // Single-scenario only (compare mode hides the panel entirely).
-  if (state.compareMode || !lastSingle || !lastSingle.sim) {
-    drawdownToleranceHide(els.drawdownTolerance);
-    return;
-  }
-  if (!lastSingle.maxDD) {
-    lastSingle.maxDD = computeMaxDrawdowns(lastSingle.sim);
-  }
-  drawdownToleranceShow(els.drawdownTolerance, {
-    maxDD: lastSingle.maxDD,
-    tolerance: state.drawdownTolerance,
-    onChange: (newTol) => {
-      state.drawdownTolerance = newTol;
-      drawdownToleranceUpdateTolerance(newTol);
-    },
-  });
-}
-
-// In drawdown mode the time anchor is (currentAge, endAge) on scenario A.
-function effectiveHorizonYears() {
-  if (!state.drawdownMode) return state.scenarios.A.horizonYears;
-  const a = state.scenarios.A;
-  return Math.max(1, a.endAge - a.currentAge);
-}
-
-function retirementYearsFromAge(s) {
-  return Math.max(0, s.retirementAge - state.scenarios.A.currentAge);
-}
-
-// --- helpers --------------------------------------------------------------
-
-const fmtMoney = (v) =>
-  v.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-
-const fmtMoneyShort = (v) => {
-  if (v >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
-  if (v >= 1e3) return `$${(v / 1e3).toFixed(0)}k`;
-  return `$${Math.round(v)}`;
-};
-
-// Inline info line under each asset dropdown. Shows the profile's
-// nominal total return (with income/growth split) and the Fisher-
-// derived real return at the current CPI, so the tool's real-terms
-// framing is visible next to the input.
-function assetInfoLine(assetName) {
-  const p = PROFILES[assetName];
-  if (!p) return "";
-  const cpi = state.inflation;
-  const real = realMu(p, cpi);
-  return `${(p.totalNominal * 100).toFixed(1)}% p.a. nominal ` +
-    `(${(p.incomeReturn * 100).toFixed(2)}% income / ${(p.growthReturn * 100).toFixed(2)}% growth) ` +
-    `≈ ${(real * 100).toFixed(2)}% real at ${(cpi * 100).toFixed(1)}% CPI`;
-}
-
-// Update the inline info lines under each visible asset dropdown.
-function applyAssetInfoLines() {
-  for (const id of ["A", "B"]) {
-    const el = document.querySelector(`[data-role="assetInfo-${id}"]`);
-    if (!el) continue;
-    el.textContent = assetInfoLine(state.scenarios[id].asset);
-  }
-}
-
-function parseAge(v) {
-  const s = String(v).trim();
-  if (s === "") return null;
-  const n = Math.floor(Number(s));
-  return Number.isFinite(n) && n >= 0 ? n : null;
-}
-
-// --- DOM building ---------------------------------------------------------
-
-// Whether the per-scenario block should host the age input.
-// (Horizon and end age both live on the persistent slider.) Only when
-// compare mode is OFF and drawdown mode is OFF does age live in the
-// scenario row; otherwise it lives in the shared block.
-function scenarioHostsAge() {
-  return !state.compareMode && !state.drawdownMode;
-}
-
-function buildScenarioBlock(id, values) {
-  const block = document.createElement("div");
-  block.className = "scenario";
-  block.dataset.scenario = id;
-
-  const header = document.createElement("div");
-  header.className = "scenario-header";
-  if (state.compareMode) {
-    header.innerHTML = `
-      <div class="scenario-title">Scenario ${id}</div>
-      <div class="scenario-subtitle" data-role="subtitle"></div>
-    `;
-  }
-  block.appendChild(header);
-
-  const grid = document.createElement("div");
-  grid.className = "scenario-grid";
-
-  const ageMarkup = scenarioHostsAge() ? `
-    <div class="control">
-      <label>Current age <span class="hint">(optional)</span></label>
-      <input type="number" min="0" max="100" step="1" placeholder="e.g. 30"
-             data-field="age" value="${values.age}" />
-    </div>
-  ` : "";
-
-  const drawdownMarkup = state.drawdownMode ? `
-    <div class="control">
-      <label>Retirement age</label>
-      <input type="number" min="20" max="100" step="1"
-             data-field="retirementAge" value="${values.retirementAge}" />
-    </div>
-    <div class="control">
-      <label>Annual withdrawal (real $)</label>
-      <input type="number" min="0" step="1000"
-             data-field="annualWithdrawal" value="${values.annualWithdrawal}" />
-    </div>
-    <div class="control">
-      <label>Withdrawal strategy</label>
-      <select data-field="strategy">
-        ${STRATEGIES.map((opt) => `<option value="${opt.value}"${opt.value === (values.strategy || "fixed-real") ? " selected" : ""}>${opt.label}</option>`).join("")}
-      </select>
-    </div>
-  ` : "";
-
-  grid.innerHTML = `
-    ${ageMarkup}
-    <div class="control">
-      <label>Starting balance ($)</label>
-      <input type="number" min="0" step="1000"
-             data-field="startingBalance" value="${values.startingBalance}" />
-    </div>
-    <div class="control">
-      <label>Monthly contribution ($)</label>
-      <input type="number" min="0" step="100"
-             data-field="monthlyContribution" value="${values.monthlyContribution}" />
-    </div>
-    <div class="control control-asset">
-      <label>${values.glide ? "Start asset" : "Asset class"}</label>
-      <select data-field="asset">
-        ${Object.keys(PROFILES).map(
-          (n) => `<option value="${n}"${n === values.asset ? " selected" : ""}>${n}</option>`
-        ).join("")}
-      </select>
-      <div class="asset-info" data-role="assetInfo-${id}">${assetInfoLine(values.asset)}</div>
-      <label class="glide-toggle">
-        <input type="checkbox" data-field="glideEnabled"${values.glide ? " checked" : ""} />
-        <span>Glide to a different profile over time</span>
-      </label>
-      <a class="calibration-link" href="#" data-open-params="asset-assumptions">
-        <span class="info-glyph" aria-hidden="true">i</span> How these profiles are calibrated
-      </a>
-    </div>
-    ${values.glide ? `
-      <div class="control">
-        <label>End asset</label>
-        <select data-field="glideEndAsset">
-          ${Object.keys(PROFILES).map(
-            (n) => `<option value="${n}"${n === values.glide.endAsset ? " selected" : ""}>${n}</option>`
-          ).join("")}
-        </select>
-      </div>
-      <div class="control">
-        <label>Glide start age</label>
-        <input type="number" min="0" max="100" step="1"
-               data-field="glideStartAge" value="${values.glide.glideStartAge}" />
-      </div>
-      <div class="control">
-        <label>Glide end age</label>
-        <input type="number" min="0" max="100" step="1"
-               data-field="glideEndAge" value="${values.glide.glideEndAge}" />
-      </div>
-    ` : ""}
-    ${drawdownMarkup}
-  `;
-  block.appendChild(grid);
-
-  grid.querySelectorAll("[data-field]").forEach((el) => {
-    el.addEventListener("input", () => onFieldChange(id, el));
-    el.addEventListener("change", () => onFieldChange(id, el));
-  });
-
-  return block;
-}
-
-// Shared block. Present whenever compare mode is on OR drawdown mode
-// is on. Contents flip based on drawdown:
-//   - drawdown off, compare on: age + horizon (existing behaviour)
-//   - drawdown on (any compare): current age + end age (+ retirement
-//     age is per-scenario)
-function buildSharedBlock() {
-  const block = document.createElement("div");
-  block.className = "scenario-shared";
-  const values = state.scenarios.A;
-
-  if (state.drawdownMode) {
-    block.innerHTML = `
-      <div class="control">
-        <label>Current age</label>
-        <input type="number" min="0" max="100" step="1"
-               data-shared="currentAge" value="${values.currentAge}" />
-      </div>
-    `;
-  } else {
-    block.innerHTML = `
-      <div class="control">
-        <label>Current age <span class="hint">(optional)</span></label>
-        <input type="number" min="0" max="100" step="1" placeholder="e.g. 30"
-               data-shared="age" value="${values.age}" />
-      </div>
-    `;
-  }
-
-  block.querySelectorAll("[data-shared]").forEach((el) => {
-    el.addEventListener("input", () => onSharedChange(el));
-    el.addEventListener("change", () => onSharedChange(el));
-  });
-  return block;
-}
-
-function onFieldChange(id, el) {
-  const field = el.dataset.field;
-  const raw = el.value;
-  const s = state.scenarios[id];
-
-  if (field === "glideEnabled") {
-    if (el.checked) {
-      // Default end asset: one rung less risky than the current start
-      // (or one rung riskier if start is at the bottom of the ladder).
-      // Off-ladder starts (Residential Property) fall back to Balanced.
-      const down = neighbourAsset(s.asset, "down");
-      const up = neighbourAsset(s.asset, "up");
-      const endAsset = down || up || "Balanced";
-      s.glide = { endAsset, glideStartAge: 50, glideEndAge: 65 };
-    } else {
-      s.glide = null;
-    }
-    renderControls();
-    scheduleRun();
-    return;
-  }
-
-  if (field === "glideEndAsset") {
-    if (s.glide) s.glide.endAsset = raw;
-  } else if (field === "glideStartAge" || field === "glideEndAge") {
-    const n = Number(raw);
-    if (s.glide) s.glide[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
-  } else if (field === "age" || field === "asset" || field === "strategy") {
-    s[field] = raw;
-    if (field === "asset") applyAssetInfoLines();
-  } else {
-    const n = Number(raw);
-    s[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
-  }
-  scheduleRun();
-}
-
-function onSharedChange(el) {
-  const field = el.dataset.shared;
-  const raw = el.value;
-  if (field === "age") {
-    state.scenarios.A.age = raw;
-    state.scenarios.B.age = raw;
-  } else {
-    const n = Number(raw);
-    const val = Number.isFinite(n) ? Math.max(0, n) : 0;
-    state.scenarios.A[field] = val;
-    state.scenarios.B[field] = val;
-  }
-  scheduleRun();
-}
-
-function renderControls() {
-  els.scenarios.innerHTML = "";
-  els.scenarios.className = `scenarios ${state.compareMode ? "compare" : "single"}`;
-  if (state.compareMode || state.drawdownMode) {
-    els.scenarios.appendChild(buildSharedBlock());
-  }
-  const columns = document.createElement("div");
-  columns.className = state.compareMode ? "scenario-columns" : "scenario-columns single";
-  columns.appendChild(buildScenarioBlock("A", state.scenarios.A));
-  if (state.compareMode) {
-    columns.appendChild(buildScenarioBlock("B", state.scenarios.B));
-  }
-  els.scenarios.appendChild(columns);
-}
-
-// --- subtitle / diff ------------------------------------------------------
-
-function describeField(field, value) {
-  switch (field) {
-    case "asset": return value;
-    case "startingBalance": return `${fmtMoneyShort(value)} start`;
-    case "monthlyContribution": return `${fmtMoneyShort(value)}/mo`;
-    case "retirementAge": return `retire @ ${value}`;
-    case "annualWithdrawal":
-      return value === 0 ? "no withdrawals" : `${fmtMoneyShort(value)}/yr withdraw`;
-    default: return String(value);
-  }
-}
-
-// Returns the per-scenario subtitle text, or "" if nothing differs.
-// Only considers per-scenario fields; shared inputs are excluded.
-function computeSubtitles(a, b) {
-  const baseFields = ["asset", "startingBalance", "monthlyContribution"];
-  const drawdownFields = ["retirementAge", "annualWithdrawal"];
-  const fields = state.drawdownMode
-    ? [...baseFields, ...drawdownFields]
-    : baseFields;
-  const diffs = fields.filter((f) => a[f] !== b[f]);
-  if (diffs.length === 0) return { A: "", B: "" };
-  return {
-    A: diffs.map((f) => describeField(f, a[f])).join(" · "),
-    B: diffs.map((f) => describeField(f, b[f])).join(" · "),
-  };
-}
-
-function applySubtitles(subs) {
-  for (const id of ["A", "B"]) {
-    const block = els.scenarios.querySelector(`.scenario[data-scenario="${id}"]`);
-    if (!block) continue;
-    const el = block.querySelector('[data-role="subtitle"]');
-    if (el) el.textContent = subs[id];
-  }
-}
-
-// Sync the persistent horizon/end-age slider with state — value,
-// min/max range, and label text. Called after every state change.
-function applySlider() {
-  const a = state.scenarios.A;
-  if (state.drawdownMode) {
-    const min = a.retirementAge + 5;
-    const max = 105;
-    let value = a.endAge;
-    if (value < min) { value = min; a.endAge = min; state.scenarios.B.endAge = min; }
-    if (value > max) { value = max; a.endAge = max; state.scenarios.B.endAge = max; }
-    els.horizonSlider.min = String(min);
-    els.horizonSlider.max = String(max);
-    els.horizonSlider.step = "1";
-    els.horizonSlider.value = String(value);
-    els.sliderLabel.innerHTML = `Project until age: <output>${value}</output>`;
-  } else {
-    els.horizonSlider.min = "5";
-    els.horizonSlider.max = "50";
-    els.horizonSlider.step = "1";
-    els.horizonSlider.value = String(a.horizonYears);
-    els.sliderLabel.innerHTML = `Time horizon: <output>${a.horizonYears}</output> years`;
-  }
-}
-
-function onSliderChange() {
-  const raw = Number(els.horizonSlider.value);
-  if (!Number.isFinite(raw)) return;
-  if (state.drawdownMode) {
-    state.scenarios.A.endAge = raw;
-    state.scenarios.B.endAge = raw;
-  } else {
-    state.scenarios.A.horizonYears = raw;
-    state.scenarios.B.horizonYears = raw;
-  }
-  applySlider();
-  scheduleRun();
-}
-
-els.horizonSlider.addEventListener("input", onSliderChange);
-els.horizonSlider.addEventListener("change", onSliderChange);
-
-// --- sim wrappers ---------------------------------------------------------
-
-const STRATEGIES = [
-  { value: "fixed-real",     label: "Fixed real (Bengen)" },
-  { value: "guyton-klinger", label: "Guyton-Klinger guardrails" },
-  { value: "fixed-pct",      label: "Fixed % of balance" },
-];
-
-function buildDrawdownConfig(s) {
-  if (!state.drawdownMode) return null;
-  const currentAge = state.scenarios.A.currentAge; // shared anchor
-  const retirementMonth = Math.max(1, (s.retirementAge - currentAge) * 12);
-  return {
-    retirementMonth,
-    annualWithdrawal: s.annualWithdrawal,
-    strategy: s.strategy || "fixed-real",
-  };
-}
-
-// Real μ used by the engine is derived from the profile's nominal
-// total return and the current CPI parameter (Fisher). Any profile
-// exposed to buildGlideSchedule needs `mu` on it — synthesise it here.
-function profileWithRealMu(p, cpi) {
-  return { ...p, mu: realMu(p, cpi) };
-}
-
-function runScenario(s, preGenZ = null, preGenU = null) {
-  const p = PROFILES[s.asset];
-  const cpi = state.inflation;
-  const horizon = state.drawdownMode
-    ? Math.max(1, state.scenarios.A.endAge - state.scenarios.A.currentAge)
-    : s.horizonYears;
-
-  let glideSchedule = null;
-  if (s.glide) {
-    const endP = PROFILES[s.glide.endAsset];
-    if (endP) {
-      const currentAge = state.drawdownMode
-        ? state.scenarios.A.currentAge
-        : (parseAge(s.age) ?? s.glide.glideStartAge);
-      glideSchedule = buildGlideSchedule({
-        startProfile: profileWithRealMu(p, cpi),
-        endProfile: profileWithRealMu(endP, cpi),
-        currentAge,
-        glideStartAge: s.glide.glideStartAge,
-        glideEndAge: s.glide.glideEndAge,
-        months: horizon * 12,
-      });
-    }
-  }
-
-  return simulate({
-    horizonYears: horizon,
-    startingBalance: s.startingBalance,
-    monthlyContribution: s.monthlyContribution,
-    mu: realMu(p, cpi),
-    sigma_normal: p.sigma_normal,
-    sigma_stress: p.sigma_stress,
-    p_stay_normal: p.p_stay_normal,
-    p_stay_stress: p.p_stay_stress,
-    glideSchedule,
-    preGenZ,
-    preGenU,
-    drawdown: buildDrawdownConfig(s),
-  });
-}
-
-// --- single-mode rendering -----------------------------------------------
-
-// Build the output section's DOM skeleton for the given mode.
-// Only rebuilds when the mode actually changes, so subsequent runs in
-// the same mode just update text/values into existing elements.
-// When switching modes, any Plotly chart inside (e.g. #probChart) is
-// torn down with its host node — its references go with it.
-function ensureOutputSkeleton(mode) {
-  if (els.output.dataset.mode === mode) return;
-  els.output.dataset.mode = mode;
-
-  if (mode === "single") {
-    els.output.innerHTML = `
-      <div class="summary single">
-        <div class="stat">
-          <div class="stat-label">Total contributed</div>
-          <div class="stat-value" data-role="contrib">—</div>
-        </div>
-        <div class="stat">
-          <div class="stat-label" data-role="steadyLabel">Steady return</div>
-          <div class="stat-value" data-role="steady">—</div>
-        </div>
-        <div class="stat">
-          <div class="stat-label">Median outcome</div>
-          <div class="stat-value" data-role="median">—</div>
-        </div>
-        <div class="stat range">
-          <div class="stat-label">5th – 95th percentile</div>
-          <div class="stat-value" data-role="range">—</div>
-        </div>
-      </div>
-    `;
-  } else if (mode === "single-drawdown") {
-    els.output.innerHTML = `
-      <div class="summary single">
-        <div class="stat stat-headline" title="Portfolio depletion only — not destitution. The Australian age pension is not modelled here, by design, and provides an income floor that continues after portfolio depletion.">
-          <div class="stat-label">Probability of ruin <span class="stat-label-hint">(portfolio depletion)</span></div>
-          <div class="stat-value" data-role="ruin">—</div>
-        </div>
-        <div class="stat">
-          <div class="stat-label">Median at end</div>
-          <div class="stat-value" data-role="median">—</div>
-        </div>
-        <div class="stat">
-          <div class="stat-label">Median at retirement</div>
-          <div class="stat-value" data-role="atRetirement">—</div>
-        </div>
-        <div class="stat range">
-          <div class="stat-label">End: 5th – 95th</div>
-          <div class="stat-value" data-role="range">—</div>
-        </div>
-      </div>
-    `;
-  } else {
-    // compare or compare-drawdown
-    const firstCol = mode === "compare-drawdown" ? "Probability of ruin" : "Total contributed";
-    els.output.innerHTML = `
-      <div class="callout" data-role="callout"></div>
-      <div class="chart-wrap chart-wrap-small">
-        <div class="prob-header">
-          <h3 class="prob-title" data-role="probTitle"></h3>
-          <button class="info-icon" type="button" aria-label="About this chart"
-            title="At each year, this shows the fraction of 2,000 simulated markets in which Plan A's value exceeds Plan B's. Both plans face the same market shocks each month, so the comparison isolates strategy choice from market luck. Ties count as half. The dashed line marks 50/50.">i</button>
-        </div>
-        <div id="probChart"></div>
-      </div>
-      <div class="narrative" data-role="narrative"></div>
-      <div class="summary compare">
-        <table class="stat-table">
-          <thead>
-            <tr>
-              <th></th>
-              <th>${firstCol}</th>
-              <th>5th percentile</th>
-              <th>Median</th>
-              <th>95th percentile</th>
-            </tr>
-          </thead>
-          <tbody data-role="statbody"></tbody>
-        </table>
-      </div>
-    `;
-  }
-}
-
-// Total contributed over `years` years, given a (possibly nominal)
-// year-by-year factor array. In real mode this collapses to the
-// simple sum; in nominal mode each year-t contribution is scaled by
-// (1+i)^t — matching the chart's nominal-stream convention.
-function totalContribFor(s, years, factors) {
-  if (!factors) return s.startingBalance + s.monthlyContribution * 12 * years;
-  let total = s.startingBalance;
-  for (let t = 0; t < years; t++) {
-    total += s.monthlyContribution * 12 * factors[t];
-  }
-  return total;
-}
-
-function updateSingleOutput(s, dsim) {
-  const last = dsim.xYears.length - 1;
-  const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
-  const factors = displayFactors(dsim.years);
-
-  if (state.drawdownMode) {
-    const retYear = retirementYearsFromAge(s);
-    q("ruin").textContent = `${(dsim.ruinedFraction * 100).toFixed(1)}%`;
-    q("median").textContent = fmtMoney(dsim.p50[last]);
-    q("atRetirement").textContent = dsim.p50[retYear] != null
-      ? fmtMoney(dsim.p50[retYear])
-      : "—";
-    q("range").textContent = `${fmtMoney(dsim.p05[last])} – ${fmtMoney(dsim.p95[last])}`;
-  } else {
-    q("contrib").textContent = fmtMoney(totalContribFor(s, s.horizonYears, factors));
-    q("steadyLabel").textContent = `Steady return @ ${(realMu(PROFILES[s.asset], state.inflation) * 100).toFixed(1)}% real`;
-    q("steady").textContent = fmtMoney(dsim.deterministic[last]);
-    q("median").textContent = fmtMoney(dsim.p50[last]);
-    q("range").textContent = `${fmtMoney(dsim.p05[last])} – ${fmtMoney(dsim.p95[last])}`;
-  }
-}
-
-// Resample `count` paths uniformly at random from a sim's full path
-// matrix, returning yearly value rows. Used by the overlay animation.
-// `factors` (may be null) scales each year for nominal display.
-function resampleSinglePaths(sim, factors, count = SAMPLE_PATH_COUNT) {
-  const seen = new Set();
-  const rows = [];
-  const target = Math.min(count, sim.numPaths);
-  while (rows.length < target) {
-    const i = Math.floor(Math.random() * sim.numPaths);
-    if (seen.has(i)) continue;
-    seen.add(i);
-    const row = new Array(sim.years);
-    const base = i * sim.years;
-    for (let y = 0; y < sim.years; y++) {
-      const v = sim.paths[base + y];
-      row[y] = factors ? v * factors[y] : v;
-    }
-    rows.push(row);
-  }
-  return rows;
-}
-
-let singleAnimTimer = null;
-const SINGLE_ANIM_INTERVAL_MS = 4000;
-
-function stopSingleAnimation() {
-  if (singleAnimTimer != null) {
-    clearInterval(singleAnimTimer);
-    singleAnimTimer = null;
-  }
-}
-
-function startSingleAnimation(sim, factors) {
-  stopSingleAnimation();
-  if (prefersReducedMotion()) return;
-  singleAnimTimer = setInterval(() => {
-    const rows = resampleSinglePaths(sim, factors);
-    Plotly.restyle("chart", { y: rows }, sampleTraceIndices());
-  }, SINGLE_ANIM_INTERVAL_MS);
-}
-
-// Cache of the most recent sim outputs, keyed by mode. Display-only
-// changes (units toggle, inflation rate) re-render from these without
-// resimulating — which would otherwise reshuffle sample paths.
-let lastSingle = null;   // { sim, s, horizon, currentAge, retirementYear }
-let lastCompare = null;  // { simA, simB, sA, sB, sharedHorizon, sharedAge, retirementYear, names, chartNames, identical, probA }
-
-function runSingle() {
-  const s = state.scenarios.A;
-  applySlider();
-
-  const t0 = performance.now();
-  const sim = runScenario(s);
-  const t1 = performance.now();
-
-  lastSingle = {
-    sim,
-    s: { ...s },
-    horizon: state.drawdownMode ? effectiveHorizonYears() : s.horizonYears,
-    currentAge: state.drawdownMode ? s.currentAge : parseAge(s.age),
-    retirementYear: state.drawdownMode ? retirementYearsFromAge(s) : null,
-  };
-  lastCompare = null;
-  redisplaySingle();
-
-  const tag = state.drawdownMode
-    ? `drawdown · ret@${s.retirementAge} · withdraw=${s.annualWithdrawal} · ruin=${(sim.ruinedFraction * 100).toFixed(1)}%`
-    : `${s.asset} · ${s.horizonYears}y`;
-  console.log(`sim ${(t1 - t0).toFixed(1)}ms · single · ${tag}`);
-  scheduleTornado();
-  refreshSequenceRisk();
-  refreshFirstDecade();
-  refreshDrawdownTolerance();
-  refreshStrategyCompare();
-}
-
-function redisplaySingle() {
-  if (!lastSingle) return;
-  const { sim, s, horizon, currentAge, retirementYear } = lastSingle;
-  const factors = displayFactors(sim.years);
-  const dsim = applyDisplayToSim(sim, factors);
-  const { yAxisLabel } = currentUnitsStrings();
-
-  renderChart("chart", dsim, {
-    horizonYears: horizon,
-    currentAge,
-    retirementYear,
-    yAxisLabel,
-  });
-
-  ensureOutputSkeleton(state.drawdownMode ? "single-drawdown" : "single");
-  updateSingleOutput(s, dsim);
-
-  startSingleAnimation(sim, factors);
-  applyUnitsLabel();
-}
-
-// --- compare-mode rendering ----------------------------------------------
-
-// P(A_i(t) "wins" over B_i(t)) for each year t in [0, sharedYears).
-// Ties contribute 0.5 — so a year where every path is tied yields 50%,
-// not 0%. Without this, year 0 at equal starting balances reads as 0%.
-function pathProbability(simA, simB, sharedYears) {
-  const n = Math.min(simA.numPaths, simB.numPaths);
-  const yearsA = simA.years;
-  const yearsB = simB.years;
-  const out = new Array(sharedYears);
-  for (let y = 0; y < sharedYears; y++) {
-    let wins = 0;
-    for (let p = 0; p < n; p++) {
-      const a = simA.paths[p * yearsA + y];
-      const b = simB.paths[p * yearsB + y];
-      if (a > b) wins += 1;
-      else if (a === b) wins += 0.5;
-    }
-    out[y] = wins / n;
-  }
-  return out;
-}
-
-// Probability that the higher-median scenario finishes below the lower-median
-// scenario at the terminal year. Ties contribute 0.5 — same rule as above.
-function regretFraction(simA, simB, termIdxA, termIdxB, higherIsA) {
-  const n = Math.min(simA.numPaths, simB.numPaths);
-  const yearsA = simA.years;
-  const yearsB = simB.years;
-  let bad = 0;
-  for (let p = 0; p < n; p++) {
-    const a = simA.paths[p * yearsA + termIdxA];
-    const b = simB.paths[p * yearsB + termIdxB];
-    // "finish worse off in H than in L"
-    const hVal = higherIsA ? a : b;
-    const lVal = higherIsA ? b : a;
-    if (hVal < lVal) bad += 1;
-    else if (hVal === lVal) bad += 0.5;
-  }
-  return bad / n;
-}
-
-function calloutText(probAGreater, names) {
-  const end = probAGreater.length - 1;
-  if (end < 1) return "";
-
-  // Skip Year 0. It is a forced 50% when starting balances match,
-  // which would otherwise flip every directional check.
-  let maxDeviation = 0;
-  for (let y = 1; y <= end; y++) {
-    const dev = Math.abs(probAGreater[y] - 0.5);
-    if (dev > maxDeviation) maxDeviation = dev;
-  }
-
-  // True "close to 50/50" case: max deviation across the horizon
-  // stays under 5 percentage points.
-  if (maxDeviation < 0.05) {
-    return `${names.A} and ${names.B} stay close to 50/50 across the horizon.`;
-  }
-
-  // Leadership checks use STRICT inequality so a 0.5 tie at any
-  // year does not flip the flags.
-  let allAbove = true, allBelow = true;
-  for (let y = 1; y <= end; y++) {
-    if (probAGreater[y] < 0.5) allAbove = false;
-    if (probAGreater[y] > 0.5) allBelow = false;
-  }
-  if (allAbove) return `${names.A} is more likely to lead throughout the entire horizon.`;
-  if (allBelow) return `${names.B} is more likely to lead throughout the entire horizon.`;
-
-  // Crossover detection starts from Year 1.
-  let initialDir = null;
-  let initialY = 1;
-  for (let y = 1; y <= end; y++) {
-    if (probAGreater[y] > 0.5) { initialDir = "A"; initialY = y; break; }
-    if (probAGreater[y] < 0.5) { initialDir = "B"; initialY = y; break; }
-  }
-  if (initialDir == null) {
-    return `${names.A} and ${names.B} stay close to 50/50 across the horizon.`;
-  }
-  for (let y = initialY + 1; y <= end; y++) {
-    const dir = probAGreater[y] > 0.5 ? "A" : (probAGreater[y] < 0.5 ? "B" : null);
-    if (dir && dir !== initialDir) {
-      return `${names[dir]} becomes more likely to lead from Year ${y}.`;
-    }
-  }
-  // If no crossover after the initial direction is set, that
-  // scenario led throughout — NOT "stays close to 50/50".
-  return `${names[initialDir]} is more likely to lead throughout the entire horizon.`;
-}
-
-function narrativeHTML(simA, simB, names, sharedHorizon, regret) {
-  const t = sharedHorizon;
-  const aMedian = simA.p50[t];
-  const bMedian = simB.p50[t];
-  const aP5 = simA.p05[t];
-  const bP5 = simB.p05[t];
-
-  const higherIsA = aMedian >= bMedian;
-  const Hname = higherIsA ? names.A : names.B;
-  const Lname = higherIsA ? names.B : names.A;
-  const Hmedian = higherIsA ? aMedian : bMedian;
-  const Lmedian = higherIsA ? bMedian : aMedian;
-  const Hp5 = higherIsA ? aP5 : bP5;
-  const Lp5 = higherIsA ? bP5 : aP5;
-
-  const premiumRaw = (Hmedian / Math.max(Lmedian, 1) - 1) * 100;
-  const premium = Math.round(premiumRaw);
-  const regretPct = Math.round(regret * 100);
-
-  let leadingSentence;
-  if (premium <= 2) {
-    leadingSentence = `Over ${sharedHorizon} years, ${Hname} and ${Lname} end with very similar medians (${fmtMoney(Hmedian)} versus ${fmtMoney(Lmedian)}) — the central outcomes are essentially tied.`;
-  } else {
-    leadingSentence = `Over ${sharedHorizon} years, <strong>${Hname}</strong> ends with a median of <strong>${fmtMoney(Hmedian)}</strong> — about <strong>${premium}%</strong> above ${Lname}'s ${fmtMoney(Lmedian)}.`;
-  }
-
-  let tailSentence;
-  if (Hp5 < Lp5) {
-    tailSentence = `However, ${Hname}'s 5th-percentile outcome is ${fmtMoney(Hp5)} versus ${Lname}'s ${fmtMoney(Lp5)} — the extra upside comes with greater downside risk.`;
-  } else if (Hp5 > Lp5) {
-    tailSentence = `${Hname} also has the higher worst-case outcome (${fmtMoney(Hp5)} at the 5th percentile, versus ${Lname}'s ${fmtMoney(Lp5)}), so the higher median does not come at the cost of more downside risk.`;
-  } else {
-    tailSentence = `Both scenarios share the same 5th-percentile outcome of ${fmtMoney(Hp5)}, so the comparison reduces to upside potential rather than downside risk.`;
-  }
-
-  return `
-    <p>${leadingSentence} ${tailSentence}
-    There's a <strong>${regretPct}%</strong> chance you actually finish worse off in
-    ${Hname} than you would have in ${Lname}.</p>
-  `;
-}
-
-function statRowsHTML(dsimA, dsimB, sA, sB, names, sharedHorizon) {
-  const t = sharedHorizon;
-  const factors = displayFactors(dsimA.years);
-  const row = (label, s, dsim) => {
-    if (state.drawdownMode) {
-      return `
-        <tr>
-          <th scope="row">${label}</th>
-          <td>${(dsim.ruinedFraction * 100).toFixed(1)}%</td>
-          <td>${fmtMoney(dsim.p05[t])}</td>
-          <td>${fmtMoney(dsim.p50[t])}</td>
-          <td>${fmtMoney(dsim.p95[t])}</td>
-        </tr>
-      `;
-    }
-    return `
-      <tr>
-        <th scope="row">${label}</th>
-        <td>${fmtMoney(totalContribFor(s, sharedHorizon, factors))}</td>
-        <td>${fmtMoney(dsim.p05[t])}</td>
-        <td>${fmtMoney(dsim.p50[t])}</td>
-        <td>${fmtMoney(dsim.p95[t])}</td>
-      </tr>
-    `;
-  };
-  return row(names.A, sA, dsimA) + row(names.B, sB, dsimB);
-}
-
-function runCompare() {
-  stopSingleAnimation();
-
-  const sA = state.scenarios.A;
-  const sB = state.scenarios.B;
-  applySlider();
-
-  const subs = computeSubtitles(sA, sB);
-  applySubtitles(subs);
-  const names = {
-    A: subs.A || "Scenario A",
-    B: subs.B || "Scenario B",
-  };
-  const chartNames = {
-    A: subs.A || "Plan A",
-    B: subs.B || "Plan B",
-  };
-
-  const sharedHorizon = state.drawdownMode
-    ? effectiveHorizonYears()
-    : Math.min(sA.horizonYears, sB.horizonYears);
-  const sharedYears = sharedHorizon + 1;
-  const sharedAge = state.drawdownMode
-    ? sA.currentAge
-    : (parseAge(sA.age) ?? parseAge(sB.age));
-  const retirementYear = state.drawdownMode
-    ? Math.max(0, sA.retirementAge - sA.currentAge)
-    : null;
-
-  const sharedMonths = sharedHorizon * 12;
-  const t0 = performance.now();
-  const shocks = generateShocks(NUM_PATHS, sharedMonths);
-  const uniforms = generateUniforms(NUM_PATHS, sharedMonths);
-  const simA = runScenario(sA, shocks, uniforms);
-  const simB = runScenario(sB, shocks, uniforms);
-  const t1 = performance.now();
-
-  const baseIdentical =
-    sA.asset === sB.asset &&
-    sA.startingBalance === sB.startingBalance &&
-    sA.monthlyContribution === sB.monthlyContribution;
-  const drawdownIdentical = state.drawdownMode &&
-    sA.retirementAge === sB.retirementAge &&
-    sA.annualWithdrawal === sB.annualWithdrawal;
-  const identical = state.drawdownMode
-    ? (baseIdentical && drawdownIdentical)
-    : baseIdentical;
-
-  const probA = pathProbability(simA, simB, sharedYears);
-
-  lastCompare = {
-    simA, simB,
-    sA: { ...sA }, sB: { ...sB },
-    sharedHorizon, sharedYears, sharedAge, retirementYear,
-    names, chartNames, identical, probA,
-  };
-  lastSingle = null;
-  redisplayCompare();
-
-  const tag = state.drawdownMode
-    ? `drawdown · ruin A=${(simA.ruinedFraction * 100).toFixed(1)}% B=${(simB.ruinedFraction * 100).toFixed(1)}%`
-    : `A=${sA.asset}/${sA.horizonYears}y · B=${sB.asset}/${sB.horizonYears}y`;
-  console.log(`sim ${(t1 - t0).toFixed(1)}ms · compare · ${tag}`);
-  scheduleTornado();
-  refreshSequenceRisk();
-  refreshFirstDecade();
-  refreshDrawdownTolerance();
-  refreshStrategyCompare();
-}
-
-function redisplayCompare() {
-  if (!lastCompare) return;
-  const {
-    simA, simB, sA, sB,
-    sharedHorizon, sharedYears, sharedAge, retirementYear,
-    names, chartNames, identical, probA,
-  } = lastCompare;
-  const factors = displayFactors(simA.years);
-  const dsimA = applyDisplayToSim(simA, factors);
-  const dsimB = applyDisplayToSim(simB, factors);
-  const { yAxisLabel } = currentUnitsStrings();
-
-  renderCompareChart("chart", { A: dsimA, B: dsimB }, {
-    horizonYears: sharedHorizon,
-    currentAge: sharedAge,
-    names,
-    retirementYear,
-    yAxisLabel,
-  });
-
-  ensureOutputSkeleton(state.drawdownMode ? "compare-drawdown" : "compare");
-
-  const xYears = Array.from({ length: sharedYears }, (_, i) => i);
-  renderProbChart("probChart", xYears, probA, {
-    horizonYears: sharedHorizon,
-    currentAge: sharedAge,
-  });
-
-  const q = (role) => els.output.querySelector(`[data-role="${role}"]`);
-  q("probTitle").textContent = state.drawdownMode
-    ? `Probability ${chartNames.A}'s portfolio leads ${chartNames.B}'s`
-    : `Probability ${chartNames.A} finishes ahead of ${chartNames.B}`;
-
-  if (identical) {
-    q("callout").textContent = "";
-    q("narrative").innerHTML = `
-      <p>Both scenarios are configured identically, so they produce the
-      same paths under the same market shocks — the two fans overlap
-      exactly. Change at least one per-scenario input to see a meaningful
-      comparison.</p>
-    `;
-  } else if (state.drawdownMode) {
-    q("callout").textContent = calloutText(probA, names);
-    q("narrative").innerHTML = drawdownNarrativeHTML(dsimA, dsimB, names, sharedHorizon);
-  } else {
-    q("callout").textContent = calloutText(probA, names);
-    const aMedian = dsimA.p50[sharedHorizon];
-    const bMedian = dsimB.p50[sharedHorizon];
-    const higherIsA = aMedian >= bMedian;
-    // Regret uses raw paths since it's a pairwise comparison; nominal
-    // factors are monotonic so they don't change A<B vs A>B counts.
-    const regret = regretFraction(simA, simB, sharedHorizon, sharedHorizon, higherIsA);
-    q("narrative").innerHTML = narrativeHTML(dsimA, dsimB, names, sharedHorizon, regret);
-  }
-
-  q("statbody").innerHTML = statRowsHTML(dsimA, dsimB, sA, sB, names, sharedHorizon);
-  applyUnitsLabel();
-}
-
-function drawdownNarrativeHTML(simA, simB, names, sharedHorizon) {
-  const ruinA = simA.ruinedFraction;
-  const ruinB = simB.ruinedFraction;
-  const t = sharedHorizon;
-  const medA = simA.p50[t];
-  const medB = simB.p50[t];
-
-  let ruinSentence;
-  if (ruinA === 0 && ruinB === 0) {
-    ruinSentence = `Neither scenario depletes the portfolio in any simulated market.`;
-  } else if (Math.abs(ruinA - ruinB) < 0.005) {
-    ruinSentence = `Both scenarios face roughly a <strong>${(ruinA * 100).toFixed(1)}%</strong> chance of running out.`;
-  } else {
-    const higher = ruinA > ruinB ? names.A : names.B;
-    const lower = ruinA > ruinB ? names.B : names.A;
-    const hP = Math.max(ruinA, ruinB);
-    const lP = Math.min(ruinA, ruinB);
-    ruinSentence = `<strong>${higher}</strong> runs out of money in <strong>${(hP * 100).toFixed(1)}%</strong> of simulated markets, versus <strong>${(lP * 100).toFixed(1)}%</strong> for ${lower}.`;
-  }
-
-  let medianSentence;
-  if (medA === 0 && medB === 0) {
-    medianSentence = `In both scenarios, the median path ends at zero.`;
-  } else {
-    const higherIsA = medA >= medB;
-    const Hname = higherIsA ? names.A : names.B;
-    const Lname = higherIsA ? names.B : names.A;
-    const Hmed = higherIsA ? medA : medB;
-    const Lmed = higherIsA ? medB : medA;
-    medianSentence = `At end age, ${Hname}'s median surviving balance is <strong>${fmtMoney(Hmed)}</strong> versus ${Lname}'s ${fmtMoney(Lmed)}.`;
-  }
-
-  return `<p>${ruinSentence} ${medianSentence}</p>`;
-}
-
-// --- run loop -------------------------------------------------------------
-
-let rafHandle = null;
-function scheduleRun() {
-  if (rafHandle != null) return;
-  rafHandle = requestAnimationFrame(() => {
-    rafHandle = null;
-    run();
-  });
-}
-
-function run() {
-  if (state.compareMode) runCompare();
-  else runSingle();
-}
-
-// --- toggle wiring --------------------------------------------------------
-
-els.toggle.addEventListener("change", () => {
-  state.compareMode = els.toggle.checked;
-  if (state.compareMode) {
-    // B inherits balance and contribution from A, but defaults to a
-    // different asset class so the two fans are obviously distinct on
-    // first render. Untrained users otherwise read two near-identical
-    // fans as a bug.
-    // Toggle B to a neighbouring risk rung so the two fans are
-    // obviously distinct on first paint. Balanced picks Moderate Growth
-    // by default; any other selection defaults to Balanced.
-    const defaultBAsset = state.scenarios.A.asset === "Balanced" ? "Moderate Growth" : "Balanced";
-    state.scenarios.B = {
-      ...state.scenarios.A,
-      asset: defaultBAsset,
-    };
-  } else {
-    // Discard B's values.
-    state.scenarios.B = { ...DEFAULTS };
-  }
-  renderControls();
-  run();
-});
-
-els.drawdownToggle.addEventListener("change", () => {
-  state.drawdownMode = els.drawdownToggle.checked;
-  if (state.drawdownMode) {
-    // Sync shared anchors across both scenarios so per-scenario
-    // retirement ages remain meaningful relative to the same currentAge.
-    state.scenarios.B.currentAge = state.scenarios.A.currentAge;
-    state.scenarios.B.endAge = state.scenarios.A.endAge;
-  }
-  stopSingleAnimation();
-  renderControls();
-  run();
-});
-
-// Units toggle — display-only, no resim.
 els.displayOptions.forEach((btn) => {
   btn.addEventListener("click", () => {
     const u = btn.dataset.units;
     if (u !== "real" && u !== "nominal") return;
-    if (state.units === u) return;
-    state.units = u;
-    redisplay();
-    redisplayTornado();
-    redisplaySequenceRisk();
-    redisplayFirstDecade();
-    redisplayStrategyCompare();
+    state.display.units = u;
+    saveState();
+    applyUnitsLabel();
+    // Phase B: re-render projection in the selected units.
   });
 });
 
-// CPI (Parameters modal). Now dual-purpose: (1) nominal display factor
-// (unchanged), (2) drives the Fisher-derived real μ used by the engine.
-// Changing it must re-simulate everywhere, since every profile's real
-// return shifts with it. run() feeds the tornado / sequence-risk /
-// first-decade / strategy-compare panels via their refresh hooks.
-els.inflationInput.addEventListener("input", () => {
-  const n = Number(els.inflationInput.value);
-  if (!Number.isFinite(n) || n < 0) return;
-  state.inflation = n / 100;
-  applyUnitsLabel();
-  applyAssetInfoLines();
-  populateParamsTable();
-  run();
-});
-
-// Target ruin probability — controls when the tornado switches into
-// goal-seek mode. Display-only on existing main chart; the tornado
-// needs a recompute since its mode depends on the comparison.
-if (els.targetRuinInput) {
-  els.targetRuinInput.addEventListener("input", () => {
-    const n = Number(els.targetRuinInput.value);
-    if (!Number.isFinite(n) || n < 0 || n > 100) return;
-    state.targetRuin = n / 100;
-    scheduleTornado();
-  });
-}
-
-function redisplay() {
-  if (lastCompare) redisplayCompare();
-  else if (lastSingle) redisplaySingle();
-  else applyUnitsLabel();
-}
-
-// --- Parameters modal -----------------------------------------------------
+// --- Parameters modal ---------------------------------------------------------
 
 function populateParamsTable() {
-  const cpi = state.inflation;
+  const cpi = state.assumptions.cpi;
   els.paramAssetTable.innerHTML = Object.entries(PROFILES).map(
     ([name, p]) => `
       <tr>
@@ -1407,37 +551,44 @@ function populateParamsTable() {
 
 function openModal(scrollToId = null) {
   els.paramsModal.showModal();
-  // Re-render on every open: real μ depends on the current CPI, and
-  // rendering after showModal() lets Plotly measure real dimensions.
-  renderBellCurves("bellCurves", PROFILES, state.inflation);
+  renderBellCurves("bellCurves", PROFILES, state.assumptions.cpi);
   if (scrollToId) {
     const target = els.paramsModal.querySelector(`#${scrollToId}`);
     if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
 
-function closeModal() {
-  els.paramsModal.close();
-}
-
 els.paramsBtn.addEventListener("click", () => openModal());
-
-// Calibration / "how is this defined?" links inside the input area
-// open the modal scrolled to the relevant section.
-els.scenarios.addEventListener("click", (e) => {
-  const link = e.target.closest("[data-open-params]");
-  if (!link) return;
-  e.preventDefault();
-  openModal(link.dataset.openParams);
-});
-els.paramsModal.querySelector(".modal-close").addEventListener("click", closeModal);
-// Click on backdrop (i.e. on the dialog element itself, outside the content) closes.
+els.paramsModal.querySelector(".modal-close").addEventListener("click", () => els.paramsModal.close());
 els.paramsModal.addEventListener("click", (e) => {
-  if (e.target === els.paramsModal) closeModal();
+  if (e.target === els.paramsModal) els.paramsModal.close();
 });
 
-// Boot.
+els.inflationInput.addEventListener("change", () => {
+  const n = Number(els.inflationInput.value);
+  if (!Number.isFinite(n) || n < 0 || n > 20) {
+    els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
+    return;
+  }
+  state.assumptions.cpi = n / 100;
+  saveState();
+  applyUnitsLabel();
+  populateParamsTable();
+  renderBellCurves("bellCurves", PROFILES, state.assumptions.cpi);
+  // Phase B: re-run projection (real returns derive from CPI).
+});
+
+// --- boot -----------------------------------------------------------------
+
+renderPlanBar();
+renderPortfolios();
+renderSummaryStrip();
+renderChartPlaceholder();
 applyUnitsLabel();
 populateParamsTable();
-renderControls();
-run();
+els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
+
+if (LEGACY_INSIGHTS_ENABLED) {
+  // Placeholder: insights phase re-mounts firstDecade, drawdownTolerance,
+  // tornado, and sequenceRisk here as collapsed accordions.
+}

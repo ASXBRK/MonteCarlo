@@ -67,6 +67,282 @@ html, body {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* --- plan details bar --- */
+
+.plan-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 18px;
+  flex-wrap: wrap;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+
+.plan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.plan-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.plan-field input {
+  width: 110px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.plan-derived {
+  margin-left: auto;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  padding-bottom: 8px;
+}
+
+/* --- portfolio cards --- */
+
+.portfolio-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pcard {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.pcard.excluded { opacity: 0.55; }
+.pcard.excluded .pcard-head { background: #f3f4f6; }
+
+.pcard-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pcard-chevron {
+  font: inherit;
+  font-size: 13px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--ink-soft);
+  transition: transform 150ms ease;
+  padding: 2px 4px;
+}
+.pcard-chevron.open { transform: rotate(90deg); }
+
+.pcard-name {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.pcard-meta {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.pcard-include {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.pcard-include input { accent-color: var(--accent); cursor: pointer; }
+
+.pcard-remove {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: #a33;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.pcard-remove:hover { border-color: #d9a5a5; background: #fdf2f2; }
+
+.pcard-body {
+  border-top: 1px solid var(--line);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pcard-details, .pcard-fees {
+  display: grid;
+  grid-template-columns: 2fr 2fr 1.5fr;
+  gap: 12px;
+}
+
+.pcard-name-cell input { font-weight: 600; }
+
+/* --- repeatable cashflow rows --- */
+
+.cf-section {
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+
+.cf-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.cf-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1.1fr 0.9fr 0.9fr 0.7fr 32px;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+
+.cf-row-lump {
+  grid-template-columns: 1.4fr 1.1fr 0.9fr 32px;
+}
+
+.cf-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.cf-cell label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cf-cell input[type="number"],
+.cf-cell input[type="text"],
+.cf-cell select {
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.cf-cell input:focus, .cf-cell select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.cf-indexed {
+  align-items: flex-start;
+}
+.cf-indexed input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  margin-top: 8px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.cf-remove {
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  height: 34px;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.cf-remove:hover { color: #a33; border-color: #d9a5a5; }
+
+.add-row-btn {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: transparent;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  margin-top: 2px;
+}
+.add-row-btn:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+.portfolio-actions {
+  margin: 12px 0 16px;
+}
+
+/* Inline validation: field snapped to its clamped value. */
+.field-clamped {
+  border-color: #d97b2f !important;
+  box-shadow: 0 0 0 3px rgba(217, 123, 47, 0.18) !important;
+  transition: box-shadow 200ms ease;
+}
+
+/* --- summary strip --- */
+
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 720px) {
+  .cf-row { grid-template-columns: 1fr 1fr; }
+  .cf-row-lump { grid-template-columns: 1fr 1fr; }
+  .cf-remove { grid-column: 2; justify-self: end; width: 60px; }
+  .pcard-details, .pcard-fees { grid-template-columns: 1fr; }
+  .summary-strip { grid-template-columns: 1fr; }
+  .plan-derived { margin-left: 0; width: 100%; }
+}
+
 /* --- controls wrapper --- */
 
 .controls-wrap {
