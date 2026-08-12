@@ -191,3 +191,37 @@ describe("exclusions + display scaling", () => {
     expect(nominalFactor(0, 0.025)).toBe(1);
   });
 });
+
+describe("indexation model (D1)", () => {
+  const at = (row, m) => {
+    const s = mkState({ endAge: 55, contributions: [{ ...cf({ toAge: 55 }), ...row }] });
+    s.assumptions.awote = 0.035;
+    return buildSchedules(s).assetFlows.a1.contributions[m];
+  };
+
+  it("CPI + 0% is constant real (old indexed:true)", () => {
+    expect(at({ indexBasis: "cpi", indexExtraPct: 0, amount: 500 }, 120)).toBe(500);
+  });
+
+  it("None + 0% decays at CPI (old indexed:false)", () => {
+    expect(at({ indexBasis: "none", indexExtraPct: 0, amount: 500 }, 120))
+      .toBeCloseTo(500 / Math.pow(1.025, 10), 10);
+  });
+
+  it("AWOTE-linked rows grow in real terms by the wage premium", () => {
+    expect(at({ indexBasis: "awote", indexExtraPct: 0, amount: 500 }, 120))
+      .toBeCloseTo(500 * Math.pow(1.035 / 1.025, 10), 10);
+  });
+
+  it("additional % stacks on the basis (CPI 2.5% + 1% = 3.5% nominal)", () => {
+    expect(at({ indexBasis: "cpi", indexExtraPct: 1, amount: 500 }, 120))
+      .toBeCloseTo(500 * Math.pow(1.035 / 1.025, 10), 10);
+  });
+
+  it("legacy indexed flags produce identical schedules to their bases", () => {
+    expect(at({ indexed: true, indexBasis: undefined, amount: 500 }, 120))
+      .toBe(at({ indexBasis: "cpi", indexExtraPct: 0, amount: 500 }, 120));
+    expect(at({ indexed: false, indexBasis: undefined, amount: 500 }, 120))
+      .toBe(at({ indexBasis: "none", indexExtraPct: 0, amount: 500 }, 120));
+  });
+});

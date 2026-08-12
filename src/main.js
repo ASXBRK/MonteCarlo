@@ -14,8 +14,9 @@ import {
   partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
   removeAsset, ownerWindow, fyLabelForAge,
   clampInt, clampNumber, serialize, hydrate,
-  summarise, planSummaryText, allocationSummary, ALLOC_PCT_MAX,
+  planSummaryText, allocationSummary, ALLOC_PCT_MAX,
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
+  personDisplayName, resolveEndBasis,
 } from "./planState.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
@@ -197,6 +198,7 @@ function mountWorkspace(clientId, scenarioId) {
   applyUnitsLabel();
   populateParamsTable();
   els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
+  awoteInput.value = ((state.assumptions.awote ?? 0.035) * 100).toFixed(1);
   syncBracketModeInputs();
 }
 
@@ -567,38 +569,110 @@ function escapeHTML(s) {
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
-const isCouple = () => state.plan.household === "couple";
+const isCouple = () => !!state.plan.partner;
 
-// --- plan bar -----------------------------------------------------------
+// --- Setup (plan bar): identity, timeline, tax profiles (D1) ---------------
+
+const clientName = () => personDisplayName(state.plan.client, "Client");
+const partnerName = () => personDisplayName(state.plan.partner, "Partner");
+
+// "Projecting to age 92 (FY 2078–79) — life expectancy of Jo Smith + 5"
+function endResolutionText(p) {
+  const fy = fyLabelForAge(p, "client", p.endAge);
+  const head = `Projecting to age ${p.endAge} (${fy})`;
+  if (p.endBasis.mode === "fixedAge") return `${head} — fixed age`;
+  if (p.endBasis.mode === "fixedYears") return `${head} — fixed ${p.endBasis.fixedYears} years`;
+  const { anchor } = resolveEndBasis(p.endBasis, p.client, p.partner);
+  const who = anchor === "partner"
+    ? personDisplayName(p.partner, "the partner")
+    : personDisplayName(p.client, "the client");
+  const off = p.endBasis.offset;
+  const offTxt = off === 0 ? "" : off > 0 ? ` + ${off}` : ` − ${-off}`;
+  return `${head} — life expectancy of ${who}${offTxt}`;
+}
+
+function personBlockHTML(prefix, person, title) {
+  const tp = person.taxProfile;
+  return `
+    <div class="person-block">
+      <div class="cf-section-title">${escapeHTML(title)}</div>
+      <div class="person-grid">
+        <div class="cf-cell">
+          <label>First name</label>
+          <input type="text" maxlength="40" value="${escapeHTML(person.firstName)}"
+                 data-plan-field="${prefix}FirstName" />
+        </div>
+        <div class="cf-cell">
+          <label>Surname</label>
+          <input type="text" maxlength="40" value="${escapeHTML(person.surname)}"
+                 data-plan-field="${prefix}Surname" />
+        </div>
+        <div class="cf-cell">
+          <label>Date of birth <span class="live-age">· age ${person.currentAge}</span></label>
+          <input type="date" value="${person.dob}" data-plan-field="${prefix}Dob" />
+        </div>
+        <div class="cf-cell">
+          <label>Sex <span class="helper-inline">used for life expectancy</span></label>
+          <select data-plan-field="${prefix}Sex">
+            <option value="male"${person.sex !== "female" ? " selected" : ""}>Male</option>
+            <option value="female"${person.sex === "female" ? " selected" : ""}>Female</option>
+          </select>
+        </div>
+        <div class="cf-cell">
+          <label>Tax residency</label>
+          <select data-plan-field="${prefix}Residency">
+            <option value="resident"${tp.residency !== "nonResident" ? " selected" : ""}>Australian resident</option>
+            <option value="nonResident"${tp.residency === "nonResident" ? " selected" : ""}>Non-resident</option>
+          </select>
+        </div>
+        <div class="cf-cell">
+          <label>Medicare levy</label>
+          <select data-plan-field="${prefix}Medicare">
+            <option value="applies"${!tp.medicareExempt ? " selected" : ""}>Applies</option>
+            <option value="exempt"${tp.medicareExempt ? " selected" : ""}>Exempt</option>
+          </select>
+        </div>
+        <div class="cf-cell">
+          <label>Opening carry-forward capital losses ($)</label>
+          <input type="number" min="0" step="1000" value="${tp.openingCapitalLosses}"
+                 data-plan-field="${prefix}OpeningLosses" />
+        </div>
+        <div class="cf-cell">
+          <label>Eligible for Centrelink benefits
+            <span class="coming-soon-tag" title="No engine effect yet">Used when Centrelink modelling arrives</span>
+          </label>
+          <label class="ptg-check">
+            <input type="checkbox" data-plan-field="${prefix}Centrelink"${tp.centrelinkEligible ? " checked" : ""} />
+            <span>Yes</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+const END_MODE_OPTIONS = [
+  ["le:0", "Life expectancy"],
+  ["le:5", "Life expectancy + 5"], ["le:10", "Life expectancy + 10"],
+  ["le:15", "Life expectancy + 15"], ["le:20", "Life expectancy + 20"],
+  ["le:-5", "Life expectancy − 5"], ["le:-10", "Life expectancy − 10"],
+  ["le:-15", "Life expectancy − 15"],
+  ["fixedAge", "Fixed age"], ["fixedYears", "Fixed number of years"],
+];
 
 function renderPlanBar() {
   const p = state.plan;
+  const couple = isCouple();
+  const endModeValue = p.endBasis.mode === "le" ? `le:${p.endBasis.offset}` : p.endBasis.mode;
   els.planBar.innerHTML = `
     <div class="plan-field">
-      <label>Household</label>
+      <label>Marital status</label>
       <div class="seg-toggle">
-        <button class="seg-option${p.household === "single" ? " active" : ""}" type="button"
-                data-plan-action="household" data-value="single">Single</button>
-        <button class="seg-option${p.household === "couple" ? " active" : ""}" type="button"
-                data-plan-action="household" data-value="couple">Couple</button>
+        ${[["single", "Single"], ["married", "Married"], ["defacto", "De facto"]].map(([v, l]) => `
+          <button class="seg-option${p.household === v ? " active" : ""}" type="button"
+                  data-plan-action="household" data-value="${v}">${l}</button>
+        `).join("")}
       </div>
-    </div>
-    <div class="plan-field">
-      <label>${isCouple() ? "Client age" : "Current age"}</label>
-      <input type="number" min="18" max="100" step="1" value="${p.client.currentAge}"
-             data-plan-field="clientAge" />
-    </div>
-    ${isCouple() ? `
-      <div class="plan-field">
-        <label>Partner age</label>
-        <input type="number" min="18" max="100" step="1" value="${p.partner.currentAge}"
-               data-plan-field="partnerAge" />
-      </div>
-    ` : ""}
-    <div class="plan-field">
-      <label>Projection end age</label>
-      <input type="number" min="19" max="120" step="1" value="${p.endAge}"
-             data-plan-field="endAge" />
     </div>
     <div class="plan-field">
       <label>Start</label>
@@ -612,78 +686,75 @@ function renderPlanBar() {
                data-plan-field="startYear" />
       </div>
     </div>
-    <div class="plan-derived">${planSummaryText(p)}</div>
-    ${taxProfileHTML(p)}
+    <div class="plan-field">
+      <label>Projection end</label>
+      <div class="plan-start">
+        <select data-plan-field="endMode">
+          ${END_MODE_OPTIONS.map(([v, l]) =>
+            `<option value="${v}"${endModeValue === v ? " selected" : ""}>${l}</option>`
+          ).join("")}
+        </select>
+        ${p.endBasis.mode === "fixedAge" ? `
+          <input type="number" min="19" max="120" step="1" value="${p.endBasis.fixedAge}"
+                 data-plan-field="endFixedAge" aria-label="Fixed end age" />` : ""}
+        ${p.endBasis.mode === "fixedYears" ? `
+          <input type="number" min="1" max="100" step="1" value="${p.endBasis.fixedYears}"
+                 data-plan-field="endFixedYears" aria-label="Fixed number of years" />` : ""}
+      </div>
+    </div>
+    <div class="plan-derived">${endResolutionText(p)} · ${planSummaryText(p)}</div>
+    ${personBlockHTML("client", p.client, couple ? `Client — ${clientName()}` : clientName())}
+    ${couple ? personBlockHTML("partner", p.partner, `Partner — ${partnerName()}`) : ""}
   `;
 }
 
-// Per-person tax profile (C3): residency + Medicare feed the tax
-// engine; the Centrelink flag is captured but inert.
-function taxProfileHTML(p) {
-  const couple = p.household === "couple";
-  const residency = (prefix, tp) => `
-    <select data-plan-field="${prefix}Residency" aria-label="Tax residency">
-      <option value="resident"${tp.residency !== "nonResident" ? " selected" : ""}>Australian resident</option>
-      <option value="nonResident"${tp.residency === "nonResident" ? " selected" : ""}>Non-resident</option>
-    </select>`;
-  const medicare = (prefix, tp) => `
-    <select data-plan-field="${prefix}Medicare" aria-label="Medicare levy">
-      <option value="applies"${!tp.medicareExempt ? " selected" : ""}>Applies</option>
-      <option value="exempt"${tp.medicareExempt ? " selected" : ""}>Exempt</option>
-    </select>`;
-  const centrelink = (prefix, tp) => `
-    <label class="ptg-check">
-      <input type="checkbox" data-plan-field="${prefix}Centrelink"${tp.centrelinkEligible ? " checked" : ""} />
-      <span>Yes</span>
-    </label>`;
-  const both = (fieldHTML) =>
-    fieldHTML("clientTax", p.client.taxProfile) +
-    (couple ? fieldHTML("partnerTax", p.partner.taxProfile) : "");
-  return `
-    <div class="plan-tax">
-      <div class="cf-section-title">Tax profile</div>
-      <div class="plan-tax-grid${couple ? " ptg-couple" : ""}">
-        <span></span>
-        <span class="ptg-head">Client</span>
-        ${couple ? `<span class="ptg-head">Partner</span>` : ""}
-        <label>Tax residency</label>
-        ${both(residency)}
-        <label>Medicare levy</label>
-        ${both(medicare)}
-        <label>Eligible for Centrelink benefits
-          <span class="coming-soon-tag" title="No engine effect yet">Used when Centrelink modelling arrives</span>
-        </label>
-        ${both(centrelink)}
-      </div>
-    </div>
-  `;
+// The workspace client's name follows the client's full name until the
+// user renames it themselves (auto-names look like "Client 3").
+function maybeDefaultWorkspaceClientName(field) {
+  if (field !== "clientFirstName" && field !== "clientSurname") return;
+  const full = personDisplayName(state.plan.client, "");
+  if (!full) return;
+  const { client } = findActive(workspace);
+  if (client && /^Client \d+$/.test(client.name)) {
+    workspace = renameClient(workspace, client.id, full);
+    saveWorkspace();
+    renderWorkspaceBreadcrumb();
+  }
 }
 
 els.planBar.addEventListener("change", (e) => {
   const field = e.target.dataset.planField;
   if (!field) return;
   const p = state.plan;
-  const tpFrom = (person, prefix) => {
-    const cur = person?.taxProfile ?? {};
-    return {
-      residency: field === `${prefix}Residency` ? e.target.value : cur.residency,
-      medicareExempt: field === `${prefix}Medicare` ? e.target.value === "exempt" : cur.medicareExempt,
-      centrelinkEligible: field === `${prefix}Centrelink` ? e.target.checked : cur.centrelinkEligible,
-    };
-  };
+  const person = (prefix, cur) => ({
+    firstName: field === `${prefix}FirstName` ? e.target.value : cur.firstName,
+    surname: field === `${prefix}Surname` ? e.target.value : cur.surname,
+    dob: field === `${prefix}Dob` ? e.target.value : cur.dob,
+    sex: field === `${prefix}Sex` ? e.target.value : cur.sex,
+    currentAge: cur.currentAge, // fallback if the new DOB is invalid
+    taxProfile: {
+      residency: field === `${prefix}Residency` ? e.target.value : cur.taxProfile.residency,
+      medicareExempt: field === `${prefix}Medicare` ? e.target.value === "exempt" : cur.taxProfile.medicareExempt,
+      centrelinkEligible: field === `${prefix}Centrelink` ? e.target.checked : cur.taxProfile.centrelinkEligible,
+      openingCapitalLosses: field === `${prefix}OpeningLosses` ? e.target.value : cur.taxProfile.openingCapitalLosses,
+    },
+  });
+  let endBasis = { ...p.endBasis };
+  if (field === "endMode") {
+    const v = e.target.value;
+    if (v === "fixedAge") endBasis = { ...endBasis, mode: "fixedAge", fixedAge: p.endAge };
+    else if (v === "fixedYears") endBasis = { ...endBasis, mode: "fixedYears", fixedYears: Math.max(1, p.endAge - p.client.currentAge) };
+    else endBasis = { ...endBasis, mode: "le", offset: Number(v.split(":")[1]) || 0 };
+  } else if (field === "endFixedAge") {
+    endBasis = { ...endBasis, fixedAge: Number(e.target.value) };
+  } else if (field === "endFixedYears") {
+    endBasis = { ...endBasis, fixedYears: Number(e.target.value) };
+  }
   const next = {
     household: p.household,
-    client: {
-      currentAge: field === "clientAge" ? e.target.value : p.client.currentAge,
-      taxProfile: tpFrom(p.client, "clientTax"),
-    },
-    partner: p.partner
-      ? {
-          currentAge: field === "partnerAge" ? e.target.value : p.partner.currentAge,
-          taxProfile: tpFrom(p.partner, "partnerTax"),
-        }
-      : null,
-    endAge: field === "endAge" ? e.target.value : p.endAge,
+    client: person("client", p.client),
+    partner: p.partner ? person("partner", p.partner) : null,
+    endBasis,
     start: {
       year: field === "startYear" ? e.target.value : p.start.year,
       month: field === "startMonth" ? e.target.value : p.start.month,
@@ -692,6 +763,7 @@ els.planBar.addEventListener("change", (e) => {
   state.plan = clampPlan(next);
   state = clampAllToPlan(state);
   saveState();
+  maybeDefaultWorkspaceClientName(field);
   renderAll();
 });
 
@@ -701,27 +773,32 @@ els.planBar.addEventListener("click", (e) => {
   const target = btn.dataset.value;
   if (target === state.plan.household) return;
 
-  if (target === "couple") {
+  const wasCouple = isCouple();
+  const willBeCouple = target === "married" || target === "defacto";
+
+  if (willBeCouple) {
     state.plan = clampPlan({
       ...state.plan,
-      household: "couple",
-      partner: { currentAge: state.plan.client.currentAge },
+      household: target,
+      partner: state.plan.partner ?? { currentAge: state.plan.client.currentAge },
     });
   } else {
     // Couple → single: never orphan an owner.
-    const owned = partnerOwnedItems(state);
-    if (owned.count > 0) {
-      const reassign = window.confirm(
-        `${owned.count} item(s) are owned by the partner (or jointly): ` +
-        `${owned.assets.map((a) => a.name).concat(owned.income.map((r) => r.label)).join(", ")}.\n\n` +
-        `OK — reassign them to the client.\nCancel — choose what else to do.`
-      );
-      if (reassign) {
-        state = reassignPartnerToClient(state);
-      } else {
-        const del = window.confirm("Delete the partner-owned items instead? Cancel keeps the household as a couple.");
-        if (!del) { renderPlanBar(); return; } // abort the switch
-        state = deletePartnerOwned(state);
+    if (wasCouple) {
+      const owned = partnerOwnedItems(state);
+      if (owned.count > 0) {
+        const reassign = window.confirm(
+          `${owned.count} item(s) are owned by the partner (or jointly): ` +
+          `${owned.assets.map((a) => a.name).concat(owned.income.map((r) => r.label)).join(", ")}.\n\n` +
+          `OK — reassign them to the client.\nCancel — choose what else to do.`
+        );
+        if (reassign) {
+          state = reassignPartnerToClient(state);
+        } else {
+          const del = window.confirm("Delete the partner-owned items instead? Cancel keeps the household as a couple.");
+          if (!del) { renderPlanBar(); return; } // abort the switch
+          state = deletePartnerOwned(state);
+        }
       }
     }
     state.plan = clampPlan({ ...state.plan, household: "single", partner: null });
@@ -740,8 +817,9 @@ function profileOptions(selected) {
 }
 
 function ownerOptions(selected) {
+  const labels = { client: clientName(), partner: partnerName(), joint: "Joint" };
   return ["client", "partner", "joint"].map(
-    (o) => `<option value="${o}"${o === selected ? " selected" : ""}>${o[0].toUpperCase()}${o.slice(1)}</option>`
+    (o) => `<option value="${o}"${o === selected ? " selected" : ""}>${escapeHTML(labels[o])}</option>`
   ).join("");
 }
 
@@ -966,8 +1044,8 @@ function incomeRowHTML(r) {
         <div class="cf-cell">
           <label>Owner</label>
           <select data-kind="income" data-cfid="${r.id}" data-field="owner">
-            <option value="client"${r.owner === "client" ? " selected" : ""}>Client</option>
-            <option value="partner"${r.owner === "partner" ? " selected" : ""}>Partner</option>
+            <option value="client"${r.owner === "client" ? " selected" : ""}>${escapeHTML(clientName())}</option>
+            <option value="partner"${r.owner === "partner" ? " selected" : ""}>${escapeHTML(partnerName())}</option>
           </select>
         </div>
       ` : ""}
@@ -993,11 +1071,7 @@ function incomeRowHTML(r) {
         <input type="number" min="18" max="120" step="1" value="${r.toAge}"
                data-kind="income" data-cfid="${r.id}" data-field="toAge" />
       </div>
-      <div class="cf-cell cf-indexed">
-        <label>Indexed</label>
-        <input type="checkbox"${r.indexed ? " checked" : ""}
-               data-kind="income" data-cfid="${r.id}" data-field="indexed" />
-      </div>
+      ${indexationCellsHTML("income", r)}
       <button class="cf-remove" type="button" aria-label="Remove row"
               data-action="remove-row" data-kind="income" data-cfid="${r.id}">×</button>
     </div>
@@ -1034,11 +1108,7 @@ function expenseRowHTML(r) {
         <input type="number" min="18" max="120" step="1" value="${r.toAge}"
                data-kind="expenses" data-cfid="${r.id}" data-field="toAge" />
       </div>
-      <div class="cf-cell cf-indexed">
-        <label>Indexed</label>
-        <input type="checkbox"${r.indexed ? " checked" : ""}
-               data-kind="expenses" data-cfid="${r.id}" data-field="indexed" />
-      </div>
+      ${indexationCellsHTML("expenses", r)}
       <button class="cf-remove" type="button" aria-label="Remove row"
               data-action="remove-row" data-kind="expenses" data-cfid="${r.id}">×</button>
     </div>
@@ -1074,15 +1144,41 @@ function contributionRowHTML(kind, cf) {
         <input type="number" min="18" max="120" step="1" value="${cf.toAge}"
                data-kind="${kind}" data-cfid="${cf.id}" data-field="toAge" />
       </div>
-      <div class="cf-cell cf-indexed">
-        <label>Indexed</label>
-        <input type="checkbox"${cf.indexed ? " checked" : ""}
-               data-kind="${kind}" data-cfid="${cf.id}" data-field="indexed" />
-      </div>
+      ${indexationCellsHTML(kind, cf)}
       <button class="cf-remove" type="button" aria-label="Remove row"
               data-action="remove-row" data-kind="${kind}" data-cfid="${cf.id}">×</button>
     </div>
   `;
+}
+
+// Per-row indexation controls (D1): basis + additional %, with the
+// computed nominal total shown live ("CPI 2.5% + 1% = 3.5%").
+function indexationCellsHTML(kind, row) {
+  const basis = row.indexBasis ?? (row.indexed === false ? "none" : "cpi");
+  const extra = row.indexExtraPct ?? 0;
+  const basisRate = basis === "awote"
+    ? (state.assumptions.awote ?? 0.035)
+    : basis === "cpi" ? state.assumptions.cpi : 0;
+  const pct = (v) => `${(v).toFixed(1).replace(/\.0$/, "")}%`;
+  const basisLabel = basis === "awote" ? "AWOTE" : basis === "cpi" ? "CPI" : "None";
+  const total = extra === 0 && basis === "none"
+    ? "Fixed nominal"
+    : `${basisLabel} ${pct(basisRate * 100)}${extra ? ` + ${pct(extra)}` : ""} = ${pct(basisRate * 100 + extra)}`;
+  return `
+      <div class="cf-cell">
+        <label>Index basis</label>
+        <select data-kind="${kind}" data-cfid="${row.id}" data-field="indexBasis">
+          <option value="none"${basis === "none" ? " selected" : ""}>None</option>
+          <option value="cpi"${basis === "cpi" ? " selected" : ""}>CPI</option>
+          <option value="awote"${basis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+        </select>
+      </div>
+      <div class="cf-cell cf-index-extra">
+        <label>Additional %</label>
+        <input type="number" min="-10" max="10" step="0.1" value="${extra}"
+               data-kind="${kind}" data-cfid="${row.id}" data-field="indexExtraPct" />
+        <span class="index-total">${total}</span>
+      </div>`;
 }
 
 function lumpSumRowHTML(ls) {
@@ -1426,9 +1522,22 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "frequency":
       row.frequency = el.value === "annual" ? "annual" : "monthly";
       break;
-    case "indexed":
-      row.indexed = el.checked;
+    case "indexBasis": {
+      row.indexBasis = ["none", "cpi", "awote"].includes(el.value) ? el.value : "cpi";
+      delete row.indexed;
+      const rowEl = el.closest(".cf-row");
+      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // refresh the computed total
       break;
+    }
+    case "indexExtraPct": {
+      row.indexExtraPct = clampNumber(el.value, -10, 10);
+      if (commit) {
+        el.value = row.indexExtraPct;
+        const rowEl = el.closest(".cf-row");
+        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+      }
+      break;
+    }
     case "direction":
       row.direction = el.value === "out" ? "out" : "in";
       break;
@@ -1458,6 +1567,13 @@ function applyRowEdit(kind, row, field, el, commit) {
       break;
     }
   }
+}
+
+function rowHTMLFor(kind, row) {
+  if (kind === "income") return incomeRowHTML(row);
+  if (kind === "expenses") return expenseRowHTML(row);
+  if (kind === "lumpSums") return lumpSumRowHTML(row);
+  return contributionRowHTML(kind, row);
 }
 
 function syncRowInput(el, field, value) {
@@ -1953,7 +2069,9 @@ function buildCashflowGroups() {
   const included = state.assets.filter((a) => a.include);
 
   const incomeRows = state.cashflows.income.map((rw) => ({
-    label: couple ? `${rw.label} (${rw.owner})` : rw.label,
+    label: couple
+      ? `${rw.label} (${rw.owner === "partner" ? partnerName() : clientName()})`
+      : rw.label,
     cell: (y) => rt.income[rw.id]?.[y] ?? 0,
   }));
   incomeRows.push({ label: "Distributions paid as cash", cell: (y) => yl[y].cashDistributions });
@@ -2150,8 +2268,8 @@ function buildTaxGroups() {
       { label: "CGT payable", cell: (y) => -(td(y, p)?.cgt ?? 0) },
     ],
   });
-  const groups = [personGroup("client", "Client")];
-  if (isCouple()) groups.push(personGroup("partner", "Partner"));
+  const groups = [personGroup("client", clientName())];
+  if (isCouple()) groups.push(personGroup("partner", partnerName()));
   groups.push({
     title: "Household",
     rows: [{ label: "Total tax", cell: (y) => -yl[y].tax, cls: "tl-total" }],
@@ -2179,6 +2297,7 @@ function buildAssumptionsGroups() {
 
   const economic = [
     { label: "CPI (% p.a.)", cell: () => cpi * 100, pct: true, always: true },
+    { label: "Wage index (AWOTE, % p.a. nominal)", cell: () => (state.assumptions.awote ?? 0.035) * 100, pct: true, always: true },
   ];
   for (const a of included) {
     const { incomeNominal, growthNominal } = assetReturnComponents(a);
@@ -2261,36 +2380,12 @@ els.showAssetsToggle.addEventListener("change", () => {
 
 // --- summary strip ------------------------------------------------------
 
+// Slim bar (D1): outputs only — the input-echo tiles are gone.
 function renderSummaryStrip() {
-  const s = summarise(state);
   const months = projection.schedule.months;
   const endBalance = projection.monthly.combined[months] * displayFactor(months);
   const shortfall = projection.shortfall;
   els.summaryStrip.innerHTML = `
-    <div class="stat">
-      <div class="stat-label">Total current value</div>
-      <div class="stat-value">${fmtMoney(s.totalBalance)}</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Assets included</div>
-      <div class="stat-value">${s.includedCount} of ${state.assets.length}</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Gross income (annualised)</div>
-      <div class="stat-value">${fmtMoney(s.annualIncome)} /yr</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Expenses (annualised)</div>
-      <div class="stat-value">${fmtMoney(s.annualExpenses)} /yr</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Contributions (annualised)</div>
-      <div class="stat-value">${fmtMoney(s.annualContributions)} /yr</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Withdrawals (annualised)</div>
-      <div class="stat-value">${fmtMoney(s.annualWithdrawals)} /yr</div>
-    </div>
     <div class="stat">
       <div class="stat-label">Projected end balance</div>
       <div class="stat-value">${fmtMoney(endBalance)}</div>
@@ -2397,6 +2492,18 @@ els.inflationInput.addEventListener("change", () => {
   populateParamsTable();
   renderBellCurves("bellCurves", PROFILES, state.assumptions.cpi);
   refreshOutputs(); // real returns derive from CPI via Fisher
+});
+
+const awoteInput = $("awoteInput");
+awoteInput.addEventListener("change", () => {
+  const n = Number(awoteInput.value);
+  if (!Number.isFinite(n) || n < 0 || n > 20) {
+    awoteInput.value = ((state.assumptions.awote ?? 0.035) * 100).toFixed(1);
+    return;
+  }
+  state.assumptions.awote = n / 100;
+  saveState();
+  refreshOutputs(); // wage-indexed rows re-derive
 });
 
 // --- boot -----------------------------------------------------------------

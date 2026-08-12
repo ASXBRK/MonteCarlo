@@ -9,7 +9,9 @@ import {
   removeAsset, ownerWindow, fyLabelForAge, horizonYears,
   serialize, hydrate, summarise, planSummaryText, annualisedAmount,
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear, clampTaxProfile,
+  ageAtDate, synthDob, resolveEndBasis, clampCashflow,
 } from "./planState.js";
+import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
 
 const PROFILE_KEYS = Object.keys(PROFILES);
@@ -269,7 +271,7 @@ describe("persistence round-trip (v3)", () => {
 
     const back = hydrate(serialize(s), PROFILES);
     expect(back).not.toBeNull();
-    expect(back.plan.household).toBe("couple");
+    expect(back.plan.household).toBe("married"); // v5 splits marital status
     expect(back.plan.partner.currentAge).toBe(36);
     expect(back.assets[1]).toMatchObject({ owner: "joint", distributions: "cash" });
     expect(back.settings.surplus).toEqual({ mode: "invest", assetId: a2.id });
@@ -402,24 +404,124 @@ describe("schema v4 migration (C3)", () => {
     };
     const s = hydrate(JSON.stringify(v3), PROFILES);
     expect(s).not.toBeNull();
-    expect(s.schemaVersion).toBe(4);
-    const def = { residency: "resident", medicareExempt: false, centrelinkEligible: false };
+    expect(s.schemaVersion).toBe(SCHEMA_VERSION);
+    const def = { residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 };
     expect(s.plan.client.taxProfile).toEqual(def);
     expect(s.plan.partner.taxProfile).toEqual(def);
   });
 
   it("explicit v4 tax profiles survive a serialize/hydrate round trip", () => {
     const s = defaultState(PROFILES, NOW);
-    s.plan.client.taxProfile = { residency: "nonResident", medicareExempt: true, centrelinkEligible: true };
+    s.plan.client.taxProfile = { residency: "nonResident", medicareExempt: true, centrelinkEligible: true, openingCapitalLosses: 2500 };
     const back = hydrate(serialize(s), PROFILES);
     expect(back.plan.client.taxProfile)
-      .toEqual({ residency: "nonResident", medicareExempt: true, centrelinkEligible: true });
+      .toEqual({ residency: "nonResident", medicareExempt: true, centrelinkEligible: true, openingCapitalLosses: 2500 });
   });
 
   it("clampTaxProfile defends junk", () => {
     expect(clampTaxProfile(null))
-      .toEqual({ residency: "resident", medicareExempt: false, centrelinkEligible: false });
-    expect(clampTaxProfile({ residency: "martian", medicareExempt: "yes", centrelinkEligible: 1 }))
-      .toEqual({ residency: "resident", medicareExempt: false, centrelinkEligible: false });
+      .toEqual({ residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 });
+    expect(clampTaxProfile({ residency: "martian", medicareExempt: "yes", centrelinkEligible: 1, openingCapitalLosses: -5 }))
+      .toEqual({ residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 });
+  });
+});
+
+describe("D1 — identity, DOB, and end basis", () => {
+  const start = { year: 2026, month: 8 };
+
+  it("derives age at start as the floor of exact age; ages tick 1 July", () => {
+    expect(ageAtDate("1986-07-01", 2026, 8)).toBe(40);
+    expect(ageAtDate("1986-09-15", 2026, 8)).toBe(39); // birthday not yet reached
+    expect(ageAtDate("1986-07-01", 2026, 3)).toBe(39);
+    expect(synthDob(40, { year: 2026, month: 3 })).toBe("1985-07-01"); // FY-aligned
+    expect(ageAtDate(synthDob(40, { year: 2026, month: 3 }), 2026, 3)).toBe(40);
+  });
+
+  it("LE basis resolves to the household's longest life expectancy", () => {
+    const client = clampPlan({
+      household: "married",
+      client: { dob: "1986-07-01", sex: "male" },
+      partner: { dob: "1990-07-01", sex: "female" },
+      endBasis: { mode: "le", offset: 0 },
+      start,
+    });
+    // Client male 40: LE 42.7 → 43y. Partner female 36: LE ≈ 50.1 →
+    // 50y — the longer horizon anchors the projection.
+    const years = Math.round(remainingLE(36, "female"));
+    expect(client.endAge).toBe(40 + years);
+    expect(resolveEndBasis(client.endBasis, client.client, client.partner).anchor).toBe("partner");
+  });
+
+  it("re-resolves when sex or partner changes while an LE basis is active", () => {
+    const base = {
+      household: "married",
+      client: { dob: "1986-07-01", sex: "male" },
+      partner: { dob: "1990-07-01", sex: "female" },
+      endBasis: { mode: "le", offset: 5 },
+      start,
+    };
+    const withPartner = clampPlan(base);
+    expect(withPartner.endAge).toBe(40 + Math.round(remainingLE(36, "female")) + 5);
+    const single = clampPlan({ ...base, household: "single", partner: null });
+    expect(single.endAge).toBe(40 + Math.round(remainingLE(40, "male")) + 5);
+    const maleP = clampPlan({ ...base, partner: { dob: "1990-07-01", sex: "male" } });
+    const expected = Math.max(
+      Math.round(remainingLE(40, "male")),
+      Math.round(remainingLE(36, "male"))
+    );
+    expect(maleP.endAge).toBe(40 + expected + 5);
+  });
+
+  it("fixed bases resolve directly", () => {
+    const p = clampPlan({
+      client: { dob: "1986-07-01" },
+      endBasis: { mode: "fixedAge", fixedAge: 92 },
+      start,
+    });
+    expect(p.endAge).toBe(92);
+    const y = clampPlan({
+      client: { dob: "1986-07-01" },
+      endBasis: { mode: "fixedYears", fixedYears: 30 },
+      start,
+    });
+    expect(y.endAge).toBe(70);
+  });
+
+  it("v4 migration preserves ages and endAge exactly (regression gate)", () => {
+    const v4 = {
+      schemaVersion: 4,
+      plan: {
+        household: "couple",
+        client: { currentAge: 45 },
+        partner: { currentAge: 43 },
+        endAge: 90,
+        start: { year: 2026, month: 3 }, // pre-July start — the tricky case
+      },
+      assets: [{ id: "a1", name: "A", include: true, owner: "client", distributions: "reinvest",
+                 balance: 1000, allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0,
+                 cgtAsset: false, costBase: null }],
+      cashflows: { income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [] },
+      settings: { surplus: { mode: "spend", assetId: null }, fundingOrder: ["a1"] },
+      display: { units: "real" },
+      assumptions: { cpi: 0.025 },
+    };
+    const s = hydrate(JSON.stringify(v4), PROFILES);
+    expect(s.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(s.plan.household).toBe("married");
+    expect(s.plan.client.currentAge).toBe(45);
+    expect(s.plan.partner.currentAge).toBe(43);
+    expect(s.plan.endAge).toBe(90); // fixed basis at the stored endAge
+    expect(s.plan.endBasis.mode).toBe("fixedAge");
+    expect(s.plan.client.taxProfile.openingCapitalLosses).toBe(0);
+  });
+
+  it("indexed flags migrate to CPI/None bases", () => {
+    const plan = clampPlan({ client: { dob: "1986-07-01" }, endBasis: { mode: "fixedAge", fixedAge: 90 }, start });
+    const t = clampCashflow({ id: "a", fromAge: 40, toAge: 90, amount: 1, frequency: "monthly", indexed: true }, plan);
+    expect(t.indexBasis).toBe("cpi");
+    expect(t.indexExtraPct).toBe(0);
+    expect("indexed" in t).toBe(false);
+    const f = clampCashflow({ id: "b", fromAge: 40, toAge: 90, amount: 1, frequency: "monthly", indexed: false }, plan);
+    expect(f.indexBasis).toBe("none");
   });
 });

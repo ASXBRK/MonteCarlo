@@ -1,4 +1,11 @@
-// Plan/asset state model — schemaVersion 4.
+// Plan/asset state model — schemaVersion 5.
+//
+// v5 (D1): identity intake (names, DOB, sex, marital status),
+// life-expectancy-anchored projection end, per-row indexation model
+// (basis + additional %), opening carry-forward capital losses, AWOTE
+// assumption. DOB replaces currentAge as stored; currentAge is derived
+// (floor of exact age at the start date) and ages still tick each
+// 1 July — DOB precision feeds the life-expectancy lookup only.
 //
 // Pure functions only — no DOM, no storage. main.js owns persistence
 // (localStorage) and rendering; this module owns shape, defaults,
@@ -17,7 +24,9 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
+
+import { remainingLE } from "./data/lifeTables.js";
 
 // --- id generation ---------------------------------------------------
 
@@ -29,10 +38,11 @@ export function uid(prefix = "id") {
 
 // --- defaults ---------------------------------------------------------
 
-// Per-person tax profile (C3). centrelinkEligible is captured but
-// inert until Centrelink modelling arrives.
+// Per-person tax profile (C3, extended D1 with opening carry-forward
+// capital losses). centrelinkEligible is captured but inert until
+// Centrelink modelling arrives.
 export function defaultTaxProfile() {
-  return { residency: "resident", medicareExempt: false, centrelinkEligible: false };
+  return { residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 };
 }
 
 export function clampTaxProfile(raw) {
@@ -40,16 +50,101 @@ export function clampTaxProfile(raw) {
     residency: raw?.residency === "nonResident" ? "nonResident" : "resident",
     medicareExempt: raw?.medicareExempt === true,
     centrelinkEligible: raw?.centrelinkEligible === true,
+    openingCapitalLosses: clampNumber(raw?.openingCapitalLosses, 0),
   };
 }
 
+// --- identity + ages (D1) --------------------------------------------------
+
+export const isCoupleHousehold = (h) => h === "married" || h === "defacto";
+
+// Floor of exact age at the 1st of {year, month}.
+export function ageAtDate(dobISO, year, month) {
+  const dob = new Date(`${dobISO}T00:00:00`);
+  if (Number.isNaN(dob.getTime())) return null;
+  let age = year - dob.getFullYear();
+  const mDelta = (month - 1) - dob.getMonth();
+  if (mDelta < 0 || (mDelta === 0 && dob.getDate() > 1)) age -= 1;
+  return age;
+}
+
+// Synthesise a DOB from a plan-year age: 1 July of the current FY's
+// start year minus the age, so age-at-start and every 1-July tick
+// match the pre-D1 currentAge behaviour exactly (migration gate).
+export function synthDob(currentAge, start) {
+  const fyStart = start.month >= 7 ? start.year : start.year - 1;
+  return `${fyStart - currentAge}-07-01`;
+}
+
+export function personDisplayName(person, fallback) {
+  const n = `${person?.firstName ?? ""} ${person?.surname ?? ""}`.trim();
+  return n || fallback;
+}
+
+function clampPerson(raw, start) {
+  const parsed = typeof raw?.dob === "string" ? ageAtDate(raw.dob, start.year, start.month) : null;
+  let dob = raw?.dob;
+  let currentAge = parsed;
+  if (currentAge == null || currentAge < 18 || currentAge > 100) {
+    currentAge = clampInt(currentAge ?? raw?.currentAge ?? 40, 18, 100);
+    dob = synthDob(currentAge, start);
+  }
+  return {
+    firstName: typeof raw?.firstName === "string" ? raw.firstName.trim() : "",
+    surname: typeof raw?.surname === "string" ? raw.surname.trim() : "",
+    dob,
+    sex: raw?.sex === "female" ? "female" : "male",
+    currentAge, // derived — recomputed from DOB on every clamp
+    taxProfile: clampTaxProfile(raw?.taxProfile),
+  };
+}
+
+// --- projection end basis (D1) ----------------------------------------------
+
+export const END_BASIS_OFFSETS = [-15, -10, -5, 0, 5, 10, 15, 20];
+
+export function clampEndBasis(raw) {
+  const mode = ["le", "fixedAge", "fixedYears"].includes(raw?.mode) ? raw.mode : "le";
+  const offset = END_BASIS_OFFSETS.includes(raw?.offset) ? raw.offset : 0;
+  return {
+    mode,
+    offset,
+    fixedAge: clampInt(raw?.fixedAge ?? 90, 19, 120),
+    fixedYears: clampInt(raw?.fixedYears ?? 40, 1, 100),
+  };
+}
+
+// Resolve the projection end (client-anchored endAge) from the basis.
+// LE bases anchor to the household's LONGEST remaining life
+// expectancy; `anchor` says whose. Rounded to whole plan years.
+export function resolveEndBasis(basis, client, partner) {
+  if (basis.mode === "fixedAge") {
+    return { endAge: Math.max(basis.fixedAge, client.currentAge + 1), anchor: null };
+  }
+  if (basis.mode === "fixedYears") {
+    return { endAge: Math.min(client.currentAge + basis.fixedYears, 120), anchor: null };
+  }
+  let anchor = "client";
+  let years = Math.round(remainingLE(client.currentAge, client.sex));
+  if (partner) {
+    const py = Math.round(remainingLE(partner.currentAge, partner.sex));
+    if (py > years) { years = py; anchor = "partner"; }
+  }
+  const endAge = Math.max(client.currentAge + 1, Math.min(client.currentAge + years + basis.offset, 120));
+  return { endAge, anchor };
+}
+
 export function defaultPlan(now = new Date()) {
+  const start = { year: now.getFullYear(), month: now.getMonth() + 1 };
+  const client = clampPerson({ currentAge: 40 }, start);
+  const endBasis = clampEndBasis({ mode: "le", offset: 0 });
   return {
     household: "single",
-    client: { currentAge: 40, taxProfile: defaultTaxProfile() },
+    client,
     partner: null,
-    endAge: 90,
-    start: { year: now.getFullYear(), month: now.getMonth() + 1 },
+    endAge: resolveEndBasis(endBasis, client, null).endAge,
+    endBasis,
+    start,
   };
 }
 
@@ -83,6 +178,21 @@ export function fyLabelForAge(plan, owner, age) {
   return `FY ${fy}–${String((fy + 1) % 100).padStart(2, "0")}`;
 }
 
+// Per-row indexation (D1): nominal growth g = basis rate + additional.
+// CPI+0 = constant real (the old `indexed: true`); None+0 = fixed
+// nominal, decaying at CPI in real terms (the old `false`); AWOTE
+// links to the wage index and grows in real terms.
+export const INDEX_BASES = ["none", "cpi", "awote"];
+
+export function clampIndexation(row) {
+  let basis = row?.indexBasis;
+  if (basis == null && row && "indexed" in row) {
+    basis = row.indexed === false ? "none" : "cpi"; // pre-D1 migration
+  }
+  if (!INDEX_BASES.includes(basis)) basis = "cpi";
+  return { indexBasis: basis, indexExtraPct: clampNumber(row?.indexExtraPct ?? 0, -10, 10) };
+}
+
 export function createCashflow(kind, plan, assetId = null) {
   return {
     id: uid("cf"),
@@ -91,7 +201,8 @@ export function createCashflow(kind, plan, assetId = null) {
     frequency: "monthly",
     fromAge: plan.client.currentAge,
     toAge: plan.endAge,
-    indexed: true,
+    indexBasis: "cpi",
+    indexExtraPct: 0,
   };
 }
 
@@ -115,7 +226,8 @@ export function createIncomeRow(plan, existing = []) {
     frequency: "annual",
     fromAge: plan.client.currentAge,
     toAge: plan.endAge,
-    indexed: true,
+    indexBasis: "cpi",
+    indexExtraPct: 0,
   };
 }
 
@@ -127,7 +239,8 @@ export function createExpenseRow(plan, existing = []) {
     frequency: "annual",
     fromAge: plan.client.currentAge,
     toAge: plan.endAge,
-    indexed: true,
+    indexBasis: "cpi",
+    indexExtraPct: 0,
   };
 }
 
@@ -190,7 +303,7 @@ export function defaultState(profiles = {}, now = new Date()) {
       fundingOrder: [asset.id],
     },
     display: { units: "real", reportPeriod: { from: null, to: null } },
-    assumptions: { cpi: 0.025, bracketMode: "indexed" },
+    assumptions: { cpi: 0.025, awote: 0.035, bracketMode: "indexed" },
   };
 }
 
@@ -272,32 +385,35 @@ export function clampAllocation(alloc, profiles) {
 }
 
 export function clampPlan(plan) {
-  const clientAge = clampInt(plan.client?.currentAge, 18, 100);
-  let endAge = clampInt(plan.endAge, 18, 120);
-  if (endAge <= clientAge) endAge = clientAge + 1;
-  const household = plan.household === "couple" ? "couple" : "single";
-  const partner = household === "couple"
-    ? {
-        currentAge: clampInt(plan.partner?.currentAge ?? clientAge, 18, 100),
-        taxProfile: clampTaxProfile(plan.partner?.taxProfile),
-      }
-    : null;
   const year = clampInt(plan.start?.year, 1900, 2200);
   const month = clampInt(plan.start?.month, 1, 12);
-  return {
-    household,
-    client: { currentAge: clientAge, taxProfile: clampTaxProfile(plan.client?.taxProfile) },
-    partner,
-    endAge,
-    start: { year, month },
-  };
+  const start = { year, month };
+
+  // v4 stored "couple"; v5 splits marital status.
+  let household = plan.household === "couple" ? "married" : plan.household;
+  if (!["single", "married", "defacto"].includes(household)) household = "single";
+
+  const client = clampPerson(plan.client, start);
+  const partner = isCoupleHousehold(household)
+    ? clampPerson(plan.partner ?? { currentAge: client.currentAge }, start)
+    : null;
+
+  // Missing basis (pre-D1 blob or partial edit): fix at the stored
+  // endAge so migrated projections are behaviour-identical.
+  const endBasis = clampEndBasis(
+    plan.endBasis ?? { mode: "fixedAge", fixedAge: clampInt(plan.endAge, 19, 120) }
+  );
+  const { endAge } = resolveEndBasis(endBasis, client, partner);
+
+  return { household, client, partner, endAge, endBasis, start };
 }
 
 // Clamp a cashflow with client-anchored ages into the plan window.
 export function clampCashflow(cf, plan) {
   const fromAge = clampInt(cf.fromAge, plan.client.currentAge, plan.endAge);
   const toAge = clampInt(cf.toAge, fromAge, plan.endAge);
-  return { ...cf, fromAge, toAge };
+  const { indexed, ...rest } = cf;
+  return { ...rest, fromAge, toAge, ...clampIndexation(cf) };
 }
 
 export function clampLumpSum(ls, plan) {
@@ -310,13 +426,15 @@ export function clampIncomeRow(row, plan) {
   const win = ownerWindow(plan, owner);
   const fromAge = clampInt(row.fromAge, win.from, win.to);
   const toAge = clampInt(row.toAge, fromAge, win.to);
-  return { ...row, owner, fromAge, toAge };
+  const { indexed, ...rest } = row;
+  return { ...rest, owner, fromAge, toAge, ...clampIndexation(row) };
 }
 
 export function clampExpenseRow(row, plan) {
   const fromAge = clampInt(row.fromAge, plan.client.currentAge, plan.endAge);
   const toAge = clampInt(row.toAge, fromAge, plan.endAge);
-  return { ...row, fromAge, toAge };
+  const { indexed, ...rest } = row;
+  return { ...rest, fromAge, toAge, ...clampIndexation(row) };
 }
 
 // fundingOrder invariant: exactly the INCLUDED assets, in order.
@@ -493,16 +611,28 @@ function migrateV3toV4(raw) {
   return { ...raw, schemaVersion: 4 };
 }
 
+// v4 → v5 (D1): identity + LE end basis + indexation model. The
+// clamps do the shape work: clampPerson synthesises a DOB from
+// currentAge (age-tick-identical), clampPlan maps household "couple"
+// → "married" and fixes the end basis at the stored endAge,
+// clampIndexation maps indexed true/false → CPI+0 / None+0, and
+// clampTaxProfile defaults openingCapitalLosses to 0. All migrated
+// projections are behaviour-identical (regression-gated).
+function migrateV4toV5(raw) {
+  return { ...raw, schemaVersion: 5 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
-// forward. Returns a clamped v4 state or null (caller falls back to
+// forward. Returns a clamped v5 state or null (caller falls back to
 // defaults). Never throws.
 export function hydrate(json, profiles = {}) {
   try {
     let raw = JSON.parse(json);
     if (!raw || typeof raw !== "object") return null;
-    if (raw.schemaVersion === 1) raw = migrateV3toV4(migrateV2toV3(migrateV1toV2(raw)));
-    else if (raw.schemaVersion === 2) raw = migrateV3toV4(migrateV2toV3(raw));
-    else if (raw.schemaVersion === 3) raw = migrateV3toV4(raw);
+    if (raw.schemaVersion === 1) raw = migrateV1toV2(raw);
+    if (raw.schemaVersion === 2) raw = migrateV2toV3(raw);
+    if (raw.schemaVersion === 3) raw = migrateV3toV4(raw);
+    if (raw.schemaVersion === 4) raw = migrateV4toV5(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -529,6 +659,7 @@ export function hydrate(json, profiles = {}) {
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,
+        awote: clampNumber(raw.assumptions?.awote ?? 0.035, 0, 0.2),
         bracketMode: raw.assumptions?.bracketMode === "frozen" ? "frozen" : "indexed",
       },
     };
@@ -572,7 +703,9 @@ function hydrateCashflows(arr, plan, assetIds) {
       frequency: c.frequency === "annual" ? "annual" : "monthly",
       fromAge: c.fromAge,
       toAge: c.toAge,
-      indexed: c.indexed !== false,
+      indexBasis: c.indexBasis,
+      indexExtraPct: c.indexExtraPct,
+      indexed: c.indexed,
     }, plan));
 }
 
@@ -600,7 +733,9 @@ function hydrateIncomeRows(arr, plan) {
     frequency: r.frequency === "monthly" ? "monthly" : "annual",
     fromAge: r.fromAge,
     toAge: r.toAge,
-    indexed: r.indexed !== false,
+    indexBasis: r.indexBasis,
+    indexExtraPct: r.indexExtraPct,
+    indexed: r.indexed,
   }, plan));
 }
 
@@ -613,7 +748,9 @@ function hydrateExpenseRows(arr, plan) {
     frequency: r.frequency === "monthly" ? "monthly" : "annual",
     fromAge: r.fromAge,
     toAge: r.toAge,
-    indexed: r.indexed !== false,
+    indexBasis: r.indexBasis,
+    indexExtraPct: r.indexExtraPct,
+    indexed: r.indexed,
   }, plan));
 }
 

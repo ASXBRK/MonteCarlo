@@ -184,6 +184,11 @@
             <label for="inflationInput">Inflation rate (annual, %)</label>
             <input id="inflationInput" type="number" min="0" max="20" step="0.1" value="2.5" />
           </div>
+          <div class="param-inline-field">
+            <label for="awoteInput">Wage index (AWOTE) growth (annual nominal, %)</label>
+            <input id="awoteInput" type="number" min="0" max="20" step="0.1" value="3.5" />
+          </div>
+          <p>Cashflow rows carry an index basis (None, CPI, or the wage index) plus an additional percentage. A CPI-indexed row is constant in real terms; a row with no indexation is fixed in nominal dollars and its real value declines by CPI each year; a wage-indexed row grows in real terms by the gap between AWOTE and CPI. Dates of birth are captured for the life-expectancy lookup — ages still tick over each 1 July per the plan-year convention, so DOB precision does not shift cashflow timing.</p>
           <p>Inflation in this tool is deterministic — every projection assumes the same inflation rate. Real-world inflation varies stochastically; modelling stochastic inflation is out of scope for this version.</p>
         </section>
 

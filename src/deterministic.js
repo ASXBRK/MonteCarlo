@@ -96,7 +96,7 @@ export function projectPlan(state, profiles = PROFILES) {
   const months = schedule.months;
   const years = schedule.planYears;
   const fy0 = firstFyStartYear(state.plan.start);
-  const couple = state.plan.household === "couple" && !!state.plan.partner;
+  const couple = !!state.plan.partner;
   const persons = couple ? ["client", "partner"] : ["client"];
 
   const meta = {};
@@ -154,7 +154,12 @@ export function projectPlan(state, profiles = PROFILES) {
   const yearly = [];
   let firstUnfundedMonth = -1;
   let totalUnfunded = 0;
-  const lossCarryFwd = { client: 0, partner: 0 };
+  // Opening carry-forward capital losses (D1) seed the B.1 loss
+  // mechanism in the first assessment year.
+  const lossCarryFwd = {
+    client: Math.max(0, state.plan.client?.taxProfile?.openingCapitalLosses ?? 0),
+    partner: Math.max(0, state.plan.partner?.taxProfile?.openingCapitalLosses ?? 0),
+  };
   let pendingCgt = { client: 0, partner: 0 }; // assessed in FY t, payable July t+1
 
   const mkYearRow = (y) => ({

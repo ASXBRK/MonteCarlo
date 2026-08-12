@@ -78,9 +78,18 @@ export function nominalFactor(m, cpi) {
   return Math.pow(1 + cpi, m / 12);
 }
 
-// Non-indexed cashflows are fixed-nominal → decay in real terms.
-function realAmountAt(row, m, cpi) {
-  return row.indexed ? row.amount : row.amount / Math.pow(1 + cpi, m / 12);
+// Per-row indexation (D1): nominal growth g = basis rate + additional
+// %, so the real amount at month m is amount × ((1+g)/(1+cpi))^(m/12).
+// CPI+0 → constant real; None+0 → decays at CPI (fixed nominal);
+// AWOTE-linked rows grow in real terms. Rows carrying only the pre-D1
+// `indexed` flag fall back to its CPI/None equivalents.
+function realAmountAt(row, m, cpi, awote) {
+  let basis = row.indexBasis;
+  if (basis == null) basis = row.indexed === false ? "none" : "cpi";
+  const basisRate = basis === "awote" ? awote : basis === "cpi" ? cpi : 0;
+  const g = basisRate + (row.indexExtraPct ?? 0) / 100;
+  if (g === cpi) return row.amount; // exact constant-real fast path
+  return row.amount * Math.pow((1 + g) / (1 + cpi), m / 12);
 }
 
 // Whether plan year y contains a July month that fires annual flows.
@@ -105,6 +114,7 @@ function julyMonthIndex(plan, y) {
 export function buildSchedules(state) {
   const plan = state.plan;
   const cpi = state.assumptions.cpi;
+  const awote = state.assumptions.awote ?? 0.035;
   const months = totalMonths(plan);
   const planYears = planYearCount(plan);
   const firstYearMonths = monthsInFirstYear(plan.start);
@@ -162,7 +172,7 @@ export function buildSchedules(state) {
     if (row.frequency === "monthly") {
       for (let m = 0; m < months; m++) {
         if (activeInYear(row, owner, yearOfMonth[m])) {
-          const v = realAmountAt(row, m, cpi);
+          const v = realAmountAt(row, m, cpi, awote);
           target[m] += v;
           if (totals) totals[yearOfMonth[m]] += v;
         }
@@ -172,7 +182,7 @@ export function buildSchedules(state) {
         if (!activeInYear(row, owner, y)) continue;
         const jm = julyMonthIndex(plan, y);
         if (jm == null) continue; // partial first year without a firing July
-        const v = realAmountAt(row, jm, cpi);
+        const v = realAmountAt(row, jm, cpi, awote);
         target[jm] += v;
         if (totals) totals[y] += v;
       }

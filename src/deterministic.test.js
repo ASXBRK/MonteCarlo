@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { projectPlan, assetMonthlyRate, assetReturnComponents } from "./deterministic.js";
+import { hydrate } from "./planState.js";
+import { PROFILES } from "./profiles.js";
 
 // Minimal v3-shaped state factory. Custom allocations pin exact
 // returns without depending on profile values.
@@ -325,6 +327,76 @@ describe("output view reconciliation (C1)", () => {
     const b = projectPlan(mk("table"));
     expect(Array.from(b.monthly.combined)).toEqual(Array.from(a.monthly.combined));
     expect(b.yearly[5].oneOffsNet).toBe(a.yearly[5].oneOffsNet);
+  });
+});
+
+// --- Phase D1: opening losses + migration gates -------------------------------
+
+describe("D1 — opening capital losses and migration gates", () => {
+  it("opening carry-forward losses offset a year-1 gain (known value)", () => {
+    // Post-reform. $10k one-off sale slice: value 100k, pool 20k →
+    // f = 0.1 → gain 10,000 − 2,000 = 8,000. Opening losses 5,000 →
+    // taxable 3,000. Zero income → 30% floor: 900 (no Medicare below
+    // the threshold), paid July of year 1.
+    const s = mkState({
+      endAge: 42,
+      start: { year: 2027, month: 7 },
+      plan: {
+        client: {
+          currentAge: 40,
+          taxProfile: { residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 5000 },
+        },
+      },
+      assets: [mkAsset({ allocation: growthOnlyAlloc(), cgtAsset: true, costBase: 20000 })],
+      cashflows: {
+        lumpSums: [{ id: "l1", assetId: "a1", amount: 10000, direction: "in", age: 40, source: "input" }],
+      },
+    });
+    // direction out for a sale:
+    s.cashflows.lumpSums[0].direction = "out";
+    const out = projectPlan(s);
+    expect(out.yearly[1].taxDetail.cgt).toBeCloseTo(0.3 * 3000, 6);
+  });
+
+  it("hydrated v4 blobs project bit-identically to native v5 states (gate)", () => {
+    const rows = {
+      income: [{ id: "i1", label: "Salary", owner: "client", amount: 100000, frequency: "annual", fromAge: 40, toAge: 50, indexed: true }],
+      expenses: [{ id: "e1", label: "Living", amount: 4000, frequency: "monthly", fromAge: 40, toAge: 55, indexed: false }],
+    };
+    const v4 = {
+      schemaVersion: 4,
+      plan: {
+        household: "single",
+        client: { currentAge: 40, taxProfile: { residency: "resident", medicareExempt: false, centrelinkEligible: false } },
+        partner: null,
+        endAge: 55,
+        start: { year: 2026, month: 7 },
+      },
+      assets: [{ id: "a1", name: "A1", include: true, owner: "client", distributions: "reinvest",
+                 balance: 100000, allocation: { mode: "custom", incomePct: 3, growthPct: 3, frankingPct: 0, volBasis: "Balanced" },
+                 icrPct: 0, cgtAsset: false, costBase: null }],
+      cashflows: { ...rows, contributions: [], withdrawals: [], lumpSums: [] },
+      settings: { surplus: { mode: "spend", assetId: null }, fundingOrder: ["a1"] },
+      display: { units: "real" },
+      assumptions: { cpi: 0.025 },
+    };
+    const migrated = hydrate(JSON.stringify(v4), PROFILES);
+    expect(migrated).not.toBeNull();
+    const native = mkState({
+      endAge: 55,
+      cashflows: {
+        income: [{ ...rows.income[0], indexed: undefined, indexBasis: "cpi", indexExtraPct: 0 }],
+        expenses: [{ ...rows.expenses[0], indexed: undefined, indexBasis: "none", indexExtraPct: 0 }],
+      },
+    });
+    const a = projectPlan(migrated);
+    const b = projectPlan(native);
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+    for (let y = 0; y < a.yearly.length; y++) {
+      expect(a.yearly[y].tax).toBe(b.yearly[y].tax);
+      expect(a.yearly[y].income).toBe(b.yearly[y].income);
+      expect(a.yearly[y].expenses).toBe(b.yearly[y].expenses);
+    }
   });
 });
 
