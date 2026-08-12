@@ -34,7 +34,9 @@ const els = {
   planBar: $("planBar"),
   assets: $("assets"),
   addAssetBtn: $("addAssetBtn"),
-  cashflows: $("cashflows"),
+  incomeSection: $("incomeSection"),
+  expensesSection: $("expensesSection"),
+  investSection: $("investSection"),
   settingsPanel: $("settingsPanel"),
   summaryStrip: $("summaryStrip"),
   chartNote: document.querySelector('[data-role="chartNote"]'),
@@ -578,35 +580,89 @@ function lumpSumRowHTML(ls) {
   `;
 }
 
+// Fact-find empty-state treatment: a section (or subsection) with no
+// rows renders collapsed to a single row — header + Add button —
+// so a portfolio-only scenario stays visually simple. Adding the
+// first row expands it.
+
+function addRowBtn(kind, label) {
+  return `<button class="add-row-btn" type="button" data-action="add-row" data-kind="${kind}">+ ${label}</button>`;
+}
+
+// Top-level fact-find section (Income / Expenses): heading with an
+// inline Add button when empty; heading + panel of rows otherwise.
+function ffSectionHTML(title, kind, addLabel, rowsHTML, helperHTML = "") {
+  const empty = rowsHTML === "";
+  if (empty) {
+    return `
+      <div class="ff-section empty">
+        <div class="ff-head">
+          <h2 class="section-heading">${title}</h2>
+          ${addRowBtn(kind, addLabel)}
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="ff-section">
+      <div class="ff-head"><h2 class="section-heading">${title}</h2></div>
+      <div class="cf-panel">
+        <div class="cf-section">
+          ${helperHTML}
+          ${rowsHTML}
+          ${addRowBtn(kind, addLabel)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Subsection inside the Investment cashflows panel: single compact
+// row when empty; title + rows + Add otherwise.
+function ffSubsectionHTML(title, kind, addLabel, rowsHTML) {
+  if (rowsHTML === "") {
+    return `
+      <div class="cf-section cf-empty">
+        <div class="cf-empty-row">
+          <span class="cf-section-title">${title}</span>
+          ${addRowBtn(kind, addLabel)}
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">${title}</div>
+      ${rowsHTML}
+      ${addRowBtn(kind, addLabel)}
+    </div>
+  `;
+}
+
 function renderCashflows() {
   const cf = state.cashflows;
-  els.cashflows.innerHTML = `
-    <div class="cf-panel">
-      <div class="cf-section">
-        <div class="cf-section-title">Income</div>
-        <p class="helper-text">Enter income before tax. Tax is calculated from a later phase.</p>
-        ${cf.income.map(incomeRowHTML).join("")}
-        <button class="add-row-btn" type="button" data-action="add-row" data-kind="income">+ Add income</button>
-      </div>
-      <div class="cf-section">
-        <div class="cf-section-title">Expenses</div>
-        ${cf.expenses.map(expenseRowHTML).join("")}
-        <button class="add-row-btn" type="button" data-action="add-row" data-kind="expenses">+ Add expense</button>
-      </div>
-      <div class="cf-section">
-        <div class="cf-section-title">Contributions</div>
-        ${cf.contributions.map((c) => contributionRowHTML("contributions", c)).join("")}
-        <button class="add-row-btn" type="button" data-action="add-row" data-kind="contributions">+ Add contribution</button>
-      </div>
-      <div class="cf-section">
-        <div class="cf-section-title">Withdrawals</div>
-        ${cf.withdrawals.map((w) => contributionRowHTML("withdrawals", w)).join("")}
-        <button class="add-row-btn" type="button" data-action="add-row" data-kind="withdrawals">+ Add withdrawal</button>
-      </div>
-      <div class="cf-section">
-        <div class="cf-section-title">Lump sums</div>
-        ${cf.lumpSums.map(lumpSumRowHTML).join("")}
-        <button class="add-row-btn" type="button" data-action="add-row" data-kind="lumpSums">+ Add lump sum</button>
+
+  els.incomeSection.innerHTML = ffSectionHTML(
+    "Income", "income", "Add income",
+    cf.income.map(incomeRowHTML).join(""),
+    `<p class="helper-text">Enter income before tax. Tax is calculated from a later phase.</p>`
+  );
+
+  els.expensesSection.innerHTML = ffSectionHTML(
+    "Expenses", "expenses", "Add expense",
+    cf.expenses.map(expenseRowHTML).join("")
+  );
+
+  els.investSection.innerHTML = `
+    <div class="ff-section">
+      <div class="ff-head"><h2 class="section-heading">Investment cashflows</h2></div>
+      <div class="cf-panel">
+        ${ffSubsectionHTML("Contributions", "contributions", "Add contribution",
+          cf.contributions.map((c) => contributionRowHTML("contributions", c)).join(""))}
+        ${ffSubsectionHTML("Withdrawals", "withdrawals", "Add withdrawal",
+          cf.withdrawals.map((w) => contributionRowHTML("withdrawals", w)).join(""))}
+        ${ffSubsectionHTML("One-off amounts", "lumpSums", "Add one-off amount",
+          cf.lumpSums.map(lumpSumRowHTML).join(""))}
       </div>
     </div>
   `;
@@ -698,7 +754,8 @@ els.settingsPanel.addEventListener("click", (e) => {
 
 // --- field mutation (delegated over assets + cashflows) ---------------------
 
-for (const container of [els.assets, els.cashflows]) {
+const CF_MOUNTS = [els.incomeSection, els.expensesSection, els.investSection];
+for (const container of [els.assets, ...CF_MOUNTS]) {
   container.addEventListener("input", (e) => applyFieldEdit(e.target, false));
   container.addEventListener("change", (e) => applyFieldEdit(e.target, true));
 }
@@ -885,7 +942,7 @@ function updateFyLabels(row, kind) {
 }
 
 function refreshAssetSelects() {
-  for (const sel of els.cashflows.querySelectorAll('[data-field="assetId"]')) {
+  for (const sel of els.investSection.querySelectorAll('[data-field="assetId"]')) {
     const current = sel.value;
     sel.innerHTML = assetOptions(current);
   }
@@ -988,7 +1045,7 @@ function switchAllocMode(a, mode) {
   allocMemory.set(a.id, mem);
 }
 
-els.cashflows.addEventListener("click", (e) => {
+function onCashflowSectionClick(e) {
   const target = e.target.closest("[data-action]");
   if (!target) return;
   const { action, kind, cfid } = target.dataset;
@@ -1010,7 +1067,11 @@ els.cashflows.addEventListener("click", (e) => {
     renderCashflows();
     renderSummaryStrip();
   }
-});
+}
+
+for (const mount of CF_MOUNTS) {
+  mount.addEventListener("click", onCashflowSectionClick);
+}
 
 els.addAssetBtn.addEventListener("click", () => {
   const a = createAsset(state.plan, state.assets, PROFILES);
