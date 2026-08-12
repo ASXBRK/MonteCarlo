@@ -33,7 +33,7 @@ function mkState(over = {}) {
       surplus: over.surplus ?? { mode: "spend", assetId: null },
       fundingOrder: over.fundingOrder ?? assets.filter((a) => a.include).map((a) => a.id),
     },
-    assumptions: { cpi: over.cpi ?? 0.025 },
+    assumptions: { cpi: over.cpi ?? 0.025, bracketMode: over.bracketMode ?? "indexed" },
     display: { units: "real" },
   };
 }
@@ -215,5 +215,206 @@ describe("aggregation + partial first year", () => {
     for (let i = 1; i < out.yearly.length; i++) {
       expect(out.yearly[i].openingBalance).toBeCloseTo(out.yearly[i - 1].closingBalance, 9);
     }
+  });
+});
+
+// --- Phase B.1: tax through the engine ---------------------------------------
+
+// A zero-real asset with NO income component (all growth) — keeps
+// distributions out of tax scenarios that don't want them.
+const growthOnlyAlloc = (cpi = 0.025) =>
+  ({ mode: "custom", incomePct: 0, growthPct: cpi * 100, frankingPct: 0, volBasis: "Balanced" });
+
+const salary = (amount, over = {}) => ({
+  id: "sal", label: "Salary", owner: "client", amount, frequency: "monthly",
+  fromAge: 40, toAge: 120, indexed: true, assetId: null, ...over,
+});
+
+describe("tax — regression guards", () => {
+  it("portfolio-only, cgtAsset:false, no income → zero tax everywhere", () => {
+    const s = mkState({ endAge: 60 });
+    const out = projectPlan(s);
+    for (const r of out.yearly) {
+      expect(r.tax).toBe(0);
+      expect(r.taxDetail.cgt).toBe(0);
+    }
+    expect(out.accruedCgtAtEnd).toBe(0);
+    // And Phase B balance behaviour is untouched.
+    const rm = assetMonthlyRate(s.assets[0], 0.025);
+    expect(out.monthly.combined[out.schedule.months])
+      .toBeCloseTo(100000 * Math.pow(1 + rm, out.schedule.months), 4);
+  });
+
+  it("reinvest distributions leave balances identical for a tax-free person", () => {
+    // zeroReal alloc has a 2.5% income component; reinvest mode keeps
+    // the full-rate growth path, so the balance must stay put.
+    const s = mkState({ endAge: 49, assets: [mkAsset({ allocation: zeroRealAlloc() })] });
+    const out = projectPlan(s);
+    expect(out.monthly.combined[out.schedule.months]).toBeCloseTo(100000, 6);
+    for (const r of out.yearly) expect(r.tax).toBe(0);
+  });
+});
+
+describe("tax — income tax and franking", () => {
+  it("salary income tax accrues in-year (hand-checked FY2026-27 figure)", () => {
+    // $100k salary FY2026-27: 26,800 × 0.15 + 55,000 × 0.30 = 20,520;
+    // Medicare 2,000; LITO 0 → $22,520, spread across the year.
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ allocation: growthOnlyAlloc() })],
+      cashflows: { income: [salary(100000 / 12)] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].tax).toBeCloseTo(22520, 4);
+    expect(out.yearly[0].taxDetail.client.incomeTax).toBeCloseTo(22520, 4);
+    // FY2027-28 table: 26,800 × 0.14 + 55,000 × 0.30 = 20,252 + 2,000.
+    expect(out.yearly[1].tax).toBeCloseTo(22252, 4);
+    // Surplus (spend mode) absorbs the tax — no funding sales needed.
+    expect(out.yearly[0].deficitFundedFromAssets).toBe(0);
+  });
+
+  it("fully-franked distributions to a low-income person refund the credit", () => {
+    // Constant $100k balance (zero real, reinvest), 2.5% income fully
+    // franked → $2,500/yr distributions, credits 2,500 × 30/70 =
+    // 1,071.43 refunded → tax is negative.
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({
+        allocation: { mode: "custom", incomePct: 2.5, growthPct: 0, frankingPct: 100, volBasis: "Balanced" },
+      })],
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].taxDetail.frankingCredits).toBeCloseTo(2500 * (30 / 70), 2);
+    expect(out.yearly[0].tax).toBeCloseTo(-2500 * (30 / 70), 2);
+  });
+
+  it("paid-as-cash distributions strip income from growth and feed the household", () => {
+    // Nominal-flat asset (income 2.5%, growth 0) paying out: real
+    // balance decays by CPI; the payout lands as household income.
+    const cash = mkState({
+      endAge: 41,
+      assets: [mkAsset({ allocation: zeroRealAlloc(), distributions: "cash" })],
+    });
+    const out = projectPlan(cash);
+    expect(out.yearly[0].closingBalance).toBeCloseTo(100000 / 1.025, 2);
+    expect(out.yearly[0].income).toBeGreaterThan(2300);
+    expect(out.yearly[0].income).toBeLessThan(2520);
+    // Reinvest mode: same asset holds its real value instead.
+    const reinvest = mkState({ endAge: 41, assets: [mkAsset({ allocation: zeroRealAlloc() })] });
+    expect(projectPlan(reinvest).yearly[0].closingBalance).toBeCloseTo(100000, 6);
+  });
+
+  it("bracket modes match in the first two FYs and diverge by year 20", () => {
+    const mk = (bracketMode) => mkState({
+      endAge: 60,
+      bracketMode,
+      assets: [mkAsset({ allocation: growthOnlyAlloc() })],
+      cashflows: { income: [salary(100000 / 12)] },
+    });
+    const indexed = projectPlan(mk("indexed"));
+    const frozen = projectPlan(mk("frozen"));
+    expect(frozen.yearly[0].tax).toBeCloseTo(indexed.yearly[0].tax, 6); // FY2026-27
+    expect(frozen.yearly[1].tax).toBeCloseTo(indexed.yearly[1].tax, 6); // FY2027-28
+    expect(frozen.yearly[20].tax).toBeGreaterThan(indexed.yearly[20].tax + 1000);
+  });
+});
+
+describe("tax — CGT timing and pools through the engine", () => {
+  it("deficit-funding sales in year t are taxed as a July year-t+1 outflow", () => {
+    // Start July 2027 (post-reform throughout). $500k asset, pool
+    // $250k, zero real growth, no distributions. $10k/mo expenses
+    // force sales: each $10k sale realises a $5k gain (pool ratio ½)
+    // → year-0 gains $60k. CGT = max(marginal(60k), 30%×60k) +
+    // Medicare = 18,000 + 1,200 = 19,200, paid in July of year 1.
+    const s = mkState({
+      endAge: 42,
+      start: { year: 2027, month: 7 },
+      assets: [mkAsset({ allocation: growthOnlyAlloc(), balance: 500000, cgtAsset: true, costBase: 250000 })],
+      cashflows: { expenses: [cf({ assetId: null, amount: 10000 })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].tax).toBe(0); // no income tax; CGT not yet due
+    expect(out.yearly[1].taxDetail.cgt).toBeCloseTo(19200, 2);
+    expect(out.yearly[1].tax).toBeCloseTo(19200, 2); // no other tax that year
+  });
+
+  it("the final year's CGT lands in accruedCgtAtEnd, not the cashflow", () => {
+    // Reinvested distributions uplift the pool: $100k constant balance
+    // (zero real), 2.5% income reinvested, pool seeded $50k. A one-off
+    // sale of the lot in July of the final year has pool 50,000 + 13
+    // months × 208.33 = 52,708.33 → gain 47,291.67. The year's only
+    // distribution is July's $208.33 (the sale empties the asset), so
+    // the 30% floor (14,187.50) beats the marginal figure and Medicare
+    // runs on gain + that income: 2% × 47,500 = 950. Accrued
+    // 15,137.50, unpayable inside the projection.
+    const s = mkState({
+      endAge: 41,
+      start: { year: 2027, month: 7 },
+      assets: [mkAsset({ allocation: zeroRealAlloc(), cgtAsset: true, costBase: 50000 })],
+      cashflows: {
+        lumpSums: [{ id: "l1", assetId: "a1", amount: 100000, direction: "out", age: 41, source: "input" }],
+      },
+    });
+    const out = projectPlan(s);
+    const dist = 100000 * 0.025 / 12;
+    const gain = 100000 - (50000 + 13 * dist);
+    const expected = 0.30 * gain + 0.02 * (gain + dist);
+    expect(out.accruedCgtAtEnd).toBeCloseTo(expected, 2);
+    expect(expected).toBeCloseTo(15137.5, 1);
+    for (const r of out.yearly) expect(r.taxDetail.cgt).toBe(0); // nothing paid in-projection
+  });
+
+  it("pre-reform sales get the 50% discount; deemed reacquisition erases history", () => {
+    // FY2026-27 sale: $1k/mo withdrawals from a zero-real asset with
+    // pool ratio ½ realise $500/mo gains, discounted to $250 (all old
+    // money) → $3k taxable on top of a $100k salary. 2026-27 table:
+    // 3,000 × 0.30 + Medicare 60 = 960, paid July 2027 (year 1).
+    const s = mkState({
+      endAge: 42,
+      assets: [mkAsset({ allocation: growthOnlyAlloc(), cgtAsset: true, costBase: 50000 })],
+      cashflows: {
+        income: [salary(100000 / 12)],
+        withdrawals: [cf({ assetId: "a1", amount: 1000, fromAge: 40, toAge: 40 })],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[1].taxDetail.cgt).toBeCloseTo(960, 2);
+
+    // Deemed reacquisition: pool 100k on a 100k asset crossing 1 July
+    // 2027 untouched, then sold at unchanged real value → zero gain.
+    const s2 = mkState({
+      endAge: 42,
+      assets: [mkAsset({ allocation: growthOnlyAlloc(), cgtAsset: true, costBase: 20000 })],
+      cashflows: { withdrawals: [cf({ assetId: "a1", amount: 1000, fromAge: 41, toAge: 42 })] },
+    });
+    const out2 = projectPlan(s2);
+    for (const r of out2.yearly) expect(r.taxDetail.cgt).toBe(0);
+    expect(out2.accruedCgtAtEnd).toBe(0);
+  });
+
+  it("capital losses carry forward against later gains", () => {
+    // Year 0 (post-reform): sell from an asset whose pool exceeds its
+    // value → loss. Year 1: sell from a gain asset — the loss offsets
+    // the gain before tax.
+    const lossAsset = mkAsset({ id: "lossy", allocation: growthOnlyAlloc(), balance: 50000, cgtAsset: true, costBase: 100000 });
+    const gainAsset = mkAsset({ id: "gainy", allocation: growthOnlyAlloc(), balance: 100000, cgtAsset: true, costBase: 0 });
+    const s = mkState({
+      endAge: 42,
+      start: { year: 2027, month: 7 },
+      assets: [lossAsset, gainAsset],
+      fundingOrder: ["lossy", "gainy"],
+      cashflows: {
+        income: [salary(100000 / 12)],
+        withdrawals: [
+          cf({ id: "w1", assetId: "lossy", amount: 1000, fromAge: 40, toAge: 40 }),  // −$1k gain/mo → −12k
+          cf({ id: "w2", assetId: "gainy", amount: 500, fromAge: 41, toAge: 41 }),   // +$500 gain/mo → +6k
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    // Year 0's 12k loss fully shelters year 1's 6k gain.
+    expect(out.yearly[1].taxDetail.cgt).toBeCloseTo(0, 8); // year 0 assessed: loss, no tax
+    expect(out.yearly[2].taxDetail.cgt).toBeCloseTo(0, 8); // year 1 assessed: gain sheltered
+    expect(out.accruedCgtAtEnd).toBeCloseTo(0, 8);
   });
 });

@@ -123,6 +123,12 @@ export function buildSchedules(state) {
 
   const income = new Float64Array(months);
   const expenses = new Float64Array(months);
+  // Per-owner income split — the tax layer attributes income rows to
+  // the person who owns them. income = incomeByOwner.client + .partner.
+  const incomeByOwner = {
+    client: new Float64Array(months),
+    partner: plan.partner ? new Float64Array(months) : null,
+  };
 
   const includedIds = new Set(state.assets.filter((a) => a.include).map((a) => a.id));
   const assetFlows = {};
@@ -161,7 +167,13 @@ export function buildSchedules(state) {
     }
   };
 
-  for (const row of state.cashflows.income) applyRegular(row, row.owner, income);
+  for (const row of state.cashflows.income) {
+    applyRegular(row, row.owner, income);
+    const ownerArr = row.owner === "partner" && incomeByOwner.partner
+      ? incomeByOwner.partner
+      : incomeByOwner.client;
+    applyRegular(row, row.owner, ownerArr);
+  }
   for (const row of state.cashflows.expenses) applyRegular(row, "client", expenses);
 
   for (const row of state.cashflows.contributions) {
@@ -195,6 +207,7 @@ export function buildSchedules(state) {
     partnerAges,
     yearOfMonth,
     income,
+    incomeByOwner,
     expenses,
     assetFlows,
   };

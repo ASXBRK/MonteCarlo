@@ -1,0 +1,127 @@
+import { describe, it, expect } from "vitest";
+import { assessPerson, litoAmount, bracketSettings, FRANKING_RATE } from "./annual.js";
+
+describe("litoAmount (legislated schedule)", () => {
+  it("matches the published taper points", () => {
+    expect(litoAmount(0)).toBe(700);
+    expect(litoAmount(37500)).toBe(700);
+    expect(litoAmount(45000)).toBeCloseTo(325, 8);   // 700 − 7500×5%
+    expect(litoAmount(50000)).toBeCloseTo(250, 8);   // 325 − 5000×1.5%
+    expect(litoAmount(66667)).toBeCloseTo(0, 1);     // cut-out
+    expect(litoAmount(80000)).toBe(0);
+  });
+});
+
+describe("bracketSettings (decision 6)", () => {
+  it("selects each FY's own legislated table up to 2027-28", () => {
+    expect(bracketSettings(2025, "indexed", 0.025).key).toBe("2025-26");
+    expect(bracketSettings(2026, "indexed", 0.025).key).toBe("2026-27");
+    expect(bracketSettings(2027, "indexed", 0.025).key).toBe("2027-28");
+    expect(bracketSettings(2045, "indexed", 0.025).key).toBe("2027-28");
+  });
+
+  it("indexed mode never scales; frozen mode scales after FY2027-28", () => {
+    expect(bracketSettings(2047, "indexed", 0.025).k).toBe(1);
+    expect(bracketSettings(2026, "frozen", 0.025).k).toBe(1);
+    expect(bracketSettings(2027, "frozen", 0.025).k).toBe(1);
+    expect(bracketSettings(2047, "frozen", 0.025).k).toBeCloseTo(Math.pow(1.025, 20), 10);
+  });
+});
+
+describe("assessPerson — known values", () => {
+  it("$100k salary, FY2027-28, no investments (hand-computed)", () => {
+    // Brackets 2027-28: 0–18,200 @ 0%; 18,200–45,000 @ 14% = 26,800 ×
+    // 0.14 = $3,752; 45,000–100,000 @ 30% = 55,000 × 0.30 = $16,500.
+    // Income tax = $20,252. Medicare = 2% × 100,000 = $2,000 (well
+    // above the shading band). LITO = $0 (income > $66,667 cut-out).
+    // Net = 20,252 + 2,000 = $22,252.
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    expect(a.incomeTax).toBeCloseTo(20252, 6);
+    expect(a.medicare).toBeCloseTo(2000, 6);
+    expect(a.lito).toBe(0);
+    expect(a.netIncomeTax).toBeCloseTo(22252, 6);
+    expect(a.cgtTax).toBe(0);
+  });
+
+  it("fully-franked $7,000 distribution, zero other income → full-credit refund", () => {
+    const a = assessPerson({
+      fyStartYear: 2027,
+      distributions: { franked: 7000, unfranked: 0 },
+    });
+    // Taxable = 7,000 + 3,000 gross-up = 10,000 → tax-free threshold,
+    // no Medicare. Refundable credits come straight back.
+    expect(a.frankingCredits).toBeCloseTo(7000 * FRANKING_RATE, 8);
+    expect(a.incomeTax).toBe(0);
+    expect(a.netIncomeTax).toBeCloseTo(-3000, 6);
+  });
+
+  it("Medicare shading-in band", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 30000 });
+    expect(a.medicare).toBeCloseTo((30000 - 28011) * 0.10, 6);
+  });
+
+  it("deductions reduce taxable income; excess floors at zero", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 50000, deductions: 5000 });
+    const b = assessPerson({ fyStartYear: 2027, ordinaryIncome: 45000 });
+    expect(a.incomeTax).toBeCloseTo(b.incomeTax, 8);
+    const c = assessPerson({ fyStartYear: 2027, ordinaryIncome: 1000, deductions: 50000 });
+    expect(c.taxableIncome).toBe(0);
+    expect(c.netIncomeTax).toBe(0);
+  });
+});
+
+describe("assessPerson — bracket modes over time", () => {
+  const at = (fyStartYear, bracketMode) =>
+    assessPerson({ fyStartYear, bracketMode, cpi: 0.025, ordinaryIncome: 100000 }).netIncomeTax;
+
+  it("equal in FY2026-27 and FY2027-28, higher under frozen by year 20", () => {
+    expect(at(2026, "frozen")).toBeCloseTo(at(2026, "indexed"), 8);
+    expect(at(2027, "frozen")).toBeCloseTo(at(2027, "indexed"), 8);
+    expect(at(2046, "indexed")).toBeCloseTo(at(2027, "indexed"), 8); // real-constant
+    expect(at(2046, "frozen")).toBeGreaterThan(at(2046, "indexed") + 1000); // bracket creep bites
+  });
+});
+
+describe("assessPerson — CGT", () => {
+  it("post-reform 30% floor beats a low marginal rate", () => {
+    // Zero other income: marginal tax on a $10k gain is $0 (below the
+    // tax-free threshold) so the 30% minimum applies.
+    const a = assessPerson({ fyStartYear: 2027, netCapitalGain: 10000 });
+    expect(a.cgtTax).toBeCloseTo(3000, 6);
+  });
+
+  it("pre-reform has no floor", () => {
+    const a = assessPerson({ fyStartYear: 2026, netCapitalGain: 10000 });
+    expect(a.cgtTax).toBe(0); // below threshold, no minimum tax
+  });
+
+  it("marginal + Medicare by differencing when above the floor", () => {
+    // $100k base, $50k gain, FY2027-28: the gain spans 100k→150k, so
+    // marginal on the gain = 35,000 × 0.30 + 15,000 × 0.37 = 16,050
+    // (above the 15,000 floor); Medicare on the gain = 2% × 50,000 =
+    // 1,000. Total 17,050.
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, netCapitalGain: 50000 });
+    expect(a.cgtTax).toBeCloseTo(17050, 6);
+  });
+
+  it("losses carry forward and offset later gains, never ordinary income", () => {
+    const lossYear = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, netCapitalGain: -5000 });
+    expect(lossYear.cgtTax).toBe(0);
+    expect(lossYear.lossCarryFwd).toBe(5000);
+    expect(lossYear.netIncomeTax).toBeCloseTo(22252, 6); // untouched by the loss
+
+    const gainYear = assessPerson({
+      fyStartYear: 2028, ordinaryIncome: 100000,
+      netCapitalGain: 8000, capitalLossCarryFwd: lossYear.lossCarryFwd,
+    });
+    expect(gainYear.taxableGain).toBe(3000);
+    expect(gainYear.lossCarryFwd).toBe(0);
+  });
+
+  it("LITO withdraws on taxable income including the gain", () => {
+    const noGain = assessPerson({ fyStartYear: 2027, ordinaryIncome: 37000 });
+    const withGain = assessPerson({ fyStartYear: 2027, ordinaryIncome: 37000, netCapitalGain: 20000 });
+    expect(noGain.lito).toBeCloseTo(700, 6);
+    expect(withGain.lito).toBeLessThan(700);
+  });
+});
