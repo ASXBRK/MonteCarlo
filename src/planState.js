@@ -297,6 +297,73 @@ export function createLifestyleAsset(plan, existing = []) {
 export const isLifestyle = (a) => a?.class === "lifestyle";
 export const isFinancial = (a) => !isLifestyle(a);
 
+// --- properties (D4) ---------------------------------------------------------
+
+export const PROPERTY_STATES = ["NSW", "VIC", "QLD", "WA", "SA", "TAS", "ACT", "NT"];
+export const PROPERTY_TYPES = ["ppr", "holiday", "investment"];
+
+export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
+  return {
+    id: uid("pr"),
+    name: `Property ${existing.length + 1}`,
+    owner: "client",
+    state: "NSW",
+    propertyType: "ppr",     // ppr | holiday | investment
+    status: "owned",         // owned | planned
+    // owned:
+    currentValue: 0,
+    acquisitionDate: null,   // ISO date (past); drives CGT regime + gearing rules
+    costBase: 0,
+    // planned:
+    priceToday: 0,
+    purchaseAge: plan.client.currentAge + 1,
+    lvrPct: 80,
+    firstHomeBuyer: false,
+    newBuild: false,
+    purchaseCostsPct: 2,     // transfer/legal, overridable
+    dutyOverride: null,      // $ | null
+    // both:
+    growthPct: defaultGrowthPct, // nominal % p.a.
+    // investment only (D1 indexation controls on each):
+    rent: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
+    expenses: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
+    expensesDeductible: true,
+  };
+}
+
+export function clampProperty(p, plan) {
+  const flow = (f) => ({ amount: clampNumber(f?.amount, 0), ...clampIndexation(f ?? {}) });
+  return {
+    id: typeof p.id === "string" && p.id ? p.id : uid("pr"),
+    name: typeof p.name === "string" && p.name.trim() ? p.name : "Property",
+    owner: ["client", "partner", "joint"].includes(p.owner) && (p.owner === "client" || plan.partner)
+      ? p.owner : "client",
+    state: PROPERTY_STATES.includes(p.state) ? p.state : "NSW",
+    propertyType: PROPERTY_TYPES.includes(p.propertyType) ? p.propertyType : "ppr",
+    status: p.status === "planned" ? "planned" : "owned",
+    currentValue: clampNumber(p.currentValue, 0),
+    acquisitionDate: typeof p.acquisitionDate === "string" && !Number.isNaN(new Date(p.acquisitionDate).getTime())
+      ? p.acquisitionDate : null,
+    costBase: clampNumber(p.costBase, 0),
+    priceToday: clampNumber(p.priceToday, 0),
+    purchaseAge: clampInt(p.purchaseAge ?? plan.client.currentAge + 1, plan.client.currentAge, plan.endAge),
+    lvrPct: clampNumber(p.lvrPct ?? 80, 0, 100),
+    firstHomeBuyer: p.firstHomeBuyer === true,
+    newBuild: p.newBuild === true,
+    purchaseCostsPct: clampNumber(p.purchaseCostsPct ?? 2, 0, 10),
+    dutyOverride: p.dutyOverride == null ? null : clampNumber(p.dutyOverride, 0),
+    growthPct: clampNumber(p.growthPct ?? 5, -10, 30),
+    rent: flow(p.rent),
+    expenses: flow(p.expenses),
+    expensesDeductible: p.expensesDeductible !== false,
+  };
+}
+
+export function normaliseProperties(properties, plan) {
+  if (!Array.isArray(properties)) return [];
+  return properties.map((p) => clampProperty(p, plan));
+}
+
 // --- liabilities (D3) --------------------------------------------------------
 
 export const LIABILITY_TYPES = ["mortgage", "investment", "personal", "other"];
@@ -318,9 +385,13 @@ export function createLiability(plan, existing = []) {
   };
 }
 
-export function clampLiability(l, plan, assets) {
+export function clampLiability(l, plan, assets, properties = []) {
   const financialIds = new Set(assets.filter((a) => isFinancial(a)).map((a) => a.id));
-  const allIds = new Set(assets.map((a) => a.id));
+  // linkedAssetId may reference any asset OR a property (D4).
+  const allIds = new Set([
+    ...assets.map((a) => a.id),
+    ...(Array.isArray(properties) ? properties.map((p) => p.id) : []),
+  ]);
   const type = LIABILITY_TYPES.includes(l.type) ? l.type : "mortgage";
   return {
     id: typeof l.id === "string" && l.id ? l.id : uid("lb"),
@@ -339,9 +410,9 @@ export function clampLiability(l, plan, assets) {
   };
 }
 
-export function normaliseLiabilities(liabilities, plan, assets) {
+export function normaliseLiabilities(liabilities, plan, assets, properties = []) {
   if (!Array.isArray(liabilities)) return [];
-  return liabilities.map((l) => clampLiability(l, plan, assets));
+  return liabilities.map((l) => clampLiability(l, plan, assets, properties));
 }
 
 function nextAssetNumber(existing) {
@@ -368,12 +439,13 @@ export function defaultState(profiles = {}, now = new Date()) {
       lumpSums: [],
     },
     liabilities: [],
+    properties: [],
     settings: {
       surplus: { mode: "spend", assetId: null },
       fundingOrder: [asset.id],
     },
     display: { units: "real", reportPeriod: { from: null, to: null } },
-    assumptions: { cpi: 0.025, awote: 0.035, bracketMode: "indexed" },
+    assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed" },
   };
 }
 
@@ -538,8 +610,9 @@ export function clampAllToPlan(state) {
     lumpSums: state.cashflows.lumpSums.map((l) => clampLumpSum(l, plan)),
   };
   const settings = normaliseSettings(state.settings, assets);
-  const liabilities = normaliseLiabilities(state.liabilities, plan, assets);
-  return { ...state, plan, assets, cashflows, settings, liabilities };
+  const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
+  const properties = normaliseProperties(state.properties, plan);
+  return { ...state, plan, assets, cashflows, settings, liabilities, properties };
 }
 
 export function normaliseSettings(settings, assets) {
@@ -745,7 +818,8 @@ export function hydrate(json, profiles = {}) {
         withdrawals: hydrateCashflows(cf.withdrawals, plan, assetIds),
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
       },
-      liabilities: normaliseLiabilities(raw.liabilities, plan, assets),
+      liabilities: normaliseLiabilities(raw.liabilities, plan, assets, raw.properties),
+      properties: normaliseProperties(raw.properties, plan),
       settings: normaliseSettings(raw.settings, assets),
       display: {
         units: raw.display?.units === "nominal" ? "nominal" : "real",
@@ -754,6 +828,7 @@ export function hydrate(json, profiles = {}) {
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,
         awote: clampNumber(raw.assumptions?.awote ?? 0.035, 0, 0.2),
+        mortgageRate: clampNumber(raw.assumptions?.mortgageRate ?? 0.06, 0, 0.3),
         bracketMode: raw.assumptions?.bracketMode === "frozen" ? "frozen" : "indexed",
       },
     };

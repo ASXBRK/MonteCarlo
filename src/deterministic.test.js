@@ -798,3 +798,184 @@ describe("D3 — liabilities", () => {
     }
   });
 });
+
+// --- Phase D4: property, purchase events, gearing ------------------------------
+
+describe("D4 — property", () => {
+  // Growth-only allocation: no distribution income muddying the tax
+  // assertions; still zero-real so balances are predictable.
+  const bigCash = () => mkAsset({ allocation: growthOnlyAlloc(), balance: 3000000 });
+  const prop = (over = {}) => ({
+    id: "p1", name: "Investment unit", owner: "client", state: "NSW",
+    propertyType: "investment", status: "owned",
+    currentValue: 800000, acquisitionDate: "2020-01-15", costBase: 600000,
+    priceToday: 0, purchaseAge: 41, lvrPct: 80, firstHomeBuyer: false, newBuild: false,
+    purchaseCostsPct: 2, dutyOverride: null, growthPct: 5,
+    rent: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
+    expenses: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
+    expensesDeductible: true,
+    ...over,
+  });
+  const withProps = (properties, over = {}) => ({
+    ...mkState({ assets: [bigCash()], ...over }),
+    properties,
+    liabilities: over.liabilities ?? [],
+  });
+
+  it("owned property value grows at Fisher(growthPct) and feeds net assets", () => {
+    const out = projectPlan(withProps([prop({ propertyType: "ppr" })], { endAge: 50 }));
+    const rm = Math.pow(1.05 / 1.025, 1 / 12) - 1;
+    const n = out.schedule.months;
+    expect(out.yearly.at(-1).properties.p1.value)
+      .toBeCloseTo(800000 * Math.pow(1 + rm, n), 2);
+    for (const r of out.yearly) {
+      expect(r.netAssets).toBeCloseTo(r.closingBalance + r.propertyClosing - r.liabilitiesClosing, 6);
+    }
+    // PPR: no rent, no deductions, no tax.
+    for (const r of out.yearly) expect(r.tax).toBe(0);
+  });
+
+  it("purchase event: grown price, duty, loan, settlement cash, cost base seed", () => {
+    // Planned NSW purchase at age 42 (July of plan year 2, m=24):
+    // nominal price = 900k × 1.05² = 992,250; duty (general NSW) =
+    // 10,909 + 4.5% × (992,250 − 364,000) = 39,180.25 nominal.
+    const p = prop({
+      status: "planned", propertyType: "ppr", priceToday: 900000, purchaseAge: 42,
+      lvrPct: 80, purchaseCostsPct: 2,
+    });
+    const out = projectPlan(withProps([p], { endAge: 50 }));
+    const m = 24;
+    const infl = Math.pow(1.025, m / 12);
+    const realPrice = 900000 * Math.pow(1.05 / 1.025, m / 12);
+    const nominalPrice = realPrice * infl;
+    expect(nominalPrice).toBeCloseTo(900000 * Math.pow(1.05, 2), 4);
+    const dutyNominal = 10909 + 0.045 * (nominalPrice - 364000);
+    const dutyReal = dutyNominal / infl;
+    const costsReal = 0.02 * realPrice;
+    const expectedSettle = realPrice * 0.2 + dutyReal + costsReal;
+    const y2 = out.yearly[2];
+    expect(y2.properties.p1.settlement).toBeCloseTo(expectedSettle, 2);
+    expect(y2.properties.p1.costBaseSeed).toBeCloseTo(realPrice + dutyReal + costsReal, 2);
+    // Before the purchase: nothing anywhere.
+    expect(out.yearly[1].properties.p1.value).toBe(0);
+    expect(out.yearly[1].liabilities["prop-p1"].closing).toBe(0);
+    // The loan draws down at 80% LVR and starts amortising (30y P&I).
+    expect(y2.liabilities["prop-p1"].closing).toBeGreaterThan(realPrice * 0.75);
+    expect(y2.liabilities["prop-p1"].closing).toBeLessThan(realPrice * 0.8);
+    // Settlement was funded from the cash asset (no unfunded).
+    expect(out.shortfall).toBeNull();
+    expect(y2.deficitFundedFromAssets).toBeGreaterThan(expectedSettle - 1);
+  });
+
+  it("a settlement the assets cannot fund becomes unfunded cashflow — the purchase still completes", () => {
+    const p = prop({ status: "planned", propertyType: "ppr", priceToday: 900000, purchaseAge: 42, lvrPct: 0 });
+    const out = projectPlan({
+      ...mkState({ endAge: 45, assets: [mkAsset({ allocation: zeroRealAlloc(), balance: 50000 })] }),
+      properties: [p],
+      liabilities: [],
+    });
+    expect(out.shortfall).not.toBeNull();
+    expect(out.yearly[2].unfundedCashflow).toBeGreaterThan(700000);
+    expect(out.yearly[2].properties.p1.value).toBeGreaterThan(0); // completed anyway
+  });
+
+  it("FHB + FHOG: duty waived and the grant reduces settlement cash", () => {
+    const base = prop({ status: "planned", propertyType: "ppr", state: "QLD", priceToday: 600000, purchaseAge: 42, lvrPct: 80 });
+    const fhb = projectPlan(withProps([{ ...base, firstHomeBuyer: true, newBuild: true }], { endAge: 45 }));
+    const not = projectPlan(withProps([base], { endAge: 45 }));
+    const dFhb = fhb.yearly[2].properties.p1.settlement;
+    const dNot = not.yearly[2].properties.p1.settlement;
+    // QLD ≤700k FHB → zero duty; new build → $30k FHOG (nominal, deflated).
+    const infl = Math.pow(1.025, 2);
+    const nominalPrice = 600000 * Math.pow(1.05, 2);
+    const dutyNominal = 17325 + 0.045 * (nominalPrice - 540000);
+    expect(dNot - dFhb).toBeCloseTo((dutyNominal + 30000) / infl, 1);
+  });
+
+  it("negative gearing: pre-2027 and new-build losses offset salary; existing dwellings quarantine", () => {
+    const mkGeared = (start, acquisitionDate, newBuild) => projectPlan({
+      ...mkState({
+        endAge: 43,
+        start,
+        assets: [mkAsset({ allocation: growthOnlyAlloc() })],
+        cashflows: { income: [salary(100000 / 12)] },
+      }),
+      properties: [prop({
+        acquisitionDate, newBuild,
+        rent: { amount: 20000, indexBasis: "cpi", indexExtraPct: 0 },
+        expenses: { amount: 30000, indexBasis: "cpi", indexExtraPct: 0 },
+      })],
+      liabilities: [],
+    });
+    // (a) FY2026-27 loss year (pre-2027): −10k offsets salary.
+    const pre = mkGeared({ year: 2026, month: 7 }, "2026-08-01", false);
+    expect(pre.yearly[0].taxDetail.client.taxableIncome).toBeCloseTo(100000 + 20000 - 30000, 2);
+    // (b) FY2027-28 loss year, existing dwelling acquired post-Budget: quarantined.
+    const post = mkGeared({ year: 2027, month: 7 }, "2026-08-01", false);
+    expect(post.yearly[0].taxDetail.client.taxableIncome).toBeCloseTo(100000, 2);
+    expect(post.yearly[0].taxDetail.client.quarantinedLossCarry).toBeCloseTo(10000, 2);
+    // (c) FY2027-28 new-build loss: offsets salary.
+    const nb = mkGeared({ year: 2027, month: 7 }, "2026-08-01", true);
+    expect(nb.yearly[0].taxDetail.client.taxableIncome).toBeCloseTo(90000, 2);
+    // (d) grandfathered acquisition (pre-12 May 2026): offsets salary post-2027.
+    const gf = mkGeared({ year: 2027, month: 7 }, "2020-01-15", false);
+    expect(gf.yearly[0].taxDetail.client.taxableIncome).toBeCloseTo(90000, 2);
+  });
+
+  it("quarantined losses apply against later rental profits, then capital gains", () => {
+    // Property A quarantines a 10k/yr loss; property B profits 5k/yr.
+    // Year 0: A quarantined (carry 10k), B's profit taxed. Year 1:
+    // prior carry offsets B's profit (5k used, carry 10k−5k+10k new).
+    const a = prop({ id: "pa", acquisitionDate: "2026-08-01",
+      rent: { amount: 10000, indexBasis: "cpi", indexExtraPct: 0 },
+      expenses: { amount: 20000, indexBasis: "cpi", indexExtraPct: 0 } });
+    const b = prop({ id: "pb", acquisitionDate: "2026-08-01",
+      rent: { amount: 8000, indexBasis: "cpi", indexExtraPct: 0 },
+      expenses: { amount: 3000, indexBasis: "cpi", indexExtraPct: 0 } });
+    const out = projectPlan({
+      ...mkState({
+        endAge: 43,
+        start: { year: 2027, month: 7 },
+        assets: [mkAsset({ allocation: growthOnlyAlloc() })],
+        cashflows: { income: [salary(100000 / 12)] },
+      }),
+      properties: [a, b],
+      liabilities: [],
+    });
+    // Year 0: B's +5k taxed (no prior carry); A's −10k quarantined.
+    expect(out.yearly[0].taxDetail.client.taxableIncome).toBeCloseTo(105000, 2);
+    expect(out.yearly[0].taxDetail.client.quarantinedLossCarry).toBeCloseTo(10000, 2);
+    // Year 1: carry offsets B's profit → taxable 100k; carry 10−5+10 = 15k.
+    expect(out.yearly[1].taxDetail.client.taxableIncome).toBeCloseTo(100000, 2);
+    expect(out.yearly[1].taxDetail.client.quarantinedLossCarry).toBeCloseTo(15000, 2);
+
+    // Capital gains: carry also shelters a realised gain.
+    const withSale = projectPlan({
+      ...mkState({
+        endAge: 43,
+        start: { year: 2027, month: 7 },
+        assets: [mkAsset({ allocation: growthOnlyAlloc(), cgtAsset: true, costBase: 20000 })],
+        cashflows: {
+          income: [salary(100000 / 12)],
+          lumpSums: [{ id: "l1", assetId: "a1", amount: 10000, direction: "out", age: 41, source: "input" }],
+        },
+      }),
+      properties: [a],
+      liabilities: [],
+    });
+    // Year 1 sale gain 8,000 fully sheltered by the 10k carry from year 0.
+    expect(withSale.yearly[2].taxDetail.cgt).toBeCloseTo(0, 6);
+  });
+
+  it("regression gate: property-free scenarios are bit-identical", () => {
+    const base = mkState({
+      endAge: 50,
+      cashflows: { income: [salary(100000 / 12)], contributions: [cf({ amount: 500, toAge: 50 })] },
+    });
+    const withEmpty = { ...JSON.parse(JSON.stringify(base)), properties: [], liabilities: [] };
+    const x = projectPlan(base);
+    const z = projectPlan(withEmpty);
+    expect(Array.from(x.monthly.combined)).toEqual(Array.from(z.monthly.combined));
+    for (let y = 0; y < x.yearly.length; y++) expect(x.yearly[y].tax).toBe(z.yearly[y].tax);
+  });
+});

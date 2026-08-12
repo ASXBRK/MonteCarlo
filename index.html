@@ -47,6 +47,14 @@
 
       <section id="investSection" aria-label="Investment cashflows"></section>
 
+      <section aria-label="Property">
+        <h2 class="section-heading">Property</h2>
+        <div id="properties" class="portfolio-stack"></div>
+        <div class="portfolio-actions">
+          <button id="addPropertyBtn" class="btn-text" type="button">+ Add property</button>
+        </div>
+      </section>
+
       <section aria-label="Liabilities">
         <h2 class="section-heading">Liabilities</h2>
         <div id="liabilities" class="portfolio-stack"></div>
@@ -196,6 +204,10 @@
             <label for="awoteInput">Wage index (AWOTE) growth (annual nominal, %)</label>
             <input id="awoteInput" type="number" min="0" max="20" step="0.1" value="3.5" />
           </div>
+          <div class="param-inline-field">
+            <label for="mortgageRateInput">Mortgage rate for planned property purchases (annual nominal, %)</label>
+            <input id="mortgageRateInput" type="number" min="0" max="30" step="0.05" value="6.0" />
+          </div>
           <p>Cashflow rows carry an index basis (None, CPI, or the wage index) plus an additional percentage. A CPI-indexed row is constant in real terms; a row with no indexation is fixed in nominal dollars and its real value declines by CPI each year; a wage-indexed row grows in real terms by the gap between AWOTE and CPI. Dates of birth are captured for the life-expectancy lookup — ages still tick over each 1 July per the plan-year convention, so DOB precision does not shift cashflow timing.</p>
           <p>Inflation in this tool is deterministic — every projection assumes the same inflation rate. Real-world inflation varies stochastically; modelling stochastic inflation is out of scope for this version.</p>
         </section>
@@ -231,6 +243,7 @@
           <p>Not modelled, by design: SAPTO, HELP repayments, the Medicare levy surcharge, Division 293, family Medicare thresholds, and trusts, companies, or superannuation. Assets marked as not CGT assets never generate capital gains tax.</p>
           <p>Lifestyle assets (contents, vehicles, jewellery and similar) are treated as exempt personal-use assets: they grow at their simple rate and never generate income, deductions, or capital gains tax. The collectables rules (which can tax gains on items acquired above $500) are not separately modelled — a disclosed simplification.</p>
           <p>A person set to non-resident in the Setup section is taxed on the non-resident bracket table (no tax-free threshold), with no Medicare levy and no LITO. Two disclosed simplifications: franking credits remain refundable offsets for non-residents, and non-resident CGT treatment (discount and indexation eligibility differences under both regimes) is not differentiated in this version.</p>
+          <p>Property: rent is the owner's assessable income; deductible property expenses and deductible loan interest are the owner's deductions. Net rental losses offset other income when the loss year is before FY2027–28, the property is a new build, or the property was acquired before 12 May 2026 (grandfathered); otherwise the loss is quarantined per owner — carried forward against future net rental profits first, then capital gains, per the enacted restriction. A main residence is CGT-exempt and generates no income or deductions; holiday-home expenses are non-deductible and not modelled. Main-residence complexities (such as the six-year absence rule) are out of scope until property sales are modelled; properties are held to the projection end and are never drawn on to fund deficits (illiquid). Stamp duty schedules for all eight jurisdictions are embedded at their as-at values (nominal-dollar brackets, not indexed) — the per-property duty override exists for precision. First-home-buyer phase-outs are linearised.</p>
           <div class="param-inline-field">
             <span>Tax bracket indexation</span>
             <label><input type="radio" name="bracketMode" value="indexed" checked /> Indexed (real-constant)</label>

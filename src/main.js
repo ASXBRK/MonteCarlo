@@ -18,8 +18,10 @@ import {
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
   personDisplayName, resolveEndBasis,
   createLiability, LIABILITY_TYPES, normaliseLiabilities,
+  createProperty, normaliseProperties, PROPERTY_STATES, PROPERTY_TYPES,
 } from "./planState.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
+import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
@@ -54,9 +56,11 @@ const els = {
   assets: $("assets"),
   lifestyleAssets: $("lifestyleAssets"),
   liabilities: $("liabilities"),
+  properties: $("properties"),
   addAssetBtn: $("addAssetBtn"),
   addLifestyleBtn: $("addLifestyleBtn"),
   addLiabilityBtn: $("addLiabilityBtn"),
+  addPropertyBtn: $("addPropertyBtn"),
   incomeSection: $("incomeSection"),
   expensesSection: $("expensesSection"),
   investSection: $("investSection"),
@@ -205,6 +209,7 @@ function mountWorkspace(clientId, scenarioId) {
   populateParamsTable();
   els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
   awoteInput.value = ((state.assumptions.awote ?? 0.035) * 100).toFixed(1);
+  mortgageRateInput.value = ((state.assumptions.mortgageRate ?? 0.06) * 100).toFixed(2);
   syncBracketModeInputs();
 }
 
@@ -215,7 +220,7 @@ function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
   for (const el of [els.planBar, els.incomeSection, els.expensesSection, els.assets,
-                    els.lifestyleAssets, els.liabilities, els.investSection, els.settingsPanel, els.summaryStrip,
+                    els.lifestyleAssets, els.liabilities, els.properties, els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
                     els.viewTax, els.viewAssumptions]) {
     el.innerHTML = "";
@@ -1797,6 +1802,166 @@ els.addAssetBtn.addEventListener("click", () => {
   renderAll();
 });
 
+// --- property section (D4) -------------------------------------------------------
+
+// "Projected price at purchase (age 34, FY2032–33): $978,000 · duty ≈
+// $36,000 · cash required ≈ $141,000"
+function propertyHelperText(p) {
+  if (p.status !== "planned" || !(p.priceToday > 0)) return "";
+  const y = p.purchaseAge - state.plan.client.currentAge;
+  if (y < 0 || y >= state.plan.endAge - state.plan.client.currentAge + 1) {
+    return "Purchase age is outside the projection.";
+  }
+  if (y === 0 && state.plan.start.month !== 7) {
+    return "A purchase in the partial first year (which has no firing July) is skipped — pick a later age.";
+  }
+  const first = 12 - ((state.plan.start.month - 7 + 12) % 12);
+  const m = y === 0 ? 0 : first + 12 * (y - 1);
+  const nominalPrice = p.priceToday * Math.pow(1 + p.growthPct / 100, m / 12);
+  const duty = p.dutyOverride != null
+    ? p.dutyOverride
+    : dutyWithConcessions(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
+  const fhog = fhogAmount(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
+  const cash = nominalPrice * (1 - p.lvrPct / 100) + duty + (p.purchaseCostsPct / 100) * nominalPrice - fhog;
+  return `Projected price at purchase (age ${p.purchaseAge}, ${fyLabelForAge(state.plan, "client", p.purchaseAge)}): ` +
+    `${fmtMoney(nominalPrice)} · duty ≈ ${fmtMoney(duty)}${fhog ? ` · FHOG ${fmtMoney(fhog)}` : ""} · cash required ≈ ${fmtMoney(cash)}`;
+}
+
+function propertyCardHTML(p) {
+  const owned = p.status === "owned";
+  const invest = p.propertyType === "investment";
+  const cell = (label, inner) => `<div class="cf-cell"><label>${label}</label>${inner}</div>`;
+  const num = (label, field, value, attrs = 'min="0" step="1000"') =>
+    cell(label, `<input type="number" ${attrs} value="${value}" data-pid="${p.id}" data-pfield="${field}" />`);
+  const flowCells = (label, field, flow) => `
+    ${num(`${label} ($/yr, today's)`, `${field}.amount`, flow.amount)}
+    ${cell(`${label} index basis`, `
+      <select data-pid="${p.id}" data-pfield="${field}.indexBasis">
+        <option value="none"${flow.indexBasis === "none" ? " selected" : ""}>None</option>
+        <option value="cpi"${flow.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
+        <option value="awote"${flow.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+      </select>`)}
+    ${num(`${label} additional %`, `${field}.indexExtraPct`, flow.indexExtraPct, 'min="-10" max="10" step="0.1"')}
+  `;
+  const helper = propertyHelperText(p);
+  return `
+    <div class="pcard" data-pid="${p.id}">
+      <div class="pcard-head">
+        <span class="pcard-name">${escapeHTML(p.name)}</span>
+        <span class="pcard-meta">${p.propertyType.toUpperCase()} · ${p.state} · ${owned ? fmtMoney(p.currentValue) : `planned @ age ${p.purchaseAge}`}</span>
+        <button class="pcard-remove" type="button" data-prop-action="remove" data-pid="${p.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          ${cell("Name", `<input type="text" maxlength="60" value="${escapeHTML(p.name)}" data-pid="${p.id}" data-pfield="name" />`)}
+          ${isCouple() ? cell("Owner", `<select data-pid="${p.id}" data-pfield="owner">${ownerOptions(p.owner)}</select>`) : ""}
+          ${cell("State", `<select data-pid="${p.id}" data-pfield="state">${PROPERTY_STATES.map((st) => `<option value="${st}"${p.state === st ? " selected" : ""}>${st}</option>`).join("")}</select>`)}
+          ${cell("Type", `<select data-pid="${p.id}" data-pfield="propertyType">
+            <option value="ppr"${p.propertyType === "ppr" ? " selected" : ""}>Main residence (PPR)</option>
+            <option value="holiday"${p.propertyType === "holiday" ? " selected" : ""}>Holiday home</option>
+            <option value="investment"${invest ? " selected" : ""}>Investment</option>
+          </select>`)}
+          ${cell("Status", `
+            <div class="seg-toggle">
+              <button class="seg-option${owned ? " active" : ""}" type="button" data-prop-action="status" data-pid="${p.id}" data-value="owned">Owned</button>
+              <button class="seg-option${!owned ? " active" : ""}" type="button" data-prop-action="status" data-pid="${p.id}" data-value="planned">Planned purchase</button>
+            </div>`)}
+          ${num("Growth (% p.a. nominal)", "growthPct", p.growthPct, 'min="-10" max="30" step="0.1"')}
+          ${owned ? `
+            ${num("Current value ($)", "currentValue", p.currentValue)}
+            ${cell("Acquisition date", `<input type="date" value="${p.acquisitionDate ?? ""}" data-pid="${p.id}" data-pfield="acquisitionDate" />`)}
+            ${p.propertyType !== "ppr" ? num("Cost base ($)", "costBase", p.costBase) : ""}
+          ` : `
+            ${num("Price today ($)", "priceToday", p.priceToday)}
+            ${num("Purchase at client age", "purchaseAge", p.purchaseAge, `min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1"`)}
+            ${num("LVR (%)", "lvrPct", p.lvrPct, 'min="0" max="100" step="1"')}
+            ${num("Purchase costs (%)", "purchaseCostsPct", p.purchaseCostsPct, 'min="0" max="10" step="0.1"')}
+            ${num("Duty override ($, blank = schedule)", "dutyOverride", p.dutyOverride ?? "", 'min="0" step="100"')}
+            ${cell("First home buyer", `<label class="ptg-check"><input type="checkbox"${p.firstHomeBuyer ? " checked" : ""} data-pid="${p.id}" data-pfield="firstHomeBuyer" /><span>Yes</span></label>`)}
+            ${cell("New build", `<label class="ptg-check"><input type="checkbox"${p.newBuild ? " checked" : ""} data-pid="${p.id}" data-pfield="newBuild" /><span>Yes</span></label>`)}
+          `}
+          ${invest ? `
+            ${flowCells("Rent", "rent", p.rent)}
+            ${flowCells("Expenses", "expenses", p.expenses)}
+            ${cell("Expenses deductible", `<label class="ptg-check"><input type="checkbox"${p.expensesDeductible ? " checked" : ""} data-pid="${p.id}" data-pfield="expensesDeductible" /><span>Yes</span></label>`)}
+          ` : ""}
+        </div>
+        ${helper ? `<p class="helper-text">${escapeHTML(helper)}</p>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderProperties() {
+  els.properties.innerHTML = (state.properties ?? []).map(propertyCardHTML).join("");
+}
+
+function findProperty(pid) {
+  return (state.properties ?? []).find((p) => p.id === pid) || null;
+}
+
+els.properties.addEventListener("change", (e) => {
+  const field = e.target.dataset.pfield;
+  const p = findProperty(e.target.dataset.pid);
+  if (!field || !p) return;
+  const v = e.target.value;
+  if (field === "name") p.name = v.trim() || p.name;
+  else if (field === "owner") p.owner = v;
+  else if (field === "state") p.state = v;
+  else if (field === "propertyType") p.propertyType = v;
+  else if (field === "growthPct") p.growthPct = clampNumber(v, -10, 30);
+  else if (field === "currentValue") p.currentValue = clampNumber(v, 0);
+  else if (field === "acquisitionDate") p.acquisitionDate = v || null;
+  else if (field === "costBase") p.costBase = clampNumber(v, 0);
+  else if (field === "priceToday") p.priceToday = clampNumber(v, 0);
+  else if (field === "purchaseAge") p.purchaseAge = clampInt(v, state.plan.client.currentAge, state.plan.endAge);
+  else if (field === "lvrPct") p.lvrPct = clampNumber(v, 0, 100);
+  else if (field === "purchaseCostsPct") p.purchaseCostsPct = clampNumber(v, 0, 10);
+  else if (field === "dutyOverride") p.dutyOverride = v === "" ? null : clampNumber(v, 0);
+  else if (field === "firstHomeBuyer") p.firstHomeBuyer = e.target.checked;
+  else if (field === "newBuild") p.newBuild = e.target.checked;
+  else if (field === "expensesDeductible") p.expensesDeductible = e.target.checked;
+  else if (field.includes(".")) {
+    const [group, sub] = field.split(".");
+    if ((group === "rent" || group === "expenses") && p[group]) {
+      if (sub === "amount") p[group].amount = clampNumber(v, 0);
+      else if (sub === "indexBasis") p[group].indexBasis = v;
+      else if (sub === "indexExtraPct") p[group].indexExtraPct = clampNumber(v, -10, 10);
+    }
+  }
+  state.properties = normaliseProperties(state.properties, state.plan);
+  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
+  saveState();
+  refreshOutputs();
+  renderProperties();
+  renderLiabilities(); // linked-asset labels may change
+});
+
+els.properties.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-prop-action]");
+  if (!btn) return;
+  const p = findProperty(btn.dataset.pid);
+  if (!p) return;
+  if (btn.dataset.propAction === "remove") {
+    if (!window.confirm(`Remove "${p.name}"?`)) return;
+    state.properties = state.properties.filter((x) => x.id !== p.id);
+    state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
+  } else if (btn.dataset.propAction === "status") {
+    p.status = btn.dataset.value === "planned" ? "planned" : "owned";
+  }
+  saveState();
+  refreshOutputs();
+  renderProperties();
+});
+
+els.addPropertyBtn.addEventListener("click", () => {
+  const growthDefault = (PROFILES["Residential Property"]?.growthReturn ?? 0.05) * 100;
+  state.properties = [...(state.properties ?? []), createProperty(state.plan, state.properties ?? [], growthDefault)];
+  saveState();
+  refreshOutputs();
+  renderProperties();
+});
+
 // --- liabilities section (D3) --------------------------------------------------
 
 function liabilityDerivedText(l) {
@@ -2297,6 +2462,14 @@ function buildCashflowGroups() {
       : rw.label,
     cell: (y) => rt.income[rw.id]?.[y] ?? 0,
   }));
+  for (const pr of (state.properties ?? []).filter((x) => x.propertyType === "investment")) {
+    incomeRows.push({
+      label: couple
+        ? `${pr.name} rent (${pr.owner === "partner" ? partnerName() : pr.owner === "joint" ? "joint" : clientName()})`
+        : `${pr.name} rent`,
+      cell: (y) => yl[y].properties?.[pr.id]?.rent ?? 0,
+    });
+  }
   incomeRows.push({ label: "Distributions paid as cash", cell: (y) => yl[y].cashDistributions });
   incomeRows.push({ label: "Total income", cell: (y) => yl[y].income, always: true, cls: "tl-total" });
 
@@ -2304,15 +2477,26 @@ function buildCashflowGroups() {
     label: rw.label,
     cell: (y) => -(rt.expenses[rw.id]?.[y] ?? 0),
   }));
+  for (const pr of (state.properties ?? []).filter((x) => x.propertyType === "investment")) {
+    expenseRows.push({
+      label: `${pr.name} expenses`,
+      cell: (y) => -(yl[y].properties?.[pr.id]?.expenses ?? 0),
+    });
+  }
   expenseRows.push({ label: "Total expenses", cell: (y) => -yl[y].expenses, always: true, cls: "tl-total" });
 
   const surplusTarget = state.settings.surplus.mode === "invest"
     ? state.assets.find((a) => a.id === state.settings.surplus.assetId)
     : null;
 
-  const liabilityRows = (state.liabilities ?? []).flatMap((l) => [
-    { label: `${l.name} — interest`, cell: (y) => -(yl[y].liabilities?.[l.id]?.interest ?? 0) },
-    { label: `${l.name} — principal`, cell: (y) => -(yl[y].liabilities?.[l.id]?.principal ?? 0) },
+  const loanName = (lid) =>
+    (state.liabilities ?? []).find((l) => l.id === lid)?.name
+      ?? ((state.properties ?? []).find((pr) => `prop-${pr.id}` === lid)
+        ? `${(state.properties ?? []).find((pr) => `prop-${pr.id}` === lid).name} loan`
+        : "Loan");
+  const liabilityRows = Object.keys(yl[0]?.liabilities ?? {}).flatMap((lid) => [
+    { label: `${loanName(lid)} — interest`, cell: (y) => -(yl[y].liabilities?.[lid]?.interest ?? 0) },
+    { label: `${loanName(lid)} — principal`, cell: (y) => -(yl[y].liabilities?.[lid]?.principal ?? 0) },
   ]);
 
   return [
@@ -2329,12 +2513,18 @@ function buildCashflowGroups() {
       { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },
       { label: "Unfunded cashflow", cell: (y) => yl[y].unfundedCashflow },
     ] },
-    { title: "One-off amounts", rows: included.filter((a) => a.class !== "lifestyle").map((a) => ({
-      label: a.name,
-      cell: (y) => projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0,
-      always: true, // editable grid — keep every cell present
-      cellAttrs: (y) => oneOffCellAttrs(a.id, y),
-    })) },
+    { title: "One-off amounts", rows: [
+      ...included.filter((a) => a.class !== "lifestyle").map((a) => ({
+        label: a.name,
+        cell: (y) => projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0,
+        always: true, // editable grid — keep every cell present
+        cellAttrs: (y) => oneOffCellAttrs(a.id, y),
+      })),
+      ...(state.properties ?? []).filter((x) => x.status === "planned").map((pr) => ({
+        label: `${pr.name} settlement`,
+        cell: (y) => -(yl[y].properties?.[pr.id]?.settlement ?? 0),
+      })),
+    ] },
   ];
 }
 
@@ -2460,18 +2650,35 @@ function buildAssetsGroups(entity) {
     if (lifestyle.length) {
       groups.splice(2, 0, { title: "Lifestyle assets", rows: lifestyle.map(closingRow) });
     }
+    const propList = state.properties ?? [];
+    if (propList.length) {
+      groups.push({
+        title: "Property",
+        rows: [
+          ...propList.map((pr) => ({
+            label: pr.name,
+            cell: (y) => yl[y].properties?.[pr.id]?.value ?? 0,
+          })),
+          { label: "Total property", cell: (y) => yl[y].propertyClosing, always: true, cls: "tl-total" },
+        ],
+      });
+    }
     const liabs = state.liabilities ?? [];
-    if (liabs.length) {
+    if (liabs.length || Object.keys(yl[0]?.liabilities ?? {}).length) {
       groups.push({
         title: "Liabilities",
         rows: [
-          ...liabs.map((l) => ({
-            label: l.name,
-            cell: (y) => -(yl[y].liabilities?.[l.id]?.closing ?? 0),
+          ...Object.keys(yl[0]?.liabilities ?? {}).map((lid) => ({
+            label: liabs.find((l) => l.id === lid)?.name
+              ?? (state.properties ?? []).find((pr) => `prop-${pr.id}` === lid)?.name?.concat(" loan")
+              ?? "Loan",
+            cell: (y) => -(yl[y].liabilities?.[lid]?.closing ?? 0),
           })),
           { label: "Total liabilities", cell: (y) => -yl[y].liabilitiesClosing, always: true, cls: "tl-total" },
         ],
       });
+    }
+    if (liabs.length || propList.length || Object.keys(yl[0]?.liabilities ?? {}).length) {
       groups.push({
         title: null,
         rows: [{ label: "NET ASSETS", cell: (y) => yl[y].netAssets, always: true, cls: "tl-total" }],
@@ -2516,6 +2723,7 @@ function buildTaxGroups() {
       { label: "Franking credits", cell: (y) => td(y, p)?.frankingCredits ?? 0 },
       { label: "Net income tax", cell: (y) => -(td(y, p)?.incomeTax ?? 0), cls: "tl-total" },
       { label: "CGT payable", cell: (y) => -(td(y, p)?.cgt ?? 0) },
+      { label: "Quarantined rental losses (carried)", cell: (y) => td(y, p)?.quarantinedLossCarry ?? 0 },
     ],
   });
   const groups = [personGroup("client", clientName())];
@@ -2745,6 +2953,19 @@ els.inflationInput.addEventListener("change", () => {
   refreshOutputs(); // real returns derive from CPI via Fisher
 });
 
+const mortgageRateInput = $("mortgageRateInput");
+mortgageRateInput.addEventListener("change", () => {
+  const n = Number(mortgageRateInput.value);
+  if (!Number.isFinite(n) || n < 0 || n > 30) {
+    mortgageRateInput.value = ((state.assumptions.mortgageRate ?? 0.06) * 100).toFixed(2);
+    return;
+  }
+  state.assumptions.mortgageRate = n / 100;
+  saveState();
+  refreshOutputs();
+  renderProperties(); // planned-purchase helper lines re-derive
+});
+
 const awoteInput = $("awoteInput");
 awoteInput.addEventListener("change", () => {
   const n = Number(awoteInput.value);
@@ -2767,6 +2988,7 @@ function renderAll() {
   renderSettings();
   refreshOutputs();
   renderLiabilities(); // after refreshOutputs — payoff FYs read the projection
+  renderProperties();
 }
 
 window.addEventListener("hashchange", handleRoute);

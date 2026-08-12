@@ -42,6 +42,7 @@
 import { PROFILES } from "./profiles.js";
 import { buildSchedules, firstFyStartYear } from "./schedule.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
+import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { assessPerson } from "./Tax/annual.js";
 import {
   createPool, poolAdd, poolConsume, poolNewFy,
@@ -135,11 +136,90 @@ export function projectPlan(state, profiles = PROFILES) {
   const combined = new Float64Array(months + 1);
   combined[0] = ids.reduce((s, id) => s + bal[id], 0);
 
+  // --- properties (D4) -------------------------------------------------------
+  //
+  // Owned properties carry their value from day one; planned purchases
+  // fire in the July of the purchase FY (one-off conventions,
+  // including the partial-first-year skip). Values are real; duty is
+  // computed on the NOMINAL price of the purchase year (brackets are
+  // nominal law) and deflated. Properties are illiquid: never in
+  // fundingOrder, no sales in v1.
+  const mortgageRateAssum = state.assumptions.mortgageRate ?? 0.06;
+  const awoteAssum = state.assumptions.awote ?? 0.035;
+  const props = (state.properties ?? []).filter((p) =>
+    p.status === "owned" ? p.currentValue > 0 : p.priceToday > 0);
+  const yearStartIdx = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
+  const julyOf = (y) => (y === 0 ? (state.plan.start.month === 7 ? 0 : null) : yearStartIdx(y));
+  const propMeta = {};
+  const propVal = {};    // real value; 0 until purchased
+  const derivedLoans = []; // purchase loans, activated at settlement
+  for (const p of props) {
+    const owned = p.status === "owned";
+    let purchaseMonth = null;
+    if (!owned) {
+      const y = p.purchaseAge - state.plan.client.currentAge;
+      purchaseMonth = y >= 0 && y < years ? julyOf(y) : null; // null = never fires (convention 5)
+    }
+    const invest = p.propertyType === "investment";
+    // Negative gearing is unrestricted when the loss year is pre-FY2027-28,
+    // the property is a new build, or it was acquired before Budget
+    // night 12 May 2026 (grandfathered under the enacted restriction).
+    const grandfathered = owned && p.acquisitionDate != null && p.acquisitionDate < "2026-05-12";
+    propMeta[p.id] = {
+      rate: toMonthlyReal(p.growthPct / 100, cpi),
+      shares: ownerShares(p, couple),
+      owned,
+      purchaseMonth,
+      invest,
+      isCgt: p.propertyType !== "ppr", // PPR exempt — assessment skipped (disclosed)
+      newBuild: p.newBuild === true,
+      grandfathered,
+      rent: p.rent,
+      expensesFlow: p.expenses,
+      expensesDeductible: p.expensesDeductible !== false,
+      loanId: null,
+    };
+    propVal[p.id] = owned ? p.currentValue : 0;
+    if (!owned && purchaseMonth != null && p.lvrPct > 0) {
+      // The purchase loan: 30-year P&I at the mortgage-rate assumption,
+      // nominal balance = LVR × nominal price at settlement (known
+      // upfront — the projection is deterministic).
+      const nominalPrice = p.priceToday * Math.pow(1 + p.growthPct / 100, purchaseMonth / 12);
+      const loanNominal = (p.lvrPct / 100) * nominalPrice;
+      derivedLoans.push({
+        id: `prop-${p.id}`,
+        name: `${p.name} loan`,
+        owner: p.owner,
+        balance: loanNominal,
+        interestRatePct: mortgageRateAssum * 100,
+        termYears: 30,
+        repayment: "pi",
+        ioYears: 0,
+        deductible: invest, // investment loans deduct by default
+        startMonth: purchaseMonth,
+        propertyId: p.id,
+      });
+      propMeta[p.id].loanId = `prop-${p.id}`;
+    }
+  }
+
+  // Real monthly amount of an annual property flow under its D1
+  // indexation settings.
+  const propFlowAt = (flow, m) => {
+    if (!flow || !(flow.amount > 0)) return 0;
+    const basisRate = flow.indexBasis === "awote" ? awoteAssum : flow.indexBasis === "cpi" ? cpi : 0;
+    const g = basisRate + (flow.indexExtraPct ?? 0) / 100;
+    return (flow.amount / 12) * Math.pow((1 + g) / (1 + cpi), m / 12);
+  };
+
   // --- liabilities (D3): simulated in NOMINAL dollars, deflated at the
   // ledger. Repayments are nominal-fixed (basis-None behaviour), so
   // their real burden falls at CPI. Constant rate for the projection
   // (v1 limitation, disclosed).
-  const liabs = (state.liabilities ?? []).filter((l) => l.balance > 0);
+  const liabs = [
+    ...(state.liabilities ?? []).filter((l) => l.balance > 0),
+    ...derivedLoans,
+  ];
   const liabMeta = {};
   const loanBal = {}; // nominal
   const offsetLoansByAsset = {}; // assetId → [liability ids]
@@ -153,13 +233,15 @@ export function projectPlan(state, profiles = PROFILES) {
       i,
       termM,
       ioM,
-      startMonth: 0, // D4 planned purchases will start loans mid-projection
+      startMonth: l.startMonth ?? 0, // purchase loans (D4) start at settlement
       pmtPI: levelPayment(l.balance, i, termM - ioM),
       offsetId,
       deductible: l.deductible === true,
       shares: ownerShares(l, couple),
+      propertyId: l.propertyId ?? null, // interest joins that property's gearing calc
     };
-    loanBal[l.id] = l.balance;
+    // Purchase loans hold zero until the settlement month sets them.
+    loanBal[l.id] = (l.startMonth ?? 0) > 0 ? 0 : l.balance;
     if (offsetId) (offsetLoansByAsset[offsetId] ??= []).push(l.id);
   }
   const inflAt = (m) => Math.pow(1 + cpi, m / 12);
@@ -201,6 +283,19 @@ export function projectPlan(state, profiles = PROFILES) {
     partner: Math.max(0, state.plan.partner?.taxProfile?.openingCapitalLosses ?? 0),
   };
   let pendingCgt = { client: 0, partner: 0 }; // assessed in FY t, payable July t+1
+  const quarantineCarry = { client: 0, partner: 0 }; // D4 quarantined rental losses
+
+  const propsById = Object.fromEntries(props.map((p) => [p.id, p]));
+  const liabsById = Object.fromEntries(liabs.map((l) => [l.id, l]));
+  // Cost base pools for non-PPR properties (no sales in v1 — the pool
+  // exists for the deemed reacquisition and future sale modelling; the
+  // seed is exposed on the purchase-year row).
+  let propPools = {};
+  for (const p of props) {
+    if (propMeta[p.id].owned && propMeta[p.id].isCgt) {
+      propPools[p.id] = createPool(p.costBase ?? p.currentValue);
+    }
+  }
 
   const mkYearRow = (y) => ({
     fyLabel: schedule.fyLabels[y],
@@ -224,9 +319,14 @@ export function projectPlan(state, profiles = PROFILES) {
     closingBalance: 0,
     perAssetClosing: {},
     // Per-liability detail (D3), real dollars; closing filled at year
-    // end. netAssets = asset closing − liability closing total.
+    // end. netAssets = assets + property − liabilities.
     liabilities: Object.fromEntries(liabs.map((l) => [l.id, { interest: 0, principal: 0, closing: 0 }])),
     liabilitiesClosing: 0,
+    // Per-property detail (D4), real dollars.
+    properties: Object.fromEntries(props.map((p) => [p.id, {
+      value: 0, rent: 0, expenses: 0, settlement: 0, costBaseSeed: 0,
+    }])),
+    propertyClosing: 0,
     netAssets: 0,
     // Per-asset flow detail for the Assets view: opening + contributions
     // − withdrawals + oneOffs − deficitFunding + surplusInvested +
@@ -250,6 +350,10 @@ export function projectPlan(state, profiles = PROFILES) {
     for (const p of persons) {
       acc[p] = { ordinary: 0, franked: 0, unfranked: 0, deductions: 0, netCapitalGain: 0, incomeMonths: new Set() };
     }
+    // Per-property net-rental tracking for the gearing rules (D4).
+    acc._propNet = Object.fromEntries(props.map((p) => [p.id, {
+      rent: 0, expenses: 0, interest: { client: 0, partner: 0 },
+    }]));
     const markIncome = (sharesObj, m) => {
       for (const p of persons) if (sharesObj[p]) acc[p].incomeMonths.add(m);
     };
@@ -289,6 +393,9 @@ export function projectPlan(state, profiles = PROFILES) {
         for (const id of ids) {
           if (meta[id].cgt) pools[id] = poolDeemedReacquisition(pools[id], bal[id]);
         }
+        for (const pid in propPools) {
+          if (propVal[pid] > 0) propPools[pid] = poolDeemedReacquisition(propPools[pid], propVal[pid]);
+        }
       }
 
       // a. Growth (mode-dependent rate). An offset asset earns its
@@ -312,6 +419,65 @@ export function projectPlan(state, profiles = PROFILES) {
         if (row) {
           row.growth += g;
           row.perAssetDetail[id].growth += g;
+        }
+      }
+
+      // a2. Properties (D4): planned purchases fire at this month's
+      // top (July of the purchase FY); values grow at their rate;
+      // investment rent and expenses accrue monthly.
+      let settlementOut = 0;
+      let rentIncome = 0;
+      let propExpenseOut = 0;
+      for (const pid in propMeta) {
+        const pm = propMeta[pid];
+        const p = propsById[pid];
+        if (!pm.owned && pm.purchaseMonth === m) {
+          // Purchase event: grown price, duty (nominal-law), costs,
+          // FHOG, loan drawdown, settlement cash, cost base seed.
+          const infl = inflAt(m);
+          const realPrice = p.priceToday * Math.pow((1 + p.growthPct / 100) / (1 + cpi), m / 12);
+          const nominalPrice = realPrice * infl;
+          const dutyNominal = p.dutyOverride != null
+            ? p.dutyOverride
+            : dutyWithConcessions(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
+          const dutyReal = dutyNominal / infl;
+          const costsReal = (p.purchaseCostsPct / 100) * realPrice;
+          const fhogReal = fhogAmount(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild }) / infl;
+          const loanReal = pm.loanId ? (p.lvrPct / 100) * realPrice : 0;
+          if (pm.loanId) loanBal[pm.loanId] = liabsById[pm.loanId].balance; // drawdown
+          const settle = realPrice - loanReal + dutyReal + costsReal - fhogReal;
+          settlementOut += settle;
+          propVal[pid] = realPrice;
+          if (pm.isCgt) {
+            propPools[pid] = createPool(realPrice + dutyReal + costsReal);
+          }
+          if (row) {
+            row.properties[pid].settlement += settle;
+            row.properties[pid].costBaseSeed = realPrice + dutyReal + costsReal;
+          }
+        } else if (propVal[pid] > 0) {
+          propVal[pid] *= 1 + pm.rate;
+        }
+        if (propVal[pid] > 0 && pm.invest) {
+          const rentM = propFlowAt(pm.rent, m);
+          const expM = propFlowAt(pm.expensesFlow, m);
+          rentIncome += rentM;
+          propExpenseOut += expM;
+          acc._propNet[pid].rent += rentM;
+          if (pm.expensesDeductible) acc._propNet[pid].expenses += expM;
+          for (const per of persons) {
+            const s = pm.shares[per];
+            if (!s) continue;
+            if (rentM > 0) {
+              acc[per].ordinary += rentM * s;
+              acc[per].incomeMonths.add(m);
+            }
+            if (pm.expensesDeductible) acc[per].deductions += expM * s;
+          }
+          if (row) {
+            row.properties[pid].rent += rentM;
+            row.properties[pid].expenses += expM;
+          }
         }
       }
 
@@ -404,7 +570,14 @@ export function projectPlan(state, profiles = PROFILES) {
         const interestReal = interest * defl;
         if (md.deductible && interestReal > 0) {
           for (const p of persons) {
-            if (md.shares[p]) acc[p].deductions += interestReal * md.shares[p];
+            if (md.shares[p]) {
+              acc[p].deductions += interestReal * md.shares[p];
+              // Interest on a loan tied to an investment property joins
+              // that property's gearing calculation (D4).
+              if (md.propertyId && propMeta[md.propertyId]?.invest) {
+                acc._propNet[md.propertyId].interest[p] += interestReal * md.shares[p];
+              }
+            }
           }
         }
         if (row) {
@@ -414,7 +587,7 @@ export function projectPlan(state, profiles = PROFILES) {
       }
 
       // d. Household position, including tax outflows (decision 14).
-      const inc = schedule.income[m] + cashDist;
+      const inc = schedule.income[m] + cashDist + rentIncome;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
         if (own && own[m] > 0) {
@@ -424,11 +597,11 @@ export function projectPlan(state, profiles = PROFILES) {
       }
       const exp = schedule.expenses[m];
       const tax = (taxOut ? taxOut[m] : 0) + (m === first ? cgtDue : 0);
-      const net = inc - exp - tax - loanPayReal;
+      const net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut;
       if (row) {
         row.income += inc;
         row.cashDistributions += cashDist;
-        row.expenses += exp;
+        row.expenses += exp + propExpenseOut;
         row.tax += tax;
         row.surplusOrDeficit += net;
       }
@@ -496,10 +669,44 @@ export function projectPlan(state, profiles = PROFILES) {
     const balSnap = { ...bal };
     const poolSnap = { ...pools };
     const loanSnap = { ...loanBal };
+    const propValSnap = { ...propVal };
+    const propPoolSnap = { ...propPools };
     const measured = runYear(y, { taxOut: null, cgtDue, row: null, trackUnfunded: false });
     Object.assign(bal, balSnap);
     pools = poolSnap;
     Object.assign(loanBal, loanSnap);
+    Object.assign(propVal, propValSnap);
+    propPools = propPoolSnap;
+
+    // Negative gearing rules (D4): a net rental loss offsets other
+    // income only when the loss year is pre-FY2027-28, the property is
+    // a new build, or it was acquired before 12 May 2026
+    // (grandfathered). Otherwise the loss is quarantined per owner —
+    // carried forward against future net rental profits first, then
+    // capital gains. Property flows are balance-independent, so the
+    // measured components are exact for both passes.
+    const newQuarantine = { client: 0, partner: 0 };
+    for (const per of persons) {
+      let rentalProfit = 0;
+      for (const pid in propMeta) {
+        const pm = propMeta[pid];
+        if (!pm.invest) continue;
+        const pn = measured._propNet[pid];
+        const share = pm.shares[per] ?? 0;
+        const net = (pn.rent - pn.expenses) * share - pn.interest[per];
+        if (net >= 0) { rentalProfit += net; continue; }
+        const allowed = fyStart < 2027 || pm.newBuild || pm.grandfathered;
+        if (!allowed) {
+          measured[per].deductions -= -net; // quarantine: pull the loss out
+          newQuarantine[per] += -net;
+        }
+      }
+      const use = Math.min(quarantineCarry[per], rentalProfit);
+      if (use > 0) {
+        measured[per].deductions += use; // prior carry offsets rental profit
+        quarantineCarry[per] -= use;
+      }
+    }
 
     // Assess income tax per person on the measured components.
     const assessed = {};
@@ -536,12 +743,22 @@ export function projectPlan(state, profiles = PROFILES) {
       row.liabilities[l.id].closing = closingReal;
       row.liabilitiesClosing += closingReal;
     }
-    row.netAssets = row.closingBalance - row.liabilitiesClosing;
+    for (const pid in propMeta) {
+      row.properties[pid].value = propVal[pid];
+      row.propertyClosing += propVal[pid];
+    }
+    row.netAssets = row.closingBalance + row.propertyClosing - row.liabilitiesClosing;
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.
     const newPending = { client: 0, partner: 0 };
     for (const p of persons) {
+      // Remaining quarantined carry offsets this year's realised gains.
+      if (quarantineCarry[p] > 0 && real[p].netCapitalGain > 0) {
+        const useGain = Math.min(quarantineCarry[p], real[p].netCapitalGain);
+        real[p].netCapitalGain -= useGain;
+        quarantineCarry[p] -= useGain;
+      }
       const a2 = assessPerson({
         fyStartYear: fyStart,
         bracketMode,
@@ -558,6 +775,7 @@ export function projectPlan(state, profiles = PROFILES) {
     }
 
     const detail = (p) => persons.includes(p) ? {
+      quarantinedLossCarry: quarantineCarry[p], // already includes this FY's quarantined losses
       taxableIncome: assessed[p].taxableIncome,
       grossTax: assessed[p].incomeTax,
       medicare: assessed[p].medicare,
@@ -566,6 +784,7 @@ export function projectPlan(state, profiles = PROFILES) {
       cgt: cgtDueDetail[p],
       frankingCredits: assessed[p].frankingCredits,
     } : null;
+    for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY
     row.taxDetail = {
       client: detail("client"),
       partner: detail("partner"),
