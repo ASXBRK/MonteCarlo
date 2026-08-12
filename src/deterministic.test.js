@@ -588,3 +588,72 @@ describe("tax — CGT timing and pools through the engine", () => {
     expect(out.accruedCgtAtEnd).toBeCloseTo(0, 8);
   });
 });
+
+// --- Phase D2: financial vs lifestyle asset classes ----------------------------
+
+describe("D2 — lifestyle assets", () => {
+  const lifestyle = (over = {}) => ({
+    id: "car", name: "Vehicles", class: "lifestyle", include: true,
+    owner: "client", balance: 60000, growthPct: 0, ...over,
+  });
+
+  it("grows at the Fisher-converted simple rate (closed form)", () => {
+    const s = mkState({
+      endAge: 49,
+      assets: [mkAsset({ allocation: zeroRealAlloc() }), lifestyle({ growthPct: 4 })],
+    });
+    const out = projectPlan(s);
+    const rm = Math.pow(1.04 / 1.025, 1 / 12) - 1;
+    const n = out.schedule.months;
+    expect(out.monthly.perAsset.car[n]).toBeCloseTo(60000 * Math.pow(1 + rm, n), 4);
+    // 0% growth → declines at CPI in real terms.
+    const flat = projectPlan(mkState({
+      endAge: 49, assets: [mkAsset({ allocation: zeroRealAlloc() }), lifestyle()],
+    }));
+    expect(flat.monthly.perAsset.car[n]).toBeCloseTo(60000 / Math.pow(1.025, 10), 2);
+    // And it joins the combined closing balance.
+    expect(flat.yearly.at(-1).closingBalance)
+      .toBeCloseTo(100000 + flat.monthly.perAsset.car[n], 4);
+  });
+
+  it("never funds deficits, earns no distribution income, pays no tax", () => {
+    const s = mkState({
+      endAge: 44,
+      assets: [mkAsset({ allocation: zeroRealAlloc(), balance: 24000 }), lifestyle({ growthPct: 2.5 })],
+      fundingOrder: ["a1", "car"], // engine must ignore the lifestyle id
+      cashflows: { expenses: [cf({ assetId: null, amount: 4000 })] },
+    });
+    const out = projectPlan(s);
+    // Financial asset drains in 6 months; the car is untouched and the
+    // rest is unfunded.
+    expect(out.monthly.perAsset.a1[6]).toBeCloseTo(0, 6);
+    expect(out.monthly.perAsset.car[12]).toBeCloseTo(60000, 4);
+    expect(out.shortfall.firstMonth).toBe(6);
+    for (const r of out.yearly) expect(r.tax).toBe(0);
+  });
+
+  it("carries no flow arrays and cannot be a surplus target", () => {
+    const s = mkState({
+      endAge: 44,
+      assets: [mkAsset(), lifestyle()],
+      surplus: { mode: "invest", assetId: "car" }, // invalid — engine falls back to spend
+      cashflows: { income: [cf({ assetId: null, amount: 1000, toAge: 44 })] },
+    });
+    const out = projectPlan(s);
+    expect(out.schedule.assetFlows.car).toBeUndefined();
+    expect(out.yearly[0].surplusInvested).toBe(0);
+    expect(out.monthly.perAsset.car[12]).toBeCloseTo(60000 / 1.025, 2);
+  });
+
+  it("regression gate: explicit class 'financial' is bit-identical to no class", () => {
+    const base = mkState({
+      endAge: 50,
+      cashflows: { contributions: [cf({ amount: 500, toAge: 50 })] },
+    });
+    const stamped = JSON.parse(JSON.stringify(base));
+    stamped.assets = stamped.assets.map((a) => ({ ...a, class: "financial" }));
+    const a = projectPlan(base);
+    const b = projectPlan(stamped);
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+  });
+});

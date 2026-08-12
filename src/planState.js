@@ -264,6 +264,7 @@ export function createAsset(plan, existing = [], profiles = {}) {
   return {
     id: uid("as"),
     name: `Asset ${n}`,
+    class: "financial",           // "financial" | "lifestyle" (D2)
     include: true,
     owner: "client",              // "client" | "partner" | "joint" (joint = 50/50 in B.1)
     distributions: "reinvest",    // "reinvest" | "cash"
@@ -274,6 +275,27 @@ export function createAsset(plan, existing = [], profiles = {}) {
     costBase: balance,
   };
 }
+
+// Lifestyle assets (D2): contents, vehicles, jewellery, other. Value +
+// simple nominal growth only — no allocation, no ICR, no
+// distributions, no CGT (exempt personal-use treatment; collectables
+// are not separately modelled — disclosed), no cashflow targeting,
+// never in fundingOrder or surplus-invest targets.
+export function createLifestyleAsset(plan, existing = []) {
+  const n = existing.filter((a) => a.class === "lifestyle").length + 1;
+  return {
+    id: uid("ls"),
+    name: `Lifestyle asset ${n}`,
+    class: "lifestyle",
+    include: true,
+    owner: "client",
+    balance: 0,
+    growthPct: 0, // nominal % p.a.
+  };
+}
+
+export const isLifestyle = (a) => a?.class === "lifestyle";
+export const isFinancial = (a) => !isLifestyle(a);
 
 function nextAssetNumber(existing) {
   let max = 0;
@@ -437,11 +459,12 @@ export function clampExpenseRow(row, plan) {
   return { ...rest, fromAge, toAge, ...clampIndexation(row) };
 }
 
-// fundingOrder invariant: exactly the INCLUDED assets, in order.
-// Known included ids keep their relative order; missing included ids
-// append in display order; excluded/unknown ids drop.
+// fundingOrder invariant: exactly the INCLUDED FINANCIAL assets, in
+// order. Known included ids keep their relative order; missing
+// included ids append in display order; excluded/unknown/lifestyle
+// ids drop.
 export function normaliseFundingOrder(order, assets) {
-  const includedIds = assets.filter((a) => a.include).map((a) => a.id);
+  const includedIds = assets.filter((a) => a.include && isFinancial(a)).map((a) => a.id);
   const includedSet = new Set(includedIds);
   const seen = new Set();
   const out = [];
@@ -474,7 +497,7 @@ export function normaliseSettings(settings, assets) {
   const fundingOrder = normaliseFundingOrder(settings?.fundingOrder, assets);
   let surplus = settings?.surplus || { mode: "spend", assetId: null };
   if (surplus.mode === "invest") {
-    const valid = assets.some((a) => a.include && a.id === surplus.assetId);
+    const valid = assets.some((a) => a.include && isFinancial(a) && a.id === surplus.assetId);
     surplus = valid ? { mode: "invest", assetId: surplus.assetId } : { mode: "spend", assetId: null };
   } else {
     surplus = { mode: "spend", assetId: null };
@@ -524,7 +547,11 @@ export function deletePartnerOwned(state) {
 
 // Remove one asset with full cascade. Never removes the last asset.
 export function removeAsset(state, assetId) {
-  if (state.assets.length <= 1) return state;
+  // The last FINANCIAL asset can never be removed; lifestyle assets
+  // (D2) are always removable.
+  const victim = state.assets.find((a) => a.id === assetId);
+  if (!victim) return state;
+  if (isFinancial(victim) && state.assets.filter(isFinancial).length <= 1) return state;
   const assets = state.assets.filter((a) => a.id !== assetId);
   const cf = state.cashflows;
   const cashflows = {
@@ -638,7 +665,9 @@ export function hydrate(json, profiles = {}) {
 
     const plan = clampPlan(raw.plan);
     const assets = raw.assets.map((a, i) => hydrateAsset(a, i, profiles));
-    const assetIds = new Set(assets.map((a) => a.id));
+    // Cashflow rows may only target FINANCIAL assets (D2 validation);
+    // rows pointing at lifestyle assets drop on hydrate.
+    const assetIds = new Set(assets.filter(isFinancial).map((a) => a.id));
     const cf = raw.cashflows || {};
 
     const state = {
@@ -675,10 +704,23 @@ export function hydrate(json, profiles = {}) {
 
 function hydrateAsset(a, i, profiles) {
   const balance = clampNumber(a.balance, 0);
+  // Migration (D2): assets without a class are financial.
+  if (a.class === "lifestyle") {
+    return {
+      id: typeof a.id === "string" && a.id ? a.id : uid("ls"),
+      name: typeof a.name === "string" && a.name.trim() ? a.name : `Lifestyle asset ${i + 1}`,
+      class: "lifestyle",
+      include: a.include !== false,
+      owner: ["client", "partner", "joint"].includes(a.owner) ? a.owner : "client",
+      balance,
+      growthPct: clampNumber(a.growthPct, -10, 30),
+    };
+  }
   const cgtAsset = a.cgtAsset !== false;
   return {
     id: typeof a.id === "string" && a.id ? a.id : uid("as"),
     name: typeof a.name === "string" && a.name.trim() ? a.name : `Asset ${i + 1}`,
+    class: "financial",
     include: a.include !== false,
     owner: ["client", "partner", "joint"].includes(a.owner) ? a.owner : "client",
     distributions: a.distributions === "cash" ? "cash" : "reinvest",

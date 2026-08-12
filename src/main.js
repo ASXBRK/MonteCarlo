@@ -7,7 +7,7 @@
 
 import { PROFILES, realMu } from "./profiles.js";
 import {
-  defaultState, createAsset, createCashflow, createLumpSum,
+  defaultState, createAsset, createLifestyleAsset, createCashflow, createLumpSum,
   createIncomeRow, createExpenseRow,
   clampPlan, clampAllToPlan, clampAllocation, clampIncomeRow,
   nearestVolBasis, normaliseSettings, normaliseFundingOrder,
@@ -50,7 +50,9 @@ const els = {
   pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
   assets: $("assets"),
+  lifestyleAssets: $("lifestyleAssets"),
   addAssetBtn: $("addAssetBtn"),
+  addLifestyleBtn: $("addLifestyleBtn"),
   incomeSection: $("incomeSection"),
   expensesSection: $("expensesSection"),
   investSection: $("investSection"),
@@ -209,7 +211,7 @@ function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
   for (const el of [els.planBar, els.incomeSection, els.expensesSection, els.assets,
-                    els.investSection, els.settingsPanel, els.summaryStrip,
+                    els.lifestyleAssets, els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
                     els.viewTax, els.viewAssumptions]) {
     el.innerHTML = "";
@@ -889,9 +891,19 @@ function allocationSectionHTML(a) {
   `;
 }
 
+function assetHeadMeta(a) {
+  if (a.class === "lifestyle") {
+    return `Lifestyle · ${fmtMoney(a.balance)} · ${(a.growthPct ?? 0).toFixed(1).replace(/\.0$/, "")}% growth${isCouple() ? ` · ${a.owner}` : ""}`;
+  }
+  return `${allocationSummary(a.allocation, PROFILES)} · ${fmtMoney(a.balance)}${isCouple() ? ` · ${a.owner}` : ""}`;
+}
+
 function assetCardHTML(a) {
   const isCollapsed = collapsed.get(a.id) === true;
   const excluded = !a.include;
+  // Last-asset rule counts FINANCIAL assets; lifestyle always removable.
+  const removable = a.class === "lifestyle"
+    || state.assets.filter((x) => x.class !== "lifestyle").length > 1;
 
   const head = `
     <div class="pcard-head" data-action="toggle-collapse" data-aid="${a.id}">
@@ -899,13 +911,13 @@ function assetCardHTML(a) {
               aria-label="${isCollapsed ? "Expand" : "Collapse"}"
               data-action="toggle-collapse" data-aid="${a.id}">▸</button>
       <span class="pcard-name" data-role="headName">${escapeHTML(a.name)}</span>
-      <span class="pcard-meta" data-role="headMeta">${escapeHTML(allocationSummary(a.allocation, PROFILES))} · ${fmtMoney(a.balance)}${isCouple() ? ` · ${a.owner}` : ""}</span>
+      <span class="pcard-meta" data-role="headMeta">${escapeHTML(assetHeadMeta(a))}</span>
       <label class="pcard-include" title="Include in projection totals">
         <input type="checkbox"${a.include ? " checked" : ""}
                data-action="toggle-include" data-aid="${a.id}" />
         <span>Include</span>
       </label>
-      ${state.assets.length > 1 ? `
+      ${removable ? `
         <button class="pcard-remove" type="button" data-action="remove-asset" data-aid="${a.id}">Remove</button>
       ` : ""}
     </div>
@@ -913,6 +925,39 @@ function assetCardHTML(a) {
 
   if (isCollapsed) {
     return `<div class="pcard${excluded ? " excluded" : ""}" data-aid="${a.id}">${head}</div>`;
+  }
+
+  // Lifestyle assets (D2): the minimal field set — value + simple
+  // growth, nothing else.
+  if (a.class === "lifestyle") {
+    return `<div class="pcard${excluded ? " excluded" : ""}" data-aid="${a.id}">${head}
+      <div class="pcard-body">
+        <div class="pcard-details${isCouple() ? " with-owner" : ""}">
+          <div class="cf-cell pcard-name-cell">
+            <label>Name</label>
+            <input type="text" value="${escapeHTML(a.name)}" maxlength="60"
+                   data-aid="${a.id}" data-field="name" />
+          </div>
+          ${isCouple() ? `
+            <div class="cf-cell">
+              <label>Owner</label>
+              <select data-aid="${a.id}" data-field="owner">${ownerOptions(a.owner)}</select>
+            </div>
+          ` : ""}
+          <div class="cf-cell">
+            <label>Value ($)</label>
+            <input type="number" min="0" step="1000" value="${a.balance}"
+                   data-aid="${a.id}" data-field="balance" />
+          </div>
+          <div class="cf-cell">
+            <label>Growth (% p.a. nominal)</label>
+            <input type="number" min="-10" max="30" step="0.1" value="${a.growthPct ?? 0}"
+                   data-aid="${a.id}" data-field="growthPct" />
+          </div>
+        </div>
+        <p class="helper-text">Lifestyle assets grow at their simple rate and sit outside the investment machinery — no income, fees, tax, or cashflow targeting, and they are never drawn on to fund deficits.</p>
+      </div>
+    </div>`;
   }
 
   const body = `
@@ -986,17 +1031,23 @@ function assetCardHTML(a) {
 }
 
 function renderAssets() {
-  els.assets.innerHTML = state.assets.map(assetCardHTML).join("");
+  els.assets.innerHTML = state.assets.filter((a) => a.class !== "lifestyle").map(assetCardHTML).join("");
+  els.lifestyleAssets.innerHTML = state.assets.filter((a) => a.class === "lifestyle").map(assetCardHTML).join("");
+}
+
+function assetCardEl(aid) {
+  return els.assets.querySelector(`.pcard[data-aid="${aid}"]`)
+    || els.lifestyleAssets.querySelector(`.pcard[data-aid="${aid}"]`);
 }
 
 function refreshCardHead(aid) {
   const a = findAsset(aid);
-  const card = els.assets.querySelector(`.pcard[data-aid="${aid}"]`);
+  const card = assetCardEl(aid);
   if (!a || !card) return;
   const nameEl = card.querySelector('[data-role="headName"]');
   const metaEl = card.querySelector('[data-role="headMeta"]');
   if (nameEl) nameEl.textContent = a.name;
-  if (metaEl) metaEl.textContent = `${allocationSummary(a.allocation, PROFILES)} · ${fmtMoney(a.balance)}${isCouple() ? ` · ${a.owner}` : ""}`;
+  if (metaEl) metaEl.textContent = assetHeadMeta(a);
 }
 
 function refreshAllocTotal(aid) {
@@ -1022,7 +1073,8 @@ function retargetVolBasis(aid) {
 // --- central cashflows section ------------------------------------------
 
 function assetOptions(selected) {
-  return state.assets.map(
+  // Cashflows may only target financial assets (D2).
+  return state.assets.filter((a) => a.class !== "lifestyle").map(
     (a) => `<option value="${a.id}"${a.id === selected ? " selected" : ""}>${escapeHTML(a.name)}</option>`
   ).join("");
 }
@@ -1303,7 +1355,7 @@ function renderCashflows() {
 
 function renderSettings() {
   const s = state.settings;
-  const includedAssets = state.assets.filter((a) => a.include);
+  const includedAssets = state.assets.filter((a) => a.include && a.class !== "lifestyle");
   const orderItems = s.fundingOrder.map((id, i) => {
     const a = findAsset(id);
     if (!a) return "";
@@ -1354,7 +1406,7 @@ els.settingsPanel.addEventListener("change", (e) => {
   if (!field) return;
   if (field === "surplusMode") {
     if (e.target.value === "invest") {
-      const first = state.assets.find((a) => a.include);
+      const first = state.assets.find((a) => a.include && a.class !== "lifestyle");
       state.settings.surplus = { mode: "invest", assetId: first ? first.id : null };
       state.settings = normaliseSettings(state.settings, state.assets);
     } else {
@@ -1386,7 +1438,7 @@ els.settingsPanel.addEventListener("click", (e) => {
 // --- field mutation (delegated over assets + cashflows) ---------------------
 
 const CF_MOUNTS = [els.incomeSection, els.expensesSection, els.investSection];
-for (const container of [els.assets, ...CF_MOUNTS]) {
+for (const container of [els.assets, els.lifestyleAssets, ...CF_MOUNTS]) {
   container.addEventListener("input", (e) => applyFieldEdit(e.target, false));
   container.addEventListener("change", (e) => applyFieldEdit(e.target, true));
 }
@@ -1441,6 +1493,10 @@ function applyAssetEdit(a, field, el, commit) {
     case "icrPct":
       a.icrPct = clampNumber(el.value, 0, 100);
       if (commit) el.value = a.icrPct;
+      return false;
+    case "growthPct": // lifestyle assets (D2)
+      a.growthPct = clampNumber(el.value, -10, 30);
+      if (commit) el.value = a.growthPct;
       return false;
     case "cgtAsset": {
       a.cgtAsset = el.checked;
@@ -1610,7 +1666,7 @@ function flagIfClamped(el, clampedValue) {
 
 // --- structural actions ------------------------------------------------------
 
-els.assets.addEventListener("click", (e) => {
+function onAssetSectionClick(e) {
   const target = e.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
@@ -1634,13 +1690,14 @@ els.assets.addEventListener("click", (e) => {
       a.include = e.target.checked;
       state.settings = normaliseSettings(state.settings, state.assets);
       saveState();
-      els.assets.querySelector(`.pcard[data-aid="${aid}"]`)?.classList.toggle("excluded", !a.include);
+      assetCardEl(aid)?.classList.toggle("excluded", !a.include);
       renderSettings();
       refreshOutputs();
       break;
     }
     case "remove-asset": {
-      if (state.assets.length <= 1) return;
+      const financialCount = state.assets.filter((x) => x.class !== "lifestyle").length;
+      if (a.class !== "lifestyle" && financialCount <= 1) return; // keep the last financial asset
       const isSurplusTarget = state.settings.surplus.assetId === aid;
       const msg = isSurplusTarget
         ? `Remove "${a.name}"? It is the surplus investment target — surplus treatment will revert to Spend, and the asset's cashflow rows will be deleted.`
@@ -1671,7 +1728,10 @@ els.assets.addEventListener("click", (e) => {
       break;
     }
   }
-});
+}
+
+els.assets.addEventListener("click", onAssetSectionClick);
+els.lifestyleAssets.addEventListener("click", onAssetSectionClick);
 
 function switchAllocMode(a, mode) {
   if (a.allocation.mode === mode) return;
@@ -1703,7 +1763,7 @@ function onCashflowSectionClick(e) {
   const cf = state.cashflows;
 
   if (action === "add-row") {
-    const firstAsset = state.assets[0]?.id ?? null;
+    const firstAsset = state.assets.find((a) => a.class !== "lifestyle")?.id ?? null;
     if (kind === "income") cf.income.push(createIncomeRow(state.plan, cf.income));
     else if (kind === "expenses") cf.expenses.push(createExpenseRow(state.plan, cf.expenses));
     else if (kind === "contributions") cf.contributions.push(createCashflow("contribution", state.plan, firstAsset));
@@ -1728,6 +1788,14 @@ els.addAssetBtn.addEventListener("click", () => {
   const a = createAsset(state.plan, state.assets, PROFILES);
   state.assets.push(a);
   state.settings = normaliseSettings(state.settings, state.assets); // appends to funding order
+  collapsed.set(a.id, false);
+  saveState();
+  renderAll();
+});
+
+els.addLifestyleBtn.addEventListener("click", () => {
+  const a = createLifestyleAsset(state.plan, state.assets);
+  state.assets.push(a);
   collapsed.set(a.id, false);
   saveState();
   renderAll();
@@ -2100,7 +2168,7 @@ function buildCashflowGroups() {
       { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },
       { label: "Unfunded cashflow", cell: (y) => yl[y].unfundedCashflow },
     ] },
-    { title: "One-off amounts", rows: included.map((a) => ({
+    { title: "One-off amounts", rows: included.filter((a) => a.class !== "lifestyle").map((a) => ({
       label: a.name,
       cell: (y) => projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0,
       always: true, // editable grid — keep every cell present
@@ -2219,15 +2287,19 @@ function buildAssetsGroups(entity) {
     }));
     combined.push({ label: "Tax attributable", cell: (y) => -yl[y].tax });
     combined.push({ label: "Closing balance", cell: (y) => yl[y].closingBalance, always: true, cls: "tl-total" });
-    const byAsset = included.map((a) => ({
-      label: a.name,
-      cell: (y) => yl[y].perAssetClosing[a.id] ?? 0,
-    }));
+    const financial = included.filter((a) => a.class !== "lifestyle");
+    const lifestyle = included.filter((a) => a.class === "lifestyle");
+    const closingRow = (a) => ({ label: a.name, cell: (y) => yl[y].perAssetClosing[a.id] ?? 0 });
+    const byAsset = financial.map(closingRow);
     byAsset.push({ label: "Total", cell: (y) => yl[y].closingBalance, always: true, cls: "tl-total" });
-    return [
+    const groups = [
       { title: "Combined", rows: combined },
       { title: "Closing balance by asset", rows: byAsset },
     ];
+    if (lifestyle.length) {
+      groups.splice(2, 0, { title: "Lifestyle assets", rows: lifestyle.map(closingRow) });
+    }
+    return groups;
   }
 
   const zero = { opening: 0, contributions: 0, withdrawals: 0, oneOffs: 0, deficitFunding: 0, surplusInvested: 0, growth: 0, closing: 0 };
@@ -2302,9 +2374,10 @@ function buildAssumptionsGroups() {
   for (const a of included) {
     const { incomeNominal, growthNominal } = assetReturnComponents(a);
     const gross = incomeNominal + growthNominal;
-    const netReal = (1 + gross - a.icrPct / 100) / (1 + cpi) - 1;
+    const icrPct = a.class === "lifestyle" ? 0 : (a.icrPct ?? 0);
+    const netReal = (1 + gross - icrPct / 100) / (1 + cpi) - 1;
     economic.push({ label: `${a.name} — gross return, nominal (% p.a.)`, cell: () => gross * 100, pct: true, always: true });
-    economic.push({ label: `${a.name} — ICR (% p.a.)`, cell: () => a.icrPct, pct: true });
+    if (icrPct > 0) economic.push({ label: `${a.name} — ICR (% p.a.)`, cell: () => icrPct, pct: true });
     economic.push({ label: `${a.name} — net real return (% p.a.)`, cell: () => netReal * 100, pct: true, always: true });
   }
 

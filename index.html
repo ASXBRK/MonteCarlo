@@ -29,11 +29,19 @@
 
       <section id="expensesSection" aria-label="Expenses"></section>
 
-      <section aria-label="Assets">
-        <h2 class="section-heading">Assets</h2>
+      <section aria-label="Financial assets">
+        <h2 class="section-heading">Financial assets</h2>
         <div id="assets" class="portfolio-stack"></div>
         <div class="portfolio-actions">
-          <button id="addAssetBtn" class="btn-text" type="button">+ Add asset</button>
+          <button id="addAssetBtn" class="btn-text" type="button">+ Add financial asset</button>
+        </div>
+      </section>
+
+      <section aria-label="Lifestyle assets">
+        <h2 class="section-heading">Lifestyle assets</h2>
+        <div id="lifestyleAssets" class="portfolio-stack"></div>
+        <div class="portfolio-actions">
+          <button id="addLifestyleBtn" class="btn-text" type="button">+ Add lifestyle asset</button>
         </div>
       </section>
 
@@ -221,6 +229,7 @@
           <p>Income tax for a financial year is deducted from household cashflow within that year, spread evenly across the months in which the income arises — a PAYG-withholding approximation. Net refunds are credited in the final month of the year.</p>
           <p>Capital gains tax uses one pooled cost base per asset (no parcels). Contributions, one-off inflows, invested surplus, and reinvested distributions add to the pool; any sale — an explicit withdrawal, an outbound one-off, or a deficit-funding draw — consumes a proportional slice, and the difference is a realised gain or loss. Sales before 1 July 2027 apply the 50% discount (holdings are assumed to satisfy the 12-month rule except amounts added in the same financial year, which are treated as coming proportionally from new money). At 1 July 2027 every asset's pool resets to market value under the enacted deemed-reacquisition transition — gains accrued before that date are not taxed at that point at the level this tool models. From that date the pool is CPI-indexed (constant in real terms) and tax on gains is the greater of the marginal calculation and the 30% minimum, with capital losses carried forward per person against future gains only. CGT on a year's gains is paid as a single household outflow in July of the following year; the final year's assessment cannot be paid inside the projection and is reported as an accrued liability.</p>
           <p>Not modelled, by design: SAPTO, HELP repayments, the Medicare levy surcharge, Division 293, family Medicare thresholds, and trusts, companies, or superannuation. Assets marked as not CGT assets never generate capital gains tax.</p>
+          <p>Lifestyle assets (contents, vehicles, jewellery and similar) are treated as exempt personal-use assets: they grow at their simple rate and never generate income, deductions, or capital gains tax. The collectables rules (which can tax gains on items acquired above $500) are not separately modelled — a disclosed simplification.</p>
           <p>A person set to non-resident in the Setup section is taxed on the non-resident bracket table (no tax-free threshold), with no Medicare levy and no LITO. Two disclosed simplifications: franking credits remain refundable offsets for non-residents, and non-resident CGT treatment (discount and indexation eligibility differences under both regimes) is not differentiated in this version.</p>
           <div class="param-inline-field">
             <span>Tax bracket indexation</span>

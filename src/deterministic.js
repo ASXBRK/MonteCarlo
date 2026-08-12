@@ -50,8 +50,12 @@ import {
 const toMonthlyReal = (netNominal, cpi) =>
   Math.pow((1 + netNominal) / (1 + cpi), 1 / 12) - 1;
 
-// Nominal return components + franking level for an asset.
+// Nominal return components + franking level for an asset. Lifestyle
+// assets (D2) have a bare growth rate and nothing else.
 export function assetReturnComponents(asset, profiles = PROFILES) {
+  if (asset.class === "lifestyle") {
+    return { incomeNominal: 0, growthNominal: (asset.growthPct ?? 0) / 100, frankingPct: 0 };
+  }
   if (asset.allocation.mode === "custom") {
     return {
       incomeNominal: asset.allocation.incomePct / 100,
@@ -102,8 +106,8 @@ export function projectPlan(state, profiles = PROFILES) {
   const meta = {};
   for (const a of included) {
     const { incomeNominal, growthNominal, frankingPct } = assetReturnComponents(a, profiles);
-    const icr = a.icrPct / 100;
-    const payout = a.distributions === "cash";
+    const icr = a.class === "lifestyle" ? 0 : a.icrPct / 100;
+    const payout = a.class !== "lifestyle" && a.distributions === "cash";
     meta[a.id] = {
       rate: payout
         ? toMonthlyReal(growthNominal - icr, cpi)
@@ -112,7 +116,8 @@ export function projectPlan(state, profiles = PROFILES) {
       frankingPct,
       icr,
       payout,
-      cgt: a.cgtAsset === true,
+      cgt: a.class !== "lifestyle" && a.cgtAsset === true,
+      lifestyle: a.class === "lifestyle",
       shares: ownerShares(a, couple),
     };
   }
@@ -129,10 +134,15 @@ export function projectPlan(state, profiles = PROFILES) {
   const combined = new Float64Array(months + 1);
   combined[0] = ids.reduce((s, id) => s + bal[id], 0);
 
-  const fundingOrder = state.settings.fundingOrder.filter((id) => id in bal);
+  // Lifestyle assets are illiquid to the engine: never funding
+  // sources, never surplus targets (defensive — settings invariants
+  // already exclude them).
+  const fundingOrder = state.settings.fundingOrder.filter((id) => id in bal && !meta[id].lifestyle);
   const surplusMode = state.settings.surplus.mode;
   const surplusTargetId =
-    surplusMode === "invest" && state.settings.surplus.assetId in bal
+    surplusMode === "invest" &&
+    state.settings.surplus.assetId in bal &&
+    !meta[state.settings.surplus.assetId].lifestyle
       ? state.settings.surplus.assetId
       : null;
 
@@ -281,9 +291,10 @@ export function projectPlan(state, profiles = PROFILES) {
         }
       }
 
-      // c. Asset-targeted flows.
+      // c. Asset-targeted flows (lifestyle assets carry none).
       for (const id of ids) {
         const flows = schedule.assetFlows[id];
+        if (!flows) continue;
         const contrib = flows.contributions[m];
         if (contrib > 0) {
           bal[id] += contrib;

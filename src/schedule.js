@@ -140,7 +140,11 @@ export function buildSchedules(state) {
     partner: plan.partner ? new Float64Array(months) : null,
   };
 
-  const includedIds = new Set(state.assets.filter((a) => a.include).map((a) => a.id));
+  // Cashflows may only target included FINANCIAL assets (D2) —
+  // lifestyle assets carry no flow arrays at all.
+  const includedIds = new Set(
+    state.assets.filter((a) => a.include && a.class !== "lifestyle").map((a) => a.id)
+  );
   const assetFlows = {};
   for (const id of includedIds) {
     assetFlows[id] = {

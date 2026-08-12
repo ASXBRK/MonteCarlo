@@ -9,7 +9,7 @@ import {
   removeAsset, ownerWindow, fyLabelForAge, horizonYears,
   serialize, hydrate, summarise, planSummaryText, annualisedAmount,
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear, clampTaxProfile,
-  ageAtDate, synthDob, resolveEndBasis, clampCashflow,
+  ageAtDate, synthDob, resolveEndBasis, clampCashflow, createLifestyleAsset,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -523,5 +523,49 @@ describe("D1 — identity, DOB, and end basis", () => {
     expect("indexed" in t).toBe(false);
     const f = clampCashflow({ id: "b", fromAge: 40, toAge: 90, amount: 1, frequency: "monthly", indexed: false }, plan);
     expect(f.indexBasis).toBe("none");
+  });
+});
+
+describe("D2 — asset class model", () => {
+  it("migration stamps existing assets financial; lifestyle round-trips", () => {
+    const s = defaultState(PROFILES, NOW);
+    const lf = createLifestyleAsset(s.plan, s.assets);
+    lf.balance = 25000;
+    lf.growthPct = 3;
+    s.assets.push(lf);
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.assets[0].class).toBe("financial");
+    const backLf = back.assets.find((a) => a.class === "lifestyle");
+    expect(backLf).toMatchObject({ balance: 25000, growthPct: 3 });
+    expect(backLf.allocation).toBeUndefined();
+    expect(backLf.cgtAsset).toBeUndefined();
+  });
+
+  it("lifestyle assets never join fundingOrder or surplus targets", () => {
+    const fin = { id: "f", include: true, class: "financial" };
+    const lf = { id: "l", include: true, class: "lifestyle" };
+    expect(normaliseFundingOrder(["l", "f"], [fin, lf])).toEqual(["f"]);
+    expect(normaliseSettings({ surplus: { mode: "invest", assetId: "l" }, fundingOrder: [] }, [fin, lf]).surplus)
+      .toEqual({ mode: "spend", assetId: null });
+  });
+
+  it("cashflow rows targeting lifestyle assets drop on hydrate", () => {
+    const s = defaultState(PROFILES, NOW);
+    const lf = createLifestyleAsset(s.plan, s.assets);
+    s.assets.push(lf);
+    s.cashflows.contributions.push({ ...createCashflow("contribution", s.plan, lf.id) });
+    s.cashflows.lumpSums.push({ id: "x", assetId: lf.id, amount: 1000, direction: "in", age: 45, source: "input" });
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.cashflows.contributions.every((c) => c.assetId !== lf.id)).toBe(true);
+    expect(back.cashflows.lumpSums).toHaveLength(0);
+  });
+
+  it("the last financial asset survives removal; lifestyle is always removable", () => {
+    const s = defaultState(PROFILES, NOW);
+    const lf = createLifestyleAsset(s.plan, s.assets);
+    s.assets.push(lf);
+    expect(removeAsset(s, s.assets[0].id)).toBe(s); // last financial — refused
+    const out = removeAsset(s, lf.id);
+    expect(out.assets).toHaveLength(1);
   });
 });
