@@ -1043,6 +1043,126 @@ html, body {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* --- Phase B output shell --- */
+
+.output-shell { padding: 14px 16px 10px; }
+
+.pretax-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #fdf6e4;
+  border: 1px solid #e8d9a8;
+  border-radius: 8px;
+  color: #6b4f00;
+  font-size: 12.5px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.pretax-dismiss {
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  color: #6b4f00;
+  background: transparent;
+  border: none;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 6px;
+  flex: 0 0 auto;
+}
+.pretax-dismiss:hover { background: rgba(107, 79, 0, 0.1); }
+
+.output-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.output-head .seg-toggle { margin-bottom: 0; }
+
+.output-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.output-actions .display-toggle { margin: 0; }
+
+.chart-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  margin: 2px 0 6px;
+  user-select: none;
+}
+.chart-opt input { accent-color: var(--accent); }
+
+.shortfall-note {
+  font-size: 12.5px;
+  color: #8a3d2c;
+  background: #fbeeea;
+  border: 1px solid #ecc9bf;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0 4px;
+}
+
+/* --- ledger table --- */
+
+.ledger-wrap {
+  overflow-x: auto;
+  margin: 4px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.ledger {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ledger th, .ledger td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ledger thead th {
+  background: #f4f6f9;
+  color: var(--ink-soft);
+  font-weight: 600;
+  text-align: right;
+  position: sticky;
+  top: 0;
+}
+
+.ledger thead .lg-group {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  text-align: left;
+  border-bottom: none;
+  padding-bottom: 1px;
+}
+
+.ledger thead tr:nth-child(2) th:first-child,
+.ledger thead tr:nth-child(2) th:nth-child(2) { text-align: left; }
+
+.ledger .lg-num { text-align: right; }
+.ledger .lg-text { text-align: left; color: var(--ink-soft); }
+
+.ledger tbody tr:nth-child(even) { background: #fafbfc; }
+.ledger tbody tr:last-child td { border-bottom: none; }
+
 /* --- Parameters modal inline field --- */
 
 .param-inline-field {

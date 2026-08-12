@@ -56,12 +56,39 @@
 
       <section id="summaryStrip" class="summary-strip" aria-live="polite"></section>
 
-      <section class="chart-wrap">
-        <div class="display-toggle" role="radiogroup" aria-label="Display units">
-          <button class="display-option" data-units="real" type="button" aria-pressed="true">Today's dollars</button>
-          <button class="display-option" data-units="nominal" type="button" aria-pressed="false">Future dollars</button>
+      <section class="chart-wrap output-shell" aria-label="Projection output">
+        <div id="pretaxBanner" class="pretax-banner" hidden>
+          <span>Pre-tax projection — income tax, CGT, franking and distribution treatment arrive with the tax engine (next phase).</span>
+          <button id="pretaxDismiss" class="pretax-dismiss" type="button" aria-label="Dismiss">×</button>
         </div>
-        <div id="chart"></div>
+        <div class="output-head">
+          <div class="seg-toggle" id="viewSwitcher" role="tablist" aria-label="Output view">
+            <button class="seg-option active" type="button" data-view="projection" role="tab" aria-selected="true">Projection</button>
+            <button class="seg-option" type="button" data-view="ledger" role="tab" aria-selected="false">Ledger</button>
+          </div>
+          <div class="output-actions">
+            <div class="display-toggle" role="radiogroup" aria-label="Display units">
+              <button class="display-option" data-units="real" type="button" aria-pressed="true">Today's dollars</button>
+              <button class="display-option" data-units="nominal" type="button" aria-pressed="false">Future dollars</button>
+            </div>
+            <button id="exportBtn" class="btn-text" type="button">Export PNG</button>
+          </div>
+        </div>
+        <div id="viewProjection">
+          <label class="chart-opt">
+            <input type="checkbox" id="showAssetsToggle" />
+            <span>Show individual assets</span>
+          </label>
+          <div id="chart"></div>
+          <p id="shortfallNote" class="shortfall-note" hidden></p>
+        </div>
+        <div id="viewLedger" hidden>
+          <label class="chart-opt">
+            <input type="checkbox" id="showPerAssetCols" />
+            <span>Show per-asset columns</span>
+          </label>
+          <div id="ledgerTable" class="ledger-wrap"></div>
+        </div>
         <div class="chart-note" data-role="chartNote"></div>
       </section>
 
@@ -159,6 +186,14 @@
           <p>The market transitions between states with small monthly probabilities, set so that stress periods occur every 7–10 years on average and last about 10 months when they occur. This captures the empirical observation that volatile periods in real markets cluster — the 2008 financial crisis, the 1970s stagflation, COVID-19, and similar episodes were not isolated bad months but coherent stressed regimes.</p>
           <p>The mean return (μ) is the same in both states — the forward-looking expected return from the profile assumptions is preserved exactly. Only the volatility (σ) differs between states. The weighted average of normal-state and stress-state volatility reproduces the profile's long-run σ assumption.</p>
           <p>This approach is "forward-looking on what returns are on average, backward-looking on how returns evolve through time." Expected returns and long-run volatilities come from forward-looking capital market assumptions; the time structure (clustering, stress duration, stress amplification) is calibrated to historical market behaviour.</p>
+        </section>
+
+        <section>
+          <h3>Deterministic projection</h3>
+          <p>The projection steps month by month. Each month, in order: assets grow at their expected return; contributions, withdrawals, and one-off amounts are applied to their target assets; household income and expenses are netted; a surplus is spent or invested per your setting; a deficit is drawn from your assets in the funding order, draining each to zero before the next.</p>
+          <p>Plan years are Australian financial years (1 July – 30 June). Annual cashflows and one-off amounts are applied in July, the first month of each financial year — in a partial first year that starts after July, that year's annual amounts are assumed to have already been made and are skipped. Monthly cashflows simply run for the months in the projection.</p>
+          <p>An explicit withdrawal larger than its asset's balance takes what is there; the remainder is recorded as <em>unfunded</em> rather than drawn from other assets — a withdrawal is an instruction about a specific asset. A household deficit that outlives every asset in the funding order is also unfunded. Unfunded amounts mean the plan's outflows exceed available funds; the projection reports when that first happens and by how much in total.</p>
+          <p>Asset returns are expected returns net of ICR, converted to real terms at the CPI setting and compounded monthly. Because the deterministic projection uses expected returns, it will sit above the Monte Carlo median when both are on screen — see "Why a deterministic projection sits above the Monte Carlo median" below.</p>
         </section>
 
         <section>

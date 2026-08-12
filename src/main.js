@@ -17,6 +17,8 @@ import {
   summarise, planSummaryText, allocationSummary, ALLOC_PCT_MAX,
 } from "./planState.js";
 import { renderBellCurves } from "./chart.js";
+import { projectPlan } from "./deterministic.js";
+import { nominalFactor } from "./schedule.js";
 import {
   createIndex, normaliseIndex, findActive, findClient,
   newClient, renameClient, deleteClient, switchClient,
@@ -48,6 +50,16 @@ const els = {
   summaryStrip: $("summaryStrip"),
   chartNote: document.querySelector('[data-role="chartNote"]'),
   displayOptions: document.querySelectorAll(".display-option"),
+  viewSwitcher: $("viewSwitcher"),
+  exportBtn: $("exportBtn"),
+  pretaxBanner: $("pretaxBanner"),
+  pretaxDismiss: $("pretaxDismiss"),
+  viewProjection: $("viewProjection"),
+  viewLedger: $("viewLedger"),
+  showAssetsToggle: $("showAssetsToggle"),
+  showPerAssetCols: $("showPerAssetCols"),
+  shortfallNote: $("shortfallNote"),
+  ledgerTable: $("ledgerTable"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
   paramAssetTable: $("paramAssetTable"),
@@ -1079,7 +1091,7 @@ function applyFieldEdit(el, commit) {
     if (!row) return;
     applyRowEdit(el.dataset.kind, row, field, el, commit);
     saveState();
-    renderSummaryStrip();
+    refreshOutputs();
     return;
   }
 
@@ -1095,7 +1107,7 @@ function applyFieldEdit(el, commit) {
   } else {
     refreshCardHead(aid);
   }
-  renderSummaryStrip();
+  refreshOutputs();
 }
 
 function applyAssetEdit(a, field, el, commit) {
@@ -1295,7 +1307,7 @@ els.assets.addEventListener("click", (e) => {
       saveState();
       els.assets.querySelector(`.pcard[data-aid="${aid}"]`)?.classList.toggle("excluded", !a.include);
       renderSettings();
-      renderSummaryStrip();
+      refreshOutputs();
       break;
     }
     case "remove-asset": {
@@ -1317,7 +1329,7 @@ els.assets.addEventListener("click", (e) => {
       switchAllocMode(a, target.dataset.mode === "custom" ? "custom" : "profile");
       saveState();
       renderAssets();
-      renderSummaryStrip();
+      refreshOutputs();
       break;
     }
     case "distributions": {
@@ -1370,12 +1382,12 @@ function onCashflowSectionClick(e) {
     else if (kind === "lumpSums") cf.lumpSums.push(createLumpSum(state.plan, firstAsset));
     saveState();
     renderCashflows();
-    renderSummaryStrip();
+    refreshOutputs();
   } else if (action === "remove-row") {
     if (cf[kind]) cf[kind] = cf[kind].filter((r) => r.id !== cfid);
     saveState();
     renderCashflows();
-    renderSummaryStrip();
+    refreshOutputs();
   }
 }
 
@@ -1392,10 +1404,286 @@ els.addAssetBtn.addEventListener("click", () => {
   renderAll();
 });
 
+// --- projection outputs (Phase B) -----------------------------------------
+//
+// The engine is sub-millisecond at this size: recompute live on every
+// mutation, no worker, no debounce. The engine emits REAL values only;
+// nominal is applied here at render time (convention 12).
+
+let projection = null;
+let activeView = "projection";
+let showAssets = false;
+let showPerAssetColumns = false;
+
+function recomputeProjection() {
+  projection = projectPlan(state);
+}
+
+// One entry point after any mutation: recompute + refresh everything
+// that displays engine output.
+function refreshOutputs() {
+  recomputeProjection();
+  renderSummaryStrip();
+  renderActiveView();
+}
+
+function renderActiveView() {
+  els.viewProjection.hidden = activeView !== "projection";
+  els.viewLedger.hidden = activeView !== "ledger";
+  els.exportBtn.textContent = activeView === "projection" ? "Export PNG" : "Export CSV";
+  for (const btn of els.viewSwitcher.querySelectorAll("[data-view]")) {
+    const active = btn.dataset.view === activeView;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  if (activeView === "projection") renderProjectionChart();
+  else renderLedgerTable();
+}
+
+const isNominal = () => state.display.units === "nominal";
+const displayFactor = (m) => (isNominal() ? nominalFactor(m, state.assumptions.cpi) : 1);
+
+// Month index at the END of plan year y (cumulative months elapsed).
+function endMonthOfYear(y) {
+  return projection.schedule.monthsInFirstYear + 12 * y;
+}
+
+// --- View 1: projection chart -----------------------------------------------
+
+function renderProjectionChart() {
+  const el = $("chart");
+  if (typeof Plotly === "undefined") {
+    el.innerHTML = `<p class="helper-text" style="text-align:center;padding:40px 0;">Chart unavailable (Plotly failed to load). The ledger view and autosave still work.</p>`;
+    els.shortfallNote.hidden = true;
+    return;
+  }
+  const { schedule, monthly, shortfall } = projection;
+  const months = schedule.months;
+  const x = Array.from({ length: months + 1 }, (_, i) => i);
+  const custom = x.map((i) => {
+    const y = i === 0 ? 0 : schedule.yearOfMonth[i - 1];
+    return [schedule.fyLabels[y], schedule.clientAges[y]];
+  });
+  const scaleSeries = (arr) => Array.from(arr, (v, i) => v * displayFactor(i));
+
+  const traces = [{
+    x, y: scaleSeries(monthly.combined), customdata: custom,
+    mode: "lines", type: "scatter",
+    name: "Combined",
+    line: { color: "rgb(28, 90, 180)", width: 2.5 },
+    hovertemplate: "%{customdata[0]} · age %{customdata[1]}<br><b>%{y:$,.0f}</b><extra>Combined</extra>",
+  }];
+
+  if (showAssets) {
+    const palette = ["#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#b5179e", "#d97b2f", "#9a031e", "#3a86c9"];
+    let i = 0;
+    for (const a of state.assets.filter((x) => x.include)) {
+      const series = monthly.perAsset[a.id];
+      if (!series) continue;
+      traces.push({
+        x, y: scaleSeries(series), customdata: custom,
+        mode: "lines", type: "scatter",
+        name: a.name,
+        line: { color: palette[i++ % palette.length], width: 1.5 },
+        hovertemplate: `%{customdata[0]} · age %{customdata[1]}<br>%{y:$,.0f}<extra>${escapeHTML(a.name)}</extra>`,
+      });
+    }
+  }
+
+  // FY tick labels at plan-year starts, thinned to ~10.
+  const yearStartIdx = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
+  const step = Math.max(1, Math.ceil(schedule.planYears / 10));
+  const tickvals = [], ticktext = [];
+  for (let y = 0; y < schedule.planYears; y += step) {
+    tickvals.push(yearStartIdx(y));
+    ticktext.push(schedule.fyLabels[y]);
+  }
+
+  const shapes = [];
+  const annotations = [];
+  if (shortfall) {
+    const sx = shortfall.firstMonth + 1;
+    shapes.push({
+      type: "line", xref: "x", yref: "paper",
+      x0: sx, x1: sx, y0: 0, y1: 1,
+      line: { color: "rgba(200, 80, 60, 0.6)", width: 1.5, dash: "dash" },
+    });
+    annotations.push({
+      x: sx, xref: "x", y: 1, yref: "paper",
+      yanchor: "bottom", text: "First shortfall", showarrow: false,
+      font: { size: 11, color: "rgb(200, 80, 60)" },
+    });
+    els.shortfallNote.textContent =
+      `Planned outflows exceed available funds from age ${shortfall.clientAge} (${shortfall.fyLabel}); ` +
+      `${fmtMoney(shortfall.total)} (today's dollars) of outflows are unfunded over the projection.`;
+    els.shortfallNote.hidden = false;
+  } else {
+    els.shortfallNote.hidden = true;
+  }
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white",
+    plot_bgcolor: "white",
+    hovermode: "x unified",
+    showlegend: showAssets,
+    legend: { orientation: "h", y: -0.18, x: 0.5, xanchor: "center" },
+    xaxis: { tickmode: "array", tickvals, ticktext, showgrid: false, zeroline: false },
+    yaxis: {
+      title: { text: `Balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    shapes, annotations,
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+// --- View 2: ledger table -----------------------------------------------------
+
+// Column model shared by the renderer and the CSV export. Numeric
+// columns that are zero for every row are hidden automatically.
+function buildLedgerColumns() {
+  const included = state.assets.filter((a) => a.include);
+  const couple = isCouple();
+  const cols = [
+    { group: "Year", label: "FY", text: (r) => r.fyLabel },
+    { group: "Year", label: "Age", text: (r) => (r.partnerAge != null ? `${r.clientAge} / ${r.partnerAge}` : String(r.clientAge)) },
+    { group: "Cashflow", label: "Income", val: (r) => r.income },
+    { group: "Cashflow", label: "Expenses", val: (r) => -r.expenses },
+    { group: "Cashflow", label: "Surplus/(deficit)", val: (r) => r.surplusOrDeficit },
+    { group: "Investment flows", label: "Contributions", val: (r) => r.contributions },
+    { group: "Investment flows", label: "Withdrawals", val: (r) => -r.withdrawals },
+    { group: "Investment flows", label: "One-offs", val: (r) => r.oneOffsNet },
+    { group: "Investment flows", label: "Surplus invested", val: (r) => r.surplusInvested },
+    { group: "Investment flows", label: "Deficit funding", val: (r) => -r.deficitFundedFromAssets },
+    { group: "Investment flows", label: "Unfunded", val: (r) => r.unfundedCashflow },
+    { group: "Assets", label: "Growth", val: (r) => r.growth },
+    { group: "Assets", label: "Closing balance", val: (r) => r.closingBalance },
+  ];
+  if (showPerAssetColumns) {
+    for (const a of included) {
+      cols.push({ group: "Per-asset closing", label: a.name, val: (r) => r.perAssetClosing[a.id] ?? 0 });
+    }
+  }
+  const rows = projection.yearly;
+  const visible = cols.filter((c) => {
+    if (c.text) return true;
+    return rows.some((r) => Math.abs(c.val(r)) >= 0.005);
+  });
+  return { visible, rows, couple };
+}
+
+function fmtLedgerCell(v) {
+  if (Math.abs(v) < 0.005) return "–";
+  const s = Math.round(Math.abs(v)).toLocaleString("en-AU");
+  return v < 0 ? `(${s})` : s;
+}
+
+function renderLedgerTable() {
+  const { visible, rows } = buildLedgerColumns();
+
+  // Group header row with colspans.
+  const groups = [];
+  for (const c of visible) {
+    const last = groups[groups.length - 1];
+    if (last && last.name === c.group) last.span += 1;
+    else groups.push({ name: c.group, span: 1 });
+  }
+
+  const head1 = groups.map((g) => `<th colspan="${g.span}" class="lg-group">${escapeHTML(g.name)}</th>`).join("");
+  const head2 = visible.map((c) => `<th>${escapeHTML(c.label)}</th>`).join("");
+
+  const body = rows.map((r, y) => {
+    const factor = isNominal() ? nominalFactor(endMonthOfYear(y), state.assumptions.cpi) : 1;
+    const cells = visible.map((c) => {
+      if (c.text) return `<td class="lg-text">${escapeHTML(c.text(r))}</td>`;
+      return `<td class="lg-num">${fmtLedgerCell(c.val(r) * factor)}</td>`;
+    }).join("");
+    return `<tr>${cells}</tr>`;
+  }).join("");
+
+  els.ledgerTable.innerHTML = `
+    <table class="ledger">
+      <thead><tr>${head1}</tr><tr>${head2}</tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
+}
+
+// --- exports -----------------------------------------------------------------
+
+function exportNameBase() {
+  const { client, scenario } = findActive(workspace);
+  return sanitiseFilename(`${client?.name ?? "client"}-${scenario?.name ?? "scenario"}`);
+}
+
+function exportProjectionPNG() {
+  const el = $("chart");
+  if (typeof Plotly === "undefined" || !el?.data) return;
+  Plotly.toImage(el, { format: "png", width: 1280, height: 640 }).then((dataUrl) => {
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `${exportNameBase()}-projection.png`;
+    a.click();
+  });
+}
+
+function exportLedgerCSV() {
+  const { visible, rows } = buildLedgerColumns();
+  const esc = (s) => `"${String(s).replaceAll('"', '""')}"`;
+  const header = visible.map((c) => esc(c.label)).join(",");
+  const lines = rows.map((r, y) => {
+    const factor = isNominal() ? nominalFactor(endMonthOfYear(y), state.assumptions.cpi) : 1;
+    return visible.map((c) => (c.text ? esc(c.text(r)) : (c.val(r) * factor).toFixed(2))).join(",");
+  });
+  const blob = new Blob([[header, ...lines].join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${exportNameBase()}-ledger.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+els.exportBtn.addEventListener("click", () => {
+  if (activeView === "projection") exportProjectionPNG();
+  else exportLedgerCSV();
+});
+
+// --- output shell wiring --------------------------------------------------------
+
+els.viewSwitcher.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-view]");
+  if (!btn || btn.dataset.view === activeView) return;
+  activeView = btn.dataset.view;
+  renderActiveView();
+});
+
+els.showAssetsToggle.addEventListener("change", () => {
+  showAssets = els.showAssetsToggle.checked;
+  renderProjectionChart();
+});
+
+els.showPerAssetCols.addEventListener("change", () => {
+  showPerAssetColumns = els.showPerAssetCols.checked;
+  renderLedgerTable();
+});
+
+// Pre-tax banner: dismissible per session.
+if (!sessionStorage.getItem("pretaxBannerDismissed")) {
+  els.pretaxBanner.hidden = false;
+}
+els.pretaxDismiss.addEventListener("click", () => {
+  try { sessionStorage.setItem("pretaxBannerDismissed", "1"); } catch { /* fine */ }
+  els.pretaxBanner.hidden = true;
+});
+
 // --- summary strip ------------------------------------------------------
 
 function renderSummaryStrip() {
   const s = summarise(state);
+  const months = projection.schedule.months;
+  const endBalance = projection.monthly.combined[months] * displayFactor(months);
+  const shortfall = projection.shortfall;
   els.summaryStrip.innerHTML = `
     <div class="stat">
       <div class="stat-label">Total current value</div>
@@ -1421,32 +1709,17 @@ function renderSummaryStrip() {
       <div class="stat-label">Withdrawals (annualised)</div>
       <div class="stat-value">${fmtMoney(s.annualWithdrawals)} /yr</div>
     </div>
+    <div class="stat">
+      <div class="stat-label">Projected end balance</div>
+      <div class="stat-value">${fmtMoney(endBalance)}</div>
+    </div>
+    ${shortfall ? `
+      <div class="stat stat-headline">
+        <div class="stat-label">First shortfall</div>
+        <div class="stat-value">Age ${shortfall.clientAge} (${shortfall.fyLabel})</div>
+      </div>
+    ` : ""}
   `;
-}
-
-// --- chart placeholder (Phase B replaces this) ------------------------------
-
-function renderChartPlaceholder() {
-  // Plotly loads from a CDN; if that's blocked (corporate networks),
-  // boot must survive — fall back to a text placeholder.
-  if (typeof Plotly === "undefined") {
-    const el = $("chart");
-    if (el) el.innerHTML = `<p class="helper-text" style="text-align:center;padding:40px 0;">Chart unavailable (Plotly failed to load). Inputs and autosave still work.</p>`;
-    return;
-  }
-  Plotly.newPlot("chart", [], {
-    paper_bgcolor: "white",
-    plot_bgcolor: "white",
-    xaxis: { visible: false },
-    yaxis: { visible: false },
-    annotations: [{
-      text: "Projection engine arrives in Phase B",
-      xref: "paper", yref: "paper", x: 0.5, y: 0.5,
-      showarrow: false,
-      font: { size: 15, color: "#5b6470", family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" },
-    }],
-    margin: { l: 20, r: 20, t: 20, b: 20 },
-  }, { displayModeBar: false, responsive: true });
 }
 
 // --- display units toggle ----------------------------------------------------
@@ -1471,6 +1744,7 @@ els.displayOptions.forEach((btn) => {
     state.display.units = u;
     saveState();
     applyUnitsLabel();
+    refreshOutputs(); // re-render chart/table/strip in the selected units
   });
 });
 
@@ -1519,6 +1793,7 @@ els.inflationInput.addEventListener("change", () => {
   applyUnitsLabel();
   populateParamsTable();
   renderBellCurves("bellCurves", PROFILES, state.assumptions.cpi);
+  refreshOutputs(); // real returns derive from CPI via Fisher
 });
 
 // --- boot -----------------------------------------------------------------
@@ -1529,11 +1804,10 @@ function renderAll() {
   renderAssets();
   renderCashflows();
   renderSettings();
-  renderSummaryStrip();
+  refreshOutputs();
 }
 
 renderAll();
-renderChartPlaceholder();
 applyUnitsLabel();
 populateParamsTable();
 els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
