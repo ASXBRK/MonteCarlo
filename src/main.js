@@ -26,6 +26,7 @@ import {
   switchScenario, touchScenario,
   exportClientFile, exportScenarioFile, importFile,
 } from "./workspace.js";
+import { formatRoute, resolveRoute, initialRoute } from "./router.js";
 
 // Legacy insight modules (firstDecade, drawdownTolerance, tornado,
 // sequenceRisk) are stubbed out. Deliberately NOT imported while
@@ -39,7 +40,10 @@ const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Se
 const $ = (id) => document.getElementById(id);
 
 const els = {
-  workspaceBar: $("workspaceBar"),
+  breadcrumb: $("breadcrumb"),
+  pageClients: $("pageClients"),
+  pageClient: $("pageClient"),
+  pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
   assets: $("assets"),
   addAssetBtn: $("addAssetBtn"),
@@ -141,76 +145,77 @@ function saveState() {
   saveWorkspace();
 }
 
-// Switch the live plan state to the workspace's active scenario.
-function activateScenarioState() {
+// --- pages + routing (A.5) --------------------------------------------------
+//
+// Hash-based navigation, Xplan-style: #/clients → Clients page,
+// #/clients/<id> → Client page, #/clients/<cid>/scenarios/<sid> →
+// Workspace (the modelling page). The list pages are light renders;
+// only the workspace mounts the heavy input/output DOM, and it is
+// emptied on the way out.
+
+let currentRoute = null;      // last resolved route
+let mountedScenarioId = null; // non-null while the workspace DOM is live
+
+function navigate(route) {
+  const target = formatRoute(route);
+  if (location.hash === target) handleRoute(); // same hash → no hashchange event
+  else location.hash = target;
+}
+
+function showPage(name) {
+  els.pageClients.hidden = name !== "clients";
+  els.pageClient.hidden = name !== "client";
+  els.pageWorkspace.hidden = name !== "workspace";
+}
+
+function handleRoute() {
+  const route = resolveRoute(location.hash, workspace);
+  if (!route) { location.replace("#/clients"); return; } // invalid ids → Clients
+  currentRoute = route;
+  if (route.page !== "workspace" && mountedScenarioId) unmountWorkspace();
+  showPage(route.page);
+  if (route.page === "clients") renderClientsPage();
+  else if (route.page === "client") renderClientPage(route.clientId);
+  else if (mountedScenarioId !== route.scenarioId) mountWorkspace(route.clientId, route.scenarioId);
+}
+
+function mountWorkspace(clientId, scenarioId) {
+  workspace = switchScenario(workspace, clientId, scenarioId);
+  saveWorkspace();
   state = loadActiveState();
   resetRuntimeUiState();
-  saveWorkspace();
+  mountedScenarioId = scenarioId;
+  renderWorkspaceBreadcrumb();
   renderAll();
+  applyUnitsLabel();
+  populateParamsTable();
+  els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
 }
 
-// --- workspace bar (client / scenario chips + menus) -----------------------
-
-let openMenu = null; // "client" | "scenario" | null
-
-function renderWorkspaceBar() {
-  const { client, scenario } = findActive(workspace);
-  if (!client || !scenario) return;
-
-  const clientList = workspace.clients.map((c) => `
-    <button class="ws-item${c.id === client.id ? " current" : ""}" type="button"
-            data-ws-action="switch-client" data-id="${c.id}">${escapeHTML(c.name)}</button>
-  `).join("");
-
-  const scenarioList = client.scenarios.map((s) => `
-    <button class="ws-item${s.id === scenario.id ? " current" : ""}" type="button"
-            data-ws-action="switch-scenario" data-id="${s.id}">${escapeHTML(s.name)}</button>
-  `).join("");
-
-  els.workspaceBar.innerHTML = `
-    <div class="ws-chip">
-      <span class="ws-kind">Client</span>
-      <button class="ws-name" type="button" data-ws-action="rename-client"
-              title="Click to rename">${escapeHTML(client.name)}</button>
-      <button class="ws-menu-btn" type="button" data-ws-action="menu-client" aria-label="Client menu">▾</button>
-      <div class="ws-menu" data-role="menu-client" ${openMenu === "client" ? "" : "hidden"}>
-        ${clientList}
-        <div class="ws-divider"></div>
-        <button class="ws-item" type="button" data-ws-action="new-client">New client</button>
-        <button class="ws-item" type="button" data-ws-action="export-client">Export client…</button>
-        <button class="ws-item" type="button" data-ws-action="import-file">Import…</button>
-        <button class="ws-item danger" type="button" data-ws-action="delete-client"
-                ${workspace.clients.length <= 1 ? "disabled" : ""}>Delete client</button>
-      </div>
-    </div>
-    <span class="ws-sep">/</span>
-    <div class="ws-chip">
-      <span class="ws-kind">Scenario</span>
-      <button class="ws-name" type="button" data-ws-action="rename-scenario"
-              title="Click to rename">${escapeHTML(scenario.name)}</button>
-      <button class="ws-menu-btn" type="button" data-ws-action="menu-scenario" aria-label="Scenario menu">▾</button>
-      <div class="ws-menu" data-role="menu-scenario" ${openMenu === "scenario" ? "" : "hidden"}>
-        ${scenarioList}
-        <div class="ws-divider"></div>
-        <button class="ws-item" type="button" data-ws-action="new-scenario">New scenario</button>
-        <button class="ws-item" type="button" data-ws-action="duplicate-scenario">Duplicate scenario</button>
-        <button class="ws-item" type="button" data-ws-action="export-scenario">Export scenario…</button>
-        <button class="ws-item danger" type="button" data-ws-action="delete-scenario"
-                ${client.scenarios.length <= 1 ? "disabled" : ""}>Delete scenario</button>
-      </div>
-    </div>
-  `;
+// Empty every dynamic mount so the list pages do not sit on top of a
+// live workspace DOM. The static skeleton and its listeners stay; the
+// content goes.
+function unmountWorkspace() {
+  if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
+  $("chart").innerHTML = "";
+  for (const el of [els.planBar, els.incomeSection, els.expensesSection, els.assets,
+                    els.investSection, els.settingsPanel, els.summaryStrip, els.ledgerTable]) {
+    el.innerHTML = "";
+  }
+  els.shortfallNote.hidden = true;
+  projection = null;
+  mountedScenarioId = null;
 }
 
-// Inline rename: swap the name button for a text input; Enter/blur
-// commits, Escape aborts.
-function startInlineRename(nameBtn, currentName, commit) {
+// Inline rename: swap the name element for a text input; Enter/blur
+// commits, Escape aborts; the caller re-renders its page afterwards.
+function startInlineRename(nameEl, currentName, commit, rerender) {
   const input = document.createElement("input");
   input.type = "text";
-  input.className = "ws-rename-input";
+  input.className = "inline-rename-input";
   input.value = currentName;
   input.maxLength = 80;
-  nameBtn.replaceWith(input);
+  nameEl.replaceWith(input);
   input.focus();
   input.select();
   let done = false;
@@ -218,7 +223,7 @@ function startInlineRename(nameBtn, currentName, commit) {
     if (done) return;
     done = true;
     if (apply) commit(input.value);
-    renderWorkspaceBar();
+    rerender();
   };
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") finish(true);
@@ -248,6 +253,18 @@ importInput.type = "file";
 importInput.accept = ".json,application/json";
 importInput.style.display = "none";
 document.body.appendChild(importInput);
+// A scenario file needs a destination client; a client file lands in
+// the list as-is.
+function pickClientForImport() {
+  if (workspace.clients.length === 1) return workspace.clients[0].id;
+  const listing = workspace.clients.map((c, i) => `${i + 1}. ${c.name}`).join("\n");
+  const raw = window.prompt(`Import scenario into which client?\n\n${listing}\n\nEnter a number:`, "1");
+  if (raw == null) return null; // cancelled
+  const id = workspace.clients[Math.round(Number(raw)) - 1]?.id ?? null;
+  if (!id) window.alert("No client with that number — import cancelled.");
+  return id;
+}
+
 importInput.addEventListener("change", () => {
   const file = importInput.files?.[0];
   importInput.value = "";
@@ -256,6 +273,15 @@ importInput.addEventListener("change", () => {
   reader.onload = () => {
     let parsed = null;
     try { parsed = JSON.parse(String(reader.result)); } catch { /* handled below */ }
+
+    // importFile targets the index's active client for scenario files,
+    // so point that at the user's pick first.
+    if (parsed && parsed.kind === "scenario") {
+      const targetId = pickClientForImport();
+      if (!targetId) return;
+      workspace = switchClient(workspace, targetId);
+    }
+
     const res = importFile(workspace, parsed, {
       hydrateState: (json) => hydrate(json, PROFILES),
       now: Date.now(),
@@ -268,129 +294,249 @@ importInput.addEventListener("change", () => {
       writeRaw(scenarioKey(w.scenarioId), serialize(w.state));
     }
     workspace = res.index;
-    activateScenarioState();
+    saveWorkspace();
+    if (parsed.kind === "scenario") {
+      navigate({ page: "client", clientId: workspace.activeClientId });
+    } else {
+      renderClientsPage(); // imported client appears in the list
+    }
   };
   reader.readAsText(file);
 });
 
-els.workspaceBar.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-ws-action]");
-  if (!btn) return;
-  const action = btn.dataset.wsAction;
-  const { client, scenario } = findActive(workspace);
+// --- breadcrumb ---------------------------------------------------------
+//
+// items: { label, href } render as links; { label, onRename, rerender }
+// renders the current page's name as an inline-renameable button.
 
-  switch (action) {
-    case "menu-client":
-      openMenu = openMenu === "client" ? null : "client";
-      renderWorkspaceBar();
-      break;
-    case "menu-scenario":
-      openMenu = openMenu === "scenario" ? null : "scenario";
-      renderWorkspaceBar();
-      break;
-    case "rename-client":
-      startInlineRename(btn, client.name, (name) => {
-        workspace = renameClient(workspace, client.id, name);
-        saveWorkspace();
-      });
-      break;
-    case "rename-scenario":
-      startInlineRename(btn, scenario.name, (name) => {
+let breadcrumbRename = null;
+
+function renderBreadcrumb(items) {
+  els.breadcrumb.hidden = items.length === 0;
+  breadcrumbRename = null;
+  els.breadcrumb.innerHTML = items.map((it, i) => {
+    const sep = i > 0 ? `<span class="bc-sep">/</span>` : "";
+    if (it.href) return `${sep}<a class="bc-link" href="${it.href}">${escapeHTML(it.label)}</a>`;
+    if (it.onRename) {
+      breadcrumbRename = it;
+      return `${sep}<button class="bc-name" type="button" data-bc-rename
+                     title="Click to rename">${escapeHTML(it.label)}</button>`;
+    }
+    return `${sep}<span class="bc-current">${escapeHTML(it.label)}</span>`;
+  }).join("");
+}
+
+els.breadcrumb.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-bc-rename]");
+  if (!btn || !breadcrumbRename) return;
+  const it = breadcrumbRename;
+  startInlineRename(btn, it.label, it.onRename, it.rerender);
+});
+
+function renderWorkspaceBreadcrumb() {
+  const { client, scenario } = findActive(workspace);
+  if (!client || !scenario) return;
+  renderBreadcrumb([
+    { label: "Clients", href: "#/clients" },
+    { label: client.name, href: formatRoute({ page: "client", clientId: client.id }) },
+    {
+      label: scenario.name,
+      onRename: (name) => {
         workspace = renameScenario(workspace, client.id, scenario.id, name);
         saveWorkspace();
-      });
-      break;
-    case "switch-client": {
-      openMenu = null;
-      if (btn.dataset.id === client.id) { renderWorkspaceBar(); break; }
-      workspace = switchClient(workspace, btn.dataset.id);
-      activateScenarioState();
-      break;
-    }
-    case "switch-scenario": {
-      openMenu = null;
-      if (btn.dataset.id === scenario.id) { renderWorkspaceBar(); break; }
-      workspace = switchScenario(workspace, client.id, btn.dataset.id);
-      activateScenarioState();
-      break;
-    }
+      },
+      rerender: renderWorkspaceBreadcrumb,
+    },
+  ]);
+}
+
+// --- Clients page ---------------------------------------------------------
+
+function fmtUpdated(ts) {
+  if (!Number.isFinite(ts) || ts <= 0) return "—";
+  return new Date(ts).toLocaleString("en-AU", {
+    day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit",
+  });
+}
+
+const clientUpdatedAt = (c) => Math.max(0, ...c.scenarios.map((s) => s.updatedAt || 0));
+
+function renderClientsPage() {
+  renderBreadcrumb([]); // root page — no breadcrumb
+  const canDelete = workspace.clients.length > 1;
+  const rows = workspace.clients.map((c) => `
+    <div class="list-row" data-id="${c.id}">
+      <a class="list-name" href="${formatRoute({ page: "client", clientId: c.id })}">${escapeHTML(c.name)}</a>
+      <span class="list-meta">${c.scenarios.length} scenario${c.scenarios.length === 1 ? "" : "s"}</span>
+      <span class="list-meta">${fmtUpdated(clientUpdatedAt(c))}</span>
+      <span class="list-actions">
+        <button class="btn-text" type="button" data-action="rename" data-id="${c.id}">Rename</button>
+        <button class="btn-text" type="button" data-action="export" data-id="${c.id}">Export</button>
+        <button class="btn-text list-danger" type="button" data-action="delete" data-id="${c.id}"
+                ${canDelete ? "" : "disabled"}>Delete</button>
+      </span>
+    </div>
+  `).join("");
+  els.pageClients.innerHTML = `
+    <header class="page-head">
+      <h1>Clients</h1>
+      <div class="page-actions">
+        <button class="btn-text" type="button" data-action="new-client">+ New client</button>
+        <button class="btn-text" type="button" data-action="import">Import JSON…</button>
+      </div>
+    </header>
+    <div class="list">
+      <div class="list-head"><span>Name</span><span>Scenarios</span><span>Last updated</span><span></span></div>
+      ${rows}
+    </div>
+  `;
+}
+
+els.pageClients.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  switch (btn.dataset.action) {
     case "new-client": {
-      openMenu = null;
       const r = newClient(workspace, Date.now());
       writeRaw(scenarioKey(r.scenarioId), serialize(defaultState(PROFILES)));
       workspace = r.index;
-      activateScenarioState();
+      saveWorkspace();
+      navigate({ page: "client", clientId: r.clientId });
       break;
     }
-    case "new-scenario": {
-      openMenu = null;
-      const r = newScenario(workspace, client.id, Date.now());
-      writeRaw(scenarioKey(r.scenarioId), serialize(defaultState(PROFILES)));
-      workspace = r.index;
-      activateScenarioState();
-      break;
-    }
-    case "duplicate-scenario": {
-      openMenu = null;
-      const r = duplicateScenario(workspace, client.id, scenario.id, Date.now());
-      // Deep copy via the serialized blob — never a shared reference.
-      const blob = readRaw(scenarioKey(scenario.id)) ?? serialize(state);
-      writeRaw(scenarioKey(r.scenarioId), blob);
-      workspace = r.index;
-      activateScenarioState();
-      break;
-    }
-    case "delete-client": {
-      openMenu = null;
-      if (!window.confirm(`Delete client "${client.name}" and all of its scenarios? This cannot be undone.`)) {
-        renderWorkspaceBar(); break;
-      }
-      const r = deleteClient(workspace, client.id);
-      if (!r) break;
-      for (const id of r.removedScenarioIds) removeRaw(scenarioKey(id));
-      workspace = r.index;
-      activateScenarioState();
-      break;
-    }
-    case "delete-scenario": {
-      openMenu = null;
-      if (!window.confirm(`Delete scenario "${scenario.name}"? This cannot be undone.`)) {
-        renderWorkspaceBar(); break;
-      }
-      const r = deleteScenario(workspace, client.id, scenario.id);
-      if (!r) break;
-      removeRaw(scenarioKey(r.removedScenarioId));
-      workspace = r.index;
-      activateScenarioState();
-      break;
-    }
-    case "export-client": {
-      openMenu = null;
-      const file = exportClientFile(workspace, client.id, getScenarioState);
-      if (file) downloadJSON(client.name, file);
-      renderWorkspaceBar();
-      break;
-    }
-    case "export-scenario": {
-      openMenu = null;
-      const file = exportScenarioFile(workspace, client.id, scenario.id, getScenarioState);
-      if (file) downloadJSON(`${client.name} - ${scenario.name}`, file);
-      renderWorkspaceBar();
-      break;
-    }
-    case "import-file":
-      openMenu = null;
-      renderWorkspaceBar();
+    case "import":
       importInput.click();
       break;
+    case "rename": {
+      const client = findClient(workspace, id);
+      const nameEl = els.pageClients.querySelector(`.list-row[data-id="${id}"] .list-name`);
+      if (!client || !nameEl) break;
+      startInlineRename(nameEl, client.name, (name) => {
+        workspace = renameClient(workspace, id, name);
+        saveWorkspace();
+      }, renderClientsPage);
+      break;
+    }
+    case "export": {
+      const client = findClient(workspace, id);
+      const file = exportClientFile(workspace, id, getScenarioState);
+      if (client && file) downloadJSON(client.name, file);
+      break;
+    }
+    case "delete": {
+      const client = findClient(workspace, id);
+      if (!client) break;
+      if (!window.confirm(`Delete client "${client.name}" and all of its scenarios? This cannot be undone.`)) break;
+      const r = deleteClient(workspace, id);
+      if (!r) break; // cannot delete the last client
+      for (const sid of r.removedScenarioIds) removeRaw(scenarioKey(sid));
+      workspace = r.index;
+      saveWorkspace();
+      renderClientsPage();
+      break;
+    }
   }
 });
 
-// Close menus on outside click.
-document.addEventListener("click", (e) => {
-  if (openMenu && !e.target.closest(".ws-chip")) {
-    openMenu = null;
-    renderWorkspaceBar();
+// --- Client page (a client's scenarios) --------------------------------------
+
+function renderClientPage(clientId) {
+  const client = findClient(workspace, clientId);
+  if (!client) { location.replace("#/clients"); return; }
+  renderBreadcrumb([
+    { label: "Clients", href: "#/clients" },
+    {
+      label: client.name,
+      onRename: (name) => {
+        workspace = renameClient(workspace, clientId, name);
+        saveWorkspace();
+      },
+      rerender: () => renderClientPage(clientId),
+    },
+  ]);
+  const canDelete = client.scenarios.length > 1;
+  const rows = client.scenarios.map((s) => `
+    <div class="list-row list-row-scenario" data-id="${s.id}">
+      <a class="list-name" href="${formatRoute({ page: "workspace", clientId, scenarioId: s.id })}">${escapeHTML(s.name)}</a>
+      <span class="list-meta">${fmtUpdated(s.updatedAt)}</span>
+      <span class="list-actions">
+        <button class="btn-text" type="button" data-action="rename" data-id="${s.id}">Rename</button>
+        <button class="btn-text" type="button" data-action="duplicate" data-id="${s.id}">Duplicate</button>
+        <button class="btn-text" type="button" data-action="export" data-id="${s.id}">Export</button>
+        <button class="btn-text list-danger" type="button" data-action="delete" data-id="${s.id}"
+                ${canDelete ? "" : "disabled"}>Delete</button>
+      </span>
+    </div>
+  `).join("");
+  els.pageClient.innerHTML = `
+    <header class="page-head">
+      <h1>Scenarios</h1>
+      <div class="page-actions">
+        <button class="btn-text" type="button" data-action="new-scenario">+ New scenario</button>
+      </div>
+    </header>
+    <div class="list">
+      <div class="list-head list-head-scenario"><span>Name</span><span>Last updated</span><span></span></div>
+      ${rows}
+    </div>
+  `;
+}
+
+els.pageClient.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const clientId = currentRoute?.clientId;
+  const client = findClient(workspace, clientId);
+  if (!client) return;
+  const sid = btn.dataset.id;
+  const scenario = client.scenarios.find((s) => s.id === sid) || null;
+  switch (btn.dataset.action) {
+    case "new-scenario": {
+      const r = newScenario(workspace, clientId, Date.now());
+      writeRaw(scenarioKey(r.scenarioId), serialize(defaultState(PROFILES)));
+      workspace = r.index;
+      saveWorkspace();
+      navigate({ page: "workspace", clientId, scenarioId: r.scenarioId });
+      break;
+    }
+    case "rename": {
+      const nameEl = els.pageClient.querySelector(`.list-row[data-id="${sid}"] .list-name`);
+      if (!scenario || !nameEl) break;
+      startInlineRename(nameEl, scenario.name, (name) => {
+        workspace = renameScenario(workspace, clientId, sid, name);
+        saveWorkspace();
+      }, () => renderClientPage(clientId));
+      break;
+    }
+    case "duplicate": {
+      if (!scenario) break;
+      const r = duplicateScenario(workspace, clientId, sid, Date.now());
+      // Deep copy via the serialized blob — never a shared reference. A
+      // scenario with no blob yet duplicates as defaults, matching load.
+      writeRaw(scenarioKey(r.scenarioId), readRaw(scenarioKey(sid)) ?? serialize(defaultState(PROFILES)));
+      workspace = r.index;
+      saveWorkspace();
+      renderClientPage(clientId);
+      break;
+    }
+    case "export": {
+      if (!scenario) break;
+      const file = exportScenarioFile(workspace, clientId, sid, getScenarioState);
+      if (file) downloadJSON(`${client.name} - ${scenario.name}`, file);
+      break;
+    }
+    case "delete": {
+      if (!scenario) break;
+      if (!window.confirm(`Delete scenario "${scenario.name}"? This cannot be undone.`)) break;
+      const r = deleteScenario(workspace, clientId, sid);
+      if (!r) break; // cannot delete the last scenario in a client
+      removeRaw(scenarioKey(r.removedScenarioId));
+      workspace = r.index;
+      saveWorkspace();
+      renderClientPage(clientId);
+      break;
+    }
   }
 });
 
@@ -1798,8 +1944,8 @@ els.inflationInput.addEventListener("change", () => {
 
 // --- boot -----------------------------------------------------------------
 
+// Full workspace render — only ever called with the workspace mounted.
 function renderAll() {
-  renderWorkspaceBar();
   renderPlanBar();
   renderAssets();
   renderCashflows();
@@ -1807,10 +1953,15 @@ function renderAll() {
   refreshOutputs();
 }
 
-renderAll();
-applyUnitsLabel();
-populateParamsTable();
-els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
+window.addEventListener("hashchange", handleRoute);
+
+// Boot: an explicit valid deep link wins; an empty hash restores the
+// last active scenario; anything invalid lands on Clients.
+const bootRoute = initialRoute(location.hash, workspace);
+if (location.hash !== formatRoute(bootRoute)) {
+  location.replace(formatRoute(bootRoute)); // also fires hashchange
+}
+handleRoute();
 
 if (LEGACY_INSIGHTS_ENABLED) {
   // Placeholder: insights phase re-mounts firstDecade, drawdownTolerance,

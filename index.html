@@ -9,7 +9,13 @@
   </head>
   <body>
     <div class="app">
-      <div id="workspaceBar" class="ws-bar" aria-label="Client and scenario"></div>
+      <nav id="breadcrumb" class="breadcrumb" aria-label="Workspace navigation" hidden></nav>
+
+      <section id="pageClients" class="page-list" aria-label="Clients" hidden></section>
+
+      <section id="pageClient" class="page-list" aria-label="Client scenarios" hidden></section>
+
+      <div id="pageWorkspace" hidden>
       <header class="app-header">
         <h1>Portfolio Projection</h1>
         <div class="header-actions">
@@ -99,6 +105,7 @@
       <div id="drawdownTolerance"></div>
       <div id="tornado"></div>
       <div id="sequenceRisk"></div>
+      </div>
     </div>
 
     <dialog id="paramsModal" class="modal" aria-labelledby="paramsTitle">
