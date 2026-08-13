@@ -310,6 +310,10 @@ export function projectPlan(state, profiles = PROFILES) {
   ];
   const liabMeta = {};
   const loanBal = {}; // nominal
+  // Real-dollar balance over time (Liabilities table/chart, Commit 5) —
+  // same convention as series/superSeries/wcaSeries: only the real
+  // pass ever writes into it, deflating loanBal at the point of write.
+  const liabSeries = {};
   const offsetLoansByAsset = {}; // assetId → [liability ids]
   for (const l of liabs) {
     const i = monthlyRate(l);
@@ -330,6 +334,8 @@ export function projectPlan(state, profiles = PROFILES) {
     };
     // Purchase loans hold zero until the settlement month sets them.
     loanBal[l.id] = (l.startMonth ?? 0) > 0 ? 0 : l.balance;
+    liabSeries[l.id] = new Float64Array(months + 1);
+    liabSeries[l.id][0] = loanBal[l.id]; // real == nominal at month 0
     if (offsetId) (offsetLoansByAsset[offsetId] ??= []).push(l.id);
   }
   const inflAt = (m) => Math.pow(1 + cpi, m / 12);
@@ -439,9 +445,15 @@ export function projectPlan(state, profiles = PROFILES) {
     openingBalance: 0,
     closingBalance: 0,
     perAssetClosing: {},
-    // Per-liability detail (D3), real dollars; closing filled at year
-    // end. netAssets = assets + property − liabilities.
-    liabilities: Object.fromEntries(liabs.map((l) => [l.id, { interest: 0, principal: 0, closing: 0 }])),
+    // Per-liability detail (D3), real dollars; opening/closing filled
+    // at year start/end. netAssets = assets + property − liabilities.
+    // drawdown (Commit 5): a new loan settling this FY (property
+    // purchases only — v1 has no other way to originate a loan mid-
+    // projection). offsetApplied is a year-end snapshot (like closing,
+    // not a sum) of how much of the balance is currently offset.
+    liabilities: Object.fromEntries(liabs.map((l) => [l.id, {
+      opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0,
+    }])),
     liabilitiesClosing: 0,
     // Per-property detail (D4), real dollars.
     properties: Object.fromEntries(props.map((p) => [p.id, {
@@ -720,7 +732,10 @@ export function projectPlan(state, profiles = PROFILES) {
           const costsReal = (p.purchaseCostsPct / 100) * realPrice;
           const fhogReal = fhogAmount(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild }) / infl;
           const loanReal = pm.loanId ? (p.lvrPct / 100) * realPrice : 0;
-          if (pm.loanId) loanBal[pm.loanId] = liabsById[pm.loanId].balance; // drawdown
+          if (pm.loanId) {
+            loanBal[pm.loanId] = liabsById[pm.loanId].balance; // drawdown
+            if (row) row.liabilities[pm.loanId].drawdown += loanReal;
+          }
           const settle = realPrice - loanReal + dutyReal + costsReal - fhogReal;
           settlementOut += settle;
           propVal[pid] = realPrice;
@@ -859,6 +874,10 @@ export function projectPlan(state, profiles = PROFILES) {
         if (row) {
           row.liabilities[l.id].interest += interestReal;
           row.liabilities[l.id].principal += (payment - interest) * defl;
+          // Snapshot, not a sum — overwritten every month so it holds
+          // the year-end value, same convention as closing.
+          row.liabilities[l.id].offsetApplied = offsetNom * defl;
+          liabSeries[l.id][m + 1] = b1 / inflAt(m + 1);
         }
       }
 
@@ -1194,6 +1213,7 @@ export function projectPlan(state, profiles = PROFILES) {
     row.superCapUsage = superCapUsage;
     row.openingBalance = combined[yearStart(y)];
     row.wcaDetail.opening = wcaSeries[yearStart(y)];
+    for (const l of liabs) row.liabilities[l.id].opening = liabSeries[l.id][yearStart(y)];
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
     const real = runYear(y, { taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome });
@@ -1210,9 +1230,8 @@ export function projectPlan(state, profiles = PROFILES) {
       row.superDetail[id].taxFreeClosing = superTaxFree[id];
       row.superClosing += superSeries[id][yearEnd(y)];
     }
-    const deflEnd = 1 / Math.pow(1 + cpi, yearEnd(y) / 12);
     for (const l of liabs) {
-      const closingReal = loanBal[l.id] * deflEnd;
+      const closingReal = liabSeries[l.id][yearEnd(y)];
       row.liabilities[l.id].closing = closingReal;
       row.liabilitiesClosing += closingReal;
     }

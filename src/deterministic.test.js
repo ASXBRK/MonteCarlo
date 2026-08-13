@@ -932,6 +932,29 @@ describe("D3 — liabilities", () => {
       expect(a.yearly[y].netAssets).toBe(a.yearly[y].closingBalance);
     }
   });
+
+  it("Liabilities view (Commit 5): opening reconciles to the prior year's closing", () => {
+    const out = projectPlan(withLoan(loan(), { years: 11 }));
+    for (let y = 1; y < out.yearly.length; y++) {
+      expect(out.yearly[y].liabilities.lb1.opening).toBeCloseTo(out.yearly[y - 1].liabilities.lb1.closing, 6);
+    }
+    // Year 0 opens at the loan's starting balance (real == nominal at month 0).
+    expect(out.yearly[0].liabilities.lb1.opening).toBeCloseTo(100000, 6);
+  });
+
+  it("Liabilities view (Commit 5): offsetApplied snapshots the offset amount at year end, not a sum", () => {
+    const offsetAsset = mkAsset({ id: "off", balance: 150000, allocation: zeroRealAlloc() });
+    const s = {
+      ...mkState({ endAge: 41, assets: [offsetAsset] }),
+      liabilities: [loan({ repayment: "io", ioYears: 5, termYears: 25, offsetAssetId: "off" })],
+    };
+    const out = projectPlan(s);
+    // The 150k offset asset (zero real growth) fully covers the 100k
+    // loan all year (offsetNominal is capped at the loan's own
+    // balance), so the snapshot is the loan's own last-month balance,
+    // deflated to real dollars at that month (11, the last of year 0).
+    expect(out.yearly[0].liabilities.lb1.offsetApplied).toBeCloseTo(100000 / Math.pow(1.025, 11 / 12), 2);
+  });
 });
 
 // --- Phase D4: property, purchase events, gearing ------------------------------
@@ -1006,6 +1029,15 @@ describe("D4 — property", () => {
     // Settlement was funded from the cash asset (no unfunded).
     expect(out.shortfall).toBeNull();
     expect(y2.deficitFundedFromAssets).toBeGreaterThan(expectedSettle - 1);
+    // Liabilities view (Commit 5): the purchase loan's drawdown shows
+    // in its settlement year only, opens at zero, and closes at the
+    // full drawn amount that same year (the loan starts amortising
+    // immediately, but a single month's payment barely dents it).
+    const loanReal = realPrice * 0.8;
+    expect(y2.liabilities["prop-p1"].drawdown).toBeCloseTo(loanReal, 2);
+    expect(out.yearly[1].liabilities["prop-p1"].drawdown).toBe(0);
+    expect(y2.liabilities["prop-p1"].opening).toBe(0);
+    expect(out.yearly[3].liabilities["prop-p1"].opening).toBeCloseTo(y2.liabilities["prop-p1"].closing, 6);
   });
 
   it("a settlement the assets cannot fund becomes unfunded cashflow — the purchase still completes", () => {

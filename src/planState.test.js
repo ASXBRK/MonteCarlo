@@ -609,7 +609,7 @@ describe("sidebar navigation (page-per-section)", () => {
   it("clampLastVisited defends junk by falling back to input/setup", () => {
     expect(clampLastVisited(null)).toEqual({ area: "input", section: "setup" });
     expect(clampLastVisited({ area: "input", section: "bogus" })).toEqual({ area: "input", section: "setup" });
-    expect(clampLastVisited({ area: "output", section: "liabilities" })).toEqual({ area: "input", section: "setup" });
+    expect(clampLastVisited({ area: "output", section: "financial-assets" })).toEqual({ area: "input", section: "setup" });
     expect(clampLastVisited({ area: "bogus", section: "setup" })).toEqual({ area: "input", section: "setup" });
   });
 

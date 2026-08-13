@@ -88,12 +88,16 @@ const els = {
   viewAssets: $("viewAssets"),
   viewTax: $("viewTax"),
   viewSuper: $("viewSuper"),
+  viewLiabilities: $("viewLiabilities"),
   viewAssumptions: $("viewAssumptions"),
   assetsEntity: $("assetsEntity"),
   assetsTable: $("assetsTable"),
   superEntity: $("superEntity"),
   superTable: $("superTable"),
+  liabilitiesEntity: $("liabilitiesEntity"),
+  liabilitiesTable: $("liabilitiesTable"),
   viewSuperBalances: $("viewSuperBalances"),
+  viewLiabilitiesBalances: $("viewLiabilitiesBalances"),
   showAssetsToggle: $("showAssetsToggle"),
   shortfallNote: $("shortfallNote"),
   periodFromAge: $("periodFromAge"),
@@ -294,12 +298,14 @@ const OUTPUT_NAV = {
     { id: "net-assets", label: "Net assets" },
     { id: "asset-balances", label: "Asset balances" },
     { id: "super-balances", label: "Super balances" },
+    { id: "liabilities-balances", label: "Liabilities" },
   ],
   Tables: [
     { id: "cashflow", label: "Cashflow" },
     { id: "assets", label: "Assets" },
     { id: "tax", label: "Tax" },
     { id: "super", label: "Super" },
+    { id: "liabilities", label: "Liabilities" },
     { id: "assumptions", label: "Assumptions" },
   ],
 };
@@ -3233,6 +3239,7 @@ let activeView = "composite"; // the composite chart is the default Graphs view 
 let showAssets = false;
 let assetsEntity = "all"; // Assets view entity selector: "all" | assetId
 let superEntity = "all"; // Super view entity selector: "all" | super account id
+let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liability id
 
 function recomputeProjection() {
   projection = projectPlan(state);
@@ -3253,13 +3260,15 @@ const VIEW_MOUNTS = {
   "net-assets": () => els.viewNetAssets,
   "asset-balances": () => els.viewAssetBalances,
   "super-balances": () => els.viewSuperBalances,
+  "liabilities-balances": () => els.viewLiabilitiesBalances,
   cashflow: () => els.viewCashflow,
   assets: () => els.viewAssets,
   tax: () => els.viewTax,
   super: () => els.viewSuper,
+  liabilities: () => els.viewLiabilities,
   assumptions: () => els.viewAssumptions,
 };
-const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "super-balances"]);
+const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "super-balances", "liabilities-balances"]);
 
 // Selection now happens via the sidebar (data-nav-section), which
 // routes through handleRoute → showSection → here.
@@ -3273,10 +3282,12 @@ function renderActiveView() {
   else if (activeView === "net-assets") renderNetAssetsChart();
   else if (activeView === "asset-balances") renderAssetBalancesChart();
   else if (activeView === "super-balances") renderSuperBalancesChart();
+  else if (activeView === "liabilities-balances") renderLiabilitiesBalancesChart();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
   else if (activeView === "tax") renderTaxView();
   else if (activeView === "super") renderSuperTableView();
+  else if (activeView === "liabilities") renderLiabilitiesView();
   else if (activeView === "assumptions") renderAssumptionsView();
 }
 
@@ -3740,6 +3751,81 @@ function renderSuperBalancesChart() {
   }, { displayModeBar: false, responsive: true });
 }
 
+// --- View: Liabilities balances chart (fix batch, item 5) -------------------
+//
+// One line per loan (user-entered or property-purchase-derived) plus
+// a Total, x-axis client age — lines, not a stack, since balances
+// here are debts owed rather than assets held. A star marks the plan
+// year a loan first reaches zero (its payoff), when that year falls
+// within the selected period.
+
+function liabilityPayoffYear(lid) {
+  const yl = projection.yearly;
+  for (let y = 0; y < yl.length; y++) {
+    const lr = yl[y].liabilities?.[lid];
+    if (!lr) continue;
+    if (lr.closing < 0.005 && lr.opening > 0.005) return y;
+  }
+  return null;
+}
+function liabilityPayoffLabel(lid) {
+  const y = liabilityPayoffYear(lid);
+  return y == null ? "beyond projection" : projection.yearly[y].fyLabel;
+}
+
+function renderLiabilitiesBalancesChart() {
+  const el = $("chartLiabilitiesBalances");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yl = projection.yearly;
+  const liabIds = Object.keys(yl[0]?.liabilities ?? {});
+  if (liabIds.length === 0) {
+    el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">No liabilities to show.</p>`;
+    return;
+  }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#b5179e", "#d97b2f", "#9a031e", "#3a86c9"];
+
+  const traces = liabIds.map((lid, i) => ({
+    x: ages,
+    y: yearIdxs.map((y) => (yl[y].liabilities[lid]?.closing ?? 0) * factor(y)),
+    name: loanName(lid), type: "scatter", mode: "lines",
+    line: { color: palette[i % palette.length], width: 1.5 },
+    hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(loanName(lid))}</extra>`,
+  }));
+  traces.push({
+    x: ages,
+    y: yearIdxs.map((y) => yl[y].liabilitiesClosing * factor(y)),
+    name: "Total", type: "scatter", mode: "lines",
+    line: { color: "#222", width: 2.5, dash: "dot" },
+    hovertemplate: `Age %{x}<br><b>%{y:$,.0f}</b><extra>Total</extra>`,
+  });
+  for (const lid of liabIds) {
+    const payoffY = liabilityPayoffYear(lid);
+    if (payoffY == null || !yearIdxs.includes(payoffY)) continue;
+    traces.push({
+      x: [projection.schedule.clientAges[payoffY]], y: [0],
+      type: "scatter", mode: "markers", showlegend: false,
+      marker: { symbol: "star", size: 12, color: "#1c5ab4", line: { color: "white", width: 1 } },
+      hovertemplate: `Age %{x}<br>${escapeHTML(loanName(lid))} paid off<extra></extra>`,
+    });
+  }
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Balance owing (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
 // --- transposed table infrastructure (shared by every table view) ------------
 //
 // Years as columns, line items as rows. Groups are visual bands; a
@@ -3898,6 +3984,16 @@ const accruedDiv293Footer = () => {
 // Surplus/(deficit) (the engine's own household-net figure) doesn't
 // include them; in a year with a nonzero one-off, Total income minus
 // Total expenses can differ from Surplus/(deficit) by that amount.
+// Shared by the Cashflow view's loan interest/principal rows and the
+// Liabilities view/chart: a liability id is either a user-entered
+// liability or a property-purchase-derived loan ("prop-<propertyId>").
+function loanName(lid) {
+  return (state.liabilities ?? []).find((l) => l.id === lid)?.name
+    ?? ((state.properties ?? []).find((pr) => `prop-${pr.id}` === lid)
+      ? `${(state.properties ?? []).find((pr) => `prop-${pr.id}` === lid).name} loan`
+      : "Loan");
+}
+
 function buildCashflowGroups() {
   const yl = projection.yearly;
   const rt = projection.schedule.rowTotals;
@@ -3949,11 +4045,6 @@ function buildCashflowGroups() {
       cell: (y) => -(yl[y].properties?.[pr.id]?.expenses ?? 0),
     });
   }
-  const loanName = (lid) =>
-    (state.liabilities ?? []).find((l) => l.id === lid)?.name
-      ?? ((state.properties ?? []).find((pr) => `prop-${pr.id}` === lid)
-        ? `${(state.properties ?? []).find((pr) => `prop-${pr.id}` === lid).name} loan`
-        : "Loan");
   for (const lid of Object.keys(yl[0]?.liabilities ?? {})) {
     expenseRows.push({ label: `${loanName(lid)} — interest`, cell: (y) => -(yl[y].liabilities?.[lid]?.interest ?? 0) });
     expenseRows.push({ label: `${loanName(lid)} — principal`, cell: (y) => -(yl[y].liabilities?.[lid]?.principal ?? 0) });
@@ -4303,6 +4394,69 @@ function renderSuperTableView() {
   renderTransposed(els.superTable, buildSuperGroups(superEntity));
 }
 
+// --- View: Liabilities (fix batch, item 5) ----------------------------------
+
+function liabilityDetailRows(get) {
+  return [
+    { label: "Opening balance", cell: (y) => get(y).opening, always: true },
+    { label: "Drawdowns", cell: (y) => get(y).drawdown },
+    { label: "Interest", cell: (y) => -get(y).interest },
+    { label: "Principal repaid", cell: (y) => -get(y).principal },
+    // Extra repayments are not modelled (v1 limitation, disclosed) —
+    // always zero, so the all-zero-rows convention hides it rather
+    // than needing a separate disclosure line here.
+    { label: "Extra repayments", cell: () => 0 },
+    { label: "Offset balance applied", cell: (y) => get(y).offsetApplied },
+  ];
+}
+
+function liabilitiesPayoffFooter(liabIds) {
+  if (liabIds.length === 0) return "";
+  const lines = liabIds.map((lid) => `${escapeHTML(loanName(lid))}: paid off ${liabilityPayoffLabel(lid)}`);
+  return `<div class="ledger-foot">${lines.join(" · ")}</div>`;
+}
+
+function buildLiabilitiesGroups(entity) {
+  const yl = projection.yearly;
+  const liabIds = Object.keys(yl[0]?.liabilities ?? {});
+  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0 };
+
+  if (entity === "all") {
+    const combined = liabilityDetailRows((y) => liabIds.reduce((s, lid) => {
+      const d = yl[y].liabilities[lid] ?? zero;
+      for (const k in s) s[k] += d[k] ?? 0;
+      return s;
+    }, { ...zero }));
+    combined.push({ label: "Closing balance", cell: (y) => yl[y].liabilitiesClosing, always: true, cls: "tl-total" });
+    const closingRow = (lid) => ({ label: loanName(lid), cell: (y) => yl[y].liabilities[lid]?.closing ?? 0 });
+    const byLoan = liabIds.map(closingRow);
+    byLoan.push({ label: "Total", cell: (y) => yl[y].liabilitiesClosing, always: true, cls: "tl-total" });
+    return [
+      { title: "Combined", rows: combined },
+      { title: "Closing balance by loan", rows: byLoan },
+    ];
+  }
+
+  const name = loanName(entity);
+  const rows = liabilityDetailRows((y) => yl[y].liabilities[entity] ?? zero);
+  rows.push({ label: "Closing balance", cell: (y) => (yl[y].liabilities[entity] ?? zero).closing, always: true, cls: "tl-total" });
+  return [{ title: name, rows }];
+}
+
+function renderLiabilitiesView() {
+  const liabIds = Object.keys(projection.yearly[0]?.liabilities ?? {});
+  if (liabilitiesEntity !== "all" && !liabIds.includes(liabilitiesEntity)) {
+    liabilitiesEntity = "all"; // entity was removed/excluded
+  }
+  renderEntitySelector(
+    els.liabilitiesEntity,
+    [{ id: "all", label: "Consolidated" }, ...liabIds.map((lid) => ({ id: lid, label: loanName(lid) }))],
+    liabilitiesEntity,
+    (id) => { liabilitiesEntity = id; renderLiabilitiesView(); }
+  );
+  renderTransposed(els.liabilitiesTable, buildLiabilitiesGroups(liabilitiesEntity), liabilitiesPayoffFooter(liabIds));
+}
+
 // --- View: Tax (C4) -----------------------------------------------------------
 
 function buildTaxGroups() {
@@ -4431,10 +4585,12 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "net-assets") exportChartPNG("chartNetAssets", "net-assets");
   else if (activeView === "asset-balances") exportChartPNG("chartAssetBalances", "asset-balances");
   else if (activeView === "super-balances") exportChartPNG("chartSuperBalances", "super-balances");
+  else if (activeView === "liabilities-balances") exportChartPNG("chartLiabilitiesBalances", "liabilities-balances");
   else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());
   else if (activeView === "super") exportTransposedCSV("super", buildSuperGroups(superEntity));
+  else if (activeView === "liabilities") exportTransposedCSV("liabilities", buildLiabilitiesGroups(liabilitiesEntity));
   else if (activeView === "assumptions") exportTransposedCSV("assumptions", buildAssumptionsGroups());
 });
 
