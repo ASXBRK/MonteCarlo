@@ -87,14 +87,12 @@ export const SUPER_RATES_BASE = Object.freeze({
   unrestrictedAccessAge: 65, // age-65 condition of release — unconditional, no retirement event needed
   // Division 296 (two-tier tax on high super balances — Commit 2 reads
   // these; added to this shared table now per that commit's spec).
-  // ASSUMPTION, pending firm confirmation: both thresholds ARE indexed
-  // (unlike the lapsed 2023 bill) — modelled here as CPI-indexed,
-  // rounding DOWN to the nearest $100,000, mirroring the general
-  // transfer balance cap's own mechanism, per public reporting that the
-  // enacted Bill's Senate amendments added indexation to address
-  // criticism that the original $3m threshold was permanently frozen.
-  // The exact indexation basis for Division 296 specifically has not
-  // been confirmed against the firm's reference material.
+  // CONFIRMED (corrected from this field's original placeholder, which
+  // had assumed $100,000 steps for both, mirroring the transfer balance
+  // cap): both thresholds ARE indexed to CPI (unlike the lapsed 2023
+  // bill, which had none) but with their OWN distinct rounding steps —
+  // the lower ($3m) threshold rounds DOWN to the nearest $150,000; the
+  // upper ($10m) threshold rounds DOWN to the nearest $500,000.
   div296LowerThreshold: 3000000,
   div296UpperThreshold: 10000000,
 });
@@ -130,8 +128,8 @@ export function superRatesFor(fyStartYear, bracketMode = "indexed", cpi = 0.025,
   const concessionalCapNom = nominalOf(SUPER_RATES_BASE.concessionalCap, awote, 2500, tNominal);
   const gtbcNom = nominalOf(SUPER_RATES_BASE.generalTransferBalanceCap, cpi, 100000, tNominal);
   const untaxedPlanCapNom = nominalOf(SUPER_RATES_BASE.untaxedPlanCap, awote, 5000, tNominal);
-  const div296LowerNom = nominalOf(SUPER_RATES_BASE.div296LowerThreshold, cpi, 100000, tNominal);
-  const div296UpperNom = nominalOf(SUPER_RATES_BASE.div296UpperThreshold, cpi, 100000, tNominal);
+  const div296LowerNom = nominalOf(SUPER_RATES_BASE.div296LowerThreshold, cpi, 150000, tNominal);
+  const div296UpperNom = nominalOf(SUPER_RATES_BASE.div296UpperThreshold, cpi, 500000, tNominal);
 
   // Derived from the above — NOT independently indexed or rounded; each
   // moves only because the figure it's built from does.

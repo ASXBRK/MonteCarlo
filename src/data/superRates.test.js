@@ -139,15 +139,18 @@ describe("superRatesFor — per-figure indexation bases and rounding (Commit 1)"
     expect(r10.div296UpperThreshold).toBeCloseTo(10000000 / k, 6);
   });
 
-  it("Division 296 thresholds ARE indexed under the default mode (unlike the lapsed 2023 design) — CPI, $100,000 steps, same mechanism as the transfer balance cap", () => {
+  it("Division 296 thresholds ARE indexed under the default mode (unlike the lapsed 2023 design) — CPI, but each with its OWN distinct rounding step: $150,000 for the lower threshold, $500,000 for the upper", () => {
     const cpi = 0.025;
     const r0 = superRatesFor(2026, "indexed", cpi, 0.035);
     const r20 = superRatesFor(2046, "indexed", cpi, 0.035);
     expect(r0.div296LowerThreshold).toBe(3000000);
     expect(r0.div296UpperThreshold).toBe(10000000);
     const nomLower20 = Math.round(r20.div296LowerThreshold * Math.pow(1 + cpi, 20));
+    const nomUpper20 = Math.round(r20.div296UpperThreshold * Math.pow(1 + cpi, 20));
     expect(nomLower20).toBeGreaterThan(3000000);
-    expect(nomLower20 % 100000).toBe(0);
+    expect(nomLower20 % 150000).toBe(0);
+    expect(nomUpper20).toBeGreaterThan(10000000);
+    expect(nomUpper20 % 500000).toBe(0);
   });
 
   it("flat rates and ages never scale under either mode", () => {

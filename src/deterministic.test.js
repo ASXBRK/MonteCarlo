@@ -2069,3 +2069,77 @@ describe("Super contribution cash flow (engine-correctness fix)", () => {
     expect(out.superDetail.su1.contributions).toBeCloseTo(20000, 2);
   });
 });
+
+// --- Division 296 (Super thresholds Commit 2) — engine wiring. The
+// formula itself (Government worked examples, two-tier boundary,
+// higher-of-opening/closing, no-tax-below-threshold) is unit-tested
+// directly against src/Tax/div296.js; these tests only exercise how
+// deterministic.js feeds it (opening/closing TSB tracking, realised
+// earnings, and the t+1 payment convention shared with CGT/Div293).
+describe("Division 296 — engine wiring", () => {
+  it("a member crossing the $3m threshold mid-year is assessed on the higher (closing) TSB, paid the following FY", () => {
+    const s = mkState({
+      endAge: 41,
+      cpi: 0,
+      plan: { superAccounts: [superAcct({
+        balance: 2900000,
+        allocation: { mode: "custom", incomePct: 0, growthPct: 10, frankingPct: 0, volBasis: "Balanced" },
+      })] },
+    });
+    const out = projectPlan(s);
+    // Net-of-tax growth ≈ 10% × (1 − 15%×2/3) = 9% ⇒ 2.9m × 1.09 ≈
+    // 3.161m — opening was under $3m, closing is over.
+    expect(out.yearly[0].superDetail.su1.opening).toBeLessThan(3000000);
+    expect(out.yearly[0].superDetail.su1.closing).toBeGreaterThan(3000000);
+    // Nothing is EVER due in a projection's first year (no prior FY to
+    // have assessed it) — year 0's crossing is assessed then, paid in
+    // year 1 (the same t+1 convention as CGT/Div293).
+    expect(out.yearly[0].taxDetail.div296).toBe(0);
+    expect(out.yearly[1].taxDetail.div296).toBeGreaterThan(0);
+    expect(out.yearly[1].taxDetail.client.div296).toBeCloseTo(out.yearly[1].taxDetail.div296, 6);
+  });
+
+  it("a balance that falls below $3m during the year (via a release-eligible withdrawal, earnings still positive) still uses the higher (opening) TSB", () => {
+    const s = mkState({
+      endAge: 66,
+      cpi: 0,
+      plan: {
+        client: { currentAge: 65, retirementAge: 65 },
+        superAccounts: [superAcct({
+          balance: 4000000,
+          allocation: { mode: "custom", incomePct: 0, growthPct: 5, frankingPct: 0, volBasis: "Balanced" },
+        })],
+      },
+      cashflows: {
+        superWithdrawals: [swRow({ amount: 1800000, from: { kind: "age", age: 65 }, to: { kind: "age", age: 65 } })],
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    expect(d.opening).toBe(4000000);
+    expect(d.closing).toBeLessThan(3000000); // the withdrawal, not a loss, took it under
+    expect(d.earnings).toBeGreaterThan(0); // growth itself stayed positive throughout
+    // Still assessed (via the higher, opening figure) — paid year 1.
+    expect(out.yearly[1].taxDetail.div296).toBeGreaterThan(0);
+  });
+
+  it("regression gate: Division 296 is zero every year when TSB never exceeds $3m", () => {
+    const s = mkState({
+      endAge: 45,
+      plan: { superAccounts: [superAcct({ balance: 500000, allocation: zeroRealAlloc() })] },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.taxDetail.div296).toBe(0);
+      expect(row.taxDetail.client.div296).toBe(0);
+    }
+    expect(out.accruedDiv296AtEnd).toBe(0);
+  });
+
+  it("a scenario with no super accounts is unaffected — div296 is always 0, never throws", () => {
+    const s = mkState({ endAge: 42 });
+    expect(() => projectPlan(s)).not.toThrow();
+    const out = projectPlan(s);
+    for (const row of out.yearly) expect(row.taxDetail.div296).toBe(0);
+  });
+});

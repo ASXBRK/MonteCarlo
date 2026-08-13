@@ -4651,6 +4651,7 @@ function buildTaxGroups() {
       { label: "Net income tax", cell: (y) => -(td(y, p)?.incomeTax ?? 0), cls: "tl-total" },
       { label: "CGT payable", cell: (y) => -(td(y, p)?.cgt ?? 0) },
       { label: "Division 293 tax payable", cell: (y) => -(td(y, p)?.div293 ?? 0) },
+      { label: "Division 296 tax payable", cell: (y) => -(td(y, p)?.div296 ?? 0) },
       { label: "Quarantined rental losses (carried)", cell: (y) => td(y, p)?.quarantinedLossCarry ?? 0 },
     ],
   });
@@ -4660,15 +4661,23 @@ function buildTaxGroups() {
     title: "Household",
     rows: [
       { label: "Division 293 tax payable", cell: (y) => -yl[y].taxDetail.div293 },
+      { label: "Division 296 tax payable", cell: (y) => -yl[y].taxDetail.div296 },
       { label: "Total tax", cell: (y) => -yl[y].tax, cls: "tl-total" },
     ],
   });
   return groups;
 }
 
+const accruedDiv296Footer = () => {
+  const accrued = (projection.accruedDiv296AtEnd ?? 0) * displayFactor(projection.schedule.months);
+  return accrued > 0.005
+    ? `<div class="ledger-foot">Division 296 tax accrued at end of projection: ${fmtMoney(accrued)} (assessed on the final year's realised super earnings above $3m TSB; payable after the projection ends).</div>`
+    : "";
+};
+
 function renderTaxView() {
-  const note = `<p class="chart-note-inline">Income tax rows accrue in the year shown (spread through the year, PAYG-style). CGT and Division 293 payable show the year of <em>payment</em> — both are assessed in one year and paid the following July.</p>`;
-  renderTransposed(els.viewTax, buildTaxGroups(), note + accruedCgtFooter() + accruedDiv293Footer());
+  const note = `<p class="chart-note-inline">Income tax rows accrue in the year shown (spread through the year, PAYG-style). CGT, Division 293 and Division 296 payable show the year of <em>payment</em> — each is assessed in one year and paid the following July.</p>`;
+  renderTransposed(els.viewTax, buildTaxGroups(), note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer());
 }
 
 // --- View: Assumptions (C4) -----------------------------------------------------

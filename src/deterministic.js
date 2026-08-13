@@ -49,6 +49,7 @@ import {
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { assessPerson } from "./Tax/annual.js";
+import { div296Tax } from "./Tax/div296.js";
 import {
   createPool, poolAdd, poolConsume, poolNewFy,
   poolDeemedReacquisition, preReformTaxableGain,
@@ -219,6 +220,7 @@ export function projectPlan(state, profiles = PROFILES) {
   };
   let superBringForward = { client: null, partner: null };
   let pendingDiv293 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT)
+  let pendingDiv296 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT/Div293)
   const superWarnings = [...schedule.superWarnings]; // age/work-test rejections, resolved in schedule.js
 
   // --- properties (D4) -------------------------------------------------------
@@ -1033,7 +1035,9 @@ export function projectPlan(state, profiles = PROFILES) {
     const fyStart = fy0 + y;
     const div293Due = y > 0 ? pendingDiv293.client + pendingDiv293.partner : 0;
     const div293DueDetail = y > 0 ? pendingDiv293 : { client: 0, partner: 0 };
-    const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0) + div293Due;
+    const div296Due = y > 0 ? pendingDiv296.client + pendingDiv296.partner : 0;
+    const div296DueDetail = y > 0 ? pendingDiv296 : { client: 0, partner: 0 };
+    const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0) + div293Due + div296Due;
     const cgtDueDetail = y > 0 ? pendingCgt : { client: 0, partner: 0 };
 
     // Super contribution caps (Tier 1.2, Commit 2): resolved ONCE per
@@ -1051,8 +1055,13 @@ export function projectPlan(state, profiles = PROFILES) {
     // concessional contribution row. Reported alongside superOutcome,
     // not folded into it, since it's display-only and never feeds tax.
     const superCapUsage = { client: null, partner: null };
+    // TSB at the start of the FY, per person — captured here (before
+    // this year's crediting) for Division 296's "higher of opening or
+    // closing TSB" rule below, once the real pass has produced closing.
+    const tsbOpening = { client: 0, partner: 0 };
     for (const p of persons) {
       const tsbPriorJune = superAccountsByOwner[p].reduce((s, id) => s + superBal[id], 0);
+      tsbOpening[p] = tsbPriorJune;
       let grossSG = 0, grossSS = 0, grossPD = 0, grossNCC = 0;
       for (const id of superAccountsByOwner[p]) {
         const flows = schedule.superFlows[id];
@@ -1242,6 +1251,26 @@ export function projectPlan(state, profiles = PROFILES) {
       row.superDetail[id].taxFreeClosing = superTaxFree[id];
       row.superClosing += superSeries[id][yearEnd(y)];
     }
+
+    // Division 296 (Super thresholds Commit 2): assessed this FY, per
+    // person, on the higher of opening/closing TSB and this FY's
+    // REALISED earnings (the same gross "earnings" figure the fund's
+    // own 15%/10% earnings tax already applies to — see div296.js's
+    // header comment for the disclosed smoothing simplification this
+    // implies). Paid as a household outflow in July of FY t+1, same
+    // convention as CGT/Div293 (folded into cgtDue next year).
+    const newPendingDiv296 = { client: 0, partner: 0 };
+    for (const p of persons) {
+      const closingTsb = superAccountsByOwner[p].reduce((s, id) => s + row.superDetail[id].closing, 0);
+      const earnings = superAccountsByOwner[p].reduce((s, id) => s + row.superDetail[id].earnings, 0);
+      const { tax } = div296Tax({
+        openingTsb: tsbOpening[p], closingTsb, earnings,
+        lowerThreshold: superRatesY.div296LowerThreshold,
+        upperThreshold: superRatesY.div296UpperThreshold,
+      });
+      newPendingDiv296[p] = tax;
+    }
+
     for (const l of liabs) {
       const closingReal = liabSeries[l.id][yearEnd(y)];
       row.liabilities[l.id].closing = closingReal;
@@ -1290,6 +1319,7 @@ export function projectPlan(state, profiles = PROFILES) {
       incomeTax: assessed[p].netIncomeTax,
       cgt: cgtDueDetail[p],
       div293: div293DueDetail[p],
+      div296: div296DueDetail[p],
       frankingCredits: assessed[p].frankingCredits,
     } : null;
     for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY
@@ -1297,13 +1327,17 @@ export function projectPlan(state, profiles = PROFILES) {
       client: detail("client"),
       partner: detail("partner"),
       incomeTax: persons.reduce((s, p) => s + assessed[p].netIncomeTax, 0),
-      cgt: cgtDue - div293Due, // cgtDue folds in div293Due for the actual cash outflow; reported separately here
+      // cgtDue folds in div293Due AND div296Due for the actual cash
+      // outflow; each reported separately here.
+      cgt: cgtDue - div293Due - div296Due,
       div293: div293Due,
+      div296: div296Due,
       frankingCredits: persons.reduce((s, p) => s + assessed[p].frankingCredits, 0),
     };
     yearly.push(row);
     pendingCgt = newPending;
     pendingDiv293 = newPendingDiv293;
+    pendingDiv296 = newPendingDiv296;
   }
 
   let shortfall = null;
@@ -1329,6 +1363,8 @@ export function projectPlan(state, profiles = PROFILES) {
     // rejected/gated contribution (age 75, work test, excess NCC)
     // across the whole projection, not silently dropped.
     accruedDiv293AtEnd: pendingDiv293.client + pendingDiv293.partner,
+    // Same unpayable-final-FY convention as accruedCgtAtEnd/accruedDiv293AtEnd.
+    accruedDiv296AtEnd: pendingDiv296.client + pendingDiv296.partner,
     superWarnings,
   };
 }
