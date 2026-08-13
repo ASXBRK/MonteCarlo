@@ -18,6 +18,7 @@ import {
   DEFAULT_RETIREMENT_AGE,
   createSuperAccount, clampSuperAccount, normaliseSuperAccounts,
   createSuperContribution, clampSuperContribution, normaliseSuperContributions,
+  createSuperWithdrawal, clampSuperWithdrawal, normaliseSuperWithdrawals,
   INCOME_TYPES, SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, CARRY_FORWARD_YEARS,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
@@ -918,5 +919,72 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
   it("normaliseSuperContributions defends non-array input", () => {
     const plan = clampPlan(couplePlan(), PROFILES);
     expect(normaliseSuperContributions(null, plan, new Set(), new Set())).toEqual([]);
+  });
+});
+
+describe("Tier 1.2 — Super (Commit 3): withdrawals, preservation, proportioning", () => {
+  it("createSuperWithdrawal defaults to the owner's account, retirement-anchored from, plan-end to", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const account = createSuperAccount(plan, [], PROFILES, "client");
+    const sw = createSuperWithdrawal(plan, [account], "client");
+    expect(sw.owner).toBe("client");
+    expect(sw.accountId).toBe(account.id);
+    expect(sw.amount).toBe(0);
+    expect(sw.frequency).toBe("monthly");
+    expect(sw.from).toEqual({ kind: "anchor", anchorId: "retirement-client" });
+    expect(sw.to).toEqual({ kind: "anchor", anchorId: "end" });
+  });
+
+  it("createSuperWithdrawal with no matching account for the owner leaves accountId null", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const sw = createSuperWithdrawal(plan, [], "client");
+    expect(sw.accountId).toBeNull();
+  });
+
+  it("clampSuperWithdrawal validates amount, frequency, and drops an unknown account reference", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const account = createSuperAccount(plan, [], PROFILES, "client");
+    const accountIds = new Set([account.id]);
+    const clamped = clampSuperWithdrawal(
+      { owner: "client", accountId: "nope", amount: -500, frequency: "bogus" },
+      plan, accountIds
+    );
+    expect(clamped.accountId).toBeNull(); // unknown account dropped, row itself survives
+    expect(clamped.amount).toBe(0); // clamped to >= 0
+    expect(clamped.frequency).toBe("monthly"); // invalid → default
+
+    const valid = clampSuperWithdrawal(
+      { owner: "client", accountId: account.id, amount: 2000, frequency: "annual" },
+      plan, accountIds
+    );
+    expect(valid.accountId).toBe(account.id);
+    expect(valid.amount).toBe(2000);
+    expect(valid.frequency).toBe("annual");
+  });
+
+  it("clampSuperWithdrawal demotes an orphan partner owner to client", () => {
+    const single = clampPlan({ ...couplePlan(), household: "single", partner: null }, PROFILES);
+    const clamped = clampSuperWithdrawal({ owner: "partner", accountId: null, amount: 0 }, single, new Set());
+    expect(clamped.owner).toBe("client");
+  });
+
+  it("normaliseSuperWithdrawals defends non-array input", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(normaliseSuperWithdrawals(null, plan, new Set())).toEqual([]);
+  });
+
+  it("hydrate round-trips cashflows.superWithdrawals", () => {
+    const s = defaultState(PROFILES, NOW);
+    const account = createSuperAccount(s.plan, [], PROFILES, "client");
+    s.plan.superAccounts = [account];
+    s.cashflows.superWithdrawals.push({
+      id: "sw1", label: "Lump sum", owner: "client", accountId: account.id,
+      amount: 1000, frequency: "monthly",
+      from: { kind: "age", age: 65 }, to: { kind: "age", age: 90 },
+      indexBasis: "cpi", indexExtraPct: 0,
+    });
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.cashflows.superWithdrawals).toHaveLength(1);
+    expect(back.cashflows.superWithdrawals[0].accountId).toBe(account.id);
   });
 });

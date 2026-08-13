@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -666,6 +666,50 @@ export function normaliseSuperContributions(rows, plan, superAccountIds, incomeR
   return rows.map((sc) => clampSuperContribution(sc, plan, superAccountIds, incomeRowIds));
 }
 
+// --- superannuation withdrawals (Tier 1.2, Commit 3) -----------------------
+//
+// Client-anchored like every other cashflow row (never owner-anchored,
+// regardless of the row's own owner — same convention as contributions/
+// withdrawals/super contributions). Only actually PAID once the
+// account owner's condition of release is met — see
+// src/data/superRates.js's superReleaseAge and deterministic.js.
+
+export function createSuperWithdrawal(plan, superAccounts = [], owner = "client") {
+  const account = superAccounts.find((s) => s.owner === owner) ?? null;
+  return {
+    id: uid("sw"),
+    label: "Withdrawal",
+    owner,
+    accountId: account ? account.id : null,
+    amount: 0,
+    frequency: "monthly",
+    from: anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"),
+    to: anchorRef("end"),
+    indexBasis: "cpi",
+    indexExtraPct: 0,
+  };
+}
+
+export function clampSuperWithdrawal(sw, plan, superAccountIds) {
+  const owner = sw.owner === "partner" && plan.partner ? "partner" : "client";
+  const { from, to } = clampFromTo(sw, plan.client.currentAge, plan.endAge, plan);
+  return {
+    id: typeof sw.id === "string" && sw.id ? sw.id : uid("sw"),
+    label: typeof sw.label === "string" && sw.label.trim() ? sw.label : "Withdrawal",
+    owner,
+    accountId: superAccountIds.has(sw.accountId) ? sw.accountId : null,
+    amount: clampNumber(sw.amount, 0),
+    frequency: sw.frequency === "annual" ? "annual" : "monthly",
+    from, to,
+    ...clampIndexation(sw),
+  };
+}
+
+export function normaliseSuperWithdrawals(rows, plan, superAccountIds) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((sw) => clampSuperWithdrawal(sw, plan, superAccountIds));
+}
+
 function nextAssetNumber(existing) {
   let max = 0;
   for (const a of existing) {
@@ -689,6 +733,7 @@ export function defaultState(profiles = {}, now = new Date()) {
       withdrawals: [],
       lumpSums: [],
       superContributions: [],
+      superWithdrawals: [],
     },
     liabilities: [],
     properties: [],
@@ -1019,6 +1064,7 @@ export function clampAllToPlan(state, profiles = {}) {
     superContributions: normaliseSuperContributions(
       state.cashflows.superContributions, plan, superAccountIds, incomeRowIds
     ),
+    superWithdrawals: normaliseSuperWithdrawals(state.cashflows.superWithdrawals, plan, superAccountIds),
   };
   const settings = normaliseSettings(state.settings, assets);
   const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
@@ -1222,8 +1268,15 @@ function migrateV6toV7(raw) {
   return { ...raw, schemaVersion: 7 };
 }
 
+// v7 → v8 (Tier 1.2, Commit 3): preservation, withdrawals, proportioning.
+// New shape only (cashflows.superWithdrawals) — no existing field
+// changes shape, so again just the version gate.
+function migrateV7toV8(raw) {
+  return { ...raw, schemaVersion: 8 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
-// forward. Returns a clamped v7 state or null (caller falls back to
+// forward. Returns a clamped v8 state or null (caller falls back to
 // defaults). Never throws.
 export function hydrate(json, profiles = {}) {
   try {
@@ -1235,6 +1288,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 4) raw = migrateV4toV5(raw);
     if (raw.schemaVersion === 5) raw = migrateV5toV6(raw);
     if (raw.schemaVersion === 6) raw = migrateV6toV7(raw);
+    if (raw.schemaVersion === 7) raw = migrateV7toV8(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -1259,6 +1313,7 @@ export function hydrate(json, profiles = {}) {
         withdrawals: hydrateCashflows(cf.withdrawals, plan, assetIds),
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
         superContributions: hydrateSuperContributions(cf.superContributions, plan, superAccountIds, incomeRowIds),
+        superWithdrawals: hydrateSuperWithdrawals(cf.superWithdrawals, plan, superAccountIds),
       },
       liabilities: normaliseLiabilities(raw.liabilities, plan, assets, raw.properties),
       properties: normaliseProperties(raw.properties, plan),
@@ -1368,6 +1423,22 @@ function hydrateSuperContributions(arr, plan, superAccountIds, incomeRowIds) {
     indexBasis: sc.indexBasis,
     indexExtraPct: sc.indexExtraPct,
   }, plan, superAccountIds, incomeRowIds));
+}
+
+function hydrateSuperWithdrawals(arr, plan, superAccountIds) {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((sw) => clampSuperWithdrawal({
+    id: typeof sw.id === "string" && sw.id ? sw.id : uid("sw"),
+    label: sw.label,
+    owner: sw.owner,
+    accountId: sw.accountId,
+    amount: clampNumber(sw.amount, 0),
+    frequency: sw.frequency,
+    from: sw.from,
+    to: sw.to,
+    indexBasis: sw.indexBasis,
+    indexExtraPct: sw.indexExtraPct,
+  }, plan, superAccountIds));
 }
 
 function hydrateIncomeRows(arr, plan) {

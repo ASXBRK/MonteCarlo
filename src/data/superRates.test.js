@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SUPER_RATES_BASE, superRatesFor } from "./superRates.js";
+import { SUPER_RATES_BASE, superRatesFor, superReleaseAge } from "./superRates.js";
 
 // Source-figure spot checks (encoding tests verify the encoding, not
 // the source — CLAUDE.md convention). Hand-checked against the spec's
@@ -42,6 +42,7 @@ describe("SUPER_RATES_BASE — FY2026/27 source-figure spot checks", () => {
     expect(SUPER_RATES_BASE.contributionAgeLimit).toBe(75);
     expect(SUPER_RATES_BASE.workTestAges).toEqual([67, 74]);
     expect(SUPER_RATES_BASE.preservationAge).toBe(60);
+    expect(SUPER_RATES_BASE.unrestrictedAccessAge).toBe(65);
   });
 });
 
@@ -95,5 +96,20 @@ describe("superRatesFor — indexation asymmetry", () => {
     const r = superRatesFor(2026, "frozen", 0.025);
     expect(r.concessionalCap).toBe(32500);
     expect(r.div293Threshold).toBe(250000);
+  });
+});
+
+describe("superReleaseAge — condition of release", () => {
+  it("retiring before preservation age still can't release before 60", () => {
+    expect(superReleaseAge(55)).toBe(60);
+  });
+  it("retiring between 60 and 65 releases at the retirement age", () => {
+    expect(superReleaseAge(62)).toBe(62);
+  });
+  it("retiring at or after 65 releases at the unrestricted-access age (65), not later", () => {
+    expect(superReleaseAge(70)).toBe(65);
+  });
+  it("retiring exactly at preservation age releases at 60", () => {
+    expect(superReleaseAge(60)).toBe(60);
   });
 });

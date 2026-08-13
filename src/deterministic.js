@@ -42,7 +42,7 @@
 import { PROFILES } from "./profiles.js";
 import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
-import { superRatesFor } from "./data/superRates.js";
+import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import {
   processConcessionalCap, processNonConcessionalCap, div293Tax, availableCarryForward,
 } from "./Tax/superContributions.js";
@@ -172,15 +172,38 @@ export function projectPlan(state, profiles = PROFILES) {
   }
   const superBal = {};
   const superSeries = {};
+  // Taxable component = balance − taxFreeComponent (Tier 1.2, Commit 3
+  // proportioning). Growth and concessional contributions build the
+  // TAXABLE component implicitly (they grow `superBal` without
+  // touching `superTaxFree`); non-concessional contributions and the
+  // opening seed build the tax-free component explicitly.
+  const superTaxFree = {};
   for (const s of superAccounts) {
     superBal[s.id] = s.balance;
     superSeries[s.id] = new Float64Array(months + 1);
     superSeries[s.id][0] = s.balance;
+    superTaxFree[s.id] = Math.min(s.taxFreeComponent ?? 0, s.balance);
   }
   const superAccountsByOwner = { client: [], partner: [] };
   for (const s of superAccounts) superAccountsByOwner[s.owner]?.push(s.id);
   const workTestMetFor = (owner) =>
     (owner === "partner" ? state.plan.partner?.super?.workTestMet : state.plan.client?.super?.workTestMet) !== false;
+
+  // Pay `want` real dollars from a super account, proportioning
+  // tax-free/taxable at the CURRENT interest — recalculated at every
+  // payment (this is what distinguishes accumulation interests from
+  // pensions, which fix the proportion once at commencement; pensions
+  // are out of scope for this tier). Never cascades to another
+  // account — same convention as explicit financial-asset withdrawals.
+  function withdrawFromSuper(id, want) {
+    const balance = superBal[id];
+    const paid = Math.min(want, balance);
+    if (paid <= 0) return 0;
+    const taxFreeFraction = balance > 0 ? superTaxFree[id] / balance : 0;
+    superTaxFree[id] -= paid * taxFreeFraction;
+    superBal[id] -= paid;
+    return paid;
+  }
 
   // Concessional carry-forward (5-year FIFO) SEEDS from the plan's
   // opening ledger (a real client's already-accrued unused cap, same
@@ -409,9 +432,12 @@ export function projectPlan(state, profiles = PROFILES) {
     // Commit 2), fund earnings and the earnings tax haircut, and
     // withdrawals (Commit 3). opening + contributions − contributionsTax
     // + earnings − earningsTax − withdrawals = closing, per account.
+    // taxFreeClosing (Commit 3): the tax-free-component balance at year
+    // end — recalculated proportionally on every withdrawal/NCC, per
+    // the accumulation-phase proportioning rule (see withdrawFromSuper).
     superDetail: Object.fromEntries(superIds.map((id) => [id, {
       opening: 0, contributions: 0, contributionsTax: 0,
-      earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0,
+      earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0, taxFreeClosing: 0,
     }])),
     superClosing: 0,
   });
@@ -425,6 +451,17 @@ export function projectPlan(state, profiles = PROFILES) {
   // which each person's income arose.
   function runYear(y, { taxOut, cgtDue, row, trackUnfunded, superOutcome }) {
     const fyStart = fy0 + y;
+    // Condition of release (Tier 1.2, Commit 3): static for the whole
+    // projection (retirementAge doesn't change), so cheap to recompute
+    // identically every runYear call rather than threading it through
+    // as year-sequential state like the cap outcome above.
+    const superReleased = {};
+    for (const p of persons) {
+      const person = p === "partner" ? state.plan.partner : state.plan.client;
+      const releaseAge = superReleaseAge(person?.retirementAge ?? 65);
+      const age = p === "partner" ? schedule.partnerAges?.[y] : schedule.clientAges[y];
+      superReleased[p] = age != null && age >= releaseAge;
+    }
     const acc = {};
     for (const p of persons) {
       acc[p] = { ordinary: 0, franked: 0, unfranked: 0, deductions: 0, netCapitalGain: 0, incomeMonths: new Set() };
@@ -544,6 +581,11 @@ export function projectPlan(state, profiles = PROFILES) {
           const ccTax = ccGross * outcome.contributionsTaxRate;
           const nccAccepted = nccGross * outcome.nccAcceptRatio;
           superBal[id] += (ccGross - ccTax) + nccAccepted;
+          // Non-concessional contributions build the tax-free
+          // component explicitly (Commit 3 proportioning); concessional
+          // contributions and growth build the taxable component
+          // implicitly (they grow the balance without touching this).
+          superTaxFree[id] += nccAccepted;
           row.superDetail[id].contributions += ccGross + nccAccepted;
           row.superDetail[id].contributionsTax += ccTax;
         }
@@ -555,10 +597,26 @@ export function projectPlan(state, profiles = PROFILES) {
           for (const p of persons) {
             for (const fill of superOutcome[p].fills) {
               const tax = fill.amount * superOutcome[p].contributionsTaxRate;
-              superBal[fill.accountId] += fill.amount - tax;
+              superBal[fill.accountId] += fill.amount - tax; // concessional fill — taxable, no taxFree change
               row.superDetail[fill.accountId].contributions += fill.amount;
               row.superDetail[fill.accountId].contributionsTax += tax;
             }
+          }
+        }
+        // Explicit super withdrawals (Tier 1.2, Commit 3) — already
+        // release-gated in schedule.js; proportioned tax-free/taxable
+        // at THIS payment (accumulation interests recalculate every
+        // time, unlike pensions, which fix the proportion once at
+        // commencement — pensions are out of scope for this tier).
+        // Never cascades, same as an explicit financial-asset
+        // withdrawal — any shortfall is simply unfunded.
+        for (const id of superIds) {
+          const flows = schedule.superFlows[id];
+          const want = flows ? flows.withdrawals[m] : 0;
+          if (want > 0) {
+            const paid = withdrawFromSuper(id, want);
+            row.superDetail[id].withdrawals += paid;
+            recordUnfunded(want - paid, m);
           }
         }
         for (const id of superIds) superSeries[id][m + 1] = superBal[id];
@@ -767,6 +825,24 @@ export function projectPlan(state, profiles = PROFILES) {
           if (row) {
             row.deficitFundedFromAssets += paid;
             row.perAssetDetail[id].deficitFunding += paid;
+          }
+        }
+        // Super (Tier 1.2, Commit 3): drawn ONLY after the ordinary
+        // funding order is exhausted, in account-list order, and ONLY
+        // from accounts whose owner has met a condition of release
+        // this plan year — before that, they are invisible to deficit
+        // funding, as they must be. Real pass only: super never
+        // affects the tax measurement pass (no realised-gain/CGT
+        // concept in accumulation phase), so there is nothing to
+        // snapshot/roll back here, unlike the financial-asset sells
+        // above.
+        if (row && shortfall > 0) {
+          for (const id of superIds) {
+            if (shortfall <= 0) break;
+            if (!superReleased[superMeta[id].owner]) continue;
+            const paid = withdrawFromSuper(id, shortfall);
+            shortfall -= paid;
+            row.superDetail[id].withdrawals += paid;
           }
         }
         recordUnfunded(shortfall, m);
@@ -981,6 +1057,7 @@ export function projectPlan(state, profiles = PROFILES) {
     }
     for (const id of superIds) {
       row.superDetail[id].closing = superSeries[id][yearEnd(y)];
+      row.superDetail[id].taxFreeClosing = superTaxFree[id];
       row.superClosing += superSeries[id][yearEnd(y)];
     }
     const deflEnd = 1 / Math.pow(1 + cpi, yearEnd(y) / 12);

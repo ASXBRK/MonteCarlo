@@ -1471,3 +1471,133 @@ describe("Tier 1.2 — Super (Commit 2): caps, carry-forward, contributions tax,
     expect(out.superWarnings).toEqual([]);
   });
 });
+
+// --- Tier 1.2, Commit 3: preservation, withdrawals, proportioning ----------
+
+function swRow(over = {}) {
+  return {
+    id: "sw1", label: "Withdrawal", owner: "client", accountId: "su1",
+    amount: 0, frequency: "annual",
+    from: { kind: "age", age: 60 }, to: { kind: "age", age: 60 },
+    indexBasis: "none", indexExtraPct: 0,
+    ...over,
+  };
+}
+
+describe("Tier 1.2 — Super (Commit 3): preservation, withdrawals, proportioning", () => {
+  it("a super account is invisible to deficit funding until the owner's condition of release is met, then available", () => {
+    // retirementAge 60 → superReleaseAge = max(60, 60) capped at 65 = 60.
+    const s = mkState({
+      plan: { client: { currentAge: 58, retirementAge: 60 }, superAccounts: [superAcct({ balance: 50000 })] },
+      endAge: 62,
+      assets: [],
+      cashflows: { expenses: [cf({ assetId: null, amount: 1000 })] }, // −12k/yr deficit, no financial assets to fund it
+    });
+    const out = projectPlan(s);
+    // Ages 58, 59 — below release age 60: shortfall unfunded, super untouched.
+    expect(out.yearly[0].superDetail.su1.withdrawals).toBe(0);
+    expect(out.yearly[0].unfundedCashflow).toBeGreaterThan(0);
+    expect(out.yearly[1].superDetail.su1.withdrawals).toBe(0);
+    expect(out.yearly[1].unfundedCashflow).toBeGreaterThan(0);
+    // Age 60 — released: the same deficit now draws from super instead.
+    expect(out.yearly[2].superDetail.su1.withdrawals).toBeGreaterThan(0);
+    expect(out.yearly[2].unfundedCashflow).toBeCloseTo(0, 2);
+    expect(out.yearly[3].superDetail.su1.withdrawals).toBeGreaterThan(0);
+  });
+
+  it("proportioning recalculates at every payment: contributions between two withdrawals dilute the tax-free fraction, and the SECOND withdrawal reflects the NEW fraction, not the first", () => {
+    // cpi:0 with a 0%/0% allocation gives an exact 0 real monthly rate
+    // (no compounding drift), so every balance below is exact.
+    const s = mkState({
+      plan: { client: { currentAge: 65, retirementAge: 65 }, superAccounts: [superAcct({ balance: 0 })] },
+      endAge: 68, // 3 plan years: ages 65, 66, 67
+      cpi: 0,
+      cashflows: {
+        // Year 0 (age 65): a $100,000 non-concessional contribution —
+        // fully tax-free, the account's only balance so far.
+        superContributions: [
+          scRow({ id: "ncc", type: "personalNonDeductible", amount: 100000, from: { kind: "age", age: 65 }, to: { kind: "age", age: 65 } }),
+          // Year 1 (age 66) and year 2 (age 67): a $50,000 gross
+          // concessional contribution each year — net of 15% tax
+          // ($42,500), credited to the TAXABLE component only.
+          scRow({ id: "cc1", type: "personalDeductible", amount: 50000, from: { kind: "age", age: 66 }, to: { kind: "age", age: 66 } }),
+          scRow({ id: "cc2", type: "personalDeductible", amount: 50000, from: { kind: "age", age: 67 }, to: { kind: "age", age: 67 } }),
+        ],
+        // A $42,500 withdrawal in July of years 1 and 2 — fired the
+        // same month as that year's concessional contribution, and
+        // (per the engine's within-month order) credited AFTER it.
+        superWithdrawals: [
+          swRow({ id: "w1", amount: 42500, from: { kind: "age", age: 66 }, to: { kind: "age", age: 66 } }),
+          swRow({ id: "w2", amount: 42500, from: { kind: "age", age: 67 }, to: { kind: "age", age: 67 } }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+
+    // Year 0 close: balance 100,000, all tax-free (100% — the account's
+    // only money so far).
+    expect(out.yearly[0].superDetail.su1.closing).toBeCloseTo(100000, 2);
+    expect(out.yearly[0].superDetail.su1.taxFreeClosing).toBeCloseTo(100000, 2);
+
+    // Year 1: contribution lands first (balance 100,000 → 142,500,
+    // taxFree unchanged at 100,000 — fraction 100,000/142,500), THEN
+    // the $42,500 withdrawal is proportioned at THAT fraction:
+    //   taxFreeWithdrawn = 42,500 × (100,000/142,500)
+    const fraction1 = 100000 / 142500;
+    const taxFreeAfterW1 = 100000 - 42500 * fraction1;
+    expect(out.yearly[1].superDetail.su1.closing).toBeCloseTo(100000, 2); // 142,500 − 42,500
+    expect(out.yearly[1].superDetail.su1.taxFreeClosing).toBeCloseTo(taxFreeAfterW1, 2);
+
+    // Year 2: the SAME sequence, but starting from year 1's ENDING
+    // tax-free balance (not the original 100%) — proving the fraction
+    // is recalculated fresh at each payment, not fixed at inception.
+    const fraction2 = taxFreeAfterW1 / 142500;
+    const taxFreeAfterW2 = taxFreeAfterW1 - 42500 * fraction2;
+    expect(out.yearly[2].superDetail.su1.closing).toBeCloseTo(100000, 2);
+    expect(out.yearly[2].superDetail.su1.taxFreeClosing).toBeCloseTo(taxFreeAfterW2, 2);
+
+    // The fraction strictly decreased between the two withdrawals —
+    // each concessional contribution dilutes it further. A fixed-at-
+    // commencement (pension-style) proportion would keep this constant.
+    expect(fraction2).toBeLessThan(fraction1);
+  });
+
+  it("withdrawals from age 60 are tax-free from a taxed source — the withdrawn amount never enters taxable income", () => {
+    const s = mkState({
+      plan: { client: { currentAge: 62, retirementAge: 62 }, superAccounts: [superAcct({ balance: 50000, taxFreeComponent: 10000 })] },
+      endAge: 63,
+      assets: [],
+      cashflows: { superWithdrawals: [swRow({ amount: 20000, from: { kind: "age", age: 62 }, to: { kind: "age", age: 62 } })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.withdrawals).toBeCloseTo(20000, 2);
+    expect(out.yearly[0].taxDetail.client.taxableIncome).toBe(0);
+    expect(out.yearly[0].tax).toBe(0);
+  });
+
+  it("an explicit withdrawal row requested before any condition of release is blocked in full, with a flagged warning — never partially paid", () => {
+    const s = mkState({
+      plan: { client: { currentAge: 55, retirementAge: 55 }, superAccounts: [superAcct({ balance: 50000 })] }, // released only at 60 (preservation age floor)
+      endAge: 56,
+      cpi: 0, // exact balance, no real-terms decay, to isolate the blocking assertion
+      cashflows: { superWithdrawals: [swRow({ amount: 10000, from: { kind: "age", age: 55 }, to: { kind: "age", age: 55 } })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.withdrawals).toBe(0);
+    expect(out.yearly[0].superDetail.su1.closing).toBeCloseTo(50000, 2); // untouched
+    expect(out.superWarnings.some((w) => w.type === "withdrawal" && w.reason.includes("60"))).toBe(true);
+  });
+
+  it("regression gate: no-super scenarios are unaffected by the withdrawal/proportioning machinery", () => {
+    const s = mkState({
+      endAge: 45,
+      cashflows: { income: [employmentRow({ amount: 90000 })] },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.superClosing).toBe(0);
+      expect(row.superDetail).toEqual({});
+    }
+    expect(out.superWarnings).toEqual([]);
+  });
+});

@@ -28,7 +28,7 @@
 // resolves to exactly the plan year an equivalent integer age did.
 
 import { resolveRef } from "./keyDates.js";
-import { superRatesFor } from "./data/superRates.js";
+import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 
 // Age 75 limit (member/spouse contributions — SG is exempt) and the
 // personal-deductible work test (ages 67–74, gated by the person's own
@@ -294,6 +294,7 @@ export function buildSchedules(state) {
       salarySacrifice: new Float64Array(months),
       personalDeductible: new Float64Array(months),
       nonConcessional: new Float64Array(months),
+      withdrawals: new Float64Array(months), // gross REQUESTED amount; release-gated below (Commit 3)
     };
   }
   const yearStartM = (y) => (y === 0 ? 0 : firstYearMonths + 12 * (y - 1));
@@ -445,6 +446,40 @@ export function buildSchedules(state) {
       }
     }
     for (let m = 0; m < months; m++) flows[key][m] += temp[m];
+  }
+
+  // Super withdrawals (Tier 1.2, Commit 3): only ever paid once the
+  // account owner's condition of release is met (reaching the
+  // unrestricted-access age, or retiring at/after preservation age —
+  // approximated by the person's own Tier 1.1 retirementAge). Release
+  // age is static for the whole projection (retirementAge doesn't
+  // change), so — like age/work-test gating above — this is resolved
+  // here rather than in deterministic.js. A withdrawal requested before
+  // release is rejected in full for that FY (flagged), not partially
+  // paid or deferred.
+  for (const sw of state.cashflows.superWithdrawals ?? []) {
+    const flows = superFlows[sw.accountId];
+    if (!flows) continue;
+    const temp = new Float64Array(months);
+    applyRegular(sw, "client", temp);
+
+    const person = sw.owner === "partner" ? plan.partner : plan.client;
+    const releaseAge = superReleaseAge(person?.retirementAge ?? 65); // 65 is only a defensive fallback — clampPerson always stamps a real retirementAge
+    for (let y = 0; y < planYears; y++) {
+      const s = yearStartM(y), e = yearEndM(y);
+      let anyThisYear = false;
+      for (let m = s; m < e; m++) if (temp[m] > 0) { anyThisYear = true; break; }
+      if (!anyThisYear) continue;
+      const age = sw.owner === "partner" ? partnerAges?.[y] : clientAges[y];
+      if (age == null || age < releaseAge) {
+        superWarnings.push({
+          fyLabel: fyLabels[y], owner: sw.owner, type: "withdrawal",
+          reason: `Blocked — no condition of release met until age ${releaseAge}`,
+        });
+        for (let m = s; m < e; m++) temp[m] = 0;
+      }
+    }
+    for (let m = 0; m < months; m++) flows.withdrawals[m] += temp[m];
   }
 
   return {

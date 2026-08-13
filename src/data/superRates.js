@@ -46,6 +46,7 @@ export const SUPER_RATES_BASE = Object.freeze({
   contributionAgeLimit: 75,
   workTestAges: Object.freeze([67, 74]),
   preservationAge: 60, // born from 1 Jul 1964 — the only cohort this projection tool models
+  unrestrictedAccessAge: 65, // age-65 condition of release — unconditional, no retirement event needed
 });
 
 // Fields expressed in nominal FY2026/27 dollars that scale with the
@@ -77,4 +78,16 @@ export function superRatesFor(fyStartYear, bracketMode = "indexed", cpi = 0.025)
   };
   out.div293Threshold = SUPER_RATES_BASE.div293Threshold / divK;
   return out;
+}
+
+// Condition of release (Commit 3): unconditional at unrestrictedAccessAge
+// (65), or retiring at/after preservationAge (60) — this tool has no
+// modelled "retirement event", so the person's own Tier 1.1
+// retirementAge stands in for it. The two conditions collapse to a
+// single "released from" age: whichever of the two is reached first,
+// floored at preservationAge (someone retiring before 60 still can't
+// access it before 60) and capped at unrestrictedAccessAge (turning 65
+// grants access regardless of retirement status).
+export function superReleaseAge(retirementAge, rates = SUPER_RATES_BASE) {
+  return Math.min(rates.unrestrictedAccessAge, Math.max(rates.preservationAge, retirementAge));
 }
