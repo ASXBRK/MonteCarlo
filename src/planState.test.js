@@ -13,7 +13,9 @@ import {
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
   createLiability, createProperty,
   clampReportPeriod, clampChartTreatment, defaultChartTreatment,
-  defaultReportPeriod,
+  defaultReportPeriod, createKeyDate, clampKeyDate, normaliseKeyDates,
+  clampDateRef, removeKeyDate, referencesToAnchor, convertAnchorReferences,
+  DEFAULT_RETIREMENT_AGE,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -705,5 +707,97 @@ describe("D5 — report period + chart treatment display state", () => {
   it("defaultState wires display.reportPeriod through defaultReportPeriod for the initial plan", () => {
     const s = defaultState(PROFILES, NOW);
     expect(s.display.reportPeriod).toEqual(defaultReportPeriod(s.plan));
+  });
+});
+
+describe("Key Dates (Tier 1.1) — retirementAge, keyDates, DateRef clamping", () => {
+  it("every person defaults to retirementAge 65, clamped to [18, 120]", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.plan.client.retirementAge).toBe(DEFAULT_RETIREMENT_AGE);
+    const withCustom = clampPlan({ ...couplePlan(), client: { ...couplePlan().client, retirementAge: 60 } });
+    expect(withCustom.client.retirementAge).toBe(60);
+    expect(withCustom.partner.retirementAge).toBe(DEFAULT_RETIREMENT_AGE);
+    expect(clampPlan({ ...couplePlan(), client: { ...couplePlan().client, retirementAge: 5 } }).client.retirementAge).toBe(18);
+  });
+
+  it("defaultPlan/clampPlan carry an empty keyDates array by default", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.plan.keyDates).toEqual([]);
+  });
+
+  it("createKeyDate/clampKeyDate/normaliseKeyDates: basis falls back to client without a partner", () => {
+    const plan = clampPlan(couplePlan());
+    const kd = createKeyDate(plan);
+    expect(kd.basis).toBe("client");
+    const clamped = clampKeyDate({ label: "Buy a home", basis: "partner", age: 46 }, plan);
+    expect(clamped).toMatchObject({ label: "Buy a home", basis: "partner", age: 46 });
+    const single = clampPlan({ ...couplePlan(), household: "single", partner: null });
+    expect(clampKeyDate({ basis: "partner", age: 46 }, single).basis).toBe("client");
+    // Defends junk the same way normaliseProperties/normaliseLiabilities
+    // do elsewhere in this module: every entry is coerced, not dropped.
+    expect(normaliseKeyDates([{ label: "A", age: 50 }, "junk", null], plan)).toHaveLength(3);
+    expect(normaliseKeyDates(null, plan)).toEqual([]);
+  });
+
+  it("clampDateRef keeps a valid anchor reference as-is; an unknown anchor or bare number clamps to an explicit age", () => {
+    const plan = clampPlan({ ...couplePlan(), keyDates: [{ id: "kd1", label: "Buy a home", basis: "client", age: 46 }] });
+    expect(clampDateRef({ kind: "anchor", anchorId: "start" }, 40, 90, plan))
+      .toEqual({ kind: "anchor", anchorId: "start" });
+    expect(clampDateRef({ kind: "anchor", anchorId: "kd1" }, 40, 90, plan))
+      .toEqual({ kind: "anchor", anchorId: "kd1" });
+    expect(clampDateRef({ kind: "anchor", anchorId: "nope" }, 40, 90, plan).kind).toBe("age");
+    expect(clampDateRef({ kind: "age", age: 55 }, 40, 90, plan)).toEqual({ kind: "age", age: 55 });
+    expect(clampDateRef(55, 40, 90, plan)).toEqual({ kind: "age", age: 55 }); // legacy bare number
+    expect(clampDateRef({ kind: "age", age: 200 }, 40, 90, plan)).toEqual({ kind: "age", age: 90 }); // clamped
+  });
+
+  it("removeKeyDate drops exactly the matching key date", () => {
+    const plan = clampPlan({ ...couplePlan(), keyDates: [{ id: "kd1", label: "A", age: 46 }, { id: "kd2", label: "B", age: 50 }] });
+    const out = removeKeyDate(plan, "kd1");
+    expect(out.keyDates.map((k) => k.id)).toEqual(["kd2"]);
+  });
+
+  it("referencesToAnchor finds every row pointing at a key date, across every row type", () => {
+    const plan = clampPlan({ ...couplePlan(), keyDates: [{ id: "kd1", label: "Buy a home", basis: "client", age: 46 }] });
+    const anchorTo = (id) => ({ kind: "anchor", anchorId: id });
+    const state = {
+      cashflows: {
+        income: [{ id: "i1", label: "Salary", from: anchorTo("start"), to: anchorTo("kd1") }],
+        expenses: [{ id: "e1", label: "Living", from: anchorTo("kd1"), to: anchorTo("end") }],
+        contributions: [{ id: "c1", from: anchorTo("kd1"), to: anchorTo("end") }],
+        withdrawals: [{ id: "w1", from: anchorTo("start"), to: anchorTo("end") }], // no reference
+        lumpSums: [{ id: "l1", at: anchorTo("kd1") }],
+      },
+      properties: [{ id: "p1", name: "Investment unit", purchaseAt: anchorTo("kd1") }],
+    };
+    const refs = referencesToAnchor(state, "kd1");
+    expect(refs).toHaveLength(5); // income.to, expenses.from, contributions.from, lumpSums.at, properties.purchaseAt
+    expect(refs.map((r) => r.id).sort()).toEqual(["c1", "e1", "i1", "l1", "p1"].sort());
+    // Scanning works generically for any anchorId, including built-ins
+    // — here, exactly the two rows anchored to "start".
+    expect(referencesToAnchor(state, "start")).toHaveLength(2);
+    expect(referencesToAnchor(state, "nonexistent-id")).toHaveLength(0);
+  });
+
+  it("convertAnchorReferences swaps every matching reference to an explicit age and leaves everything else untouched", () => {
+    const anchorTo = (id) => ({ kind: "anchor", anchorId: id });
+    const state = {
+      cashflows: {
+        income: [{ id: "i1", from: anchorTo("start"), to: anchorTo("kd1") }],
+        expenses: [{ id: "e1", from: anchorTo("kd1"), to: anchorTo("end") }],
+        contributions: [], withdrawals: [],
+        lumpSums: [{ id: "l1", at: anchorTo("kd1") }],
+      },
+      properties: [{ id: "p1", purchaseAt: anchorTo("kd1") }],
+    };
+    const out = convertAnchorReferences(state, "kd1", 46);
+    expect(out.cashflows.income[0].to).toEqual({ kind: "age", age: 46 });
+    expect(out.cashflows.income[0].from).toEqual({ kind: "anchor", anchorId: "start" }); // untouched
+    expect(out.cashflows.expenses[0].from).toEqual({ kind: "age", age: 46 });
+    expect(out.cashflows.expenses[0].to).toEqual({ kind: "anchor", anchorId: "end" }); // untouched
+    expect(out.cashflows.lumpSums[0].at).toEqual({ kind: "age", age: 46 });
+    expect(out.properties[0].purchaseAt).toEqual({ kind: "age", age: 46 });
+    // No references left afterwards.
+    expect(referencesToAnchor(out, "kd1")).toHaveLength(0);
   });
 });

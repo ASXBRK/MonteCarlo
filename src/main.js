@@ -20,7 +20,9 @@ import {
   createLiability, LIABILITY_TYPES, normaliseLiabilities,
   createProperty, normaliseProperties, PROPERTY_STATES, PROPERTY_TYPES,
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
+  createKeyDate, removeKeyDate, referencesToAnchor, convertAnchorReferences,
 } from "./planState.js";
+import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { renderBellCurves } from "./chart.js";
@@ -786,6 +788,13 @@ function personBlockHTML(prefix, person, title) {
           </select>
         </div>
         <div class="cf-cell">
+          <label>Retirement age
+            <span class="helper-inline">Used as the Retirement key date and as the default report period anchor.</span>
+          </label>
+          <input type="number" min="18" max="120" step="1" value="${person.retirementAge}"
+                 data-plan-field="${prefix}RetirementAge" />
+        </div>
+        <div class="cf-cell">
           <label>Opening carry-forward capital losses ($)</label>
           <input type="number" min="0" step="1000" value="${tp.openingCapitalLosses}"
                  data-plan-field="${prefix}OpeningLosses" />
@@ -803,6 +812,107 @@ function personBlockHTML(prefix, person, title) {
     </div>
   `;
 }
+
+// --- key dates block (Tier 1.1) ----------------------------------------
+//
+// Built-in anchors (Start, End, the retirement anchors) are listed as
+// read-only reference rows — the user can see what's available without
+// being able to delete them; user key dates below are the only
+// editable rows.
+
+function keyDateReadoutHTML(a) {
+  return a.outOfRange
+    ? `<span class="date-ref-resolved date-ref-outofrange">Falls outside the projection window — clamped to age ${a.age}</span>`
+    : `<span class="date-ref-resolved">age ${a.age} (${a.fyLabel})</span>`;
+}
+
+const BUILT_IN_ANCHOR_IDS = new Set(["start", "end", "retirement-client", "retirement-partner"]);
+
+function keyDateRowHTML(anchor) {
+  const kd = state.plan.keyDates.find((k) => k.id === anchor.id);
+  return `
+    <div class="kd-row" data-kd-id="${kd.id}">
+      <input type="text" maxlength="60" placeholder="Label" value="${escapeHTML(kd.label)}"
+             data-kd-field="label" data-kd-id="${kd.id}" />
+      ${state.plan.partner ? `
+        <select data-kd-field="basis" data-kd-id="${kd.id}">
+          <option value="client"${kd.basis === "client" ? " selected" : ""}>${escapeHTML(clientName())}</option>
+          <option value="partner"${kd.basis === "partner" ? " selected" : ""}>${escapeHTML(partnerName())}</option>
+        </select>
+      ` : ""}
+      <input type="number" min="0" max="130" step="1" value="${kd.age}"
+             data-kd-field="age" data-kd-id="${kd.id}" />
+      ${keyDateReadoutHTML(anchor)}
+      <button class="cf-remove" type="button" data-kd-action="remove" data-kd-id="${kd.id}" aria-label="Remove key date">×</button>
+    </div>
+  `;
+}
+
+function keyDatesBlockHTML() {
+  const anchors = listAnchors(state.plan, projection.schedule);
+  const builtins = anchors.filter((a) => BUILT_IN_ANCHOR_IDS.has(a.id));
+  const userAnchors = anchors.filter((a) => !BUILT_IN_ANCHOR_IDS.has(a.id));
+  return `
+    <div class="key-dates-block">
+      <div class="cf-section-title">Key dates</div>
+      <p class="helper-text">Named ages referenced by every start/end field below — move one date here and everything that points at it moves too.</p>
+      <div class="kd-list kd-builtin">
+        ${builtins.map((a) => `
+          <div class="kd-row kd-readonly">
+            <span class="kd-label">${escapeHTML(a.label)}</span>
+            ${keyDateReadoutHTML(a)}
+          </div>
+        `).join("")}
+      </div>
+      ${userAnchors.length ? `<div class="kd-list kd-user">${userAnchors.map(keyDateRowHTML).join("")}</div>` : ""}
+      <button class="btn-text" type="button" data-kd-action="add">+ Add key date</button>
+    </div>
+  `;
+}
+
+els.planBar.addEventListener("change", (e) => {
+  const kdId = e.target.dataset.kdId;
+  const kdField = e.target.dataset.kdField;
+  if (!kdId || !kdField) return;
+  const kd = state.plan.keyDates.find((k) => k.id === kdId);
+  if (!kd) return;
+  if (kdField === "label") kd.label = e.target.value;
+  else if (kdField === "basis") kd.basis = e.target.value === "partner" && state.plan.partner ? "partner" : "client";
+  else if (kdField === "age") kd.age = Number(e.target.value);
+  state.plan = clampPlan(state.plan);
+  state = clampAllToPlan(state);
+  saveState();
+  renderAll();
+});
+
+els.planBar.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-kd-action]");
+  if (!btn) return;
+  if (btn.dataset.kdAction === "add") {
+    state.plan.keyDates = [...state.plan.keyDates, createKeyDate(state.plan)];
+    saveState();
+    renderAll();
+    return;
+  }
+  if (btn.dataset.kdAction === "remove") {
+    const kdId = btn.dataset.kdId;
+    const refs = referencesToAnchor(state, kdId);
+    if (refs.length > 0) {
+      const resolvedAge = resolveRef({ kind: "anchor", anchorId: kdId }, state.plan, projection.schedule).age;
+      const names = refs.map((r) => r.label).join(", ");
+      const ok = window.confirm(
+        `${refs.length} row(s) reference this key date: ${names}.\n\n` +
+        `OK — convert those references to age ${resolvedAge}.\nCancel — keep the key date.`
+      );
+      if (!ok) return; // never orphan a reference, never silently drop data
+      state = convertAnchorReferences(state, kdId, resolvedAge);
+    }
+    state.plan = removeKeyDate(state.plan, kdId);
+    state = clampAllToPlan(state);
+    saveState();
+    renderAll();
+  }
+});
 
 const END_MODE_OPTIONS = [
   ["le:0", "Life expectancy"],
@@ -856,6 +966,7 @@ function renderPlanBar() {
       </div>
     </div>
     <div class="plan-derived">${endResolutionText(p)} · ${planSummaryText(p)}</div>
+    ${keyDatesBlockHTML()}
     ${personBlockHTML("client", p.client, couple ? `Client — ${clientName()}` : clientName())}
     ${couple ? personBlockHTML("partner", p.partner, `Partner — ${partnerName()}`) : ""}
   `;
@@ -885,6 +996,7 @@ els.planBar.addEventListener("change", (e) => {
     dob: field === `${prefix}Dob` ? e.target.value : cur.dob,
     sex: field === `${prefix}Sex` ? e.target.value : cur.sex,
     currentAge: cur.currentAge, // fallback if the new DOB is invalid
+    retirementAge: field === `${prefix}RetirementAge` ? e.target.value : cur.retirementAge,
     taxProfile: {
       residency: field === `${prefix}Residency` ? e.target.value : cur.taxProfile.residency,
       medicareExempt: field === `${prefix}Medicare` ? e.target.value === "exempt" : cur.taxProfile.medicareExempt,
@@ -912,6 +1024,7 @@ els.planBar.addEventListener("change", (e) => {
       year: field === "startYear" ? e.target.value : p.start.year,
       month: field === "startMonth" ? e.target.value : p.start.month,
     },
+    keyDates: p.keyDates,
   };
   state.plan = clampPlan(next);
   state = clampAllToPlan(state);
@@ -1249,9 +1362,42 @@ function assetOptions(selected) {
   ).join("");
 }
 
-function fySpan(kind, row, which, owner) {
-  const age = which === "from" ? row.fromAge : (which === "to" ? row.toAge : row.age);
-  return `<span class="fy-label" data-role="fy-${row.id}-${which}">${fyLabelForAge(state.plan, owner, age)}</span>`;
+// A single date-ref control (Tier 1.1): a <select> listing every
+// available anchor plus "Specific age…", each option carrying its
+// resolved value so the user never has to work it out; a number input
+// that only shows while "Specific age…" is chosen; and a resolved
+// value/out-of-range readout beneath. `dataAttrs` stamps the caller's
+// own data-* identifiers (data-kind/data-cfid/data-field for cashflow
+// rows, data-pid/data-pfield for properties) onto both controls so the
+// existing delegated change handlers can find the row/field; a
+// `data-dr-role` of "anchor" or "age" tells them which control fired.
+function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax) {
+  const plan = state.plan;
+  const schedule = projection.schedule;
+  const anchors = listAnchors(plan, schedule);
+  const isAnchor = ref?.kind === "anchor";
+  const resolved = resolveRef(ref, plan, schedule, ownerForAges);
+  const selectValue = isAnchor ? ref.anchorId : "__age__";
+  const options = anchors.map((a) =>
+    `<option value="${a.id}"${selectValue === a.id ? " selected" : ""}>${escapeHTML(a.display)}</option>`
+  ).join("") + `<option value="__age__"${selectValue === "__age__" ? " selected" : ""}>Specific age…</option>`;
+  // The number input is hidden (not removed) while an anchor is
+  // chosen, pre-filled with the anchor's current resolved age so
+  // switching to "Specific age…" starts from somewhere sensible rather
+  // than a blank/zero box.
+  const numberValue = isAnchor ? resolved.age : ref.age;
+  return `
+    <div class="date-ref">
+      <select ${dataAttrs} data-dr-role="anchor">${options}</select>
+      <input type="number" min="${ageMin}" max="${ageMax}" step="1" value="${numberValue}"
+             ${dataAttrs} data-dr-role="age"${isAnchor ? " hidden" : ""} />
+      <span class="date-ref-resolved${resolved.outOfRange ? " date-ref-outofrange" : ""}">${
+        resolved.outOfRange
+          ? `Falls outside the projection window — clamped to age ${resolved.age}`
+          : `age ${resolved.age} (${resolved.fyLabel})`
+      }</span>
+    </div>
+  `;
 }
 
 function incomeRowHTML(r) {
@@ -1284,14 +1430,12 @@ function incomeRowHTML(r) {
         </select>
       </div>
       <div class="cf-cell">
-        <label>From age ${fySpan("income", r, "from", r.owner)}</label>
-        <input type="number" min="18" max="120" step="1" value="${r.fromAge}"
-               data-kind="income" data-cfid="${r.id}" data-field="fromAge" />
+        <label>From</label>
+        ${dateRefControlHTML(r.from, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="from"`, 18, 120)}
       </div>
       <div class="cf-cell">
-        <label>To age ${fySpan("income", r, "to", r.owner)}</label>
-        <input type="number" min="18" max="120" step="1" value="${r.toAge}"
-               data-kind="income" data-cfid="${r.id}" data-field="toAge" />
+        <label>To</label>
+        ${dateRefControlHTML(r.to, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="to"`, 18, 120)}
       </div>
       ${indexationCellsHTML("income", r)}
       <button class="cf-remove" type="button" aria-label="Remove row"
@@ -1321,14 +1465,12 @@ function expenseRowHTML(r) {
         </select>
       </div>
       <div class="cf-cell">
-        <label>From age ${fySpan("expenses", r, "from", "client")}</label>
-        <input type="number" min="18" max="120" step="1" value="${r.fromAge}"
-               data-kind="expenses" data-cfid="${r.id}" data-field="fromAge" />
+        <label>From</label>
+        ${dateRefControlHTML(r.from, "client", `data-kind="expenses" data-cfid="${r.id}" data-field="from"`, 18, 120)}
       </div>
       <div class="cf-cell">
-        <label>To age ${fySpan("expenses", r, "to", "client")}</label>
-        <input type="number" min="18" max="120" step="1" value="${r.toAge}"
-               data-kind="expenses" data-cfid="${r.id}" data-field="toAge" />
+        <label>To</label>
+        ${dateRefControlHTML(r.to, "client", `data-kind="expenses" data-cfid="${r.id}" data-field="to"`, 18, 120)}
       </div>
       ${indexationCellsHTML("expenses", r)}
       <button class="cf-remove" type="button" aria-label="Remove row"
@@ -1357,14 +1499,12 @@ function contributionRowHTML(kind, cf) {
         </select>
       </div>
       <div class="cf-cell">
-        <label>From age ${fySpan(kind, cf, "from", "client")}</label>
-        <input type="number" min="18" max="120" step="1" value="${cf.fromAge}"
-               data-kind="${kind}" data-cfid="${cf.id}" data-field="fromAge" />
+        <label>From</label>
+        ${dateRefControlHTML(cf.from, "client", `data-kind="${kind}" data-cfid="${cf.id}" data-field="from"`, 18, 120)}
       </div>
       <div class="cf-cell">
-        <label>To age ${fySpan(kind, cf, "to", "client")}</label>
-        <input type="number" min="18" max="120" step="1" value="${cf.toAge}"
-               data-kind="${kind}" data-cfid="${cf.id}" data-field="toAge" />
+        <label>To</label>
+        ${dateRefControlHTML(cf.to, "client", `data-kind="${kind}" data-cfid="${cf.id}" data-field="to"`, 18, 120)}
       </div>
       ${indexationCellsHTML(kind, cf)}
       <button class="cf-remove" type="button" aria-label="Remove row"
@@ -1423,9 +1563,8 @@ function lumpSumRowHTML(ls) {
         </select>
       </div>
       <div class="cf-cell">
-        <label>At age ${fySpan("lumpSums", ls, "at", "client")}</label>
-        <input type="number" min="18" max="120" step="1" value="${ls.age}"
-               data-kind="lumpSums" data-cfid="${ls.id}" data-field="age" />
+        <label>At</label>
+        ${dateRefControlHTML(ls.at, "client", `data-kind="lumpSums" data-cfid="${ls.id}" data-field="at"`, 18, 120)}
       </div>
       <button class="cf-remove" type="button" aria-label="Remove row"
               data-action="remove-row" data-kind="lumpSums" data-cfid="${ls.id}">×</button>
@@ -1748,14 +1887,17 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "owner": { // income rows only
       if (el.value !== "client" && el.value !== "partner") break;
       row.owner = el.value;
-      // Keep numeric ages; re-clamp into the new owner's window and
-      // re-derive FY labels.
+      // Anchors resolve dynamically against whichever owner window
+      // applies — only explicit ages need re-clamping into the new
+      // owner's window (clampIncomeRow does both via clampDateRef).
       const clamped = clampIncomeRow(row, plan);
-      row.fromAge = clamped.fromAge;
-      row.toAge = clamped.toAge;
-      syncRowInput(el, "fromAge", row.fromAge);
-      syncRowInput(el, "toAge", row.toAge);
-      updateFyLabels(row, kind);
+      row.from = clamped.from;
+      row.to = clamped.to;
+      // The owner change can also change which anchor a "Retirement —
+      // <name>" option resolves to, so the whole row (selects,
+      // resolved readouts) needs a full refresh, not just two labels.
+      const rowEl = el.closest(".cf-row");
+      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
       break;
     }
     case "assetId":
@@ -1787,29 +1929,51 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "direction":
       row.direction = el.value === "out" ? "out" : "in";
       break;
-    case "fromAge": {
+    case "from":
+    case "to": {
+      if (el.dataset.drRole === "anchor") {
+        if (el.value === "__age__") {
+          // Switch to an explicit age, seeded from the anchor's
+          // current resolved value so the number doesn't jump.
+          row[field] = { kind: "age", age: resolveRef(row[field], plan, projection.schedule, owner).age };
+        } else {
+          row[field] = { kind: "anchor", anchorId: el.value };
+        }
+        const rowEl = el.closest(".cf-row");
+        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // select/number visibility changes
+        break;
+      }
+      // The paired number input, live only while "Specific age…" is chosen.
       if (!commit) return;
-      const v = clampInt(el.value, win.from, win.to);
-      row.fromAge = v;
-      if (row.toAge < v) { row.toAge = v; syncRowInput(el, "toAge", v); }
+      const other = field === "from" ? "to" : "from";
+      const otherResolved = resolveRef(row[other], plan, projection.schedule, owner).age;
+      const lo = field === "to" ? Math.max(win.from, otherResolved) : win.from;
+      const v = clampInt(el.value, lo, win.to);
+      row[field] = { kind: "age", age: v };
+      // Mirror the old "lift the other bound" nicety, but only when
+      // it's ALSO an explicit age — never silently rewrite a
+      // reference the user chose deliberately.
+      if (field === "from" && row.to.kind === "age" && row.to.age < v) row.to = { kind: "age", age: v };
       flagIfClamped(el, v);
-      updateFyLabels(row, kind);
+      updateDateRefReadouts(el.closest(".cf-row"), row, owner);
       break;
     }
-    case "toAge": {
-      if (!commit) return;
-      const v = clampInt(el.value, row.fromAge, win.to);
-      row.toAge = v;
-      flagIfClamped(el, v);
-      updateFyLabels(row, kind);
-      break;
-    }
-    case "age": { // lump sum
+    case "at": { // lump sum
+      if (el.dataset.drRole === "anchor") {
+        if (el.value === "__age__") {
+          row.at = { kind: "age", age: resolveRef(row.at, plan, projection.schedule, "client").age };
+        } else {
+          row.at = { kind: "anchor", anchorId: el.value };
+        }
+        const rowEl = el.closest(".cf-row");
+        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+        break;
+      }
       if (!commit) return;
       const v = clampInt(el.value, plan.client.currentAge, plan.endAge);
-      row.age = v;
+      row.at = { kind: "age", age: v };
       flagIfClamped(el, v);
-      updateFyLabels(row, kind);
+      updateDateRefReadouts(el.closest(".cf-row"), row, "client");
       break;
     }
   }
@@ -1822,20 +1986,22 @@ function rowHTMLFor(kind, row) {
   return contributionRowHTML(kind, row);
 }
 
-function syncRowInput(el, field, value) {
-  const rowEl = el.closest(".cf-row");
-  const sib = rowEl?.querySelector(`[data-field="${field}"]`);
-  if (sib) sib.value = value;
-}
-
-function updateFyLabels(row, kind) {
-  const owner = kind === "income" ? row.owner : "client";
-  const set = (which, age) => {
-    const el = document.querySelector(`[data-role="fy-${row.id}-${which}"]`);
-    if (el) el.textContent = fyLabelForAge(state.plan, owner, age);
-  };
-  if (kind === "lumpSums") set("at", row.age);
-  else { set("from", row.fromAge); set("to", row.toAge); }
+// Refresh every date-ref "age N (FYxxxx–yy)" / out-of-range readout in
+// a row in place, without a full re-render — used for the live
+// (per-keystroke) number-input path so the field never loses focus.
+function updateDateRefReadouts(rowEl, row, ownerForAges) {
+  if (!rowEl) return;
+  for (const wrap of rowEl.querySelectorAll(".date-ref")) {
+    const select = wrap.querySelector('[data-dr-role="anchor"]');
+    const field = select?.dataset.field;
+    const span = wrap.querySelector(".date-ref-resolved");
+    if (!field || !row[field] || !span) continue;
+    const resolved = resolveRef(row[field], state.plan, projection.schedule, ownerForAges);
+    span.classList.toggle("date-ref-outofrange", resolved.outOfRange);
+    span.textContent = resolved.outOfRange
+      ? `Falls outside the projection window — clamped to age ${resolved.age}`
+      : `age ${resolved.age} (${resolved.fyLabel})`;
+  }
 }
 
 function refreshAssetSelects() {
@@ -1997,12 +2163,13 @@ els.addAssetBtn.addEventListener("click", () => {
 // $36,000 · cash required ≈ $141,000"
 function propertyHelperText(p) {
   if (p.status !== "planned" || !(p.priceToday > 0)) return "";
-  const y = p.purchaseAge - state.plan.client.currentAge;
-  if (y < 0 || y >= state.plan.endAge - state.plan.client.currentAge + 1) {
-    return "Purchase age is outside the projection.";
+  const resolved = resolveRef(p.purchaseAt, state.plan, projection.schedule, "client");
+  const y = resolved.planYear;
+  if (resolved.outOfRange) {
+    return `Falls outside the projection window — clamped to age ${resolved.age}.`;
   }
   if (y === 0 && state.plan.start.month !== 7) {
-    return "A purchase in the partial first year (which has no firing July) is skipped — pick a later age.";
+    return "A purchase in the partial first year (which has no firing July) is skipped — pick a later date.";
   }
   const first = 12 - ((state.plan.start.month - 7 + 12) % 12);
   const m = y === 0 ? 0 : first + 12 * (y - 1);
@@ -2012,7 +2179,7 @@ function propertyHelperText(p) {
     : dutyWithConcessions(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
   const fhog = fhogAmount(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
   const cash = nominalPrice * (1 - p.lvrPct / 100) + duty + (p.purchaseCostsPct / 100) * nominalPrice - fhog;
-  return `Projected price at purchase (age ${p.purchaseAge}, ${fyLabelForAge(state.plan, "client", p.purchaseAge)}): ` +
+  return `Projected price at purchase (age ${resolved.age}, ${resolved.fyLabel}): ` +
     `${fmtMoney(nominalPrice)} · duty ≈ ${fmtMoney(duty)}${fhog ? ` · FHOG ${fmtMoney(fhog)}` : ""} · cash required ≈ ${fmtMoney(cash)}`;
 }
 
@@ -2037,7 +2204,7 @@ function propertyCardHTML(p) {
     <div class="pcard" data-pid="${p.id}">
       <div class="pcard-head">
         <span class="pcard-name">${escapeHTML(p.name)}</span>
-        <span class="pcard-meta">${p.propertyType.toUpperCase()} · ${p.state} · ${owned ? fmtMoney(p.currentValue) : `planned @ age ${p.purchaseAge}`}</span>
+        <span class="pcard-meta">${p.propertyType.toUpperCase()} · ${p.state} · ${owned ? fmtMoney(p.currentValue) : `planned @ age ${resolveRef(p.purchaseAt, state.plan, projection.schedule, "client").age}`}</span>
         <button class="pcard-remove" type="button" data-prop-action="remove" data-pid="${p.id}">Remove</button>
       </div>
       <div class="pcard-body">
@@ -2062,7 +2229,7 @@ function propertyCardHTML(p) {
             ${p.propertyType !== "ppr" ? num("Cost base ($)", "costBase", p.costBase) : ""}
           ` : `
             ${num("Price today ($)", "priceToday", p.priceToday)}
-            ${num("Purchase at client age", "purchaseAge", p.purchaseAge, `min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1"`)}
+            ${cell("Purchase at", dateRefControlHTML(p.purchaseAt, "client", `data-pid="${p.id}" data-pfield="purchaseAt"`, state.plan.client.currentAge, state.plan.endAge))}
             ${num("LVR (%)", "lvrPct", p.lvrPct, 'min="0" max="100" step="1"')}
             ${num("Purchase costs (%)", "purchaseCostsPct", p.purchaseCostsPct, 'min="0" max="10" step="0.1"')}
             ${num("Duty override ($, blank = schedule)", "dutyOverride", p.dutyOverride ?? "", 'min="0" step="100"')}
@@ -2118,7 +2285,15 @@ els.propertySection.addEventListener("change", (e) => {
   else if (field === "acquisitionDate") p.acquisitionDate = v || null;
   else if (field === "costBase") p.costBase = clampNumber(v, 0);
   else if (field === "priceToday") p.priceToday = clampNumber(v, 0);
-  else if (field === "purchaseAge") p.purchaseAge = clampInt(v, state.plan.client.currentAge, state.plan.endAge);
+  else if (field === "purchaseAt") {
+    if (e.target.dataset.drRole === "anchor") {
+      p.purchaseAt = v === "__age__"
+        ? { kind: "age", age: resolveRef(p.purchaseAt, state.plan, projection.schedule, "client").age }
+        : { kind: "anchor", anchorId: v };
+    } else {
+      p.purchaseAt = { kind: "age", age: clampInt(v, state.plan.client.currentAge, state.plan.endAge) };
+    }
+  }
   else if (field === "lvrPct") p.lvrPct = clampNumber(v, 0, 100);
   else if (field === "purchaseCostsPct") p.purchaseCostsPct = clampNumber(v, 0, 10);
   else if (field === "dutyOverride") p.dutyOverride = v === "" ? null : clampNumber(v, 0);
@@ -2411,16 +2586,18 @@ const fyShortLabel = (fyStart) =>
   `FY${String(fyStart % 100).padStart(2, "0")}–${String((fyStart + 1) % 100).padStart(2, "0")}`;
 
 // Plan-year indices that must survive thinning beyond the ordinary
-// first/last-year pins: the first shortfall and every planned
-// property's purchase year.
+// first/last-year pins: the first shortfall, every planned property's
+// purchase year, and every resolved key date (built-in or
+// user-defined) — so the table/chart annotation always has a year to
+// attach its label to.
 function forcedYearIndices() {
   const forced = [];
   if (projection.shortfall) forced.push(projection.shortfall.planYear);
   for (const p of state.properties ?? []) {
     if (p.status !== "planned") continue;
-    const y = p.purchaseAge - state.plan.client.currentAge;
-    if (y >= 0) forced.push(y);
+    forced.push(resolveRef(p.purchaseAt, state.plan, projection.schedule, "client").planYear);
   }
+  for (const a of listAnchors(state.plan, projection.schedule)) forced.push(a.planYear);
   return forced;
 }
 
@@ -2674,6 +2851,27 @@ function renderCompositeChart() {
   const periods = ages.length;
   const dtick = periods <= 15 ? 1 : periods <= 40 ? 5 : 10;
 
+  // Key date annotation (Tier 1.1): a thin, low-opacity vertical rule
+  // + label at each retirement/user key date year that survived
+  // thinning onto the displayed x-range — subtle, no fill.
+  const keyDateMarks = listAnchors(state.plan, projection.schedule)
+    .filter((a) => !SKIP_LABEL_ANCHOR_IDS.has(a.id) && yearIdxs.includes(a.planYear))
+    .map((a) => ({ age: projection.schedule.clientAges[a.planYear], label: a.label }));
+  const keyDateShapes = keyDateMarks.map((k) => ({
+    type: "line", xref: "x", x0: k.age, x1: k.age, yref: "paper", y0: 0, y1: 1,
+    line: { color: "rgba(0, 0, 0, 0.15)", width: 1, dash: "dot" },
+  }));
+  const keyDateAnnotations = keyDateMarks.map((k) => ({
+    // Plotly's text field interprets its own small HTML-like tag
+    // subset, not raw HTML — escapeHTML() would double-escape entities
+    // (e.g. "&" → "&amp;" shown literally), so the label goes through
+    // as-is, same as every other dynamic label already fed to Plotly
+    // in this file (hovertemplates, trace names).
+    x: k.age, y: 1, xref: "x", yref: "paper", yanchor: "bottom", xanchor: "left",
+    text: k.label, showarrow: false, textangle: -90,
+    font: { size: 9, color: "rgba(0, 0, 0, 0.5)" },
+  }));
+
   Plotly.react(el, traces, {
     margin: { l: 64, r: 64, t: 16, b: 44 },
     paper_bgcolor: "white", plot_bgcolor: "white",
@@ -2692,10 +2890,12 @@ function renderCompositeChart() {
       range: rightRange, autorange: false,
       tickmode: "array", tickvals: rightTicks,
     },
-    shapes: [{
-      type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: zeroFraction, y1: zeroFraction,
-      line: { color: "rgba(0, 0, 0, 0.3)", width: 1 },
-    }],
+    shapes: [
+      { type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: zeroFraction, y1: zeroFraction,
+        line: { color: "rgba(0, 0, 0, 0.3)", width: 1 } },
+      ...keyDateShapes,
+    ],
+    annotations: keyDateAnnotations,
     font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 11.5, color: "#222" },
   }, { displayModeBar: false, responsive: true });
 }
@@ -2793,24 +2993,45 @@ function fmtLedgerCell(v) {
   return v < 0 ? `(${s})` : s;
 }
 
+// Start/end are always the first/last column or chart edge already —
+// annotating them again would just be noise, so table and chart
+// annotation both skip them and only surface retirement/user dates.
+const SKIP_LABEL_ANCHOR_IDS = new Set(["start", "end"]);
+
+// The key date (built-in or user-defined) whose resolved plan year is
+// y, preferring a user-defined label over a coincidental built-in
+// match (Tier 1.1 table annotation).
+function keyDateLabelForYear(y) {
+  const matches = listAnchors(state.plan, projection.schedule)
+    .filter((a) => a.planYear === y && !SKIP_LABEL_ANCHOR_IDS.has(a.id));
+  if (matches.length === 0) return null;
+  const user = matches.find((a) => !BUILT_IN_ANCHOR_IDS.has(a.id));
+  return (user ?? matches[0]).label;
+}
+
 // Client age, primary; FY beneath; partner age a third line for
-// couples (item D). One shared builder for the on-screen header and
-// the plain-text CSV header.
+// couples (item D); a matching key date's label beneath that (Tier
+// 1.1). One shared builder for the on-screen header and the
+// plain-text CSV header.
 function yearHeaderHTML(y) {
   const age = projection.schedule.clientAges[y];
   const fy = fyShortLabel(firstFyStartYear(state.plan.start) + y);
   const partnerAge = projection.schedule.partnerAges ? projection.schedule.partnerAges[y] : null;
+  const kdLabel = keyDateLabelForYear(y);
   return `
     <span class="tl-age">${age}</span>
     <span class="tl-fy">${escapeHTML(fy)}</span>
     ${partnerAge != null ? `<span class="tl-partner-age">${partnerAge}</span>` : ""}
+    ${kdLabel ? `<span class="tl-kd-label" title="${escapeHTML(kdLabel)}">${escapeHTML(kdLabel)}</span>` : ""}
   `;
 }
 function yearHeaderText(y) {
   const age = projection.schedule.clientAges[y];
   const fy = fyShortLabel(firstFyStartYear(state.plan.start) + y);
   const partnerAge = projection.schedule.partnerAges ? projection.schedule.partnerAges[y] : null;
-  return partnerAge != null ? `${age} / ${partnerAge} (${fy})` : `${age} (${fy})`;
+  const kdLabel = keyDateLabelForYear(y);
+  const base = partnerAge != null ? `${age} / ${partnerAge} (${fy})` : `${age} (${fy})`;
+  return kdLabel ? `${base} — ${kdLabel}` : base;
 }
 
 // Filter groups down to the selected (thinned) period + visible rows.
@@ -3450,6 +3671,11 @@ awoteInput.addEventListener("change", () => {
 
 // Full workspace render — only ever called with the workspace mounted.
 function renderAll() {
+  // Setup's Key Dates block (and every date-ref select) needs a
+  // resolved schedule, so the projection must exist before the plan
+  // bar renders — refreshOutputs() recomputes it again below, which is
+  // cheap (the engine is sub-millisecond at this size).
+  recomputeProjection();
   renderPlanBar();
   renderAssets();
   renderCashflows();

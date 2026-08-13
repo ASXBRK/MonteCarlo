@@ -651,15 +651,119 @@ html, body {
   grid-template-columns: 1.2fr 1.2fr 1fr 0.9fr 0.9fr 0.6fr 32px;
 }
 
-.fy-label {
+/* --- date-ref control (Tier 1.1): anchor select + hidden-until-chosen
+   number input + resolved-value readout beneath --- */
+
+.date-ref {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.date-ref select,
+.date-ref input[type="number"] {
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.date-ref select:focus, .date-ref input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.date-ref-resolved {
   font-weight: 500;
-  text-transform: none;
-  letter-spacing: 0;
   color: var(--ink-soft);
   opacity: 0.85;
   font-size: 10px;
-  margin-left: 3px;
   font-variant-numeric: tabular-nums;
+}
+.date-ref-resolved.date-ref-outofrange {
+  color: #a33;
+  opacity: 1;
+  font-weight: 600;
+}
+
+/* --- Setup: Key dates block --- */
+
+.key-dates-block {
+  border-top: 1px dashed var(--line);
+  border-bottom: 1px dashed var(--line);
+  padding: 14px 0;
+  margin: 4px 0 18px;
+}
+.kd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.kd-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.kd-row.kd-readonly {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.kd-label {
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 170px;
+}
+.kd-row input[type="text"] {
+  flex: 1 1 160px;
+  min-width: 120px;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 13px;
+}
+.kd-row select {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 13px;
+}
+.kd-row input[type="number"] {
+  width: 68px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.kd-row .date-ref-resolved {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* --- transposed table: key-date column annotation --- */
+
+.tl-kd-label {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--accent);
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --- settings: surplus + funding order --- */

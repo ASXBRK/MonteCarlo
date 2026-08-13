@@ -197,6 +197,57 @@ export function clampDateRef(raw, lo, hi, plan) {
   return { kind: "age", age: clampInt(age, lo, hi) };
 }
 
+export function removeKeyDate(plan, keyDateId) {
+  return { ...plan, keyDates: plan.keyDates.filter((k) => k.id !== keyDateId) };
+}
+
+// Every row across the plan whose from/to/at/purchaseAt points at
+// `anchorId` — built for the "delete this key date" confirm dialog, so
+// a deletion never silently orphans a reference.
+export function referencesToAnchor(state, anchorId) {
+  const found = [];
+  const scan = (rows, fields, labelOf) => {
+    for (const row of rows ?? []) {
+      for (const field of fields) {
+        if (row[field]?.kind === "anchor" && row[field].anchorId === anchorId) {
+          found.push({ id: row.id, label: labelOf(row), field });
+        }
+      }
+    }
+  };
+  scan(state.cashflows.income, ["from", "to"], (r) => r.label);
+  scan(state.cashflows.expenses, ["from", "to"], (r) => r.label);
+  scan(state.cashflows.contributions, ["from", "to"], () => "Contribution");
+  scan(state.cashflows.withdrawals, ["from", "to"], () => "Withdrawal");
+  scan(state.cashflows.lumpSums, ["at"], () => "One-off amount");
+  scan(state.properties, ["purchaseAt"], (r) => r.name);
+  return found;
+}
+
+// Convert every reference to `anchorId`, plan-wide, into the explicit
+// age it currently resolves to — the deletion flow's "Convert those
+// references to age N" action. Rows not referencing this anchor are
+// untouched (returned as-is).
+export function convertAnchorReferences(state, anchorId, age) {
+  const swap = (row, field) =>
+    row[field]?.kind === "anchor" && row[field].anchorId === anchorId
+      ? { ...row, [field]: { kind: "age", age } }
+      : row;
+  const mapFields = (rows, fields) => rows.map((row) => fields.reduce(swap, row));
+  return {
+    ...state,
+    cashflows: {
+      ...state.cashflows,
+      income: mapFields(state.cashflows.income, ["from", "to"]),
+      expenses: mapFields(state.cashflows.expenses, ["from", "to"]),
+      contributions: mapFields(state.cashflows.contributions, ["from", "to"]),
+      withdrawals: mapFields(state.cashflows.withdrawals, ["from", "to"]),
+      lumpSums: mapFields(state.cashflows.lumpSums, ["at"]),
+    },
+    properties: mapFields(state.properties ?? [], ["purchaseAt"]),
+  };
+}
+
 export const dateRefAge = (ref) => (ref?.kind === "age" ? ref.age : null);
 
 // Horizon in plan years (client-anchored).
