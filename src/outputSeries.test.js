@@ -3,7 +3,10 @@ import { projectPlan } from "./deterministic.js";
 import { defaultChartTreatment } from "./planState.js";
 import {
   compositeSeries, compositeExpenditure, compositeIncome, compositeDrawdown,
+  sharedZeroRanges, seriesIsAllZero,
 } from "./outputSeries.js";
+
+const zeroFractionOfRange = ([min, max]) => -min / (max - min);
 
 // A scenario with a liability AND both a PPR and an investment
 // property, so every composite-series branch is exercised.
@@ -129,5 +132,48 @@ describe("compositeSeries — net assets under display treatment", () => {
     const before = JSON.parse(JSON.stringify(out.yearly));
     compositeSeries(out.yearly, state.assets, state.properties, { pprProperty: "exclude", otherProperty: "exclude", lifestyle: "exclude", liabilities: "exclude" });
     expect(out.yearly).toEqual(before);
+  });
+});
+
+describe("sharedZeroRanges — shared zero baseline across both y-axes", () => {
+  it("negative-left/positive-right: both axes place zero at the same (unclamped) fraction", () => {
+    // Left crosses zero (mortgage-era negative net assets through to a
+    // positive balance later) — its natural zero fraction sits well
+    // inside [0.05, 0.95], so it passes through unclamped.
+    const left = [-100, 50, 200];
+    const right = [0, 300, 600];
+    const { leftRange, rightRange, zeroFraction } = sharedZeroRanges(left, right);
+    expect(zeroFractionOfRange(leftRange)).toBeCloseTo(zeroFraction, 10);
+    expect(zeroFractionOfRange(rightRange)).toBeCloseTo(zeroFraction, 10);
+    // Expand-only: the right axis's top must not be cut below its own
+    // padded data max.
+    const rawRightMax = 600 * 1.05;
+    expect(rightRange[1]).toBeCloseTo(rawRightMax, 6);
+  });
+
+  it("all-positive case: the fraction clamps to the 0.05 floor and both axes still agree", () => {
+    const left = [100, 200, 300];
+    const right = [50, 80, 120];
+    const { leftRange, rightRange, zeroFraction } = sharedZeroRanges(left, right);
+    expect(zeroFraction).toBeCloseTo(0.05, 10);
+    // Left's own natural fraction (~0.045) is below the floor, so the
+    // clamp — not the raw left range — is what both sides agree on.
+    expect(zeroFractionOfRange(leftRange)).toBeLessThan(zeroFraction);
+    expect(zeroFractionOfRange(rightRange)).toBeCloseTo(zeroFraction, 10);
+  });
+});
+
+describe("seriesIsAllZero — auto-hide flat series", () => {
+  it("treats a series as all-zero when every value is within threshold of 0", () => {
+    expect(seriesIsAllZero([0, 0.001, -0.002, 0])).toBe(true);
+  });
+
+  it("is false as soon as one value clears the threshold", () => {
+    expect(seriesIsAllZero([0, 0, 0.01, 0])).toBe(false);
+  });
+
+  it("honours a custom threshold", () => {
+    expect(seriesIsAllZero([1, 2], 5)).toBe(true);
+    expect(seriesIsAllZero([1, 6], 5)).toBe(false);
   });
 });

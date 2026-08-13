@@ -13,6 +13,7 @@ import {
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
   createLiability, createProperty,
   clampReportPeriod, clampChartTreatment, defaultChartTreatment,
+  defaultReportPeriod, ASSUMED_RETIREMENT_AGE,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -666,5 +667,28 @@ describe("D5 — report period + chart treatment display state", () => {
     expect(back.display.reportPeriod).toEqual({ fromAge: 45, toAge: 60, everyN: 5, forceKeyYears: false });
     expect(back.display.chartTreatment).toEqual({ pprProperty: "include", otherProperty: "exclude", lifestyle: "include", liabilities: "exclude" });
     expect(back.display.hideEmptyRows).toBe(false);
+  });
+
+  it("defaultReportPeriod defaults toAge to retirement+25 (capped at endAge) and thins beyond a 25-year span", () => {
+    // Short horizon: retirement+25 exceeds endAge, so toAge is just
+    // endAge, and the span is short enough that no thinning applies.
+    expect(defaultReportPeriod({ client: { currentAge: 60 }, endAge: 70 }))
+      .toEqual({ fromAge: null, toAge: 70, everyN: 1, forceKeyYears: true });
+
+    // Long horizon (>25 years, but endAge still under retirement+25):
+    // toAge equals endAge, but the overall span triggers thinning.
+    expect(defaultReportPeriod({ client: { currentAge: 40 }, endAge: 80 }))
+      .toEqual({ fromAge: null, toAge: 80, everyN: 5, forceKeyYears: true });
+
+    // Very long horizon: retirement+25 caps toAge well short of
+    // endAge — "a 63-year x-axis with 38 flat years at the end" is
+    // exactly what this cap avoids.
+    expect(defaultReportPeriod({ client: { currentAge: 30 }, endAge: 110 }))
+      .toEqual({ fromAge: null, toAge: ASSUMED_RETIREMENT_AGE + 25, everyN: 5, forceKeyYears: true });
+  });
+
+  it("defaultState wires display.reportPeriod through defaultReportPeriod for the initial plan", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.display.reportPeriod).toEqual(defaultReportPeriod(s.plan));
   });
 });

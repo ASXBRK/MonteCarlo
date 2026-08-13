@@ -27,7 +27,7 @@ import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
 import { thinnedYearIndices } from "./periodThinning.js";
-import { compositeSeries } from "./outputSeries.js";
+import { compositeSeries, sharedZeroRanges, seriesIsAllZero } from "./outputSeries.js";
 import { realThreshold, LITO } from "./Tax/annual.js";
 import { LEG } from "./Tax/engine.js";
 import {
@@ -2601,55 +2601,93 @@ function renderCompositeChart() {
   const scale = (arr) => yearIdxs.map((y, i) => arr[y] * factor(y));
 
   const series = compositeSeries(projection.yearly, state.assets, state.properties ?? [], state.display.chartTreatment);
-  const hasSeparate = series.separateArea.some((v) => Math.abs(v) >= 0.005);
+  const netArea = scale(series.netAssetsArea);
+  const sepArea = scale(series.separateArea);
+  const incomeArea = scale(series.income);
+  const drawdownArea = scale(series.drawdown);
+  const expenditureArea = scale(series.expenditure);
+
+  // Auto-hide series that are zero across every displayed period —
+  // no legend entry, no bar slot. Net assets is the chart's anchor
+  // (and axis reference) and is always drawn, even if zero.
+  const hasSeparate = !seriesIsAllZero(sepArea);
+  const hasIncome = !seriesIsAllZero(incomeArea);
+  const hasDrawdown = !seriesIsAllZero(drawdownArea);
+  const hasExpenditure = !seriesIsAllZero(expenditureArea);
 
   const traces = [{
-    x: ages, y: scale(series.netAssetsArea), name: "Net assets",
-    type: "scatter", mode: "lines", fill: "tozeroy", stackgroup: "assets",
+    x: ages, y: netArea, name: "Net assets",
+    type: "scatter", mode: "lines", fill: "tozeroy",
     line: { color: "rgb(28, 90, 180)", width: 1.5 },
+    fillcolor: "rgba(28, 90, 180, 0.18)",
     hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Net assets</extra>",
   }];
   if (hasSeparate) {
     traces.push({
-      x: ages, y: scale(series.separateArea), name: "Non-financial assets",
-      type: "scatter", mode: "lines", fill: "tonexty", stackgroup: "assets",
+      x: ages, y: sepArea, name: "Non-financial assets",
+      type: "scatter", mode: "lines", fill: "tonexty",
       line: { color: "rgb(150, 180, 220)", width: 1.5 },
+      fillcolor: "rgba(150, 180, 220, 0.12)",
       hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Non-financial assets</extra>",
     });
   }
-  traces.push(
-    {
-      x: ages, y: scale(series.income), name: "Income", type: "bar",
-      marker: { color: "rgba(107, 142, 35, 0.75)" }, yaxis: "y2",
+  if (hasIncome) {
+    traces.push({
+      x: ages, y: incomeArea, name: "Income", type: "bar",
+      marker: { color: "rgb(107, 142, 35)", opacity: 0.55 }, yaxis: "y2",
       hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Income</extra>",
-    },
-    {
-      x: ages, y: scale(series.drawdown), name: "Capital drawdown", type: "bar",
-      marker: { color: "rgba(217, 123, 47, 0.75)" }, yaxis: "y2",
+    });
+  }
+  if (hasDrawdown) {
+    traces.push({
+      x: ages, y: drawdownArea, name: "Capital drawdown", type: "bar",
+      marker: { color: "rgb(217, 123, 47)", opacity: 0.55 }, yaxis: "y2",
       hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Capital drawdown</extra>",
-    },
-    {
-      x: ages, y: scale(series.expenditure), name: "Total expenditure (incl. tax)", type: "scatter",
+    });
+  }
+  if (hasExpenditure) {
+    traces.push({
+      x: ages, y: expenditureArea, name: "Total expenditure (incl. tax)", type: "scatter",
       mode: "lines", line: { color: "rgb(180, 40, 40)", width: 2 }, yaxis: "y2",
       hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Total expenditure (incl. tax)</extra>",
-    },
-  );
+    });
+  }
+
+  // Shared zero baseline: the left (assets) axis spans net assets plus
+  // whatever's stacked on top of it as a separate area; the right
+  // (income/expenditure) axis spans the stacked income+drawdown bars
+  // plus the expenditure line. Only visible (non-hidden) series feed
+  // the range maths.
+  const topArea = hasSeparate ? netArea.map((v, i) => v + sepArea[i]) : netArea;
+  const leftValues = hasSeparate ? [...netArea, ...topArea] : netArea;
+  const stackTop = ages.map((_, i) => (hasIncome ? incomeArea[i] : 0) + (hasDrawdown ? drawdownArea[i] : 0));
+  const rightValues = hasExpenditure ? [...stackTop, ...expenditureArea] : stackTop;
+  const { leftRange, rightRange, zeroFraction } = sharedZeroRanges(leftValues, rightValues);
+
+  const periods = ages.length;
+  const dtick = periods <= 15 ? 1 : periods <= 40 ? 5 : 10;
 
   Plotly.react(el, traces, {
-    margin: { l: 70, r: 70, t: 24, b: 50 },
+    margin: { l: 64, r: 64, t: 16, b: 44 },
     paper_bgcolor: "white", plot_bgcolor: "white",
-    hovermode: "x unified", barmode: "group", showlegend: true,
-    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
-    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    hovermode: "x unified", barmode: "stack", bargap: 0.1, showlegend: true,
+    legend: { orientation: "h", y: -0.16, x: 0.5, xanchor: "center", font: { size: 11 } },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick },
     yaxis: {
-      title: { text: `Assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
-      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+      title: { text: `Assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10, font: { size: 11 } },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.05)", zeroline: false,
+      range: leftRange, autorange: false,
     },
     yaxis2: {
-      title: { text: "Income / expenditure", standoff: 10 },
-      tickformat: "$,.2s", overlaying: "y", side: "right", showgrid: false, rangemode: "tozero",
+      title: { text: "Income / expenditure", standoff: 10, font: { size: 11 } },
+      tickformat: "$,.2s", overlaying: "y", side: "right", showgrid: false, zeroline: false,
+      range: rightRange, autorange: false,
     },
-    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+    shapes: [{
+      type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: zeroFraction, y1: zeroFraction,
+      line: { color: "rgba(0, 0, 0, 0.3)", width: 1 },
+    }],
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 11.5, color: "#222" },
   }, { displayModeBar: false, responsive: true });
 }
 

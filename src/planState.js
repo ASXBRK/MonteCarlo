@@ -447,7 +447,7 @@ export function defaultState(profiles = {}, now = new Date()) {
     },
     display: {
       units: "real",
-      reportPeriod: { fromAge: null, toAge: null, everyN: 1, forceKeyYears: true },
+      reportPeriod: defaultReportPeriod(plan),
       lastVisited: { area: "input", section: DEFAULT_INPUT_SECTION },
       chartTreatment: defaultChartTreatment(),
       hideEmptyRows: true,
@@ -499,6 +499,25 @@ export function canEditOneOffYear(plan, planYear) {
 // start; toAge null = full detail all the way to the end, i.e. no
 // thinning ever applies — the "All" default).
 export const PERIOD_STEP_OPTIONS = [1, 2, 5, 10];
+
+// No "retirement age" field exists anywhere in the data model — this
+// is a disclosed simplification used only to pick a sensible default
+// report-period width the first time a scenario is opened. A 60+-year
+// x-axis with decades of flat post-retirement years at the end is not
+// a useful default; the user can still widen the period to "All" from
+// the period selector at any time. Never used by the engine.
+export const ASSUMED_RETIREMENT_AGE = 65;
+
+// Default report period for a freshly-created scenario: full detail
+// out to a sensible horizon (retirement + 25 years, capped at the
+// plan's actual end) rather than the full projection end, and thinned
+// (every 5th plan year beyond toAge) when the overall projection span
+// is long enough that per-year detail at the far end adds no value.
+export function defaultReportPeriod(plan) {
+  const span = plan.endAge - plan.client.currentAge;
+  const toAge = Math.min(plan.endAge, ASSUMED_RETIREMENT_AGE + 25);
+  return { fromAge: null, toAge, everyN: span > 25 ? 5 : 1, forceKeyYears: true };
+}
 
 export function clampReportPeriod(raw) {
   const age = (v) => (Number.isInteger(v) && v >= 0 && v <= 130 ? v : null);
