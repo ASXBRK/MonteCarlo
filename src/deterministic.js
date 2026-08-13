@@ -334,6 +334,10 @@ export function projectPlan(state, profiles = PROFILES) {
     perAssetDetail: Object.fromEntries(ids.map((id) => [id, {
       opening: 0, contributions: 0, withdrawals: 0, oneOffs: 0,
       deficitFunding: 0, surplusInvested: 0, growth: 0, closing: 0,
+      // costBasePool: this asset's pooled cost base at year end (D5's
+      // unrealised-gain row = closing − costBasePool). null for
+      // non-CGT assets (no pool exists), including lifestyle.
+      costBasePool: meta[id].cgt ? 0 : null,
     }])),
   });
 
@@ -736,6 +740,7 @@ export function projectPlan(state, profiles = PROFILES) {
     for (const id of ids) {
       row.perAssetClosing[id] = series[id][yearEnd(y)];
       row.perAssetDetail[id].closing = series[id][yearEnd(y)];
+      if (meta[id].cgt) row.perAssetDetail[id].costBasePool = pools[id].pool;
     }
     const deflEnd = 1 / Math.pow(1 + cpi, yearEnd(y) / 12);
     for (const l of liabs) {

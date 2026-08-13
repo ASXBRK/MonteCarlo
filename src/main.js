@@ -26,6 +26,8 @@ import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
+import { thinnedYearIndices } from "./periodThinning.js";
+import { compositeSeries } from "./outputSeries.js";
 import { realThreshold, LITO } from "./Tax/annual.js";
 import { LEG } from "./Tax/engine.js";
 import {
@@ -37,7 +39,7 @@ import {
 } from "./workspace.js";
 import {
   formatRoute, resolveRoute, initialRoute,
-  INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION,
+  INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION, DEFAULT_OUTPUT_VIEW,
 } from "./router.js";
 
 // Legacy insight modules (firstDecade, drawdownTolerance, tornado,
@@ -82,9 +84,15 @@ const els = {
   assetsTable: $("assetsTable"),
   showAssetsToggle: $("showAssetsToggle"),
   shortfallNote: $("shortfallNote"),
-  periodFrom: $("periodFrom"),
-  periodTo: $("periodTo"),
-  periodPresets: document.querySelectorAll(".period-presets [data-preset]"),
+  periodFromAge: $("periodFromAge"),
+  periodToAge: $("periodToAge"),
+  periodEveryN: $("periodEveryN"),
+  forceKeyYearsToggle: $("forceKeyYearsToggle"),
+  hideEmptyRowsToggle: $("hideEmptyRowsToggle"),
+  viewComposite: $("viewComposite"),
+  viewNetAssets: $("viewNetAssets"),
+  viewAssetBalances: $("viewAssetBalances"),
+  chartTreatmentSelects: document.querySelectorAll("[data-treatment]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
   paramAssetTable: $("paramAssetTable"),
@@ -250,6 +258,7 @@ function mountWorkspace(clientId, scenarioId) {
   awoteInput.value = ((state.assumptions.awote ?? 0.035) * 100).toFixed(1);
   mortgageRateInput.value = ((state.assumptions.mortgageRate ?? 0.06) * 100).toFixed(2);
   syncBracketModeInputs();
+  els.chartTreatmentSelects.forEach((sel) => { sel.value = state.display.chartTreatment[sel.dataset.treatment]; });
 }
 
 // --- sidebar navigation: one section per page (Sidebar nav) -----------------
@@ -266,7 +275,12 @@ const INPUT_NAV = [
   { id: "settings", label: "Settings" },
 ];
 const OUTPUT_NAV = {
-  Graphs: [{ id: "projection", label: "Projection" }],
+  Graphs: [
+    { id: "projection", label: "Projection" },
+    { id: "composite", label: "Cashflow, Assets & Liabilities" },
+    { id: "net-assets", label: "Net assets" },
+    { id: "asset-balances", label: "Asset balances" },
+  ],
   Tables: [
     { id: "cashflow", label: "Cashflow" },
     { id: "assets", label: "Assets" },
@@ -325,7 +339,7 @@ function showSection(area, section) {
     el.hidden = el.dataset.section !== target;
   }
   if (area === "output") {
-    activeView = OUTPUT_VIEWS.includes(section) ? section : "projection";
+    activeView = OUTPUT_VIEWS.includes(section) ? section : DEFAULT_OUTPUT_VIEW;
     renderActiveView();
   }
 }
@@ -2325,7 +2339,7 @@ els.liabilitiesSection.addEventListener("click", (e) => {
 // nominal is applied here at render time (convention 12).
 
 let projection = null;
-let activeView = "projection";
+let activeView = "composite"; // the composite chart is the default Graphs view (D5)
 let showAssets = false;
 let assetsEntity = "all"; // Assets view entity selector: "all" | assetId
 
@@ -2344,11 +2358,15 @@ function refreshOutputs() {
 
 const VIEW_MOUNTS = {
   projection: () => els.viewProjection,
+  composite: () => els.viewComposite,
+  "net-assets": () => els.viewNetAssets,
+  "asset-balances": () => els.viewAssetBalances,
   cashflow: () => els.viewCashflow,
   assets: () => els.viewAssets,
   tax: () => els.viewTax,
   assumptions: () => els.viewAssumptions,
 };
+const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances"]);
 
 // Selection now happens via the sidebar (data-nav-section), which
 // routes through handleRoute → showSection → here.
@@ -2356,8 +2374,11 @@ function renderActiveView() {
   for (const [name, mount] of Object.entries(VIEW_MOUNTS)) {
     mount().hidden = name !== activeView;
   }
-  els.exportBtn.textContent = activeView === "projection" ? "Export PNG" : "Export CSV";
+  els.exportBtn.textContent = GRAPH_VIEWS.has(activeView) ? "Export PNG" : "Export CSV";
   if (activeView === "projection") renderProjectionChart();
+  else if (activeView === "composite") renderCompositeChart();
+  else if (activeView === "net-assets") renderNetAssetsChart();
+  else if (activeView === "asset-balances") renderAssetBalancesChart();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
   else if (activeView === "tax") renderTaxView();
@@ -2377,74 +2398,91 @@ function startMonthOfYear(y) {
   return y === 0 ? 0 : projection.schedule.monthsInFirstYear + 12 * (y - 1);
 }
 
-// --- report period (display state, persisted per scenario) -------------------
+// --- report period + thinning (D5, display state, persisted per scenario) ----
+//
+// Ages, not FY years, are the primary period bound (item D); thinning
+// (item E) replaces the old All/Next 10/Next 20 presets: full detail
+// across [fromAge, toAge], then every Nth plan year beyond `toAge`
+// through the projection's actual end. Forcing pins the first/last
+// projection years plus the shortfall year and any planned-property
+// purchase year into every table, chart x-range, and export.
 
 const fyShortLabel = (fyStart) =>
   `FY${String(fyStart % 100).padStart(2, "0")}–${String((fyStart + 1) % 100).padStart(2, "0")}`;
 
-// Resolve the persisted {from, to} FY start years into clamped plan
-// year indices [a, b].
-function periodYears() {
-  const years = projection.schedule.planYears;
-  const f0 = firstFyStartYear(state.plan.start);
-  const rp = state.display.reportPeriod || { from: null, to: null };
-  let a = rp.from != null ? rp.from - f0 : 0;
-  let b = rp.to != null ? rp.to - f0 : years - 1;
-  a = Math.max(0, Math.min(years - 1, a));
-  b = Math.max(a, Math.min(years - 1, b));
-  return { a, b };
+// Plan-year indices that must survive thinning beyond the ordinary
+// first/last-year pins: the first shortfall and every planned
+// property's purchase year.
+function forcedYearIndices() {
+  const forced = [];
+  if (projection.shortfall) forced.push(projection.shortfall.planYear);
+  for (const p of state.properties ?? []) {
+    if (p.status !== "planned") continue;
+    const y = p.purchaseAge - state.plan.client.currentAge;
+    if (y >= 0) forced.push(y);
+  }
+  return forced;
+}
+
+// The full (possibly non-contiguous) set of plan-year indices to show
+// in every table and export.
+function selectedYearIndices() {
+  return thinnedYearIndices(state.display.reportPeriod, projection.schedule.clientAges, forcedYearIndices());
+}
+
+// A contiguous [a, b] bound spanning the selected years, for the
+// continuous monthly Projection chart's x-range and tick spacing.
+function periodBounds() {
+  const idxs = selectedYearIndices();
+  return idxs.length
+    ? { a: idxs[0], b: idxs[idxs.length - 1] }
+    : { a: 0, b: projection.schedule.planYears - 1 };
 }
 
 function renderPeriodSelector() {
   const years = projection.schedule.planYears;
-  const f0 = firstFyStartYear(state.plan.start);
-  const { a, b } = periodYears();
-  const options = (sel) => {
-    let html = "";
-    for (let y = 0; y < years; y++) {
-      html += `<option value="${f0 + y}">${fyShortLabel(f0 + y)}</option>`;
-    }
-    sel.innerHTML = html;
+  const ages = projection.schedule.clientAges;
+  const rp = state.display.reportPeriod;
+  const options = (sel, current) => {
+    sel.innerHTML = Array.from({ length: years }, (_, y) =>
+      `<option value="${ages[y]}"${ages[y] === current ? " selected" : ""}>${ages[y]}</option>`
+    ).join("");
   };
-  options(els.periodFrom);
-  options(els.periodTo);
-  els.periodFrom.value = String(f0 + a);
-  els.periodTo.value = String(f0 + b);
-  const isAll = a === 0 && b === years - 1;
-  els.periodPresets.forEach((btn) => {
-    const p = btn.dataset.preset;
-    const active =
-      (p === "all" && isAll) ||
-      (p !== "all" && a === 0 && b === Math.min(years - 1, Number(p) - 1) && !isAll);
-    btn.classList.toggle("active", active);
-  });
+  options(els.periodFromAge, rp.fromAge ?? ages[0]);
+  options(els.periodToAge, rp.toAge ?? ages[years - 1]);
+  els.periodEveryN.value = String(rp.everyN);
+  els.forceKeyYearsToggle.checked = rp.forceKeyYears;
+  els.hideEmptyRowsToggle.checked = state.display.hideEmptyRows !== false;
 }
 
-function setReportPeriod(from, to) {
-  state.display.reportPeriod = { from, to };
+function setReportPeriod(patch) {
+  state.display.reportPeriod = { ...state.display.reportPeriod, ...patch };
   saveState();
   renderPeriodSelector();
   renderActiveView();
 }
 
-els.periodFrom.addEventListener("change", () => {
-  const from = Number(els.periodFrom.value);
-  const to = Math.max(from, Number(els.periodTo.value));
-  setReportPeriod(from, to);
+els.periodFromAge.addEventListener("change", () => {
+  const fromAge = Number(els.periodFromAge.value);
+  const toAge = Math.max(fromAge, state.display.reportPeriod.toAge ?? fromAge);
+  setReportPeriod({ fromAge, toAge });
 });
-els.periodTo.addEventListener("change", () => {
-  const to = Number(els.periodTo.value);
-  const from = Math.min(to, Number(els.periodFrom.value));
-  setReportPeriod(from, to);
+els.periodToAge.addEventListener("change", () => {
+  const toAge = Number(els.periodToAge.value);
+  const fromAge = Math.min(toAge, state.display.reportPeriod.fromAge ?? toAge);
+  setReportPeriod({ fromAge, toAge });
 });
-els.periodPresets.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    const p = btn.dataset.preset;
-    if (p === "all") setReportPeriod(null, null);
-    else setReportPeriod(null, firstFyStartYear(state.plan.start) + Number(p) - 1);
-  });
+els.periodEveryN.addEventListener("change", () => {
+  setReportPeriod({ everyN: Number(els.periodEveryN.value) });
 });
-
+els.forceKeyYearsToggle.addEventListener("change", () => {
+  setReportPeriod({ forceKeyYears: els.forceKeyYearsToggle.checked });
+});
+els.hideEmptyRowsToggle.addEventListener("change", () => {
+  state.display.hideEmptyRows = els.hideEmptyRowsToggle.checked;
+  saveState();
+  renderActiveView();
+});
 // --- View 1: projection chart -----------------------------------------------
 
 function renderProjectionChart() {
@@ -2489,7 +2527,7 @@ function renderProjectionChart() {
 
   // FY tick labels at plan-year starts within the report period,
   // thinned to ~10.
-  const { a: perA, b: perB } = periodYears();
+  const { a: perA, b: perB } = periodBounds();
   const step = Math.max(1, Math.ceil((perB - perA + 1) / 10));
   const tickvals = [], ticktext = [];
   for (let y = perA; y <= perB; y += step) {
@@ -2539,6 +2577,158 @@ function renderProjectionChart() {
   }, { displayModeBar: false, responsive: true });
 }
 
+// --- View: Composite chart (D5) — the default Graphs view -------------------
+//
+// "Cashflow, Assets & Liabilities" — the headline artefact. Dual axis,
+// x = CLIENT AGE, one point per selected (thinned) plan year: net
+// assets as a filled area (can go negative in early mortgage years —
+// never clamped), non-financial assets as their own stacked area when
+// the display treatment below says Include Separately, total
+// expenditure including tax as a line, income and capital drawdown as
+// bars. Series come from src/outputSeries.js — pure and unit-tested;
+// this function only scales and draws them.
+
+function chartUnavailableHTML() {
+  return `<p class="helper-text" style="text-align:center;padding:40px 0;">Chart unavailable (Plotly failed to load). Table views and autosave still work.</p>`;
+}
+
+function renderCompositeChart() {
+  const el = $("chartComposite");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const scale = (arr) => yearIdxs.map((y, i) => arr[y] * factor(y));
+
+  const series = compositeSeries(projection.yearly, state.assets, state.properties ?? [], state.display.chartTreatment);
+  const hasSeparate = series.separateArea.some((v) => Math.abs(v) >= 0.005);
+
+  const traces = [{
+    x: ages, y: scale(series.netAssetsArea), name: "Net assets",
+    type: "scatter", mode: "lines", fill: "tozeroy", stackgroup: "assets",
+    line: { color: "rgb(28, 90, 180)", width: 1.5 },
+    hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Net assets</extra>",
+  }];
+  if (hasSeparate) {
+    traces.push({
+      x: ages, y: scale(series.separateArea), name: "Non-financial assets",
+      type: "scatter", mode: "lines", fill: "tonexty", stackgroup: "assets",
+      line: { color: "rgb(150, 180, 220)", width: 1.5 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Non-financial assets</extra>",
+    });
+  }
+  traces.push(
+    {
+      x: ages, y: scale(series.income), name: "Income", type: "bar",
+      marker: { color: "rgba(107, 142, 35, 0.75)" }, yaxis: "y2",
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Income</extra>",
+    },
+    {
+      x: ages, y: scale(series.drawdown), name: "Capital drawdown", type: "bar",
+      marker: { color: "rgba(217, 123, 47, 0.75)" }, yaxis: "y2",
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Capital drawdown</extra>",
+    },
+    {
+      x: ages, y: scale(series.expenditure), name: "Total expenditure (incl. tax)", type: "scatter",
+      mode: "lines", line: { color: "rgb(180, 40, 40)", width: 2 }, yaxis: "y2",
+      hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Total expenditure (incl. tax)</extra>",
+    },
+  );
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 70, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", barmode: "group", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    yaxis2: {
+      title: { text: "Income / expenditure", standoff: 10 },
+      tickformat: "$,.2s", overlaying: "y", side: "right", showgrid: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+els.chartTreatmentSelects.forEach((sel) => {
+  sel.addEventListener("change", () => {
+    state.display.chartTreatment = { ...state.display.chartTreatment, [sel.dataset.treatment]: sel.value };
+    saveState();
+    if (activeView === "composite") renderCompositeChart(); // display-only — never touches table values
+  });
+});
+
+// --- View: Net assets chart (D5) ---------------------------------------------
+
+function renderNetAssetsChart() {
+  const el = $("chartNetAssets");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const netAssets = yearIdxs.map((y) => projection.yearly[y].netAssets * factor(y));
+
+  Plotly.react(el, [{
+    x: ages, y: netAssets, name: "Net assets",
+    type: "scatter", mode: "lines", fill: "tozeroy",
+    line: { color: "rgb(28, 90, 180)", width: 2.5 },
+    hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Net assets</extra>",
+  }], {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: false,
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+// --- View: Asset balances chart (D5) -----------------------------------------
+//
+// Each included asset's closing balance, stacked. The lifestyle
+// display treatment applies (exclude drops it from the stack;
+// separate has no distinct meaning in an asset-only chart, so it
+// behaves like include here — disclosed in this comment).
+
+function renderAssetBalancesChart() {
+  const el = $("chartAssetBalances");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lifestyleTreatment = state.display.chartTreatment.lifestyle;
+  const included = state.assets.filter((a) => a.include && (a.class !== "lifestyle" || lifestyleTreatment !== "exclude"));
+  const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#b5179e", "#d97b2f", "#9a031e", "#3a86c9"];
+
+  const traces = included.map((a, i) => ({
+    x: ages,
+    y: yearIdxs.map((y) => (projection.yearly[y].perAssetClosing[a.id] ?? 0) * factor(y)),
+    name: a.name, type: "scatter", mode: "lines",
+    stackgroup: "assets", fill: "tonexty",
+    line: { color: palette[i % palette.length], width: 1 },
+    hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(a.name)}</extra>`,
+  }));
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
 // --- transposed table infrastructure (shared by every table view) ------------
 //
 // Years as columns, line items as rows. Groups are visual bands; a
@@ -2556,16 +2746,37 @@ function fmtLedgerCell(v) {
   return v < 0 ? `(${s})` : s;
 }
 
-// Filter groups down to the visible period + visible rows.
+// Client age, primary; FY beneath; partner age a third line for
+// couples (item D). One shared builder for the on-screen header and
+// the plain-text CSV header.
+function yearHeaderHTML(y) {
+  const age = projection.schedule.clientAges[y];
+  const fy = fyShortLabel(firstFyStartYear(state.plan.start) + y);
+  const partnerAge = projection.schedule.partnerAges ? projection.schedule.partnerAges[y] : null;
+  return `
+    <span class="tl-age">${age}</span>
+    <span class="tl-fy">${escapeHTML(fy)}</span>
+    ${partnerAge != null ? `<span class="tl-partner-age">${partnerAge}</span>` : ""}
+  `;
+}
+function yearHeaderText(y) {
+  const age = projection.schedule.clientAges[y];
+  const fy = fyShortLabel(firstFyStartYear(state.plan.start) + y);
+  const partnerAge = projection.schedule.partnerAges ? projection.schedule.partnerAges[y] : null;
+  return partnerAge != null ? `${age} / ${partnerAge} (${fy})` : `${age} (${fy})`;
+}
+
+// Filter groups down to the selected (thinned) period + visible rows.
+// Hide-empty-rows (item F) is a toggle, default on; off shows the
+// full row skeleton including all-zero rows.
 function visibleTransposed(groups) {
-  const { a, b } = periodYears();
-  const yearIdxs = [];
-  for (let y = a; y <= b; y++) yearIdxs.push(y);
+  const yearIdxs = selectedYearIndices();
+  const hideEmpty = state.display.hideEmptyRows !== false;
   const vGroups = groups
     .map((g) => ({
       ...g,
       rows: g.rows.filter((r) =>
-        r.always || r.text || yearIdxs.some((y) => Math.abs(r.cell(y)) >= 0.005)),
+        !hideEmpty || r.always || r.text || yearIdxs.some((y) => Math.abs(r.cell(y)) >= 0.005)),
     }))
     .filter((g) => g.rows.length > 0);
   return { yearIdxs, vGroups };
@@ -2579,7 +2790,7 @@ function renderTransposed(mountEl, groups, footerHTML = "") {
   }
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const head = `<tr><th class="tl-corner"></th>${
-    yearIdxs.map((y) => `<th class="tl-year">${fyShortLabel(firstFyStartYear(state.plan.start) + y)}</th>`).join("")
+    yearIdxs.map((y) => `<th class="tl-year"><span class="tl-year-stack">${yearHeaderHTML(y)}</span></th>`).join("")
   }</tr>`;
   const body = vGroups.map((g) => {
     const gh = g.title
@@ -2607,9 +2818,8 @@ function exportTransposedCSV(viewName, groups) {
   const { yearIdxs, vGroups } = visibleTransposed(groups);
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const esc = (s) => `"${String(s).replaceAll('"', '""')}"`;
-  const f0 = firstFyStartYear(state.plan.start);
   const lines = [
-    ["Item", ...yearIdxs.map((y) => fyShortLabel(f0 + y))].map(esc).join(","),
+    ["Item", ...yearIdxs.map((y) => yearHeaderText(y))].map(esc).join(","),
   ];
   for (const g of vGroups) {
     if (g.title) lines.push(esc(g.title));
@@ -2825,6 +3035,16 @@ function buildAssetsGroups(entity) {
       surplusInvested: yl[y].surplusInvested,
       growth: yl[y].growth,
     }));
+    // Unrealised gain (item G): market value − cost base pool, summed
+    // only over CGT assets (a non-CGT asset's closing balance never
+    // enters this row — costBasePool is null for it, not zero).
+    combined.push({
+      label: "Unrealised gain",
+      cell: (y) => included.reduce((s, a) => {
+        const d = yl[y].perAssetDetail[a.id];
+        return d?.costBasePool != null ? s + (d.closing - d.costBasePool) : s;
+      }, 0),
+    });
     combined.push({ label: "Tax attributable", cell: (y) => -yl[y].tax });
     combined.push({ label: "Closing balance", cell: (y) => yl[y].closingBalance, always: true, cls: "tl-total" });
     const financial = included.filter((a) => a.class !== "lifestyle");
@@ -2876,9 +3096,18 @@ function buildAssetsGroups(entity) {
     return groups;
   }
 
-  const zero = { opening: 0, contributions: 0, withdrawals: 0, oneOffs: 0, deficitFunding: 0, surplusInvested: 0, growth: 0, closing: 0 };
+  const zero = { opening: 0, contributions: 0, withdrawals: 0, oneOffs: 0, deficitFunding: 0, surplusInvested: 0, growth: 0, closing: 0, costBasePool: null };
   const name = included.find((a) => a.id === entity)?.name ?? "Asset";
   const rows = assetDetailRows((y) => yl[y].perAssetDetail[entity] ?? zero);
+  // Unrealised gain (item G): zero (and auto-hidden under F) for a
+  // non-CGT asset, whose costBasePool is null rather than 0.
+  rows.push({
+    label: "Unrealised gain",
+    cell: (y) => {
+      const d = yl[y].perAssetDetail[entity] ?? zero;
+      return d.costBasePool != null ? d.closing - d.costBasePool : 0;
+    },
+  });
   rows.push({ label: "Closing balance", cell: (y) => (yl[y].perAssetDetail[entity] ?? zero).closing, always: true, cls: "tl-total" });
   return [{ title: name, rows }];
 }
@@ -3002,19 +3231,22 @@ function exportNameBase() {
   return sanitiseFilename(`${client?.name ?? "client"}-${scenario?.name ?? "scenario"}`);
 }
 
-function exportProjectionPNG() {
-  const el = $("chart");
+function exportChartPNG(chartElId, viewName) {
+  const el = $(chartElId);
   if (typeof Plotly === "undefined" || !el?.data) return;
   Plotly.toImage(el, { format: "png", width: 1280, height: 640 }).then((dataUrl) => {
     const a = document.createElement("a");
     a.href = dataUrl;
-    a.download = `${exportNameBase()}-projection.png`;
+    a.download = `${exportNameBase()}-${viewName}.png`;
     a.click();
   });
 }
 
 els.exportBtn.addEventListener("click", () => {
-  if (activeView === "projection") exportProjectionPNG();
+  if (activeView === "projection") exportChartPNG("chart", "projection");
+  else if (activeView === "composite") exportChartPNG("chartComposite", "composite");
+  else if (activeView === "net-assets") exportChartPNG("chartNetAssets", "net-assets");
+  else if (activeView === "asset-balances") exportChartPNG("chartAssetBalances", "asset-balances");
   else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());

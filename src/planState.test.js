@@ -12,6 +12,7 @@ import {
   ageAtDate, synthDob, resolveEndBasis, clampCashflow, createLifestyleAsset,
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
   createLiability, createProperty,
+  clampReportPeriod, clampChartTreatment, defaultChartTreatment,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -636,5 +637,34 @@ describe("sidebar navigation (page-per-section)", () => {
     expect(counts.liabilities).toBe(1);
     expect(counts.property).toBe(0);
     expect(counts["investment-cashflows"]).toBe(1); // the default contribution row
+  });
+});
+
+describe("D5 — report period + chart treatment display state", () => {
+  it("clampReportPeriod defaults and clamps ages", () => {
+    expect(clampReportPeriod(null)).toEqual({ fromAge: null, toAge: null, everyN: 1, forceKeyYears: true });
+    expect(clampReportPeriod({ fromAge: 50, toAge: 45, everyN: 5, forceKeyYears: false }))
+      .toEqual({ fromAge: 50, toAge: 50, everyN: 5, forceKeyYears: false }); // toAge lifted to fromAge
+    expect(clampReportPeriod({ everyN: 7 }).everyN).toBe(1); // not one of 1/2/5/10 → default
+    expect(clampReportPeriod({ fromAge: -5, toAge: 999 })).toEqual({ fromAge: null, toAge: null, everyN: 1, forceKeyYears: true });
+  });
+
+  it("clampChartTreatment defaults to PPR + lifestyle separate, property + liabilities included", () => {
+    expect(defaultChartTreatment())
+      .toEqual({ pprProperty: "separate", otherProperty: "include", lifestyle: "separate", liabilities: "include" });
+    expect(clampChartTreatment(null)).toEqual(defaultChartTreatment());
+    expect(clampChartTreatment({ pprProperty: "bogus", lifestyle: "exclude" }))
+      .toEqual({ pprProperty: "separate", otherProperty: "include", lifestyle: "exclude", liabilities: "include" });
+  });
+
+  it("reportPeriod and chartTreatment round-trip through serialize/hydrate", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.display.reportPeriod = { fromAge: 45, toAge: 60, everyN: 5, forceKeyYears: false };
+    s.display.chartTreatment = { pprProperty: "include", otherProperty: "exclude", lifestyle: "include", liabilities: "exclude" };
+    s.display.hideEmptyRows = false;
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.display.reportPeriod).toEqual({ fromAge: 45, toAge: 60, everyN: 5, forceKeyYears: false });
+    expect(back.display.chartTreatment).toEqual({ pprProperty: "include", otherProperty: "exclude", lifestyle: "include", liabilities: "exclude" });
+    expect(back.display.hideEmptyRows).toBe(false);
   });
 });

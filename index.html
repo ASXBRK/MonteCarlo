@@ -56,15 +56,21 @@
 
             <div class="output-head">
               <div class="period-select" aria-label="Report period">
-                <label>From <select id="periodFrom"></select></label>
-                <label>To <select id="periodTo"></select></label>
-                <div class="seg-toggle period-presets">
-                  <button class="seg-option" type="button" data-preset="all">All</button>
-                  <button class="seg-option" type="button" data-preset="10">Next 10</button>
-                  <button class="seg-option" type="button" data-preset="20">Next 20</button>
-                </div>
+                <label>From age <select id="periodFromAge"></select></label>
+                <label>To age <select id="periodToAge"></select></label>
+                <label>Then every
+                  <select id="periodEveryN">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="5">5</option>
+                    <option value="10">10</option>
+                  </select>
+                  period(s)
+                </label>
+                <label class="chart-opt"><input type="checkbox" id="forceKeyYearsToggle" /><span>Force key years to display</span></label>
               </div>
               <div class="output-actions">
+                <label class="chart-opt"><input type="checkbox" id="hideEmptyRowsToggle" /><span>Hide empty rows</span></label>
                 <div class="display-toggle" role="radiogroup" aria-label="Display units">
                   <button class="display-option" data-units="real" type="button" aria-pressed="true">Today's dollars</button>
                   <button class="display-option" data-units="nominal" type="button" aria-pressed="false">Future dollars</button>
@@ -82,6 +88,44 @@
                 <div id="chart"></div>
                 <p id="shortfallNote" class="shortfall-note" hidden></p>
               </div>
+              <div id="viewComposite" hidden>
+                <div id="chartComposite"></div>
+                <details class="chart-settings">
+                  <summary>Display treatment</summary>
+                  <div class="chart-treatment-grid">
+                    <label>Property (PPR)
+                      <select data-treatment="pprProperty">
+                        <option value="exclude">Exclude</option>
+                        <option value="include">Include</option>
+                        <option value="separate">Include separately</option>
+                      </select>
+                    </label>
+                    <label>Property (other)
+                      <select data-treatment="otherProperty">
+                        <option value="exclude">Exclude</option>
+                        <option value="include">Include</option>
+                        <option value="separate">Include separately</option>
+                      </select>
+                    </label>
+                    <label>Lifestyle assets
+                      <select data-treatment="lifestyle">
+                        <option value="exclude">Exclude</option>
+                        <option value="include">Include</option>
+                        <option value="separate">Include separately</option>
+                      </select>
+                    </label>
+                    <label>Liabilities
+                      <select data-treatment="liabilities">
+                        <option value="exclude">Exclude</option>
+                        <option value="include">Include</option>
+                        <option value="separate">Include separately</option>
+                      </select>
+                    </label>
+                  </div>
+                </details>
+              </div>
+              <div id="viewNetAssets" hidden><div id="chartNetAssets"></div></div>
+              <div id="viewAssetBalances" hidden><div id="chartAssetBalances"></div></div>
               <div id="viewCashflow" hidden></div>
               <div id="viewAssets" hidden>
                 <div id="assetsEntity" class="seg-toggle entity-select" role="tablist" aria-label="Asset"></div>

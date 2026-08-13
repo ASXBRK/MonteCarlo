@@ -979,3 +979,36 @@ describe("D4 — property", () => {
     for (let y = 0; y < x.yearly.length; y++) expect(x.yearly[y].tax).toBe(z.yearly[y].tax);
   });
 });
+
+// --- D5: unrealised gain (cost-base pool exposure) -----------------------------
+
+describe("D5 — perAssetDetail.costBasePool", () => {
+  it("exposes the pool for CGT assets and null for non-CGT/lifestyle", () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [
+        mkAsset({ id: "cgt", allocation: growthOnlyAlloc(), balance: 100000, cgtAsset: true, costBase: 60000 }),
+        mkAsset({ id: "noncgt", allocation: growthOnlyAlloc(), balance: 50000, cgtAsset: false, costBase: null }),
+      ],
+    });
+    const out = projectPlan(s);
+    const y0 = out.yearly[0].perAssetDetail;
+    expect(y0.cgt.costBasePool).toBeCloseTo(60000, 6); // no flows this year → pool unchanged
+    expect(y0.noncgt.costBasePool).toBeNull();
+    // Unrealised gain = closing − pool.
+    expect(y0.cgt.closing - y0.cgt.costBasePool).toBeCloseTo(y0.cgt.closing - 60000, 6);
+  });
+
+  it("the pool tracks contributions exactly as costBasePool.js does", () => {
+    // growthOnlyAlloc has zero income component, so nothing reinvests
+    // into the pool via distributions — only the contributions do.
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ allocation: growthOnlyAlloc(), balance: 100000, cgtAsset: true, costBase: 50000 })],
+      cashflows: { contributions: [cf({ amount: 1000, toAge: 41 })] },
+    });
+    const out = projectPlan(s);
+    // 12 months × $1,000 contributed → pool = 50,000 + 12,000.
+    expect(out.yearly[0].perAssetDetail.a1.costBasePool).toBeCloseTo(62000, 4);
+  });
+});

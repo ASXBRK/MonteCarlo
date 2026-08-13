@@ -135,7 +135,10 @@ describe("known section/view ids", () => {
   });
 
   it("exposes the output view list", () => {
-    expect(OUTPUT_VIEWS).toEqual(["projection", "cashflow", "assets", "tax", "assumptions"]);
-    expect(DEFAULT_OUTPUT_VIEW).toBe("projection");
+    expect(OUTPUT_VIEWS).toEqual([
+      "projection", "composite", "net-assets", "asset-balances",
+      "cashflow", "assets", "tax", "assumptions",
+    ]);
+    expect(DEFAULT_OUTPUT_VIEW).toBe("composite");
   });
 });

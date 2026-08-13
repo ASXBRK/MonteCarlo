@@ -17,8 +17,11 @@ export const DEFAULT_INPUT_SECTION = "setup";
 
 // Output view ids are flat (not nested by Graphs/Tables group) — the
 // grouping is a sidebar presentation concern, not a routing one.
-export const OUTPUT_VIEWS = ["projection", "cashflow", "assets", "tax", "assumptions"];
-export const DEFAULT_OUTPUT_VIEW = "projection";
+export const OUTPUT_VIEWS = [
+  "projection", "composite", "net-assets", "asset-balances", // Graphs
+  "cashflow", "assets", "tax", "assumptions",                // Tables
+];
+export const DEFAULT_OUTPUT_VIEW = "composite"; // the composite chart is the default Graphs view (D5)
 
 export function formatRoute(route) {
   switch (route?.page) {

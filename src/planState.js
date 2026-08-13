@@ -447,8 +447,10 @@ export function defaultState(profiles = {}, now = new Date()) {
     },
     display: {
       units: "real",
-      reportPeriod: { from: null, to: null },
+      reportPeriod: { fromAge: null, toAge: null, everyN: 1, forceKeyYears: true },
       lastVisited: { area: "input", section: DEFAULT_INPUT_SECTION },
+      chartTreatment: defaultChartTreatment(),
+      hideEmptyRows: true,
     },
     assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed" },
   };
@@ -489,14 +491,47 @@ export function canEditOneOffYear(plan, planYear) {
   return planYear > 0 || plan.start.month === 7;
 }
 
-// Report period: FY start years (or null = unbounded). Display state,
-// not plan state — it only narrows what the output views show.
+// Report period (D5): client-AGE bounds for the full-detail range,
+// then thinning to every Nth plan year beyond `toAge` through the
+// projection's actual end (src/periodThinning.js does the resolving).
+// Display state, not plan state — it only narrows what the output
+// views show; null bounds mean unbounded (fromAge null = from the
+// start; toAge null = full detail all the way to the end, i.e. no
+// thinning ever applies — the "All" default).
+export const PERIOD_STEP_OPTIONS = [1, 2, 5, 10];
+
 export function clampReportPeriod(raw) {
-  const fy = (v) => (Number.isInteger(v) && v >= 1900 && v <= 3000 ? v : null);
-  const from = fy(raw?.from);
-  const to = fy(raw?.to);
-  if (from != null && to != null && to < from) return { from, to: from };
-  return { from, to };
+  const age = (v) => (Number.isInteger(v) && v >= 0 && v <= 130 ? v : null);
+  const fromAge = age(raw?.fromAge);
+  let toAge = age(raw?.toAge);
+  if (fromAge != null && toAge != null && toAge < fromAge) toAge = fromAge;
+  const everyN = PERIOD_STEP_OPTIONS.includes(raw?.everyN) ? raw.everyN : 1;
+  const forceKeyYears = raw?.forceKeyYears !== false;
+  return { fromAge, toAge, everyN, forceKeyYears };
+}
+
+// --- chart display treatment (D5) -----------------------------------------
+//
+// Display-level ONLY: which asset classes fold into the composite
+// chart's main net-assets area vs. show as their own stacked area vs.
+// drop from the chart entirely. Never touches engine output or table
+// values — tables always show full detail regardless of this setting.
+
+export const CHART_TREATMENTS = ["exclude", "include", "separate"];
+
+export function defaultChartTreatment() {
+  return { pprProperty: "separate", otherProperty: "include", lifestyle: "separate", liabilities: "include" };
+}
+
+export function clampChartTreatment(raw) {
+  const pick = (v, dflt) => (CHART_TREATMENTS.includes(v) ? v : dflt);
+  const d = defaultChartTreatment();
+  return {
+    pprProperty: pick(raw?.pprProperty, d.pprProperty),
+    otherProperty: pick(raw?.otherProperty, d.otherProperty),
+    lifestyle: pick(raw?.lifestyle, d.lifestyle),
+    liabilities: pick(raw?.liabilities, d.liabilities),
+  };
 }
 
 // --- sidebar navigation (page-per-section) -------------------------------
@@ -889,6 +924,8 @@ export function hydrate(json, profiles = {}) {
         units: raw.display?.units === "nominal" ? "nominal" : "real",
         reportPeriod: clampReportPeriod(raw.display?.reportPeriod),
         lastVisited: clampLastVisited(raw.display?.lastVisited),
+        chartTreatment: clampChartTreatment(raw.display?.chartTreatment),
+        hideEmptyRows: raw.display?.hideEmptyRows !== false,
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,

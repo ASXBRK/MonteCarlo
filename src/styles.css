@@ -1264,6 +1264,61 @@ html, body {
 
 .period-presets { margin: 0; }
 
+/* --- composite chart display-treatment settings (D5) --- */
+
+.chart-settings {
+  margin: 10px 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 12px;
+  background: var(--card);
+}
+
+.chart-settings summary {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  cursor: pointer;
+  padding: 6px 0;
+}
+.chart-settings[open] summary { color: var(--ink); }
+
+.chart-treatment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  padding: 4px 0 12px;
+}
+
+.chart-treatment-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.chart-treatment-grid select {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--ink);
+}
+
+/* --- age-primary table header (D5) --- */
+
+.tl-year-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.25;
+}
+.tl-age { font-size: 13px; font-weight: 700; color: var(--ink); }
+.tl-fy, .tl-partner-age { font-size: 10px; font-weight: 500; color: var(--ink-soft); }
+
 /* --- transposed ledger tables (years as columns) --- */
 
 .tl-wrap {
