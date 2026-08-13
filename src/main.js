@@ -35,6 +35,12 @@ import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
+import {
+  salarySacrificeCash as salarySacrificeCashPure,
+  personalSuperContributionsCash,
+  incomeCategorySums as incomeCategorySumsPure,
+  expenseCategorySums as expenseCategorySumsPure,
+} from "./cashflowCategories.js";
 import { realThreshold, LITO } from "./Tax/annual.js";
 import { LEG } from "./Tax/engine.js";
 import {
@@ -4048,66 +4054,50 @@ function loanName(lid) {
       : "Loan");
 }
 
-// Super contributions the client actually funds — salary sacrifice,
-// personal deductible/non-deductible, spouse (toConcessionalCap fills
-// included, since Tier 1.2 Commit 4 folds them into these same
-// per-type fields). SG is excluded: it's employer money that never
-// reaches the household. Shared by the Cashflow table's expense row
+// Thin adapters over src/cashflowCategories.js's pure functions —
+// main.js owns the DOM/Plotly-dependent rendering, cashflowCategories.js
+// owns the (unit-tested) arithmetic. See that module's header comment
+// for why the split exists.
+function financialAssetIds() {
+  return state.assets.filter((a) => a.class !== "lifestyle").map((a) => a.id);
+}
+
+// Salary-sacrifice cash for a year — the Cashflow table's own "Less:
+// salary sacrifice" row uses this directly (its per-row Salary line
+// reads rt.income, which is GROSS, unlike the engine's row.income).
+function salarySacrificeCash(y) {
+  return salarySacrificeCashPure(projection.yearly[y], state.plan.superAccounts);
+}
+
+// Super contributions the client actually pays for out of household
+// cash — personal deductible/non-deductible, spouse (toConcessionalCap
+// fills included). Salary sacrifice and SG are excluded (see
+// cashflowCategories.js). Shared by the Cashflow table's expense row
 // and the Cashflow bars chart's matching category — one formula, so
 // they can never disagree.
 function superContributionsCash(y) {
-  const yl = projection.yearly;
-  return (state.plan.superAccounts ?? []).reduce((s, sa) => {
-    const d = yl[y].superDetail[sa.id];
-    return s + (d ? d.salarySacrifice + d.personalDeductible + d.nonConcessional : 0);
-  }, 0);
+  return personalSuperContributionsCash(projection.yearly[y], state.plan.superAccounts);
 }
 
 // Income/expense category sums (Cashflow bars chart) — built from
 // exactly the same fields the Cashflow table's rows read, so summing
 // every category reproduces the table's Total income/Total expenses
-// exactly (verified by a reconciliation check). One-off inflows fold
-// into "other" (income has no other natural home for them); one-off
-// outflows and a planned property's settlement fold into "investment/
-// property expenses" (the closest fit) — both are asset-level events,
-// not household cashflow, same disclosed caveat as the table's.
+// exactly (verified by a reconciliation check, now a committed unit
+// test — see cashflowCategories.test.js).
 function incomeCategorySums(y) {
-  const yl = projection.yearly;
-  const rt = projection.schedule.rowTotals;
-  const byType = (type) => state.cashflows.income
-    .filter((r) => r.incomeType === type)
-    .reduce((s, r) => s + (rt.income[r.id]?.[y] ?? 0), 0);
-  const investmentProps = (state.properties ?? []).filter((p) => p.propertyType === "investment");
-  const employment = byType("employment");
-  const rental = byType("rental") + investmentProps.reduce((s, p) => s + (yl[y].properties?.[p.id]?.rent ?? 0), 0);
-  const investment = yl[y].cashDistributions;
-  const wcaInterest = yl[y].wcaDetail.interest;
-  const oneOffIn = state.assets.filter((a) => a.class !== "lifestyle")
-    .reduce((s, a) => s + Math.max(0, projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0), 0);
-  const other = byType("otherTaxable") + byType("nonTaxable") + oneOffIn;
-  return { employment, rental, investment, wcaInterest, other };
+  return incomeCategorySumsPure(
+    projection.yearly[y], state.cashflows.income, projection.schedule.rowTotals.income,
+    state.properties, projection.schedule.oneOffsByAssetYear, financialAssetIds(),
+    state.plan.superAccounts, y
+  );
 }
 
 function expenseCategorySums(y) {
-  const yl = projection.yearly;
-  const rt = projection.schedule.rowTotals;
-  const living = state.cashflows.expenses.reduce((s, r) => s + (rt.expenses[r.id]?.[y] ?? 0), 0);
-  const investmentProps = (state.properties ?? []).filter((p) => p.propertyType === "investment");
-  const propExpenses = investmentProps.reduce((s, p) => s + (yl[y].properties?.[p.id]?.expenses ?? 0), 0);
-  const oneOffOut = state.assets.filter((a) => a.class !== "lifestyle")
-    .reduce((s, a) => s + Math.max(0, -(projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0)), 0);
-  const settlement = (state.properties ?? []).filter((p) => p.status === "planned")
-    .reduce((s, p) => s + (yl[y].properties?.[p.id]?.settlement ?? 0), 0);
-  const liabIds = Object.keys(yl[y].liabilities ?? {});
-  const loanInterest = liabIds.reduce((s, lid) => s + yl[y].liabilities[lid].interest, 0);
-  const loanPrincipal = liabIds.reduce((s, lid) => s + yl[y].liabilities[lid].principal, 0);
-  return {
-    living,
-    investmentExpenses: propExpenses + oneOffOut + settlement,
-    loanInterest, loanPrincipal,
-    tax: yl[y].tax,
-    superContributions: superContributionsCash(y),
-  };
+  return expenseCategorySumsPure(
+    projection.yearly[y], state.cashflows.expenses, projection.schedule.rowTotals.expenses,
+    state.properties, projection.schedule.oneOffsByAssetYear, financialAssetIds(),
+    state.plan.superAccounts, y
+  );
 }
 
 // --- View: Key figures (fix batch 3, item 3) --------------------------------
@@ -4192,6 +4182,16 @@ function buildCashflowGroups() {
       always: true,
       cellAttrs: (y) => oneOffCellAttrs(a.id, y),
     });
+  }
+  // Salary sacrifice (engine-correctness fix): each Salary row above
+  // reads rt.income, a snapshot taken BEFORE schedule.js reduces the
+  // client's actual pay by the sacrificed amount — the row must stay
+  // GROSS so the input panel and this row both show what the client
+  // actually earns. This row nets it back out so Total income below
+  // matches the engine's own row.income (net of sacrifice) instead of
+  // silently overstating it by whatever was sacrificed that year.
+  if ((state.plan.superAccounts ?? []).length) {
+    incomeRows.push({ label: "Less: salary sacrifice", cell: (y) => -salarySacrificeCash(y) });
   }
   const incomeRowsSoFar = [...incomeRows];
   incomeRows.push({

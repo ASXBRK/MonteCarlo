@@ -897,7 +897,19 @@ export function projectPlan(state, profiles = PROFILES) {
       }
       const exp = schedule.expenses[m];
       const tax = (taxOut ? taxOut[m] : 0) + (m === first ? cgtDue : 0);
-      const net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut;
+      // Personal deductible/non-deductible/spouse super contributions
+      // (engine-correctness fix) are paid from household cash, exactly
+      // like any other outflow — SG (employer-paid, on top of salary)
+      // and salary sacrifice (already reflected as reduced income,
+      // upstream in schedule.js) are excluded here, or they'd be
+      // debited twice. Without this, super gains the contribution and
+      // tax falls by the deduction, but nothing ever leaves the
+      // household — the original defect.
+      const superContribCashOut = superIds.reduce((s, id) => {
+        const flows = schedule.superFlows[id];
+        return s + (flows ? flows.personalDeductible[m] + flows.nonConcessional[m] : 0);
+      }, 0);
+      const net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut - superContribCashOut;
       wcaBal += net;
       if (row) {
         row.income += inc;

@@ -1376,9 +1376,17 @@ describe("Tier 1.2 — Super (Commit 2): caps, carry-forward, contributions tax,
   });
 
   it("salary sacrifice and personal deductible produce IDENTICAL net tax outcomes for equal amounts", () => {
+    // Strengthened (engine-correctness fix) to also assert household cash
+    // position, not just tax and asset balances — as originally written
+    // this test passed while BOTH paths created money identically, so
+    // tax-only equivalence alone proves nothing about correctness. See the
+    // dedicated "Super contribution cash flow" describe block below for the
+    // full WCA-level version; this one keeps its original narrow tax scope
+    // plus the one cash assertion that was missing.
     const scenario = (type) => mkState({
       endAge: 40,
-      plan: { superAccounts: [superAcct()] },
+      plan: { superAccounts: [superAcct()], workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      surplus: { mode: "accumulate", assetId: null },
       cashflows: {
         income: [employmentRow({ amount: 100000, sgApplies: false })], // isolate — no SG noise
         superContributions: [scRow({ type, amount: 10000 })],
@@ -1389,6 +1397,7 @@ describe("Tier 1.2 — Super (Commit 2): caps, carry-forward, contributions tax,
     expect(ss.yearly[0].taxDetail.client.taxableIncome).toBeCloseTo(pd.yearly[0].taxDetail.client.taxableIncome, 4);
     expect(ss.yearly[0].tax).toBeCloseTo(pd.yearly[0].tax, 2);
     expect(ss.yearly[0].taxDetail.incomeTax).toBeCloseTo(pd.yearly[0].taxDetail.incomeTax, 4);
+    expect(ss.yearly[0].wcaClosing).toBeCloseTo(pd.yearly[0].wcaClosing, 2);
   });
 
   it("carry-forward: an under-cap year accrues unused cap, which a later over-cap year draws on (no excess)", () => {
@@ -1573,6 +1582,12 @@ describe("Tier 1.2 — Super (Commit 3): preservation, withdrawals, proportionin
       endAge: 68, // 3 plan years: ages 65, 66, 67
       cpi: 0,
       cashflows: {
+        // Ample income so every contribution is funded from household
+        // cash (the engine-correctness fix) rather than by selling the
+        // default asset or — once exhausted — drawing on super itself,
+        // which would otherwise contaminate the proportioning math
+        // this test is isolating.
+        income: [annualSalary(1000000, { from: { kind: "age", age: 65 }, to: { kind: "age", age: 67 } })],
         // Year 0 (age 65): a $100,000 non-concessional contribution —
         // fully tax-free, the account's only balance so far.
         superContributions: [
@@ -1928,5 +1943,123 @@ describe("Working Cash Account (engine correctness fix)", () => {
     const householdNet = r.income - r.expenses - r.tax;
     expect(r.surplusOrDeficit).toBeCloseTo(householdNet + r.wcaDetail.interest, 4);
     expect(r.wcaDetail.interest).toBeGreaterThan(0);
+  });
+});
+
+// --- Super contribution cash flow (engine-correctness fix: contributions
+// used to be credited to super and deducted from taxable income without
+// ever leaving household cash — pure money creation). See schedule.js's
+// reduceHouseholdCash and deterministic.js's superContribCashOut.
+describe("Super contribution cash flow (engine-correctness fix)", () => {
+  // 0% real WCA growth (ratePct == cpi×100) — the same zero-real-rate
+  // trick as zeroRealAlloc — so every WCA figure below is exact, and
+  // "accumulate" mode so nothing is swept out at FY-end, leaving
+  // wcaClosing equal to the year's actual net cash position.
+  const zeroRealWca = { balance: 0, minimumBalance: 0, ratePct: 2.5 };
+  const accumulate = { mode: "accumulate", assetId: null };
+
+  it("personal deductible: the WCA falls by the contribution and rises by the tax saved — net household position is worse, never better", () => {
+    const scenario = (contribution) => mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: {
+        income: [employmentRow({ amount: 120000, sgApplies: false })],
+        ...(contribution
+          ? { superContributions: [scRow({ type: "personalDeductible", amount: contribution })] }
+          : {}),
+      },
+    });
+    const withContrib = projectPlan(scenario(20000)).yearly[0];
+    const without = projectPlan(scenario(0)).yearly[0];
+    const taxSaved = without.tax - withContrib.tax;
+    expect(taxSaved).toBeGreaterThan(0); // the deduction actually reduces tax
+    expect(taxSaved).toBeLessThan(20000); // never a full-dollar refund
+    // WCA falls by exactly the contribution and rises by exactly the tax saved.
+    expect(withContrib.wcaClosing).toBeCloseTo(without.wcaClosing - 20000 + taxSaved, 2);
+    // Net household cash position: worse off by (contribution − tax saved),
+    // never better — this is the money-creation bug's exact inverse.
+    const worseOff = without.wcaClosing - withContrib.wcaClosing;
+    expect(worseOff).toBeCloseTo(20000 - taxSaved, 2);
+    expect(worseOff).toBeGreaterThan(0);
+  });
+
+  it("salary sacrifice: the WCA credit equals gross salary minus the sacrifice — asserting explicitly that no second debit occurs", () => {
+    const sacrificed = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: {
+        income: [employmentRow({ amount: 120000, sgApplies: false })],
+        superContributions: [scRow({ type: "salarySacrifice", amount: 20000 })],
+      },
+    });
+    // A client earning $100k outright, with no contribution of any kind —
+    // household cash in the sacrifice scenario must match this EXACTLY.
+    // If the $20k sacrifice were ALSO debited as a household outflow (the
+    // original defect, mirrored from personal deductible because both
+    // paths shared the same broken logic), this would fail by exactly $20k.
+    const plainHundredK = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: { income: [employmentRow({ amount: 100000, sgApplies: false })] },
+    });
+    const outSacrificed = projectPlan(sacrificed).yearly[0];
+    const outPlain = projectPlan(plainHundredK).yearly[0];
+    expect(outSacrificed.income).toBeCloseTo(100000, 2); // 120,000 − 20,000
+    expect(outSacrificed.income).toBeCloseTo(outPlain.income, 2);
+    expect(outSacrificed.tax).toBeCloseTo(outPlain.tax, 2);
+    expect(outSacrificed.wcaClosing).toBeCloseTo(outPlain.wcaClosing, 2); // no second debit
+    // Super still actually received the sacrificed amount.
+    expect(outSacrificed.superDetail.su1.contributions).toBeCloseTo(20000, 2);
+  });
+
+  it("SG: the WCA is completely unaffected by SG, while super still receives it", () => {
+    const withSg = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: { income: [employmentRow({ amount: 120000, sgApplies: true })] },
+    });
+    const withoutSg = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: { income: [employmentRow({ amount: 120000, sgApplies: false })] },
+    });
+    const outWith = projectPlan(withSg).yearly[0];
+    const outWithout = projectPlan(withoutSg).yearly[0];
+    // SG is employer-paid, on top of salary — identical household cash and
+    // tax whether or not SG applies.
+    expect(outWith.income).toBeCloseTo(outWithout.income, 2);
+    expect(outWith.tax).toBeCloseTo(outWithout.tax, 2);
+    expect(outWith.wcaClosing).toBeCloseTo(outWithout.wcaClosing, 2);
+    // Super still receives the SG contribution.
+    expect(outWith.superDetail.su1.contributions).toBeCloseTo(120000 * 0.12, 2);
+  });
+
+  it("a contribution larger than available household cash draws on fundingOrder, then reports unfunded cashflow once that's exhausted too", () => {
+    const s = mkState({
+      endAge: 40,
+      assets: [mkAsset({ id: "a1", balance: 5000, allocation: zeroRealAlloc() })],
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: {
+        income: [employmentRow({ amount: 12000, sgApplies: false })], // modest cash, nowhere near the contribution
+        superContributions: [scRow({ type: "personalDeductible", amount: 20000 })],
+      },
+    });
+    const out = projectPlan(s).yearly[0];
+    // The $20k contribution far exceeds the $12k income plus the $5k asset —
+    // the shortfall drains the asset (fundingOrder), then the remainder is
+    // genuinely unfunded. A client cannot contribute money they don't have,
+    // and the tool must show that rather than hide it.
+    expect(out.deficitFundedFromAssets).toBeGreaterThan(0);
+    expect(out.perAssetClosing.a1).toBeCloseTo(0, 2); // fully drained
+    expect(out.unfundedCashflow).toBeGreaterThan(0);
+    // Super still receives the full contribution — the cash gap is the
+    // household's problem to fund, not a reason to silently shrink it.
+    expect(out.superDetail.su1.contributions).toBeCloseTo(20000, 2);
   });
 });

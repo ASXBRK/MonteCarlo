@@ -328,18 +328,21 @@ export function buildSchedules(state) {
   }
 
   // Salary sacrifice reduces the CONTRIBUTING person's assessable
-  // salary at source (Commit 2) — every dollar credited here is also
-  // subtracted from that person's incomeByOwner the same month, floored
-  // at zero. It does NOT touch `income` (household cash): the money
-  // never reached the household as cash to begin with, but that's a
-  // side effect already fully captured by incomeByOwner feeding ONLY
-  // the tax layer — household cashflow accounting for contributions
-  // already treats them as outside the surplus/deficit ledger (same as
-  // every other asset contribution in this engine), so there is
-  // nothing further to adjust there.
+  // salary at source (Commit 2) AND the household cash they actually
+  // receive (engine-correctness fix) — every dollar credited here is
+  // subtracted from BOTH incomeByOwner (tax) and `income` (household
+  // cash, what the Working Cash Account sees), the same month, each
+  // floored at zero independently. The client never had this cash —
+  // their employer diverted it straight to super — so leaving it in
+  // `income` while also crediting the super account would create it
+  // from nothing (the original defect: super gained the contribution,
+  // tax fell by the saving, but household cash was never debited).
   const reduceTaxableIncome = (owner, m, amount) => {
     const arr = owner === "partner" && incomeByOwner.partner ? incomeByOwner.partner : incomeByOwner.client;
     arr[m] = Math.max(0, arr[m] - amount);
+  };
+  const reduceHouseholdCash = (m, amount) => {
+    income[m] = Math.max(0, income[m] - amount);
   };
 
   // SG: one "employer" per employment income row (sgApplies, default
@@ -380,6 +383,18 @@ export function buildSchedules(state) {
   // its fill amount depends on the carry-forward ledger's evolving
   // state, so deterministic.js resolves it directly (see
   // `toConcessionalCapRows` below).
+  //
+  // DISCLOSED GAP (engine-correctness fix): a toConcessionalCap fill
+  // of type personalDeductible does NOT yet debit household cash the
+  // way an explicit amount/percentOfIncome personalDeductible row now
+  // does (deterministic.js only reads schedule.superFlows for that
+  // debit, and a fill is never written back into those arrays); one of
+  // type salarySacrifice likewise doesn't reduce `income` here, for
+  // the same reason. Both still create money for a toConcessionalCap
+  // row specifically. Not fixed in this pass — it needs the fill
+  // credit (currently real-pass-only) restructured to run ungated, the
+  // same way the WCA's other flows do, which is a larger change than
+  // this fix's scope. Tracked, not silent.
   const incomeRowsById = Object.fromEntries(state.cashflows.income.map((r) => [r.id, r]));
   const toConcessionalCapRows = [];
   for (const sc of state.cashflows.superContributions ?? []) {
@@ -439,10 +454,14 @@ export function buildSchedules(state) {
     }
 
     // Salary sacrifice: reduce the contributing owner's taxable income
-    // by exactly what survives gating, month by month.
+    // AND the household's actual cash by exactly what survives gating,
+    // month by month — see reduceHouseholdCash's header comment.
     if (key === "salarySacrifice") {
       for (let m = 0; m < months; m++) {
-        if (temp[m] > 0) reduceTaxableIncome(sc.owner, m, temp[m]);
+        if (temp[m] > 0) {
+          reduceTaxableIncome(sc.owner, m, temp[m]);
+          reduceHouseholdCash(m, temp[m]);
+        }
       }
     }
     for (let m = 0; m < months; m++) flows[key][m] += temp[m];
