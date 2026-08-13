@@ -98,6 +98,7 @@ const els = {
   liabilitiesTable: $("liabilitiesTable"),
   viewSuperBalances: $("viewSuperBalances"),
   viewLiabilitiesBalances: $("viewLiabilitiesBalances"),
+  viewCashflowBars: $("viewCashflowBars"),
   showAssetsToggle: $("showAssetsToggle"),
   shortfallNote: $("shortfallNote"),
   periodFromAge: $("periodFromAge"),
@@ -294,6 +295,7 @@ const INPUT_NAV = [
 const OUTPUT_NAV = {
   Graphs: [
     { id: "projection", label: "Projection" },
+    { id: "cashflow-bars", label: "Cashflow" },
     { id: "composite", label: "Cashflow, Assets & Liabilities" },
     { id: "net-assets", label: "Net assets" },
     { id: "asset-balances", label: "Asset balances" },
@@ -3261,6 +3263,7 @@ const VIEW_MOUNTS = {
   "asset-balances": () => els.viewAssetBalances,
   "super-balances": () => els.viewSuperBalances,
   "liabilities-balances": () => els.viewLiabilitiesBalances,
+  "cashflow-bars": () => els.viewCashflowBars,
   cashflow: () => els.viewCashflow,
   assets: () => els.viewAssets,
   tax: () => els.viewTax,
@@ -3268,7 +3271,7 @@ const VIEW_MOUNTS = {
   liabilities: () => els.viewLiabilities,
   assumptions: () => els.viewAssumptions,
 };
-const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "super-balances", "liabilities-balances"]);
+const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
 // Selection now happens via the sidebar (data-nav-section), which
 // routes through handleRoute → showSection → here.
@@ -3283,6 +3286,7 @@ function renderActiveView() {
   else if (activeView === "asset-balances") renderAssetBalancesChart();
   else if (activeView === "super-balances") renderSuperBalancesChart();
   else if (activeView === "liabilities-balances") renderLiabilitiesBalancesChart();
+  else if (activeView === "cashflow-bars") renderCashflowBarsChart();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
   else if (activeView === "tax") renderTaxView();
@@ -3802,6 +3806,85 @@ function renderLiabilitiesBalancesChart() {
   }, { displayModeBar: false, responsive: true });
 }
 
+// --- View: Cashflow bars chart (fix batch 3, item 2) ------------------------
+//
+// The client-facing counterpart to the Cashflow table: stacked bars by
+// client age, income above the axis and expenses below (Plotly's
+// "relative" barmode stacks each sign on its own side of zero), with
+// Surplus/(deficit) overlaid as a line. Categories are sourced from
+// incomeCategorySums/expenseCategorySums, the same functions the
+// Cashflow table's reconciliation relies on — chart and table read
+// the same numbers, just grouped differently (category vs per-row).
+
+const CASHFLOW_INCOME_SEGMENTS = [
+  { key: "employment", name: "Employment", color: "#1c5ab4" },
+  { key: "rental", name: "Rental", color: "#2e8a8a" },
+  { key: "investment", name: "Investment/distributions", color: "#6b8e23" },
+  { key: "wcaInterest", name: "Working Cash Account interest", color: "#5e60ce" },
+  { key: "other", name: "Other income", color: "#8d99ae" },
+];
+const CASHFLOW_EXPENSE_SEGMENTS = [
+  { key: "living", name: "Living expenses", color: "#dc5a28" },
+  { key: "investmentExpenses", name: "Investment/property expenses", color: "#d97b2f" },
+  { key: "loanInterest", name: "Loan interest", color: "#9a031e" },
+  { key: "loanPrincipal", name: "Loan principal", color: "#c1121f" },
+  { key: "tax", name: "Tax", color: "#780000" },
+  { key: "superContributions", name: "Super contributions", color: "#b5179e" },
+];
+
+function renderCashflowBarsChart() {
+  const el = $("chartCashflowBars");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yl = projection.yearly;
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const incomeSums = yearIdxs.map(incomeCategorySums);
+  const expenseSums = yearIdxs.map(expenseCategorySums);
+
+  const traces = [];
+  for (const seg of CASHFLOW_INCOME_SEGMENTS) {
+    const y = yearIdxs.map((yr, i) => incomeSums[i][seg.key] * factor(yr));
+    if (seriesIsAllZero(y)) continue; // hide-empty-rows convention
+    traces.push({
+      x: ages, y,
+      name: seg.name, type: "bar",
+      marker: { color: seg.color },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
+    });
+  }
+  for (const seg of CASHFLOW_EXPENSE_SEGMENTS) {
+    const y = yearIdxs.map((yr, i) => -expenseSums[i][seg.key] * factor(yr));
+    if (seriesIsAllZero(y)) continue;
+    traces.push({
+      x: ages, y,
+      name: seg.name, type: "bar",
+      marker: { color: seg.color },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
+    });
+  }
+  traces.push({
+    x: ages, y: yearIdxs.map((y) => yl[y].surplusOrDeficit * factor(y)),
+    name: "Surplus / (deficit)", type: "scatter", mode: "lines+markers",
+    line: { color: "#111", width: 2 }, marker: { size: 5 },
+    hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Surplus / (deficit)</extra>",
+  });
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 70 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    barmode: "relative",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.3, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Cashflow (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
 // --- transposed table infrastructure (shared by every table view) ------------
 //
 // Years as columns, line items as rows. Groups are visual bands; a
@@ -3950,16 +4033,6 @@ const accruedDiv293Footer = () => {
 
 // --- View: Cashflow -----------------------------------------------------------
 
-// Two input sections plus the resolution (Working Cash Account fix,
-// Commit 2): every inflow lives in Income, every outflow in Expenses —
-// Liabilities and One-off amounts as standalone sections are gone,
-// their rows folded in by direction. Tax detail stays in the Tax
-// view; this shows only the single Tax line. One-off amounts are
-// asset-level transactions, not household cashflow — they never touch
-// the Working Cash Account, so they show here for completeness but
-// Surplus/(deficit) (the engine's own household-net figure) doesn't
-// include them; in a year with a nonzero one-off, Total income minus
-// Total expenses can differ from Surplus/(deficit) by that amount.
 // Shared by the Cashflow view's loan interest/principal rows and the
 // Liabilities view/chart: a liability id is either a user-entered
 // liability or a property-purchase-derived loan ("prop-<propertyId>").
@@ -3970,6 +4043,78 @@ function loanName(lid) {
       : "Loan");
 }
 
+// Super contributions the client actually funds — salary sacrifice,
+// personal deductible/non-deductible, spouse (toConcessionalCap fills
+// included, since Tier 1.2 Commit 4 folds them into these same
+// per-type fields). SG is excluded: it's employer money that never
+// reaches the household. Shared by the Cashflow table's expense row
+// and the Cashflow bars chart's matching category — one formula, so
+// they can never disagree.
+function superContributionsCash(y) {
+  const yl = projection.yearly;
+  return (state.plan.superAccounts ?? []).reduce((s, sa) => {
+    const d = yl[y].superDetail[sa.id];
+    return s + (d ? d.salarySacrifice + d.personalDeductible + d.nonConcessional : 0);
+  }, 0);
+}
+
+// Income/expense category sums (Cashflow bars chart) — built from
+// exactly the same fields the Cashflow table's rows read, so summing
+// every category reproduces the table's Total income/Total expenses
+// exactly (verified by a reconciliation check). One-off inflows fold
+// into "other" (income has no other natural home for them); one-off
+// outflows and a planned property's settlement fold into "investment/
+// property expenses" (the closest fit) — both are asset-level events,
+// not household cashflow, same disclosed caveat as the table's.
+function incomeCategorySums(y) {
+  const yl = projection.yearly;
+  const rt = projection.schedule.rowTotals;
+  const byType = (type) => state.cashflows.income
+    .filter((r) => r.incomeType === type)
+    .reduce((s, r) => s + (rt.income[r.id]?.[y] ?? 0), 0);
+  const investmentProps = (state.properties ?? []).filter((p) => p.propertyType === "investment");
+  const employment = byType("employment");
+  const rental = byType("rental") + investmentProps.reduce((s, p) => s + (yl[y].properties?.[p.id]?.rent ?? 0), 0);
+  const investment = yl[y].cashDistributions;
+  const wcaInterest = yl[y].wcaDetail.interest;
+  const oneOffIn = state.assets.filter((a) => a.class !== "lifestyle")
+    .reduce((s, a) => s + Math.max(0, projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0), 0);
+  const other = byType("otherTaxable") + byType("nonTaxable") + oneOffIn;
+  return { employment, rental, investment, wcaInterest, other };
+}
+
+function expenseCategorySums(y) {
+  const yl = projection.yearly;
+  const rt = projection.schedule.rowTotals;
+  const living = state.cashflows.expenses.reduce((s, r) => s + (rt.expenses[r.id]?.[y] ?? 0), 0);
+  const investmentProps = (state.properties ?? []).filter((p) => p.propertyType === "investment");
+  const propExpenses = investmentProps.reduce((s, p) => s + (yl[y].properties?.[p.id]?.expenses ?? 0), 0);
+  const oneOffOut = state.assets.filter((a) => a.class !== "lifestyle")
+    .reduce((s, a) => s + Math.max(0, -(projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0)), 0);
+  const settlement = (state.properties ?? []).filter((p) => p.status === "planned")
+    .reduce((s, p) => s + (yl[y].properties?.[p.id]?.settlement ?? 0), 0);
+  const liabIds = Object.keys(yl[y].liabilities ?? {});
+  const loanInterest = liabIds.reduce((s, lid) => s + yl[y].liabilities[lid].interest, 0);
+  const loanPrincipal = liabIds.reduce((s, lid) => s + yl[y].liabilities[lid].principal, 0);
+  return {
+    living,
+    investmentExpenses: propExpenses + oneOffOut + settlement,
+    loanInterest, loanPrincipal,
+    tax: yl[y].tax,
+    superContributions: superContributionsCash(y),
+  };
+}
+
+// Two input sections plus the resolution (Working Cash Account fix,
+// Commit 2): every inflow lives in Income, every outflow in Expenses —
+// Liabilities and One-off amounts as standalone sections are gone,
+// their rows folded in by direction. Tax detail stays in the Tax
+// view; this shows only the single Tax line. One-off amounts are
+// asset-level transactions, not household cashflow — they never touch
+// the Working Cash Account, so they show here for completeness but
+// Surplus/(deficit) (the engine's own household-net figure) doesn't
+// include them; in a year with a nonzero one-off, Total income minus
+// Total expenses can differ from Surplus/(deficit) by that amount.
 function buildCashflowGroups() {
   const yl = projection.yearly;
   const rt = projection.schedule.rowTotals;
@@ -4036,6 +4181,17 @@ function buildCashflowGroups() {
   }
   for (const pr of (state.properties ?? []).filter((x) => x.status === "planned")) {
     expenseRows.push({ label: `${pr.name} settlement`, cell: (y) => -(yl[y].properties?.[pr.id]?.settlement ?? 0) });
+  }
+  // Super contributions the client actually pays for — salary
+  // sacrifice, personal deductible/non-deductible, spouse (fills
+  // included). SG is excluded: it's employer money that never reaches
+  // the household. Shown for completeness (the Cashflow bars chart
+  // has the same category), but — like one-off amounts above —
+  // contributions are outside the WCA/surplus-deficit mechanism (the
+  // same convention as any other asset contribution), so
+  // Surplus/(deficit) below does not net this out.
+  if ((state.plan.superAccounts ?? []).length) {
+    expenseRows.push({ label: "Super contributions", cell: (y) => -superContributionsCash(y) });
   }
   const expenseRowsSoFar = [...expenseRows];
   expenseRows.push({
@@ -4562,6 +4718,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "asset-balances") exportChartPNG("chartAssetBalances", "asset-balances");
   else if (activeView === "super-balances") exportChartPNG("chartSuperBalances", "super-balances");
   else if (activeView === "liabilities-balances") exportChartPNG("chartLiabilitiesBalances", "liabilities-balances");
+  else if (activeView === "cashflow-bars") exportChartPNG("chartCashflowBars", "cashflow-bars");
   else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());
