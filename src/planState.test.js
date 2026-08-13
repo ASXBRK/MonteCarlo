@@ -68,7 +68,10 @@ describe("defaults (v3)", () => {
     expect(inc.from).toEqual({ kind: "anchor", anchorId: "start" });
     expect(inc.to).toEqual({ kind: "anchor", anchorId: "retirement-client" });
     const exp = createExpenseRow(plan, [inc]);
-    expect(exp.label).toBe("Expense 2");
+    // Label defaults to the category name (Cashflow table: firm row
+    // vocabulary and category grouping), not a numbered placeholder.
+    expect(exp.label).toBe("Non-discretionary Living Expenses");
+    expect(exp.category).toBe("nonDiscretionary");
     expect(exp.from).toEqual({ kind: "anchor", anchorId: "start" });
     expect(exp.to).toEqual({ kind: "anchor", anchorId: "end" });
   });
@@ -81,6 +84,23 @@ describe("defaults (v3)", () => {
     expect(ded.label).toBe(DEDUCTION_CATEGORY_LABELS.workingExpense);
     expect(ded.frequency).toBe("annual");
     expect(DEDUCTION_CATEGORIES).toContain(ded.category);
+  });
+});
+
+describe("clampAllToPlan re-clamps deductions too (Cashflow table: firm row vocabulary and category grouping)", () => {
+  it("preserves deduction rows through a household/plan change instead of dropping the whole array", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.cashflows.deductions.push(createDeductionRow(s.plan, []));
+    const reclamped = clampAllToPlan({ ...s, plan: { ...s.plan, household: "couple", partner: { currentAge: 38 } } }, PROFILES);
+    expect(reclamped.cashflows.deductions).toHaveLength(1);
+    expect(reclamped.cashflows.deductions[0].category).toBe("workingExpense");
+  });
+
+  it("a pre-Commit-2 state with no deductions array at all doesn't throw", () => {
+    const s = defaultState(PROFILES, NOW);
+    delete s.cashflows.deductions;
+    expect(() => clampAllToPlan(s, PROFILES)).not.toThrow();
+    expect(clampAllToPlan(s, PROFILES).cashflows.deductions).toEqual([]);
   });
 });
 
@@ -923,15 +943,35 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(back.cashflows.contributions.some((c) => c.assetId === "su1")).toBe(false);
   });
 
-  it("income rows default to incomeType employment with sgApplies true; other types force sgApplies false", () => {
+  it("income rows default to category salary / incomeType employment with sgApplies true; other categories force sgApplies false", () => {
     const plan = clampPlan(couplePlan(), PROFILES);
     const row = createIncomeRow(plan, []);
+    expect(row.category).toBe("salary");
     expect(row.incomeType).toBe("employment");
     expect(row.sgApplies).toBe(true);
-    const clamped = clampIncomeRow({ ...row, incomeType: "rental", sgApplies: true }, plan);
-    expect(clamped.incomeType).toBe("rental");
+    // category is authoritative going forward — setting a non-salary
+    // category forces incomeType/sgApplies to follow it, regardless of
+    // whatever was stored for either.
+    const clamped = clampIncomeRow({ ...row, category: "afterTaxBonus", incomeType: "employment", sgApplies: true }, plan);
+    expect(clamped.incomeType).toBe("nonTaxable");
     expect(clamped.sgApplies).toBe(false); // forced off — SG only ever applies to employment income
     expect(INCOME_TYPES).toEqual(["employment", "rental", "otherTaxable", "nonTaxable"]);
+  });
+
+  it("a pre-Commit-2 row (incomeType only, no category — including the legacy 'rental' value) migrates on read", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const legacyEmployment = clampIncomeRow({ id: "i1", label: "Salary", owner: "client", amount: 100000, frequency: "annual", incomeType: "employment", sgApplies: true }, plan);
+    expect(legacyEmployment.category).toBe("salary");
+    expect(legacyEmployment.incomeType).toBe("employment");
+
+    const legacyRental = clampIncomeRow({ id: "i2", label: "Rent", owner: "client", amount: 20000, frequency: "annual", incomeType: "rental", sgApplies: false }, plan);
+    expect(legacyRental.category).toBe("otherIncome"); // no dedicated category for the old "rental" value
+    expect(legacyRental.incomeType).toBe("otherTaxable");
+    expect(legacyRental.sgApplies).toBe(false);
+
+    const legacyNonTaxable = clampIncomeRow({ id: "i3", label: "Gift", owner: "client", amount: 5000, frequency: "annual", incomeType: "nonTaxable" }, plan);
+    expect(legacyNonTaxable.category).toBe("otherTaxFreeIncome");
+    expect(legacyNonTaxable.incomeType).toBe("nonTaxable");
   });
 
   it("createSuperContribution/clampSuperContribution: shape, type/basis validation, account and income-row reference checks", () => {

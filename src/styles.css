@@ -656,25 +656,49 @@ html, body {
 .cf-cell-to      { grid-area: to; }
 .cf-cell-basis   { grid-area: basis; }
 .cf-cell-extra   { grid-area: extra; }
+.cf-cell-category { grid-area: category; }
+.cf-cell-sg       { grid-area: sg; }
 
-.cf-row-income,
-.cf-row-expense,
 .cf-row-asset {
   grid-template-columns: 1.5fr 1fr 0.8fr 0.8fr 32px;
-  grid-template-areas:
-    "label   label   amount  freq    remove"
-    "from    to      basis   extra   remove";
-}
-.cf-row-asset {
   grid-template-areas:
     "asset   asset   amount  freq    remove"
     "from    to      basis   extra   remove";
 }
+/* Income/expense/deduction rows (Cashflow table: firm row vocabulary
+   and category grouping) all carry a third, explicit line for their
+   category select (income's Superannuation Guarantee toggle shares it,
+   shown only for the Salary category) — named so the extra cell is
+   deliberately placed, not left to grid auto-placement (which has no
+   consistent column tracks to fall back on and visibly overlaps). */
+.cf-row-income {
+  grid-template-columns: 1.5fr 1fr 0.8fr 0.8fr 32px;
+  grid-template-areas:
+    "label    label    amount  freq   remove"
+    "from     to       basis   extra  remove"
+    "category category sg      sg     remove";
+}
 .cf-row-income.with-owner {
   grid-template-columns: 1.05fr 0.8fr 0.8fr 0.7fr 32px;
   grid-template-areas:
-    "label   owner   amount  freq    remove"
-    "from    to      basis   extra   remove";
+    "label    owner    amount  freq   remove"
+    "from     to       basis   extra  remove"
+    "category category sg      sg     remove";
+}
+.cf-row-expense,
+.cf-row-deduction {
+  grid-template-columns: 1.5fr 1fr 0.8fr 0.8fr 32px;
+  grid-template-areas:
+    "label    label    amount   freq    remove"
+    "from     to       basis    extra   remove"
+    "category category category category remove";
+}
+.cf-row-deduction.with-owner {
+  grid-template-columns: 1.05fr 0.8fr 0.8fr 0.7fr 32px;
+  grid-template-areas:
+    "label    owner    amount   freq    remove"
+    "from     to       basis    extra   remove"
+    "category category category category remove";
 }
 
 /* Super contribution/withdrawal rows (Tier 1.2): more cells than the
@@ -751,6 +775,7 @@ html, body {
 
 .cf-row-income .cf-remove,
 .cf-row-expense .cf-remove,
+.cf-row-deduction .cf-remove,
 .cf-row-asset .cf-remove {
   grid-area: remove;
   align-self: stretch;
@@ -936,12 +961,14 @@ html, body {
      named two-line layout for a plain auto-flowing 2-column stack —
      grid-template-areas: none releases each cf-cell-* class's
      grid-area back to auto-placement. */
-  .cf-row-income, .cf-row-income.with-owner, .cf-row-expense, .cf-row-asset {
+  .cf-row-income, .cf-row-income.with-owner, .cf-row-expense,
+  .cf-row-deduction, .cf-row-deduction.with-owner, .cf-row-asset {
     grid-template-columns: 1fr 1fr;
     grid-template-areas: none;
   }
   .cf-row-income .cf-remove,
   .cf-row-expense .cf-remove,
+  .cf-row-deduction .cf-remove,
   .cf-row-asset .cf-remove {
     grid-area: auto;
     align-self: center;

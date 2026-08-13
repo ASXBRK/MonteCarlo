@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -355,10 +355,64 @@ export function createLumpSum(plan, assetId = null, source = "input") {
 
 export const INCOME_TYPES = ["employment", "rental", "otherTaxable", "nonTaxable"];
 
+// Income row categories (Cashflow table: firm row vocabulary and
+// category grouping) — the user-facing field, replacing the old
+// incomeType select while keeping its tax semantics exactly: each
+// category maps onto one of the old incomeType values below, so
+// nothing downstream of clampIncomeRow (SG derivation, nonTaxable's
+// tax-assessment bypass, PAYG withholding's employment base) needs to
+// change — incomeType is still populated, just derived from category
+// now instead of being the row's own stored field.
+export const INCOME_CATEGORIES = [
+  "salary", "otherIncome", "interestIncome", "dividendIncome", "otherTaxFreeIncome", "afterTaxBonus",
+];
+export const INCOME_CATEGORY_LABELS = {
+  salary: "Salary",
+  otherIncome: "Other Income",
+  interestIncome: "Interest Income",
+  dividendIncome: "Dividend Income",
+  otherTaxFreeIncome: "Other tax-free income",
+  afterTaxBonus: "After tax bonus",
+};
+const INCOME_CATEGORY_TAX_TREATMENT = {
+  salary: "employment",
+  otherIncome: "otherTaxable",
+  interestIncome: "otherTaxable",
+  dividendIncome: "otherTaxable",
+  otherTaxFreeIncome: "nonTaxable",
+  afterTaxBonus: "nonTaxable",
+};
+export function incomeCategoryTaxTreatment(category) {
+  return INCOME_CATEGORY_TAX_TREATMENT[category] ?? "otherTaxable";
+}
+// A pre-Commit-2 row has no category, only incomeType — including the
+// "rental" value, which has no dedicated category in the new list; the
+// nearest fit is Other Income (rent entered as a manual income row,
+// as opposed to the property module's own derived rent).
+const LEGACY_INCOME_TYPE_TO_CATEGORY = {
+  employment: "salary", rental: "otherIncome", otherTaxable: "otherIncome", nonTaxable: "otherTaxFreeIncome",
+};
+
+// Expense row categories (same commit) — Mortgage/Loan repayments and
+// Investment Property expenses are [derived] elsewhere (the liability
+// and property modules), not a category a user picks here.
+export const EXPENSE_CATEGORIES = [
+  "nonDiscretionary", "discretionary", "groceryFuel", "holidays", "insurance", "homeMaintenance", "other",
+];
+export const EXPENSE_CATEGORY_LABELS = {
+  nonDiscretionary: "Non-discretionary Living Expenses",
+  discretionary: "Discretionary Living Expenses",
+  groceryFuel: "Grocery & Fuel Expenses",
+  holidays: "Holidays",
+  insurance: "New Insurance Premiums",
+  homeMaintenance: "Home Maintenance expenses",
+  other: "Other",
+};
+
 export function createIncomeRow(plan, existing = []) {
   return {
     id: uid("in"),
-    label: `Income ${existing.length + 1}`,
+    label: INCOME_CATEGORY_LABELS.salary,
     owner: "client",
     amount: 0,
     frequency: "annual",
@@ -366,7 +420,8 @@ export function createIncomeRow(plan, existing = []) {
     to: anchorRef("retirement-client"), // new rows always default owner "client"
     indexBasis: "cpi",
     indexExtraPct: 0,
-    incomeType: "employment",
+    category: "salary",
+    incomeType: "employment", // derived from category; kept for existing engine consumers
     sgApplies: true, // Super Guarantee (Tier 1.2) — default on for employment income
   };
 }
@@ -374,7 +429,8 @@ export function createIncomeRow(plan, existing = []) {
 export function createExpenseRow(plan, existing = []) {
   return {
     id: uid("ex"),
-    label: `Expense ${existing.length + 1}`,
+    label: EXPENSE_CATEGORY_LABELS.nonDiscretionary,
+    category: "nonDiscretionary",
     amount: 0,
     frequency: "annual",
     from: anchorRef("start"),
@@ -789,6 +845,7 @@ export function defaultState(profiles = {}, now = new Date()) {
       lastVisited: { area: "input", section: DEFAULT_INPUT_SECTION },
       chartTreatment: defaultChartTreatment(),
       hideEmptyRows: true,
+      showIndividualCashflowItems: false,
     },
     assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed" },
   };
@@ -1073,24 +1130,36 @@ export function clampLumpSum(ls, plan) {
   return { ...rest, at };
 }
 
-// Income rows anchor to their owner's window. incomeType (Tier 1.2)
-// gates sgApplies: SG only ever makes sense for employment income, so
-// a non-employment row's toggle is force-cleared regardless of what
-// was stored (defensive — the UI hides the toggle for those rows too).
+// Income rows anchor to their owner's window. category (Cashflow
+// table: firm row vocabulary) is now the authoritative, user-facing
+// field — incomeType is derived FROM it every time (a pre-Commit-2 row
+// has no category, only incomeType, including the legacy "rental"
+// value; LEGACY_INCOME_TYPE_TO_CATEGORY migrates it once, and category
+// is authoritative from then on). incomeType stays populated purely so
+// existing engine consumers (SG derivation, nonTaxable's tax-assessment
+// bypass, PAYG withholding's employment base) never had to change.
+// sgApplies gates on the derived incomeType, same as before — SG only
+// ever makes sense for employment income, so a non-salary row's toggle
+// is force-cleared regardless of what was stored (defensive — the UI
+// hides the toggle for those rows too).
 export function clampIncomeRow(row, plan) {
   const owner = row.owner === "partner" && plan.partner ? "partner" : "client";
   const win = ownerWindow(plan, owner);
   const { from, to } = clampFromTo(row, win.from, win.to, plan);
   const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
-  const incomeType = INCOME_TYPES.includes(row.incomeType) ? row.incomeType : "employment";
+  const category = INCOME_CATEGORIES.includes(row.category)
+    ? row.category
+    : (LEGACY_INCOME_TYPE_TO_CATEGORY[row.incomeType] ?? "salary");
+  const incomeType = incomeCategoryTaxTreatment(category);
   const sgApplies = incomeType === "employment" && row.sgApplies !== false;
-  return { ...rest, owner, from, to, incomeType, sgApplies, ...clampIndexation(row) };
+  return { ...rest, owner, from, to, category, incomeType, sgApplies, ...clampIndexation(row) };
 }
 
 export function clampExpenseRow(row, plan) {
   const { from, to } = clampFromTo(row, plan.client.currentAge, plan.endAge, plan);
   const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
-  return { ...rest, from, to, ...clampIndexation(row) };
+  const category = EXPENSE_CATEGORIES.includes(row.category) ? row.category : "other";
+  return { ...rest, from, to, category, ...clampIndexation(row) };
 }
 
 // Deduction rows anchor to their owner's window, same as income rows —
@@ -1134,6 +1203,7 @@ export function clampAllToPlan(state, profiles = {}) {
   const superAccountIds = new Set(plan.superAccounts.map((s) => s.id));
   const cashflows = {
     income,
+    deductions: (state.cashflows.deductions ?? []).map((r) => clampDeductionRow(r, plan)),
     expenses: state.cashflows.expenses.map((r) => clampExpenseRow(r, plan)),
     contributions: state.cashflows.contributions.map((c) => clampCashflow(c, plan)),
     withdrawals: state.cashflows.withdrawals.map((w) => clampCashflow(w, plan)),
@@ -1387,6 +1457,16 @@ function migrateV9toV10(raw) {
   return { ...raw, schemaVersion: 10 };
 }
 
+// v10 → v11 (Cashflow table: firm row vocabulary and category
+// grouping): income/expense rows gain a category field — clampIncomeRow
+// derives it from the pre-existing incomeType on read (including the
+// legacy "rental" value), clampExpenseRow defaults a missing one to
+// "other". No existing field changes shape or is removed, so again
+// just the version gate.
+function migrateV10toV11(raw) {
+  return { ...raw, schemaVersion: 11 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -1403,6 +1483,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 7) raw = migrateV7toV8(raw);
     if (raw.schemaVersion === 8) raw = migrateV8toV9(raw);
     if (raw.schemaVersion === 9) raw = migrateV9toV10(raw);
+    if (raw.schemaVersion === 10) raw = migrateV10toV11(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -1439,6 +1520,7 @@ export function hydrate(json, profiles = {}) {
         lastVisited: clampLastVisited(raw.display?.lastVisited),
         chartTreatment: clampChartTreatment(raw.display?.chartTreatment),
         hideEmptyRows: raw.display?.hideEmptyRows !== false,
+        showIndividualCashflowItems: raw.display?.showIndividualCashflowItems === true,
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,
@@ -1571,6 +1653,7 @@ function hydrateIncomeRows(arr, plan) {
     indexed: r.indexed,
     incomeType: r.incomeType,
     sgApplies: r.sgApplies,
+    category: r.category,
   }, plan));
 }
 
@@ -1586,6 +1669,7 @@ function hydrateExpenseRows(arr, plan) {
     indexBasis: r.indexBasis,
     indexExtraPct: r.indexExtraPct,
     indexed: r.indexed,
+    category: r.category,
   }, plan));
 }
 

@@ -1379,6 +1379,11 @@ export function projectPlan(state, profiles = PROFILES) {
       excessCcOffset: assessed[p].excessCcOffset,
       excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
       incomeTax: assessed[p].netIncomeTax,
+      // The realised net capital gain actually assessed this FY (after
+      // quarantined-loss offset above) — for the Cashflow table's "Net
+      // Taxable Capital Gains" row (Cashflow table: firm row
+      // vocabulary and category grouping).
+      netCapitalGain: real[p].netCapitalGain,
       cgt: cgtDueDetail[p],
       div293: div293DueDetail[p],
       div296: div296DueDetail[p],
@@ -1420,6 +1425,7 @@ export function projectPlan(state, profiles = PROFILES) {
       // projection's first year (nothing was assessed yet).
       refundSettled: refundDue,
       frankingCredits: persons.reduce((s, p) => s + assessed[p].frankingCredits, 0),
+      netCapitalGain: persons.reduce((s, p) => s + real[p].netCapitalGain, 0),
     };
     yearly.push(row);
     pendingCgt = newPending;

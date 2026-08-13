@@ -25,8 +25,10 @@ import {
   createSuperAccount, clampSuperAccount, normaliseSuperAccounts,
   createSuperContribution, normaliseSuperContributions,
   createSuperWithdrawal, normaliseSuperWithdrawals,
-  SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, INCOME_TYPES,
+  SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES,
   clampWorkingCash,
+  INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
+  incomeCategoryTaxTreatment,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -36,6 +38,7 @@ import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
+import { cashflowStatement } from "./cashflowStatement.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -117,6 +120,8 @@ const els = {
   periodEveryN: $("periodEveryN"),
   forceKeyYearsToggle: $("forceKeyYearsToggle"),
   hideEmptyRowsToggle: $("hideEmptyRowsToggle"),
+  showIndividualItemsLabel: $("showIndividualItemsLabel"),
+  showIndividualItemsToggle: $("showIndividualItemsToggle"),
   viewComposite: $("viewComposite"),
   viewNetAssets: $("viewNetAssets"),
   viewAssetBalances: $("viewAssetBalances"),
@@ -1462,13 +1467,6 @@ function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax) {
   `;
 }
 
-const INCOME_TYPE_LABELS = {
-  employment: "Employment",
-  rental: "Rental",
-  otherTaxable: "Other taxable",
-  nonTaxable: "Non-taxable",
-};
-
 function incomeRowHTML(r) {
   return `
     <div class="cf-row cf-row-income${isCouple() ? " with-owner" : ""}" data-cfid="${r.id}">
@@ -1507,13 +1505,13 @@ function incomeRowHTML(r) {
         ${dateRefControlHTML(r.to, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="to"`, 18, 120)}
       </div>
       ${indexationCellsHTML("income", r)}
-      <div class="cf-cell cf-cell-incometype">
-        <label>Income type</label>
-        <select data-kind="income" data-cfid="${r.id}" data-field="incomeType">
-          ${INCOME_TYPES.map((t) => `<option value="${t}"${r.incomeType === t ? " selected" : ""}>${INCOME_TYPE_LABELS[t]}</option>`).join("")}
+      <div class="cf-cell cf-cell-category">
+        <label>Category</label>
+        <select data-kind="income" data-cfid="${r.id}" data-field="category">
+          ${INCOME_CATEGORIES.map((c) => `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(INCOME_CATEGORY_LABELS[c])}</option>`).join("")}
         </select>
       </div>
-      ${r.incomeType === "employment" ? `
+      ${r.category === "salary" ? `
         <div class="cf-cell cf-cell-sg">
           <label>Superannuation Guarantee</label>
           <label class="ptg-check">
@@ -1536,6 +1534,12 @@ function expenseRowHTML(r) {
         <label>Label</label>
         <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
                data-kind="expenses" data-cfid="${r.id}" data-field="label" />
+      </div>
+      <div class="cf-cell cf-cell-category">
+        <label>Category</label>
+        <select data-kind="expenses" data-cfid="${r.id}" data-field="category">
+          ${EXPENSE_CATEGORIES.map((c) => `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(EXPENSE_CATEGORY_LABELS[c])}</option>`).join("")}
+        </select>
       </div>
       <div class="cf-cell cf-cell-amount">
         <label>Amount ($)</label>
@@ -2153,22 +2157,26 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "direction":
       row.direction = el.value === "out" ? "out" : "in";
       break;
-    case "incomeType": {
-      row.incomeType = INCOME_TYPES.includes(el.value) ? el.value : "employment";
-      // SG only ever applies to employment income (planState's
-      // clampIncomeRow convention) — force it off here too, and
-      // refresh the row so the SG toggle appears/disappears.
-      if (row.incomeType !== "employment") row.sgApplies = false;
-      const rowEl = el.closest(".cf-row");
-      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
-      break;
-    }
     case "sgApplies":
       row.sgApplies = el.checked;
       break;
-    case "category":
-      row.category = DEDUCTION_CATEGORIES.includes(el.value) ? el.value : "other";
+    case "category": {
+      if (kind === "income") {
+        row.category = INCOME_CATEGORIES.includes(el.value) ? el.value : "salary";
+        row.incomeType = incomeCategoryTaxTreatment(row.category);
+        // SG only ever applies to salary (planState's clampIncomeRow
+        // convention) — force it off here too, and refresh the row so
+        // the SG toggle appears/disappears.
+        if (row.incomeType !== "employment") row.sgApplies = false;
+        const rowEl = el.closest(".cf-row");
+        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+      } else if (kind === "expenses") {
+        row.category = EXPENSE_CATEGORIES.includes(el.value) ? el.value : "other";
+      } else if (kind === "deductions") {
+        row.category = DEDUCTION_CATEGORIES.includes(el.value) ? el.value : "other";
+      }
       break;
+    }
     case "from":
     case "to": {
       if (el.dataset.drRole === "anchor") {
@@ -3438,6 +3446,10 @@ function renderPeriodSelector() {
   els.periodEveryN.value = String(rp.everyN);
   els.forceKeyYearsToggle.checked = rp.forceKeyYears;
   els.hideEmptyRowsToggle.checked = state.display.hideEmptyRows !== false;
+  // Cashflow-view-only control (Cashflow table: firm row vocabulary
+  // and category grouping) — hidden everywhere else.
+  els.showIndividualItemsLabel.hidden = activeView !== "cashflow";
+  els.showIndividualItemsToggle.checked = state.display.showIndividualCashflowItems === true;
 }
 
 function setReportPeriod(patch) {
@@ -3465,6 +3477,11 @@ els.forceKeyYearsToggle.addEventListener("change", () => {
 });
 els.hideEmptyRowsToggle.addEventListener("change", () => {
   state.display.hideEmptyRows = els.hideEmptyRowsToggle.checked;
+  saveState();
+  renderActiveView();
+});
+els.showIndividualItemsToggle.addEventListener("change", () => {
+  state.display.showIndividualCashflowItems = els.showIndividualItemsToggle.checked;
   saveState();
   renderActiveView();
 });
@@ -4224,119 +4241,177 @@ function renderKeyFiguresView() {
 // Surplus/(deficit) (the engine's own household-net figure) doesn't
 // include them; in a year with a nonzero one-off, Total income minus
 // Total expenses can differ from Surplus/(deficit) by that amount.
+// Cashflow table: firm row vocabulary and category grouping. Row order
+// and labels mirror the firm's own Cash Flow SOA spreadsheet exactly,
+// so the output reads as familiar to advisers who've used the
+// workbook for years. Every row's arithmetic lives in the pure,
+// unit-tested src/cashflowStatement.js — this function only turns that
+// data into the transposed-table row shape and handles the two display
+// choices (individual items vs category totals; one-off amounts and
+// Funding, which sit outside the firm's vocabulary but must still
+// render somewhere).
+//
+// "Show individual items" (default off) expands a pure category total
+// into one row per entered row of that category — the two combined
+// derived+category rows (Interest Income, Dividend Income) always stay
+// combined either way; expanding those specifically isn't supported
+// (a disclosed simplification, not a bug).
 function buildCashflowGroups() {
   const yl = projection.yearly;
   const rt = projection.schedule.rowTotals;
   const couple = isCouple();
   const included = state.assets.filter((a) => a.include);
   const editableAssets = included.filter((a) => a.class !== "lifestyle");
+  const showIndividual = state.display.showIndividualCashflowItems === true;
+  const properties = state.properties ?? [];
+  const liabilities = state.liabilities ?? [];
+  const superAccounts = state.plan.superAccounts ?? [];
+  const incomeRows = state.cashflows.income;
+  const expenseRows = state.cashflows.expenses;
+  const deductionRows = state.cashflows.deductions ?? [];
 
-  const incomeRows = state.cashflows.income.map((rw) => ({
-    label: couple
-      ? `${rw.label} (${rw.owner === "partner" ? partnerName() : clientName()})`
-      : rw.label,
-    cell: (y) => rt.income[rw.id]?.[y] ?? 0,
-  }));
-  for (const pr of (state.properties ?? []).filter((x) => x.propertyType === "investment")) {
-    incomeRows.push({
-      label: couple
-        ? `${pr.name} rent (${pr.owner === "partner" ? partnerName() : pr.owner === "joint" ? "joint" : clientName()})`
-        : `${pr.name} rent`,
-      cell: (y) => yl[y].properties?.[pr.id]?.rent ?? 0,
-    });
-  }
-  incomeRows.push({ label: "Distributions paid as cash", cell: (y) => yl[y].cashDistributions });
-  incomeRows.push({ label: "Working Cash Account interest", cell: (y) => yl[y].wcaDetail.interest });
-  // One-off inflows: the positive slice of each asset's net one-off
-  // amount for the year. Same underlying signed value the "one-off
-  // out" row below edits (one editable figure per asset+year) — the
-  // cell whose sign matches shows the amount, the other shows zero.
+  const stmt = (y) => cashflowStatement(yl[y], {
+    incomeRows, rowTotalsIncome: rt.income,
+    expenseRows, rowTotalsExpenses: rt.expenses,
+    deductionRows, rowTotalsDeductions: rt.deductions,
+    properties, liabilities, superAccounts, y,
+  });
+
+  const ownerLabel = (r) => couple ? `${r.label} (${r.owner === "partner" ? partnerName() : clientName()})` : r.label;
+  // One row per category (collapsed default), or one row per
+  // individually entered row of that category — same total either way.
+  const catRow = (rows, rowTotals, category, label, aggregateCell) => {
+    const matching = rows.filter((r) => r.category === category);
+    if (!showIndividual || matching.length === 0) return [{ label, cell: aggregateCell }];
+    return matching.map((r) => ({ label: ownerLabel(r), cell: (y) => rowTotals[r.id]?.[y] ?? 0 }));
+  };
+
+  // --- ASSESSABLE INCOME ------------------------------------------------
+  const assessableRows = [
+    ...catRow(incomeRows, rt.income, "salary", "Salary", (y) => stmt(y).assessable.salary),
+    { label: "Taxable Pension Component", cell: (y) => stmt(y).assessable.taxablePensionComponent },
+    ...catRow(incomeRows, rt.income, "otherIncome", "Other Income", (y) => stmt(y).assessable.otherIncome),
+    { label: "Government/Centrelink payments", cell: (y) => stmt(y).assessable.governmentPayments },
+    { label: "Interest Income", cell: (y) => stmt(y).assessable.interestIncome },
+    { label: "Dividend Income", cell: (y) => stmt(y).assessable.dividendIncome },
+    { label: "Franking Credits", cell: (y) => stmt(y).assessable.frankingCredits },
+    { label: "Property Income – Gross Rent", cell: (y) => stmt(y).assessable.propertyIncomeGross },
+    { label: "Trust Distribution", cell: (y) => stmt(y).assessable.trustDistribution },
+    { label: "Foreign Income", cell: (y) => stmt(y).assessable.foreignIncome },
+    { label: "Net Taxable Capital Gains", cell: (y) => stmt(y).assessable.netTaxableCapitalGains },
+  ];
+  assessableRows.push({ label: "Assessable Income", always: true, cls: "tl-total", cell: (y) => stmt(y).assessable.total });
+
+  // --- DEDUCTIONS --------------------------------------------------------
+  const deductionSectionRows = [
+    { label: "Less: Investment Portfolio Interest", cell: (y) => -stmt(y).deductions.investmentPortfolioInterest },
+    { label: "Property Interest Deductions", cell: (y) => -stmt(y).deductions.propertyInterestDeductions },
+    { label: "Property Deductions", cell: (y) => -stmt(y).deductions.propertyDeductions },
+    { label: "Property Depreciation", cell: (y) => -stmt(y).deductions.propertyDepreciation },
+    ...catRow(deductionRows, rt.deductions, "vehicle", "Vehicle Deductions", (y) => stmt(y).deductions.vehicle).map(negate),
+    ...catRow(deductionRows, rt.deductions, "socialClub", "Social Club (pre-tax)", (y) => stmt(y).deductions.socialClub).map(negate),
+    ...catRow(deductionRows, rt.deductions, "insurance", "Deductible Insurance Premiums", (y) => stmt(y).deductions.insurance).map(negate),
+    ...catRow(deductionRows, rt.deductions, "novatedLease", "Novated Lease pre-tax", (y) => stmt(y).deductions.novatedLease).map(negate),
+    ...catRow(deductionRows, rt.deductions, "workingExpense", "Working Expense", (y) => stmt(y).deductions.workingExpense).map(negate),
+    { label: "Salary sacrifice", cell: (y) => -stmt(y).deductions.salarySacrifice },
+    { label: "Lump sum super contributions", cell: (y) => -stmt(y).deductions.lumpSumSuperContributions },
+    ...catRow(deductionRows, rt.deductions, "salaryPackaging", "Salary Packaging (Living Expenses)", (y) => stmt(y).deductions.salaryPackaging).map(negate),
+    ...catRow(deductionRows, rt.deductions, "other", "Other", (y) => stmt(y).deductions.other).map(negate),
+  ];
+  deductionSectionRows.push({ label: "Taxable Income", always: true, cls: "tl-total", cell: (y) => stmt(y).taxableIncome });
+
+  // --- TAX -----------------------------------------------------------
+  const taxSectionRows = [
+    { label: "Income Tax", cell: (y) => -stmt(y).tax.incomeTax },
+    { label: "Medicare Levy", cell: (y) => -stmt(y).tax.medicareLevy },
+    { label: "Medicare Levy Surcharge", cell: (y) => -stmt(y).tax.medicareLevySurcharge },
+    { label: "HELP Repayment", cell: (y) => -stmt(y).tax.helpRepayment },
+    { label: "SAPTO", cell: (y) => -stmt(y).tax.sapto },
+    { label: "LITO", cell: (y) => -stmt(y).tax.lito },
+    { label: "Spouse Splitting Offset", cell: (y) => -stmt(y).tax.spouseSplittingOffset },
+    { label: "Franking Credit Offset", cell: (y) => -stmt(y).tax.frankingCreditOffset },
+    { label: "Taxable Pension Offset (TTR)", cell: (y) => -stmt(y).tax.taxablePensionOffset },
+    { label: "Division 293", cell: (y) => -stmt(y).tax.div293 },
+    { label: "Division 296", cell: (y) => -stmt(y).tax.div296 },
+  ];
+  taxSectionRows.push({ label: "Tax on Taxable Income", always: true, cls: "tl-total", cell: (y) => -stmt(y).tax.total });
+  taxSectionRows.push({ label: "NET INCOME", always: true, cls: "tl-total", cell: (y) => stmt(y).netIncome });
+
+  // --- CASH RECEIVED ---------------------------------------------------
+  const cashReceivedRows = [
+    { label: "Regular take home pay", cell: (y) => stmt(y).cashReceived.regularTakeHomePay },
+    { label: "Anticipated tax return", cell: (y) => stmt(y).cashReceived.anticipatedTaxReturn },
+    ...catRow(incomeRows, rt.income, "afterTaxBonus", "After tax bonus", (y) => stmt(y).cashReceived.afterTaxBonus),
+    ...catRow(incomeRows, rt.income, "otherTaxFreeIncome", "Other tax free income", (y) => stmt(y).cashReceived.otherTaxFreeIncome),
+  ];
+
+  // --- EXPENSES ----------------------------------------------------------
+  const expenseSectionRows = [
+    { label: "Mortgage Repayments", cell: (y) => -stmt(y).expenses.mortgageRepayments },
+    { label: "Other Loan Repayments (P&I)", cell: (y) => -stmt(y).expenses.otherLoanRepayments },
+    ...catRow(expenseRows, rt.expenses, "nonDiscretionary", "Non-discretionary Living Expenses", (y) => stmt(y).expenses.nonDiscretionary).map(negate),
+    ...catRow(expenseRows, rt.expenses, "discretionary", "Discretionary Living Expenses", (y) => stmt(y).expenses.discretionary).map(negate),
+    ...catRow(expenseRows, rt.expenses, "groceryFuel", "Grocery & Fuel Expenses", (y) => stmt(y).expenses.groceryFuel).map(negate),
+    ...catRow(expenseRows, rt.expenses, "holidays", "Holidays", (y) => stmt(y).expenses.holidays).map(negate),
+    ...catRow(expenseRows, rt.expenses, "insurance", "New Insurance Premiums", (y) => stmt(y).expenses.insurance).map(negate),
+    { label: "Investment Property expenses", cell: (y) => -stmt(y).expenses.investmentPropertyExpenses },
+    ...catRow(expenseRows, rt.expenses, "homeMaintenance", "Home Maintenance expenses", (y) => stmt(y).expenses.homeMaintenance).map(negate),
+    ...catRow(expenseRows, rt.expenses, "other", "Other", (y) => stmt(y).expenses.other).map(negate),
+  ];
+  expenseSectionRows.push({ label: "Total Expenses", always: true, cls: "tl-total", cell: (y) => -stmt(y).expenses.total });
+  expenseSectionRows.push({ label: "SURPLUS INCOME", always: true, cls: "tl-total", cell: (y) => stmt(y).surplusIncome });
+
+  // --- One-off amounts (asset-level events, outside the firm's row
+  // vocabulary — kept as its own section so in-grid one-off editing
+  // keeps working; never touches the Working Cash Account, so neither
+  // NET INCOME nor SURPLUS INCOME above include it). ------------------
+  const oneOffRows = [];
   for (const a of editableAssets) {
-    incomeRows.push({
+    oneOffRows.push({
       label: `${a.name} — one-off in`,
       cell: (y) => Math.max(0, projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0),
-      always: true,
-      cellAttrs: (y) => oneOffCellAttrs(a.id, y),
+      always: true, cellAttrs: (y) => oneOffCellAttrs(a.id, y),
     });
-  }
-  // Salary sacrifice (engine-correctness fix): each Salary row above
-  // reads rt.income, a snapshot taken BEFORE schedule.js reduces the
-  // client's actual pay by the sacrificed amount — the row must stay
-  // GROSS so the input panel and this row both show what the client
-  // actually earns. This row nets it back out so Total income below
-  // matches the engine's own row.income (net of sacrifice) instead of
-  // silently overstating it by whatever was sacrificed that year.
-  if ((state.plan.superAccounts ?? []).length) {
-    incomeRows.push({ label: "Less: salary sacrifice", cell: (y) => -salarySacrificeCash(y) });
-  }
-  const incomeRowsSoFar = [...incomeRows];
-  incomeRows.push({
-    label: "Total income", always: true, cls: "tl-total",
-    cell: (y) => incomeRowsSoFar.reduce((s, r) => s + r.cell(y), 0),
-  });
-
-  const expenseRows = state.cashflows.expenses.map((rw) => ({
-    label: rw.label,
-    cell: (y) => -(rt.expenses[rw.id]?.[y] ?? 0),
-  }));
-  for (const pr of (state.properties ?? []).filter((x) => x.propertyType === "investment")) {
-    expenseRows.push({
-      label: `${pr.name} expenses`,
-      cell: (y) => -(yl[y].properties?.[pr.id]?.expenses ?? 0),
-    });
-  }
-  for (const lid of Object.keys(yl[0]?.liabilities ?? {})) {
-    expenseRows.push({ label: `${loanName(lid)} — interest`, cell: (y) => -(yl[y].liabilities?.[lid]?.interest ?? 0) });
-    expenseRows.push({ label: `${loanName(lid)} — principal`, cell: (y) => -(yl[y].liabilities?.[lid]?.principal ?? 0) });
-  }
-  expenseRows.push({ label: "Tax", cell: (y) => -yl[y].tax });
-  for (const a of editableAssets) {
-    expenseRows.push({
+    oneOffRows.push({
       label: `${a.name} — one-off out`,
       cell: (y) => Math.max(0, -(projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0)),
-      always: true,
-      cellAttrs: (y) => oneOffCellAttrs(a.id, y),
+      always: true, cellAttrs: (y) => oneOffCellAttrs(a.id, y),
     });
   }
-  for (const pr of (state.properties ?? []).filter((x) => x.status === "planned")) {
-    expenseRows.push({ label: `${pr.name} settlement`, cell: (y) => -(yl[y].properties?.[pr.id]?.settlement ?? 0) });
+  for (const pr of properties.filter((x) => x.status === "planned")) {
+    oneOffRows.push({ label: `${pr.name} settlement`, cell: (y) => -(yl[y].properties?.[pr.id]?.settlement ?? 0) });
   }
-  // Super contributions the client actually pays for — salary
-  // sacrifice, personal deductible/non-deductible, spouse (fills
-  // included). SG is excluded: it's employer money that never reaches
-  // the household. Shown for completeness (the Cashflow bars chart
-  // has the same category), but — like one-off amounts above —
-  // contributions are outside the WCA/surplus-deficit mechanism (the
-  // same convention as any other asset contribution), so
-  // Surplus/(deficit) below does not net this out.
-  if ((state.plan.superAccounts ?? []).length) {
-    expenseRows.push({ label: "Super contributions", cell: (y) => -superContributionsCash(y) });
-  }
-  const expenseRowsSoFar = [...expenseRows];
-  expenseRows.push({
-    label: "Total expenses", always: true, cls: "tl-total",
-    cell: (y) => expenseRowsSoFar.reduce((s, r) => s + r.cell(y), 0),
-  });
 
   const surplusTarget = state.settings.surplus.mode === "invest"
     ? state.assets.find((a) => a.id === state.settings.surplus.assetId)
     : null;
 
-  return [
-    { title: "Income", rows: incomeRows },
-    { title: "Expenses", rows: expenseRows },
-    { title: null, rows: [
-      { label: "Surplus / (deficit)", cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
-    ] },
-    { title: "Funding", rows: [
-      { label: surplusTarget ? `Surplus invested (to ${surplusTarget.name})` : "Surplus invested",
-        cell: (y) => yl[y].surplusInvested },
-      { label: "Surplus swept to cash", cell: (y) => yl[y].surplusAccumulated },
-      { label: "Surplus spent", cell: (y) => yl[y].surplusSpent },
-      { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },
-      { label: "Unfunded cashflow", cell: (y) => yl[y].unfundedCashflow },
-    ] },
+  const groups = [
+    { title: "Assessable Income", rows: assessableRows },
+    { title: "Deductions", rows: deductionSectionRows },
+    { title: "Tax", rows: taxSectionRows },
+    { title: "Cash Received", rows: cashReceivedRows },
+    { title: "Expenses", rows: expenseSectionRows },
   ];
+  if (oneOffRows.length) groups.push({ title: "One-off amounts", rows: oneOffRows });
+  groups.push({ title: "Funding", rows: [
+    { label: surplusTarget ? `Surplus invested (to ${surplusTarget.name})` : "Surplus invested",
+      cell: (y) => yl[y].surplusInvested },
+    { label: "Surplus swept to cash", cell: (y) => yl[y].surplusAccumulated },
+    { label: "Surplus spent", cell: (y) => yl[y].surplusSpent },
+    { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },
+    { label: "Unfunded cashflow", cell: (y) => yl[y].unfundedCashflow },
+  ] });
+  return groups;
+}
+
+// catRow()'s expanded (individual-item) rows read POSITIVE row totals
+// (the pure module's own convention); the Deductions/Expenses sections
+// display everything as a negative outflow — negate() flips an
+// already-built row's cell function without altering catRow itself
+// (which is shared by Income, where rows stay positive).
+function negate(r) {
+  return { ...r, cell: (y) => -r.cell(y) };
 }
 
 // In-grid one-off editing (C2): each cell shows the NET of all
@@ -4401,7 +4476,8 @@ els.viewCashflow.addEventListener("keydown", (e) => {
 });
 
 function renderCashflowView() {
-  renderTransposed(els.viewCashflow, buildCashflowGroups(), accruedCgtFooter());
+  renderTransposed(els.viewCashflow, buildCashflowGroups(),
+    accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer());
 }
 
 // --- View: Assets ---------------------------------------------------------------
