@@ -21,6 +21,10 @@ import {
   createProperty, normaliseProperties, PROPERTY_STATES, PROPERTY_TYPES,
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
   createKeyDate, removeKeyDate, referencesToAnchor, convertAnchorReferences,
+  createSuperAccount, clampSuperAccount, normaliseSuperAccounts,
+  createSuperContribution, normaliseSuperContributions,
+  createSuperWithdrawal, normaliseSuperWithdrawals,
+  SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, INCOME_TYPES,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -65,6 +69,7 @@ const els = {
   lifestyleSection: $("lifestyleSection"),
   liabilitiesSection: $("liabilitiesSection"),
   propertySection: $("propertySection"),
+  superSection: $("superSection"),
   addAssetBtn: $("addAssetBtn"),
   incomeSection: $("incomeSection"),
   expensesSection: $("expensesSection"),
@@ -81,9 +86,13 @@ const els = {
   viewCashflow: $("viewCashflow"),
   viewAssets: $("viewAssets"),
   viewTax: $("viewTax"),
+  viewSuper: $("viewSuper"),
   viewAssumptions: $("viewAssumptions"),
   assetsEntity: $("assetsEntity"),
   assetsTable: $("assetsTable"),
+  superEntity: $("superEntity"),
+  superTable: $("superTable"),
+  viewSuperBalances: $("viewSuperBalances"),
   showAssetsToggle: $("showAssetsToggle"),
   shortfallNote: $("shortfallNote"),
   periodFromAge: $("periodFromAge"),
@@ -272,6 +281,7 @@ const INPUT_NAV = [
   { id: "financial-assets", label: "Financial assets" },
   { id: "lifestyle-assets", label: "Lifestyle assets" },
   { id: "property", label: "Property" },
+  { id: "super", label: "Super" },
   { id: "liabilities", label: "Liabilities" },
   { id: "investment-cashflows", label: "Investment cashflows" },
   { id: "settings", label: "Settings" },
@@ -282,11 +292,13 @@ const OUTPUT_NAV = {
     { id: "composite", label: "Cashflow, Assets & Liabilities" },
     { id: "net-assets", label: "Net assets" },
     { id: "asset-balances", label: "Asset balances" },
+    { id: "super-balances", label: "Super balances" },
   ],
   Tables: [
     { id: "cashflow", label: "Cashflow" },
     { id: "assets", label: "Assets" },
     { id: "tax", label: "Tax" },
+    { id: "super", label: "Super" },
     { id: "assumptions", label: "Assumptions" },
   ],
 };
@@ -311,9 +323,6 @@ function renderSideNav() {
   els.sideNav.innerHTML = `
     <div class="nav-group-label">Input</div>
     ${INPUT_NAV.map((n) => item(n)).join("")}
-    <button class="nav-item" type="button" disabled title="Coming soon">
-      <span>Super</span>
-    </button>
     <div class="nav-group-label">Output</div>
     <div class="nav-subgroup-label">Graphs</div>
     ${OUTPUT_NAV.Graphs.map((n) => item(n, true)).join("")}
@@ -746,6 +755,19 @@ function endResolutionText(p) {
   return `${head} — life expectancy of ${who}${offTxt}`;
 }
 
+// Tier 1.2, Commit 4: the work-test toggle is only shown when this
+// person is actually 67–74 at some point during the projection — a
+// client who is already 80, or a partner whose whole window is under
+// 67, never needs it cluttering Setup. The partner ages alongside the
+// client from their own current age (D1 convention), so the partner's
+// window length matches the client's, not the partner's own end age.
+function personSpansWorkTestAges(person) {
+  const years = state.plan.endAge - state.plan.client.currentAge;
+  const from = person.currentAge;
+  const to = from + years;
+  return from <= 74 && to >= 67;
+}
+
 function personBlockHTML(prefix, person, title) {
   const tp = person.taxProfile;
   return `
@@ -794,6 +816,17 @@ function personBlockHTML(prefix, person, title) {
           <input type="number" min="18" max="120" step="1" value="${person.retirementAge}"
                  data-plan-field="${prefix}RetirementAge" />
         </div>
+        ${personSpansWorkTestAges(person) ? `
+          <div class="cf-cell">
+            <label>Work test met (age 67–74)
+              <span class="helper-inline">Gates personal deductible super contributions in that age band. The work-test exemption itself is not modelled.</span>
+            </label>
+            <label class="ptg-check">
+              <input type="checkbox" data-plan-field="${prefix}WorkTestMet"${person.super?.workTestMet !== false ? " checked" : ""} />
+              <span>Yes</span>
+            </label>
+          </div>
+        ` : ""}
         <div class="cf-cell">
           <label>Opening carry-forward capital losses ($)</label>
           <input type="number" min="0" step="1000" value="${tp.openingCapitalLosses}"
@@ -1407,6 +1440,13 @@ function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax) {
   `;
 }
 
+const INCOME_TYPE_LABELS = {
+  employment: "Employment",
+  rental: "Rental",
+  otherTaxable: "Other taxable",
+  nonTaxable: "Non-taxable",
+};
+
 function incomeRowHTML(r) {
   return `
     <div class="cf-row cf-row-income${isCouple() ? " with-owner" : ""}" data-cfid="${r.id}">
@@ -1445,6 +1485,22 @@ function incomeRowHTML(r) {
         ${dateRefControlHTML(r.to, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="to"`, 18, 120)}
       </div>
       ${indexationCellsHTML("income", r)}
+      <div class="cf-cell cf-cell-incometype">
+        <label>Income type</label>
+        <select data-kind="income" data-cfid="${r.id}" data-field="incomeType">
+          ${INCOME_TYPES.map((t) => `<option value="${t}"${r.incomeType === t ? " selected" : ""}>${INCOME_TYPE_LABELS[t]}</option>`).join("")}
+        </select>
+      </div>
+      ${r.incomeType === "employment" ? `
+        <div class="cf-cell cf-cell-sg">
+          <label>Superannuation Guarantee</label>
+          <label class="ptg-check">
+            <input type="checkbox"${r.sgApplies !== false ? " checked" : ""}
+                   data-kind="income" data-cfid="${r.id}" data-field="sgApplies" />
+            <span>Applies</span>
+          </label>
+        </div>
+      ` : ""}
       <button class="cf-remove" type="button" aria-label="Remove row"
               data-action="remove-row" data-kind="income" data-cfid="${r.id}">×</button>
     </div>
@@ -1776,7 +1832,7 @@ els.settingsPanel.addEventListener("click", (e) => {
 
 // --- field mutation (delegated over assets + cashflows) ---------------------
 
-const CF_MOUNTS = [els.incomeSection, els.expensesSection, els.investSection];
+const CF_MOUNTS = [els.incomeSection, els.expensesSection, els.investSection, els.superSection];
 for (const container of [els.assets, els.lifestyleSection, ...CF_MOUNTS]) {
   container.addEventListener("input", (e) => applyFieldEdit(e.target, false));
   container.addEventListener("change", (e) => applyFieldEdit(e.target, true));
@@ -1894,9 +1950,22 @@ function applyRowEdit(kind, row, field, el, commit) {
       row.label = commit ? (el.value.trim() || row.label) : el.value;
       if (commit) el.value = row.label;
       break;
-    case "owner": { // income rows only
+    case "owner": {
       if (el.value !== "client" && el.value !== "partner") break;
       row.owner = el.value;
+      if (kind === "superContributions" || kind === "superWithdrawals") {
+        // Super rows are always client-anchored (Tier 1.2 convention —
+        // see planState.js), so no date reclamping is needed here,
+        // unlike income. The account may not belong to the new owner —
+        // drop it if so, same "unknown reference dropped, row
+        // survives" convention as clampSuperContribution.
+        const acct = (state.plan.superAccounts ?? []).find((s) => s.id === row.accountId);
+        if (acct && acct.owner !== el.value) row.accountId = null;
+        const rowEl = el.closest(".cf-row");
+        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+        break;
+      }
+      // income rows only, from here.
       // Anchors resolve dynamically against whichever owner window
       // applies — only explicit ages need re-clamping into the new
       // owner's window (clampIncomeRow does both via clampDateRef).
@@ -1912,6 +1981,28 @@ function applyRowEdit(kind, row, field, el, commit) {
     }
     case "assetId":
       if (findAsset(el.value)) row.assetId = el.value;
+      break;
+    case "accountId":
+      if ((state.plan.superAccounts ?? []).some((s) => s.id === el.value)) row.accountId = el.value;
+      break;
+    case "type": {
+      if (SUPER_CONTRIBUTION_TYPES.includes(el.value)) row.type = el.value;
+      const rowEl = el.closest(".cf-row");
+      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // cap-headroom note depends on type
+      break;
+    }
+    case "basis": {
+      if (SUPER_CONTRIBUTION_BASES.includes(el.value)) row.basis = el.value;
+      const rowEl = el.closest(".cf-row");
+      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // amount vs percent vs fill-note fields differ
+      break;
+    }
+    case "percent":
+      row.percent = clampNumber(el.value, 0, 100);
+      if (commit) el.value = row.percent;
+      break;
+    case "incomeRowId":
+      if (state.cashflows.income.some((r) => r.id === el.value)) row.incomeRowId = el.value;
       break;
     case "amount":
       row.amount = clampNumber(el.value, 0);
@@ -1938,6 +2029,19 @@ function applyRowEdit(kind, row, field, el, commit) {
     }
     case "direction":
       row.direction = el.value === "out" ? "out" : "in";
+      break;
+    case "incomeType": {
+      row.incomeType = INCOME_TYPES.includes(el.value) ? el.value : "employment";
+      // SG only ever applies to employment income (planState's
+      // clampIncomeRow convention) — force it off here too, and
+      // refresh the row so the SG toggle appears/disappears.
+      if (row.incomeType !== "employment") row.sgApplies = false;
+      const rowEl = el.closest(".cf-row");
+      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+      break;
+    }
+    case "sgApplies":
+      row.sgApplies = el.checked;
       break;
     case "from":
     case "to": {
@@ -1993,6 +2097,8 @@ function rowHTMLFor(kind, row) {
   if (kind === "income") return incomeRowHTML(row);
   if (kind === "expenses") return expenseRowHTML(row);
   if (kind === "lumpSums") return lumpSumRowHTML(row);
+  if (kind === "superContributions") return superContributionRowHTML(row);
+  if (kind === "superWithdrawals") return superWithdrawalRowHTML(row);
   return contributionRowHTML(kind, row);
 }
 
@@ -2018,6 +2124,13 @@ function refreshAssetSelects() {
   for (const sel of els.investSection.querySelectorAll('[data-field="assetId"]')) {
     const current = sel.value;
     sel.innerHTML = assetOptions(current);
+  }
+}
+
+function refreshSuperAccountSelects() {
+  for (const sel of els.superSection.querySelectorAll('[data-field="accountId"]')) {
+    const row = findRow(sel.dataset.kind, sel.dataset.cfid);
+    sel.innerHTML = superAccountOptions(sel.value, row?.owner);
   }
 }
 
@@ -2130,11 +2243,14 @@ function switchAllocMode(a, mode) {
   allocMemory.set(a.id, mem);
 }
 
+const SUPER_ROW_KINDS = ["superContributions", "superWithdrawals"];
+
 function onCashflowSectionClick(e) {
   const target = e.target.closest("[data-action]");
   if (!target) return;
   const { action, kind, cfid } = target.dataset;
   const cf = state.cashflows;
+  const isSuperKind = SUPER_ROW_KINDS.includes(kind);
 
   if (action === "add-row") {
     const firstAsset = state.assets.find((a) => a.class !== "lifestyle")?.id ?? null;
@@ -2143,14 +2259,17 @@ function onCashflowSectionClick(e) {
     else if (kind === "contributions") cf.contributions.push(createCashflow("contribution", state.plan, firstAsset));
     else if (kind === "withdrawals") cf.withdrawals.push(createCashflow("withdrawal", state.plan, firstAsset));
     else if (kind === "lumpSums") cf.lumpSums.push(createLumpSum(state.plan, firstAsset));
+    else if (kind === "superContributions") {
+      cf.superContributions.push(createSuperContribution(state.plan, state.plan.superAccounts ?? []));
+    } else if (kind === "superWithdrawals") {
+      cf.superWithdrawals.push(createSuperWithdrawal(state.plan, state.plan.superAccounts ?? []));
+    }
     saveState();
-    renderCashflows();
-    refreshOutputs();
+    if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
   } else if (action === "remove-row") {
     if (cf[kind]) cf[kind] = cf[kind].filter((r) => r.id !== cfid);
     saveState();
-    renderCashflows();
-    refreshOutputs();
+    if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
   }
 }
 
@@ -2351,6 +2470,527 @@ els.propertySection.addEventListener("click", (e) => {
   renderProperties();
 });
 
+// --- super section (Tier 1.2, Commit 4) -------------------------------------
+//
+// Super accounts live on plan.superAccounts (person-owned, never
+// joint — see planState.js), so account cards are entirely
+// self-contained (their own data-said/data-sfield attributes and
+// listeners) rather than routed through the financial-asset pipeline.
+// Contribution/withdrawal rows DO reuse the shared cashflow-row
+// plumbing (findRow/applyRowEdit/rowHTMLFor, add-row/remove-row) —
+// they're shaped like every other cashflow row plus a type/basis pair.
+
+const ENTERABLE_SUPER_TYPES = SUPER_CONTRIBUTION_TYPES.filter((t) => t !== "sg"); // SG is derived, never entered
+const SUPER_TYPE_LABELS = {
+  sg: "Superannuation Guarantee",
+  salarySacrifice: "Salary sacrifice",
+  personalDeductible: "Personal (deductible)",
+  personalNonDeductible: "Personal (non-deductible)",
+  spouse: "Spouse contribution",
+};
+const CONCESSIONAL_SUPER_TYPES = ["salarySacrifice", "personalDeductible"];
+
+function findSuperAccount(said) {
+  return (state.plan.superAccounts ?? []).find((s) => s.id === said) || null;
+}
+
+// Super accounts are always person-owned — never "joint" (Tier 1.2).
+function superOwnerOptions(selected) {
+  const labels = { client: clientName(), partner: partnerName() };
+  const owners = isCouple() ? ["client", "partner"] : ["client"];
+  return owners.map((o) =>
+    `<option value="${o}"${o === selected ? " selected" : ""}>${escapeHTML(labels[o])}</option>`
+  ).join("");
+}
+
+function superAccountOptions(selected, owner) {
+  const accounts = (state.plan.superAccounts ?? []).filter((s) => !owner || s.owner === owner);
+  if (accounts.length === 0) return `<option value="">No super account for this owner</option>`;
+  return accounts.map((s) =>
+    `<option value="${s.id}"${s.id === selected ? " selected" : ""}>${escapeHTML(s.name)}</option>`
+  ).join("");
+}
+
+function incomeRowOptions(selected) {
+  const rows = state.cashflows.income;
+  if (rows.length === 0) return `<option value="">No income rows</option>`;
+  return rows.map((r) =>
+    `<option value="${r.id}"${r.id === selected ? " selected" : ""}>${escapeHTML(r.label)}</option>`
+  ).join("");
+}
+
+// Live cap-headroom "constraint row" (spec: "the single most useful
+// thing on the screen") — reads the current FY's superCapUsage off the
+// live projection rather than recomputing cap/carry-forward logic here
+// a second time. Shown only beside concessional-type rows.
+function superCapHeadroomHTML(sc) {
+  if (!CONCESSIONAL_SUPER_TYPES.includes(sc.type)) return "";
+  const usage = projection?.yearly?.[0]?.superCapUsage?.[sc.owner];
+  if (!usage) return "";
+  return `
+    <div class="super-cap-headroom">
+      ${fmtMoney(usage.cap)} cap · ${fmtMoney(usage.sg)} SG · ${fmtMoney(usage.salarySacrifice)} sacrifice ·
+      ${fmtMoney(usage.personalDeductible)} personal ·
+      <strong>${fmtMoney(usage.available)} available</strong>
+      (incl. ${fmtMoney(usage.carryForwardAvailable)} carry-forward)
+    </div>
+  `;
+}
+
+function superAccountHeadMeta(sa) {
+  const ownerLabel = sa.owner === "partner" ? partnerName() : clientName();
+  return `${ownerLabel} · ${fmtMoney(sa.balance)}` +
+    (sa.taxFreeComponent > 0 ? ` · tax-free ${fmtMoney(sa.taxFreeComponent)}` : "");
+}
+
+function superAllocationSectionHTML(sa) {
+  const alloc = sa.allocation;
+  const isCustom = alloc.mode === "custom";
+  const seg = `
+    <div class="seg-toggle" role="radiogroup" aria-label="Allocation mode">
+      <button class="seg-option${!isCustom ? " active" : ""}" type="button"
+              data-super-action="alloc-mode" data-said="${sa.id}" data-mode="profile"
+              aria-pressed="${!isCustom}">Firm profile</button>
+      <button class="seg-option${isCustom ? " active" : ""}" type="button"
+              data-super-action="alloc-mode" data-said="${sa.id}" data-mode="custom"
+              aria-pressed="${isCustom}">Custom</button>
+    </div>
+  `;
+  if (!isCustom) {
+    return `
+      <div class="cf-section">
+        <div class="cf-section-title">Allocation</div>
+        ${seg}
+        <div class="alloc-grid alloc-grid-profile">
+          <div class="cf-cell">
+            <label>Risk profile</label>
+            <select data-said="${sa.id}" data-sfield="alloc.profile">${profileOptions(alloc.profile)}</select>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  const total = (alloc.incomePct + alloc.growthPct).toFixed(2);
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Allocation</div>
+      ${seg}
+      <div class="alloc-grid">
+        <div class="cf-cell">
+          <label>Income (% p.a.)</label>
+          <input type="number" min="0" max="${ALLOC_PCT_MAX}" step="0.05" value="${alloc.incomePct}"
+                 data-said="${sa.id}" data-sfield="alloc.incomePct" />
+        </div>
+        <div class="cf-cell">
+          <label>Growth (% p.a.)</label>
+          <input type="number" min="0" max="${ALLOC_PCT_MAX}" step="0.05" value="${alloc.growthPct}"
+                 data-said="${sa.id}" data-sfield="alloc.growthPct" />
+        </div>
+        <div class="cf-cell">
+          <label>Franking (%)</label>
+          <input type="number" min="0" max="100" step="1" value="${alloc.frankingPct}"
+                 data-said="${sa.id}" data-sfield="alloc.frankingPct" />
+        </div>
+        <div class="cf-cell alloc-total">
+          <label>&nbsp;</label>
+          <div class="alloc-total-value" data-role="superAllocTotal-${sa.id}">Total: ${total}% p.a. nominal</div>
+        </div>
+      </div>
+      <div class="alloc-grid alloc-grid-vol">
+        <div class="cf-cell">
+          <label>Volatility basis</label>
+          <select data-said="${sa.id}" data-sfield="alloc.volBasis">${profileOptions(alloc.volBasis)}</select>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function superAccountCardHTML(sa) {
+  const isCollapsed = collapsed.get(sa.id) === true;
+  const excluded = !sa.include;
+  const head = `
+    <div class="pcard-head" data-super-action="toggle-collapse" data-said="${sa.id}">
+      <button class="pcard-chevron${isCollapsed ? "" : " open"}" type="button"
+              aria-label="${isCollapsed ? "Expand" : "Collapse"}"
+              data-super-action="toggle-collapse" data-said="${sa.id}">▸</button>
+      <span class="pcard-name" data-role="superHeadName">${escapeHTML(sa.name)}</span>
+      <span class="pcard-meta" data-role="superHeadMeta">${superAccountHeadMeta(sa)}</span>
+      <label class="pcard-include" title="Include in projection totals">
+        <input type="checkbox"${sa.include ? " checked" : ""}
+               data-super-action="toggle-include" data-said="${sa.id}" />
+        <span>Include</span>
+      </label>
+      <button class="pcard-remove" type="button" data-super-action="remove-account" data-said="${sa.id}">Remove</button>
+    </div>
+  `;
+  if (isCollapsed) {
+    return `<div class="pcard${excluded ? " excluded" : ""}" data-said="${sa.id}">${head}</div>`;
+  }
+  return `<div class="pcard${excluded ? " excluded" : ""}" data-said="${sa.id}">${head}
+    <div class="pcard-body">
+      <div class="pcard-details${isCouple() ? " with-owner" : ""}">
+        <div class="cf-cell pcard-name-cell">
+          <label>Name</label>
+          <input type="text" value="${escapeHTML(sa.name)}" maxlength="60"
+                 data-said="${sa.id}" data-sfield="name" />
+        </div>
+        ${isCouple() ? `
+          <div class="cf-cell">
+            <label>Owner</label>
+            <select data-said="${sa.id}" data-sfield="owner">${superOwnerOptions(sa.owner)}</select>
+          </div>
+        ` : ""}
+        <div class="cf-cell">
+          <label>Balance ($)</label>
+          <input type="number" min="0" step="1000" value="${sa.balance}"
+                 data-said="${sa.id}" data-sfield="balance" />
+        </div>
+        <div class="cf-cell">
+          <label>Tax-free component ($)</label>
+          <input type="number" min="0" step="1000" value="${sa.taxFreeComponent}"
+                 data-said="${sa.id}" data-sfield="taxFreeComponent" />
+        </div>
+      </div>
+
+      ${superAllocationSectionHTML(sa)}
+
+      <div class="cf-section">
+        <div class="cf-section-title">Costs</div>
+        <div class="alloc-grid alloc-grid-profile">
+          <div class="cf-cell">
+            <label>ICR (% p.a.)</label>
+            <input type="number" min="0" max="100" step="0.01" value="${sa.icrPct}"
+                   data-said="${sa.id}" data-sfield="icrPct" />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function superContributionRowHTML(sc) {
+  const showAmount = sc.basis === "amount";
+  const showPercent = sc.basis === "percentOfIncome";
+  const showFillNote = sc.basis === "toConcessionalCap";
+  return `
+    <div class="cf-row cf-row-super" data-cfid="${sc.id}">
+      <div class="cf-cell cf-cell-label">
+        <label>Label</label>
+        <input type="text" value="${escapeHTML(sc.label)}" maxlength="60"
+               data-kind="superContributions" data-cfid="${sc.id}" data-field="label" />
+      </div>
+      <div class="cf-cell">
+        <label>Type</label>
+        <select data-kind="superContributions" data-cfid="${sc.id}" data-field="type">
+          ${ENTERABLE_SUPER_TYPES.map((t) =>
+            `<option value="${t}"${sc.type === t ? " selected" : ""}>${SUPER_TYPE_LABELS[t]}</option>`
+          ).join("")}
+        </select>
+      </div>
+      ${isCouple() ? `
+        <div class="cf-cell">
+          <label>Owner</label>
+          <select data-kind="superContributions" data-cfid="${sc.id}" data-field="owner">${superOwnerOptions(sc.owner)}</select>
+        </div>
+      ` : ""}
+      <div class="cf-cell">
+        <label>Account</label>
+        <select data-kind="superContributions" data-cfid="${sc.id}" data-field="accountId">${superAccountOptions(sc.accountId, sc.owner)}</select>
+      </div>
+      <div class="cf-cell">
+        <label>Basis</label>
+        <select data-kind="superContributions" data-cfid="${sc.id}" data-field="basis">
+          <option value="amount"${sc.basis === "amount" ? " selected" : ""}>Fixed amount</option>
+          <option value="percentOfIncome"${sc.basis === "percentOfIncome" ? " selected" : ""}>% of an income row</option>
+          <option value="toConcessionalCap"${sc.basis === "toConcessionalCap" ? " selected" : ""}>Fill remaining concessional cap</option>
+        </select>
+      </div>
+      ${showAmount ? `
+        <div class="cf-cell cf-cell-amount">
+          <label>Amount ($)</label>
+          <input type="number" min="0" step="100" value="${sc.amount}"
+                 data-kind="superContributions" data-cfid="${sc.id}" data-field="amount" />
+        </div>
+      ` : ""}
+      ${showPercent ? `
+        <div class="cf-cell">
+          <label>% of income</label>
+          <input type="number" min="0" max="100" step="1" value="${sc.percent}"
+                 data-kind="superContributions" data-cfid="${sc.id}" data-field="percent" />
+        </div>
+        <div class="cf-cell">
+          <label>Income row</label>
+          <select data-kind="superContributions" data-cfid="${sc.id}" data-field="incomeRowId">${incomeRowOptions(sc.incomeRowId)}</select>
+        </div>
+      ` : ""}
+      ${showFillNote ? `
+        <div class="cf-cell cf-cell-cap-note">
+          <p class="helper-text">Fills whatever headroom remains in this FY's concessional cap, including available carry-forward.</p>
+        </div>
+      ` : ""}
+      <div class="cf-cell cf-cell-freq">
+        <label>Frequency</label>
+        <select data-kind="superContributions" data-cfid="${sc.id}" data-field="frequency">
+          <option value="monthly"${sc.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${sc.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </div>
+      <div class="cf-cell cf-cell-from">
+        <label>From</label>
+        ${dateRefControlHTML(sc.from, "client", `data-kind="superContributions" data-cfid="${sc.id}" data-field="from"`, 18, 120)}
+      </div>
+      <div class="cf-cell cf-cell-to">
+        <label>To</label>
+        ${dateRefControlHTML(sc.to, "client", `data-kind="superContributions" data-cfid="${sc.id}" data-field="to"`, 18, 120)}
+      </div>
+      ${showAmount ? indexationCellsHTML("superContributions", sc) : ""}
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-kind="superContributions" data-cfid="${sc.id}">×</button>
+      ${superCapHeadroomHTML(sc)}
+    </div>
+  `;
+}
+
+function superWithdrawalRowHTML(sw) {
+  return `
+    <div class="cf-row cf-row-super" data-cfid="${sw.id}">
+      <div class="cf-cell cf-cell-label">
+        <label>Label</label>
+        <input type="text" value="${escapeHTML(sw.label)}" maxlength="60"
+               data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="label" />
+      </div>
+      ${isCouple() ? `
+        <div class="cf-cell">
+          <label>Owner</label>
+          <select data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="owner">${superOwnerOptions(sw.owner)}</select>
+        </div>
+      ` : ""}
+      <div class="cf-cell">
+        <label>Account</label>
+        <select data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="accountId">${superAccountOptions(sw.accountId, sw.owner)}</select>
+      </div>
+      <div class="cf-cell cf-cell-amount">
+        <label>Amount ($)</label>
+        <input type="number" min="0" step="100" value="${sw.amount}"
+               data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="amount" />
+      </div>
+      <div class="cf-cell cf-cell-freq">
+        <label>Frequency</label>
+        <select data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="frequency">
+          <option value="monthly"${sw.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${sw.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </div>
+      <div class="cf-cell cf-cell-from">
+        <label>From</label>
+        ${dateRefControlHTML(sw.from, "client", `data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="from"`, 18, 120)}
+      </div>
+      <div class="cf-cell cf-cell-to">
+        <label>To</label>
+        ${dateRefControlHTML(sw.to, "client", `data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="to"`, 18, 120)}
+      </div>
+      ${indexationCellsHTML("superWithdrawals", sw)}
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-kind="superWithdrawals" data-cfid="${sw.id}">×</button>
+    </div>
+  `;
+}
+
+function renderSuper() {
+  const accounts = state.plan.superAccounts ?? [];
+  const cards = accounts.map(superAccountCardHTML).join("");
+  const cf = state.cashflows;
+  const cashflowsHTML = `
+    <div class="cf-panel">
+      ${ffSubsectionHTML("Contributions", "superContributions", "Add contribution",
+        (cf.superContributions ?? []).map(superContributionRowHTML).join(""))}
+      ${ffSubsectionHTML("Withdrawals", "superWithdrawals", "Add withdrawal",
+        (cf.superWithdrawals ?? []).map(superWithdrawalRowHTML).join(""))}
+    </div>
+  `;
+  els.superSection.innerHTML = accounts.length === 0
+    ? `
+      <h2 class="section-heading">Super</h2>
+      ${pageEmptyHTML(
+        "Add a super account to model accumulation-phase superannuation — balances, contributions, caps, and withdrawals.",
+        `<button class="add-row-btn" type="button" data-super-action="add-account">+ Add super account</button>`
+      )}
+    `
+    : `
+      <h2 class="section-heading">Super</h2>
+      <div id="superAccounts" class="portfolio-stack">${cards}</div>
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-super-action="add-account">+ Add super account</button>
+      </div>
+      ${cashflowsHTML}
+    `;
+}
+
+function refreshSuperCardHead(said) {
+  const sa = findSuperAccount(said);
+  const card = els.superSection.querySelector(`.pcard[data-said="${said}"]`);
+  if (!sa || !card) return;
+  const nameEl = card.querySelector('[data-role="superHeadName"]');
+  const metaEl = card.querySelector('[data-role="superHeadMeta"]');
+  if (nameEl) nameEl.textContent = sa.name;
+  if (metaEl) metaEl.textContent = superAccountHeadMeta(sa);
+}
+
+function refreshSuperAllocTotal(said) {
+  const sa = findSuperAccount(said);
+  if (!sa || sa.allocation.mode !== "custom") return;
+  const el = document.querySelector(`[data-role="superAllocTotal-${said}"]`);
+  if (el) {
+    el.textContent = `Total: ${(sa.allocation.incomePct + sa.allocation.growthPct).toFixed(2)}% p.a. nominal`;
+  }
+}
+
+// Applies a simple (non-structural) field edit to a super account.
+// Returns true when the change is structural (needs a full re-render —
+// owner switch changes account-select options everywhere else, etc.).
+function applySuperAccountEdit(sa, field, el, commit) {
+  switch (field) {
+    case "name":
+      sa.name = commit ? (el.value.trim() || sa.name) : el.value;
+      if (commit) { el.value = sa.name; refreshSuperAccountSelects(); }
+      return false;
+    case "owner":
+      if (["client", "partner"].includes(el.value)) sa.owner = el.value;
+      return true;
+    case "balance":
+      sa.balance = clampNumber(el.value, 0);
+      sa.taxFreeComponent = Math.min(sa.taxFreeComponent, sa.balance);
+      if (commit) el.value = sa.balance;
+      return false;
+    case "taxFreeComponent":
+      sa.taxFreeComponent = clampNumber(el.value, 0, sa.balance);
+      if (commit) el.value = sa.taxFreeComponent;
+      return false;
+    case "icrPct":
+      sa.icrPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = sa.icrPct;
+      return false;
+    case "alloc.profile":
+      sa.allocation = clampAllocation({ mode: "profile", profile: el.value }, PROFILES);
+      return false;
+    case "alloc.incomePct":
+      sa.allocation.incomePct = clampNumber(el.value, 0, ALLOC_PCT_MAX);
+      if (commit) el.value = sa.allocation.incomePct;
+      retargetSuperVolBasis(sa.id);
+      refreshSuperAllocTotal(sa.id);
+      return false;
+    case "alloc.growthPct":
+      sa.allocation.growthPct = clampNumber(el.value, 0, ALLOC_PCT_MAX);
+      if (commit) el.value = sa.allocation.growthPct;
+      retargetSuperVolBasis(sa.id);
+      refreshSuperAllocTotal(sa.id);
+      return false;
+    case "alloc.frankingPct":
+      sa.allocation.frankingPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = sa.allocation.frankingPct;
+      return false;
+    case "alloc.volBasis":
+      if (Object.keys(PROFILES).includes(el.value)) {
+        sa.allocation.volBasis = el.value;
+        volBasisTouched.add(sa.id);
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+function retargetSuperVolBasis(said) {
+  const sa = findSuperAccount(said);
+  if (!sa || sa.allocation.mode !== "custom" || volBasisTouched.has(said)) return;
+  const next = nearestVolBasis(PROFILES, sa.allocation.incomePct + sa.allocation.growthPct);
+  if (next && next !== sa.allocation.volBasis) {
+    sa.allocation.volBasis = next;
+    const sel = els.superSection.querySelector(`[data-said="${said}"][data-sfield="alloc.volBasis"]`);
+    if (sel) sel.value = next;
+  }
+}
+
+els.superSection.addEventListener("input", (e) => {
+  const said = e.target.dataset.said;
+  const field = e.target.dataset.sfield;
+  if (!said || !field) return;
+  const sa = findSuperAccount(said);
+  if (!sa) return;
+  applySuperAccountEdit(sa, field, e.target, false);
+  saveState();
+  refreshOutputs();
+});
+
+els.superSection.addEventListener("change", (e) => {
+  const said = e.target.dataset.said;
+  const field = e.target.dataset.sfield;
+  if (!said || !field) return;
+  const sa = findSuperAccount(said);
+  if (!sa) return;
+  const structural = applySuperAccountEdit(sa, field, e.target, true);
+  saveState();
+  if (structural) {
+    renderSuper();
+  } else {
+    refreshSuperCardHead(said);
+  }
+  refreshOutputs();
+});
+
+els.superSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-super-action]");
+  if (!btn) return;
+  const action = btn.dataset.superAction;
+  if (action === "add-account") {
+    const owner = isCouple() && (state.plan.superAccounts ?? []).some((s) => s.owner === "client")
+      ? "partner" : "client";
+    state.plan.superAccounts = [...(state.plan.superAccounts ?? []), createSuperAccount(state.plan, state.plan.superAccounts, PROFILES, owner)];
+    saveState();
+    refreshOutputs();
+    renderSuper();
+    return;
+  }
+  const said = btn.dataset.said;
+  const sa = findSuperAccount(said);
+  if (!sa) return;
+  switch (action) {
+    case "toggle-collapse": {
+      if (e.target.closest(".pcard-include") || e.target.closest(".pcard-remove")) return;
+      collapsed.set(said, !(collapsed.get(said) === true));
+      renderSuper();
+      break;
+    }
+    case "toggle-include": {
+      sa.include = e.target.checked;
+      saveState();
+      els.superSection.querySelector(`.pcard[data-said="${said}"]`)?.classList.toggle("excluded", !sa.include);
+      refreshOutputs();
+      break;
+    }
+    case "remove-account": {
+      if (!window.confirm(`Remove "${sa.name}"? Its contribution and withdrawal rows will be deleted too.`)) return;
+      state.plan.superAccounts = state.plan.superAccounts.filter((x) => x.id !== said);
+      state.cashflows.superContributions = (state.cashflows.superContributions ?? []).filter((c) => c.accountId !== said);
+      state.cashflows.superWithdrawals = (state.cashflows.superWithdrawals ?? []).filter((w) => w.accountId !== said);
+      collapsed.delete(said);
+      volBasisTouched.delete(said);
+      saveState();
+      refreshOutputs();
+      renderSuper();
+      break;
+    }
+    case "alloc-mode": {
+      switchAllocMode(sa, btn.dataset.mode === "custom" ? "custom" : "profile");
+      saveState();
+      renderSuper();
+      refreshOutputs();
+      break;
+    }
+  }
+});
+
 // --- liabilities section (D3) --------------------------------------------------
 
 function liabilityDerivedText(l) {
@@ -2527,6 +3167,7 @@ let projection = null;
 let activeView = "composite"; // the composite chart is the default Graphs view (D5)
 let showAssets = false;
 let assetsEntity = "all"; // Assets view entity selector: "all" | assetId
+let superEntity = "all"; // Super view entity selector: "all" | super account id
 
 function recomputeProjection() {
   projection = projectPlan(state);
@@ -2546,12 +3187,14 @@ const VIEW_MOUNTS = {
   composite: () => els.viewComposite,
   "net-assets": () => els.viewNetAssets,
   "asset-balances": () => els.viewAssetBalances,
+  "super-balances": () => els.viewSuperBalances,
   cashflow: () => els.viewCashflow,
   assets: () => els.viewAssets,
   tax: () => els.viewTax,
+  super: () => els.viewSuper,
   assumptions: () => els.viewAssumptions,
 };
-const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances"]);
+const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "super-balances"]);
 
 // Selection now happens via the sidebar (data-nav-section), which
 // routes through handleRoute → showSection → here.
@@ -2564,9 +3207,11 @@ function renderActiveView() {
   else if (activeView === "composite") renderCompositeChart();
   else if (activeView === "net-assets") renderNetAssetsChart();
   else if (activeView === "asset-balances") renderAssetBalancesChart();
+  else if (activeView === "super-balances") renderSuperBalancesChart();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
   else if (activeView === "tax") renderTaxView();
+  else if (activeView === "super") renderSuperTableView();
   else if (activeView === "assumptions") renderAssumptionsView();
 }
 
@@ -2986,6 +3631,50 @@ function renderAssetBalancesChart() {
   }, { displayModeBar: false, responsive: true });
 }
 
+// --- View: Super balances chart (Tier 1.2, Commit 4) ------------------------
+//
+// Each included super account's closing balance, stacked — the same
+// shape as the Asset balances chart. Net assets and the composite
+// chart already fold super in via the engine's own row.netAssets
+// (Commit 1); this is the dedicated per-account breakdown.
+
+function renderSuperBalancesChart() {
+  const el = $("chartSuperBalances");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const included = (state.plan.superAccounts ?? []).filter((s) => s.include);
+  const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#b5179e", "#d97b2f", "#9a031e", "#3a86c9"];
+
+  const traces = included.map((s, i) => ({
+    x: ages,
+    y: yearIdxs.map((y) => (projection.yearly[y].superDetail[s.id]?.closing ?? 0) * factor(y)),
+    name: s.name, type: "scatter", mode: "lines",
+    stackgroup: "super", fill: "tonexty",
+    line: { color: palette[i % palette.length], width: 1 },
+    hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(s.name)}</extra>`,
+  }));
+
+  if (traces.length === 0) {
+    el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Add a super account to see balances here.</p>`;
+    return;
+  }
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Super balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
 // --- transposed table infrastructure (shared by every table view) ------------
 //
 // Years as columns, line items as rows. Groups are visual bands; a
@@ -3122,6 +3811,13 @@ const accruedCgtFooter = () => {
   const accrued = projection.accruedCgtAtEnd * displayFactor(projection.schedule.months);
   return accrued > 0.005
     ? `<div class="ledger-foot">CGT liability accrued at end of projection: ${fmtMoney(accrued)} (assessed on the final year's realised gains; payable after the projection ends).</div>`
+    : "";
+};
+
+const accruedDiv293Footer = () => {
+  const accrued = (projection.accruedDiv293AtEnd ?? 0) * displayFactor(projection.schedule.months);
+  return accrued > 0.005
+    ? `<div class="ledger-foot">Division 293 tax accrued at end of projection: ${fmtMoney(accrued)} (assessed on the final year's low-tax contributions; payable after the projection ends).</div>`
     : "";
 };
 
@@ -3404,6 +4100,103 @@ function renderAssetsView() {
   renderTransposed(els.assetsTable, buildAssetsGroups(assetsEntity));
 }
 
+// --- View: Super (Tier 1.2, Commit 4) ---------------------------------------
+
+function superDetailRows(get) {
+  return [
+    { label: "Opening balance", cell: (y) => get(y).opening, always: true },
+    { label: "SG contributions", cell: (y) => get(y).sg },
+    { label: "Salary sacrifice", cell: (y) => get(y).salarySacrifice },
+    { label: "Personal deductible", cell: (y) => get(y).personalDeductible },
+    { label: "Non-concessional", cell: (y) => get(y).nonConcessional },
+    { label: "Contributions tax", cell: (y) => -get(y).contributionsTax },
+    { label: "Earnings", cell: (y) => get(y).earnings },
+    { label: "Earnings tax", cell: (y) => -get(y).earningsTax },
+    { label: "Withdrawals", cell: (y) => -get(y).withdrawals },
+  ];
+}
+
+// Per-person cap/TSB rows, from the engine's superCapUsage +
+// superDetail — never re-derives cap/carry-forward arithmetic here.
+function superPersonGroup(p, title) {
+  const yl = projection.yearly;
+  const owned = (state.plan.superAccounts ?? []).filter((s) => s.owner === p).map((s) => s.id);
+  return {
+    title,
+    rows: [
+      {
+        label: "Concessional cap used", always: true,
+        cell: (y) => {
+          const u = yl[y].superCapUsage?.[p];
+          return u ? u.sg + u.salarySacrifice + u.personalDeductible : 0;
+        },
+      },
+      {
+        label: "Concessional cap available",
+        cell: (y) => yl[y].superCapUsage?.[p]?.available ?? 0,
+      },
+      {
+        label: "Carry-forward available",
+        cell: (y) => yl[y].superCapUsage?.[p]?.carryForwardAvailable ?? 0,
+      },
+      {
+        label: "Total super balance (TSB)", always: true, cls: "tl-total",
+        cell: (y) => owned.reduce((s, id) => s + (yl[y].superDetail[id]?.closing ?? 0), 0),
+      },
+    ],
+  };
+}
+
+function buildSuperGroups(entity) {
+  const yl = projection.yearly;
+  const included = (state.plan.superAccounts ?? []).filter((s) => s.include);
+
+  const personGroups = [superPersonGroup("client", clientName())];
+  if (isCouple()) personGroups.push(superPersonGroup("partner", partnerName()));
+
+  if (entity === "all") {
+    const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0 };
+    const combined = superDetailRows((y) => included.reduce((s, a) => {
+      const d = yl[y].superDetail[a.id] ?? zero;
+      for (const k in s) s[k] += d[k] ?? 0;
+      return s;
+    }, { ...zero }));
+    combined.push({
+      label: "Closing balance", always: true, cls: "tl-total",
+      cell: (y) => included.reduce((s, a) => s + (yl[y].superDetail[a.id]?.closing ?? 0), 0),
+    });
+    const closingRow = (a) => ({ label: a.name, cell: (y) => yl[y].superDetail[a.id]?.closing ?? 0 });
+    const byAccount = included.map(closingRow);
+    byAccount.push({ label: "Total", always: true, cls: "tl-total", cell: (y) => yl[y].superClosing });
+    return [
+      { title: "Combined", rows: combined },
+      { title: "Closing balance by account", rows: byAccount },
+      ...personGroups,
+    ];
+  }
+
+  const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0, taxFreeClosing: 0 };
+  const name = included.find((a) => a.id === entity)?.name ?? "Super account";
+  const rows = superDetailRows((y) => yl[y].superDetail[entity] ?? zero);
+  rows.push({ label: "Closing balance", cell: (y) => (yl[y].superDetail[entity] ?? zero).closing, always: true, cls: "tl-total" });
+  rows.push({ label: "of which tax-free", cell: (y) => (yl[y].superDetail[entity] ?? zero).taxFreeClosing });
+  return [{ title: name, rows }, ...personGroups];
+}
+
+function renderSuperTableView() {
+  const included = (state.plan.superAccounts ?? []).filter((s) => s.include);
+  if (superEntity !== "all" && !included.some((s) => s.id === superEntity)) {
+    superEntity = "all"; // entity was removed/excluded
+  }
+  renderEntitySelector(
+    els.superEntity,
+    [{ id: "all", label: "Consolidated" }, ...included.map((s) => ({ id: s.id, label: s.name }))],
+    superEntity,
+    (id) => { superEntity = id; renderSuperTableView(); }
+  );
+  renderTransposed(els.superTable, buildSuperGroups(superEntity));
+}
+
 // --- View: Tax (C4) -----------------------------------------------------------
 
 function buildTaxGroups() {
@@ -3417,8 +4210,11 @@ function buildTaxGroups() {
       { label: "Medicare levy", cell: (y) => -(td(y, p)?.medicare ?? 0) },
       { label: "LITO", cell: (y) => td(y, p)?.lito ?? 0 },
       { label: "Franking credits", cell: (y) => td(y, p)?.frankingCredits ?? 0 },
+      { label: "Excess concessional super contributions", cell: (y) => td(y, p)?.excessConcessionalContributions ?? 0 },
+      { label: "Excess concessional contributions offset (15%)", cell: (y) => td(y, p)?.excessCcOffset ?? 0 },
       { label: "Net income tax", cell: (y) => -(td(y, p)?.incomeTax ?? 0), cls: "tl-total" },
       { label: "CGT payable", cell: (y) => -(td(y, p)?.cgt ?? 0) },
+      { label: "Division 293 tax payable", cell: (y) => -(td(y, p)?.div293 ?? 0) },
       { label: "Quarantined rental losses (carried)", cell: (y) => td(y, p)?.quarantinedLossCarry ?? 0 },
     ],
   });
@@ -3426,14 +4222,17 @@ function buildTaxGroups() {
   if (isCouple()) groups.push(personGroup("partner", partnerName()));
   groups.push({
     title: "Household",
-    rows: [{ label: "Total tax", cell: (y) => -yl[y].tax, cls: "tl-total" }],
+    rows: [
+      { label: "Division 293 tax payable", cell: (y) => -yl[y].taxDetail.div293 },
+      { label: "Total tax", cell: (y) => -yl[y].tax, cls: "tl-total" },
+    ],
   });
   return groups;
 }
 
 function renderTaxView() {
-  const note = `<p class="chart-note-inline">Income tax rows accrue in the year shown (spread through the year, PAYG-style). CGT payable shows the year of <em>payment</em> — gains realised in a year are assessed then and paid the following July.</p>`;
-  renderTransposed(els.viewTax, buildTaxGroups(), note + accruedCgtFooter());
+  const note = `<p class="chart-note-inline">Income tax rows accrue in the year shown (spread through the year, PAYG-style). CGT and Division 293 payable show the year of <em>payment</em> — both are assessed in one year and paid the following July.</p>`;
+  renderTransposed(els.viewTax, buildTaxGroups(), note + accruedCgtFooter() + accruedDiv293Footer());
 }
 
 // --- View: Assumptions (C4) -----------------------------------------------------
@@ -3525,9 +4324,11 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "composite") exportChartPNG("chartComposite", "composite");
   else if (activeView === "net-assets") exportChartPNG("chartNetAssets", "net-assets");
   else if (activeView === "asset-balances") exportChartPNG("chartAssetBalances", "asset-balances");
+  else if (activeView === "super-balances") exportChartPNG("chartSuperBalances", "super-balances");
   else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());
+  else if (activeView === "super") exportTransposedCSV("super", buildSuperGroups(superEntity));
   else if (activeView === "assumptions") exportTransposedCSV("assumptions", buildAssumptionsGroups());
 });
 
@@ -3693,6 +4494,7 @@ function renderAll() {
   refreshOutputs();
   renderLiabilities(); // after refreshOutputs — payoff FYs read the projection
   renderProperties();
+  renderSuper(); // after refreshOutputs — the cap-headroom display reads the projection
 }
 
 window.addEventListener("hashchange", handleRoute);

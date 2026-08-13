@@ -677,6 +677,25 @@ html, body {
     "from    to      basis   extra   remove";
 }
 
+/* Super contribution/withdrawal rows (Tier 1.2): more cells than the
+   fixed named-area rows above, so a flowing auto-fit grid rather than
+   a hand-laid-out template. */
+.cf-row-super {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+.cf-cell-cap-note,
+.super-cap-headroom {
+  grid-column: 1 / -1;
+}
+.super-cap-headroom {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  background: var(--accent-soft);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-variant-numeric: tabular-nums;
+}
+
 .cf-row-income .cf-remove,
 .cf-row-expense .cf-remove,
 .cf-row-asset .cf-remove {

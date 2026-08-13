@@ -129,15 +129,15 @@ describe("known section/view ids", () => {
   it("exposes the full input section list", () => {
     expect(INPUT_SECTIONS).toEqual([
       "setup", "income", "expenses", "financial-assets", "lifestyle-assets",
-      "property", "liabilities", "investment-cashflows", "settings",
+      "property", "super", "liabilities", "investment-cashflows", "settings",
     ]);
     expect(DEFAULT_INPUT_SECTION).toBe("setup");
   });
 
   it("exposes the output view list", () => {
     expect(OUTPUT_VIEWS).toEqual([
-      "projection", "composite", "net-assets", "asset-balances",
-      "cashflow", "assets", "tax", "assumptions",
+      "projection", "composite", "net-assets", "asset-balances", "super-balances",
+      "cashflow", "assets", "tax", "super", "assumptions",
     ]);
     expect(DEFAULT_OUTPUT_VIEW).toBe("composite");
   });

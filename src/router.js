@@ -11,15 +11,15 @@
 
 export const INPUT_SECTIONS = [
   "setup", "income", "expenses", "financial-assets", "lifestyle-assets",
-  "property", "liabilities", "investment-cashflows", "settings",
+  "property", "super", "liabilities", "investment-cashflows", "settings",
 ];
 export const DEFAULT_INPUT_SECTION = "setup";
 
 // Output view ids are flat (not nested by Graphs/Tables group) — the
 // grouping is a sidebar presentation concern, not a routing one.
 export const OUTPUT_VIEWS = [
-  "projection", "composite", "net-assets", "asset-balances", // Graphs
-  "cashflow", "assets", "tax", "assumptions",                // Tables
+  "projection", "composite", "net-assets", "asset-balances", "super-balances", // Graphs
+  "cashflow", "assets", "tax", "super", "assumptions",                        // Tables
 ];
 export const DEFAULT_OUTPUT_VIEW = "composite"; // the composite chart is the default Graphs view (D5)
 

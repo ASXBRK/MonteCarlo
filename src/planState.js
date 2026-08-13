@@ -885,7 +885,8 @@ export function isScenarioEffectivelyEmpty(state) {
     financialCount <= 1 &&
     lifestyleCount === 0 &&
     (state.liabilities ?? []).length === 0 &&
-    (state.properties ?? []).length === 0
+    (state.properties ?? []).length === 0 &&
+    (state.plan.superAccounts ?? []).length === 0
   );
 }
 
@@ -900,6 +901,7 @@ export function sectionCounts(state) {
     "financial-assets": state.assets.filter(isFinancial).length,
     "lifestyle-assets": state.assets.filter(isLifestyle).length,
     property: (state.properties ?? []).length,
+    super: (state.plan.superAccounts ?? []).length,
     liabilities: (state.liabilities ?? []).length,
     "investment-cashflows": cf.contributions.length + cf.withdrawals.length + cf.lumpSums.length,
   };

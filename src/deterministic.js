@@ -435,11 +435,17 @@ export function projectPlan(state, profiles = PROFILES) {
     // taxFreeClosing (Commit 3): the tax-free-component balance at year
     // end — recalculated proportionally on every withdrawal/NCC, per
     // the accumulation-phase proportioning rule (see withdrawFromSuper).
+    // sg/salarySacrifice/personalDeductible/nonConcessional (Commit 4):
+    // the same total as `contributions`, broken out by type for the
+    // Super table view — kept in the engine so the UI never re-derives
+    // cap/fill arithmetic itself.
     superDetail: Object.fromEntries(superIds.map((id) => [id, {
       opening: 0, contributions: 0, contributionsTax: 0,
+      sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0,
       earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0, taxFreeClosing: 0,
     }])),
     superClosing: 0,
+    superCapUsage: { client: null, partner: null },
   });
 
   // Run one plan year's months. opts:
@@ -588,6 +594,10 @@ export function projectPlan(state, profiles = PROFILES) {
           superTaxFree[id] += nccAccepted;
           row.superDetail[id].contributions += ccGross + nccAccepted;
           row.superDetail[id].contributionsTax += ccTax;
+          row.superDetail[id].sg += flows.sg[m];
+          row.superDetail[id].salarySacrifice += flows.salarySacrifice[m];
+          row.superDetail[id].personalDeductible += flows.personalDeductible[m];
+          row.superDetail[id].nonConcessional += nccAccepted;
         }
         // "toConcessionalCap" fills: credited once, in the FY's July
         // (see schedule.js's toConcessionalCapRows header comment) —
@@ -600,6 +610,8 @@ export function projectPlan(state, profiles = PROFILES) {
               superBal[fill.accountId] += fill.amount - tax; // concessional fill — taxable, no taxFree change
               row.superDetail[fill.accountId].contributions += fill.amount;
               row.superDetail[fill.accountId].contributionsTax += tax;
+              if (fill.type === "personalDeductible") row.superDetail[fill.accountId].personalDeductible += fill.amount;
+              else row.superDetail[fill.accountId].salarySacrifice += fill.amount;
             }
           }
         }
@@ -890,6 +902,12 @@ export function projectPlan(state, profiles = PROFILES) {
     // handed to runYear for crediting in the real pass only.
     const superRatesY = superRatesFor(fyStart, bracketMode, cpi);
     const superOutcome = { client: null, partner: null };
+    // Cap headroom snapshot (Tier 1.2, Commit 4 UI): the cap and
+    // carry-forward available BEFORE this FY's toConcessionalCap fills
+    // consume it — the "constraint row" figure shown live beside each
+    // concessional contribution row. Reported alongside superOutcome,
+    // not folded into it, since it's display-only and never feeds tax.
+    const superCapUsage = { client: null, partner: null };
     for (const p of persons) {
       const tsbPriorJune = superAccountsByOwner[p].reduce((s, id) => s + superBal[id], 0);
       let grossSG = 0, grossSS = 0, grossPD = 0, grossNCC = 0;
@@ -904,6 +922,17 @@ export function projectPlan(state, profiles = PROFILES) {
         }
       }
       const otherConcessional = grossSG + grossSS + grossPD;
+      const carryForwardAvailable = availableCarryForward(
+        superCarryForward[p], tsbPriorJune, superRatesY.carryForwardTsbGate
+      );
+      superCapUsage[p] = {
+        cap: superRatesY.concessionalCap,
+        carryForwardAvailable,
+        sg: grossSG,
+        salarySacrifice: grossSS,
+        personalDeductible: grossPD,
+        available: Math.max(0, superRatesY.concessionalCap + carryForwardAvailable - otherConcessional),
+      };
 
       // "toConcessionalCap": fills whatever headroom remains — resolved
       // here (not schedule.js) because it needs the LIVE carry-forward
@@ -923,7 +952,7 @@ export function projectPlan(state, profiles = PROFILES) {
           availableCarryForward(superCarryForward[p], tsbPriorJune, superRatesY.carryForwardTsbGate);
         const headroom = Math.max(0, capAvailableNow - otherConcessional - fillTotal);
         if (headroom <= 0) continue;
-        fills.push({ accountId: tc.accountId, amount: headroom });
+        fills.push({ accountId: tc.accountId, amount: headroom, type: tc.type });
         fillTotal += headroom;
       }
 
@@ -1045,6 +1074,7 @@ export function projectPlan(state, profiles = PROFILES) {
 
     // Pass 2 — the real year, with the PAYG spread applied.
     const row = mkYearRow(y);
+    row.superCapUsage = superCapUsage;
     row.openingBalance = combined[yearStart(y)];
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];

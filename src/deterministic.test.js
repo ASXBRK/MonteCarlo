@@ -1601,3 +1601,64 @@ describe("Tier 1.2 — Super (Commit 3): preservation, withdrawals, proportionin
     expect(out.superWarnings).toEqual([]);
   });
 });
+
+// --- Tier 1.2, Commit 4: per-type contribution breakdown + cap-usage display -
+
+describe("Tier 1.2 — Super (Commit 4): superDetail type breakdown, superCapUsage", () => {
+  it("superDetail splits the aggregate contribution total by type", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [employmentRow({ amount: 100000, sgApplies: true })], // SG only
+        superContributions: [scRow({ type: "personalDeductible", amount: 5000 })],
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    const sgGross = 100000 * 0.12;
+    expect(d.sg).toBeCloseTo(sgGross, 2);
+    expect(d.personalDeductible).toBeCloseTo(5000, 2);
+    expect(d.salarySacrifice).toBe(0);
+    expect(d.nonConcessional).toBe(0);
+    // The breakdown always sums back to the pre-existing aggregate.
+    expect(d.sg + d.salarySacrifice + d.personalDeductible + d.nonConcessional).toBeCloseTo(d.contributions, 2);
+  });
+
+  it("a toConcessionalCap fill attributes to the filling row's own type in the breakdown", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { superContributions: [scRow({ type: "personalDeductible", basis: "toConcessionalCap" })] },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    expect(d.personalDeductible).toBeCloseTo(32500, 1); // the full cap, nothing else contributed
+    expect(d.sg).toBe(0);
+    expect(d.salarySacrifice).toBe(0);
+  });
+
+  it("superCapUsage reports the cap, per-type usage, and available headroom (incl. carry-forward) per person", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [employmentRow({ amount: 70000 })] }, // SG only: 70,000 × 0.12 = 8,400
+    });
+    const out = projectPlan(s);
+    const u = out.yearly[0].superCapUsage.client;
+    expect(u.cap).toBe(32500);
+    expect(u.sg).toBeCloseTo(8400, 2);
+    expect(u.salarySacrifice).toBe(0);
+    expect(u.personalDeductible).toBe(0);
+    expect(u.carryForwardAvailable).toBe(0); // nothing accrued yet
+    expect(u.available).toBeCloseTo(32500 - 8400, 2);
+  });
+
+  it("regression gate: superCapUsage is still reported per person even with no super accounts (cap headroom is a person-level figure, not account-gated), and superDetail stays empty", () => {
+    const s = mkState({ endAge: 41 });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail).toEqual({});
+    expect(out.yearly[0].superCapUsage.client.available).toBe(32500);
+    expect(out.yearly[0].superCapUsage.client.sg).toBe(0);
+  });
+});
