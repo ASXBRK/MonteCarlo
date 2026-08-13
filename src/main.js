@@ -3299,11 +3299,6 @@ function endMonthOfYear(y) {
   return projection.schedule.monthsInFirstYear + 12 * y;
 }
 
-// Month index at the START of plan year y.
-function startMonthOfYear(y) {
-  return y === 0 ? 0 : projection.schedule.monthsInFirstYear + 12 * (y - 1);
-}
-
 // --- report period + thinning (D5, display state, persisted per scenario) ----
 //
 // Ages, not FY years, are the primary period bound (item D); thinning
@@ -3336,15 +3331,6 @@ function forcedYearIndices() {
 // in every table and export.
 function selectedYearIndices() {
   return thinnedYearIndices(state.display.reportPeriod, projection.schedule.clientAges, forcedYearIndices());
-}
-
-// A contiguous [a, b] bound spanning the selected years, for the
-// continuous monthly Projection chart's x-range and tick spacing.
-function periodBounds() {
-  const idxs = selectedYearIndices();
-  return idxs.length
-    ? { a: idxs[0], b: idxs[idxs.length - 1] }
-    : { a: 0, b: projection.schedule.planYears - 1 };
 }
 
 function renderPeriodSelector() {
@@ -3393,6 +3379,14 @@ els.hideEmptyRowsToggle.addEventListener("change", () => {
 });
 // --- View 1: projection chart -----------------------------------------------
 
+// One point per plan year (FY-end closing balance), sourced from the
+// same yearly ledger every table reads — chart and table cannot
+// disagree. Annual cashflows fire in July, so a monthly line would
+// show a step-then-drift sawtooth that is an artefact of that
+// convention, not anything the client experiences; per-year points
+// sidestep it entirely. X-axis is client age, matching every other
+// chart; hover keeps the FY label alongside the age since this is the
+// headline chart clients see first.
 function renderProjectionChart() {
   const el = $("chart");
   if (typeof Plotly === "undefined") {
@@ -3400,53 +3394,38 @@ function renderProjectionChart() {
     els.shortfallNote.hidden = true;
     return;
   }
-  const { schedule, monthly, shortfall } = projection;
-  const months = schedule.months;
-  const x = Array.from({ length: months + 1 }, (_, i) => i);
-  const custom = x.map((i) => {
-    const y = i === 0 ? 0 : schedule.yearOfMonth[i - 1];
-    return [schedule.fyLabels[y], schedule.clientAges[y]];
-  });
-  const scaleSeries = (arr) => Array.from(arr, (v, i) => v * displayFactor(i));
+  const { schedule, yearly, shortfall } = projection;
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => schedule.clientAges[y]);
+  const fyLabels = yearIdxs.map((y) => schedule.fyLabels[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
 
   const traces = [{
-    x, y: scaleSeries(monthly.combined), customdata: custom,
+    x: ages, y: yearIdxs.map((y) => yearly[y].closingBalance * factor(y)), customdata: fyLabels,
     mode: "lines", type: "scatter",
     name: "Combined",
     line: { color: "rgb(28, 90, 180)", width: 2.5 },
-    hovertemplate: "%{customdata[0]} · age %{customdata[1]}<br><b>%{y:$,.0f}</b><extra>Combined</extra>",
+    hovertemplate: "%{customdata} · age %{x}<br><b>%{y:$,.0f}</b><extra>Combined</extra>",
   }];
 
   if (showAssets) {
     const palette = ["#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#b5179e", "#d97b2f", "#9a031e", "#3a86c9"];
     let i = 0;
     for (const a of state.assets.filter((x) => x.include)) {
-      const series = monthly.perAsset[a.id];
-      if (!series) continue;
       traces.push({
-        x, y: scaleSeries(series), customdata: custom,
+        x: ages, y: yearIdxs.map((y) => (yearly[y].perAssetClosing[a.id] ?? 0) * factor(y)), customdata: fyLabels,
         mode: "lines", type: "scatter",
         name: a.name,
         line: { color: palette[i++ % palette.length], width: 1.5 },
-        hovertemplate: `%{customdata[0]} · age %{customdata[1]}<br>%{y:$,.0f}<extra>${escapeHTML(a.name)}</extra>`,
+        hovertemplate: `%{customdata} · age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(a.name)}</extra>`,
       });
     }
-  }
-
-  // FY tick labels at plan-year starts within the report period,
-  // thinned to ~10.
-  const { a: perA, b: perB } = periodBounds();
-  const step = Math.max(1, Math.ceil((perB - perA + 1) / 10));
-  const tickvals = [], ticktext = [];
-  for (let y = perA; y <= perB; y += step) {
-    tickvals.push(startMonthOfYear(y));
-    ticktext.push(schedule.fyLabels[y]);
   }
 
   const shapes = [];
   const annotations = [];
   if (shortfall) {
-    const sx = shortfall.firstMonth + 1;
+    const sx = shortfall.clientAge;
     shapes.push({
       type: "line", xref: "x", yref: "paper",
       x0: sx, x1: sx, y0: 0, y1: 1,
@@ -3472,10 +3451,7 @@ function renderProjectionChart() {
     hovermode: "x unified",
     showlegend: showAssets,
     legend: { orientation: "h", y: -0.18, x: 0.5, xanchor: "center" },
-    xaxis: {
-      tickmode: "array", tickvals, ticktext, showgrid: false, zeroline: false,
-      range: [startMonthOfYear(perA), endMonthOfYear(perB)],
-    },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
     yaxis: {
       title: { text: `Balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
       tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
