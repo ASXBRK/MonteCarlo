@@ -1447,8 +1447,14 @@ describe("Tier 1.2 — Super (Commit 2): caps, carry-forward, contributions tax,
     });
     const out = projectPlan(s);
     // Year 0: 2,500 contributed → 30,000 unused accrues to carry-forward.
-    // Year 1 fill = 32,500 cap + 30,000 available carry-forward = 62,500.
-    expect(out.yearly[1].superDetail.su1.contributions).toBeCloseTo(62500, 1);
+    // Year 1's cap (per-threshold indexation, Super thresholds Commit 1):
+    // 32,500 × 1.035¹ = 33,637.50 → floor to the nearest $2,500 = 32,500
+    // nominal (unchanged — one year of 3.5% AWOTE growth isn't yet
+    // enough to clear the next rounding step) → ÷1.025 deflation =
+    // 31,707.317073... real. Fill = 31,707.317073 + 30,000 carry-forward
+    // = 61,707.317073 (irregular real-terms stepping is the corrected
+    // behaviour, not a bug — see superRates.js's header comment).
+    expect(out.yearly[1].superDetail.su1.contributions).toBeCloseTo(31707.317073 + 30000, 1);
     expect(out.yearly[1].taxDetail.client.excessConcessionalContributions).toBeCloseTo(0, 2);
   });
 

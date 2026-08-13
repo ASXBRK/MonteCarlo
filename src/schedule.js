@@ -363,7 +363,7 @@ export function buildSchedules(state) {
     for (let y = Math.max(0, bounds.from); y <= Math.min(planYears - 1, bounds.to); y++) {
       const salaryFy = fyTotals[y];
       if (!(salaryFy > 0)) continue;
-      const rates = superRatesFor(fy0 + y, bracketMode, cpi);
+      const rates = superRatesFor(fy0 + y, bracketMode, cpi, awote);
       const sgFy = Math.min(salaryFy, rates.sgMaximumSalary) * rates.sgRate;
       if (sgFy <= 0) continue;
       if (row.frequency === "monthly") {

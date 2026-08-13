@@ -42,6 +42,7 @@ import {
   expenseCategorySums as expenseCategorySumsPure,
 } from "./cashflowCategories.js";
 import { realThreshold, LITO } from "./Tax/annual.js";
+import { superRatesFor } from "./data/superRates.js";
 import { LEG } from "./Tax/engine.js";
 import {
   createIndex, normaliseIndex, findActive, findClient,
@@ -4725,6 +4726,34 @@ function buildAssumptionsGroups() {
       rows: [
         { label: "37% bracket from", cell: thr(135000), always: true },
         { label: "45% bracket from", cell: thr(190000), always: true },
+      ],
+    });
+  }
+
+  // Super thresholds (Super thresholds Commit 1): each figure indexes
+  // on its own legislated basis and rounding step (superRates.js), so —
+  // unlike the tax-bracket rows above — these are NOT flat under
+  // "Indexed": the concessional/untaxed-plan caps and transfer balance
+  // cap step up irregularly in real dollars as their own nominal
+  // rounding thresholds are crossed.
+  if ((state.plan.superAccounts ?? []).length) {
+    const awote = state.assumptions.awote ?? 0.035;
+    const sr = (y) => superRatesFor(f0 + y, mode, cpi, awote);
+    groups.push({
+      title: "Super thresholds",
+      rows: [
+        { label: "Concessional cap", cell: (y) => sr(y).concessionalCap, always: true },
+        { label: "Non-concessional cap (= 4× concessional)", cell: (y) => sr(y).nonConcessionalCap, always: true },
+        { label: "General transfer balance cap", cell: (y) => sr(y).generalTransferBalanceCap, always: true },
+        { label: "Bring-forward threshold — full (3yr)", cell: (y) => sr(y).bringForwardTsbThresholds.full },
+        { label: "Bring-forward threshold — 2yr", cell: (y) => sr(y).bringForwardTsbThresholds.two },
+        { label: "Bring-forward threshold — nil bring-forward", cell: (y) => sr(y).bringForwardTsbThresholds.one },
+        { label: "Carry-forward TSB gate (not indexed)", cell: (y) => sr(y).carryForwardTsbGate, always: true },
+        { label: "SG maximum salary", cell: (y) => sr(y).sgMaximumSalary, always: true },
+        { label: "Untaxed plan cap", cell: (y) => sr(y).untaxedPlanCap },
+        { label: "Division 293 threshold (not indexed)", cell: (y) => sr(y).div293Threshold, always: true },
+        { label: "Division 296 lower threshold ($3m)", cell: (y) => sr(y).div296LowerThreshold },
+        { label: "Division 296 upper threshold ($10m)", cell: (y) => sr(y).div296UpperThreshold },
       ],
     });
   }

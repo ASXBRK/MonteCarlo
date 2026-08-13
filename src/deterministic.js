@@ -1043,7 +1043,7 @@ export function projectPlan(state, profiles = PROFILES) {
     // (contributions tax rate, the accepted NCC fraction, dynamic
     // "toConcessionalCap" fills, excess CC, and the Div293 inputs) is
     // handed to runYear for crediting in the real pass only.
-    const superRatesY = superRatesFor(fyStart, bracketMode, cpi);
+    const superRatesY = superRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     const superOutcome = { client: null, partner: null };
     // Cap headroom snapshot (Tier 1.2, Commit 4 UI): the cap and
     // carry-forward available BEFORE this FY's toConcessionalCap fills
