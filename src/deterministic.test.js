@@ -2110,6 +2110,331 @@ describe("Super contribution cash flow (engine-correctness fix)", () => {
   });
 });
 
+// --- toConcessionalCap contribution cash flow (engine-correctness fix,
+// cap-fill gap). schedule.js can't compute a toConcessionalCap row's fill
+// amount (it depends on the live carry-forward ledger), so it hands the
+// row to deterministic.js's year loop instead — which credited the fill
+// to super but never charged household cash for it (the same defect
+// e1eb61a fixed for explicit amount/percentOfIncome rows, left open here
+// because the fix amount wasn't known until this point). See
+// deterministic.js's a-super-fill step and schedule.js's
+// toConcessionalCapRows header comment.
+describe("toConcessionalCap contribution cash flow (engine-correctness fix)", () => {
+  const zeroRealWca = { balance: 0, minimumBalance: 0, ratePct: 2.5 };
+  const accumulate = { mode: "accumulate", assetId: null };
+
+  it('basis "amount" and basis "toConcessionalCap" produce IDENTICAL household cash, super balance and tax for the same resulting contribution', () => {
+    // SG disabled so the fill is the ONLY concessional contribution —
+    // superDetail.su1.contributions this FY is then exactly the fill.
+    const capState = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: {
+        income: [employmentRow({ amount: 180000, sgApplies: false })],
+        superContributions: [scRow({ type: "personalDeductible", basis: "toConcessionalCap" })],
+      },
+    });
+    const capOut = projectPlan(capState).yearly[0];
+    const fillAmount = capOut.superDetail.su1.contributions;
+    expect(fillAmount).toBeGreaterThan(0);
+
+    const amountState = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: {
+        income: [employmentRow({ amount: 180000, sgApplies: false })],
+        superContributions: [scRow({ type: "personalDeductible", basis: "amount", amount: fillAmount })],
+      },
+    });
+    const amountOut = projectPlan(amountState).yearly[0];
+
+    // This is the assertion that would have caught the original defect:
+    // the fill's fixed-amount equivalent must land identically on every
+    // one of these, not just the super balance.
+    expect(amountOut.wcaClosing).toBeCloseTo(capOut.wcaClosing, 4);
+    expect(amountOut.superDetail.su1.closing).toBeCloseTo(capOut.superDetail.su1.closing, 4);
+    expect(amountOut.tax).toBeCloseTo(capOut.tax, 4);
+    expect(amountOut.taxDetail.client.taxableIncome).toBeCloseTo(capOut.taxDetail.client.taxableIncome, 4);
+  });
+
+  it("a cap fill larger than available household cash draws on fundingOrder, then reports unfunded cashflow once that's exhausted too", () => {
+    const s = mkState({
+      endAge: 40,
+      assets: [mkAsset({ id: "a1", balance: 5000, allocation: zeroRealAlloc() })],
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: {
+        income: [employmentRow({ amount: 12000, sgApplies: false })], // modest cash, headroom far exceeds it
+        superContributions: [scRow({ type: "personalDeductible", basis: "toConcessionalCap" })],
+      },
+    });
+    const out = projectPlan(s).yearly[0];
+    // A cap-filling instruction is not an exception to "a client cannot
+    // contribute money they don't have" — same fallback as an explicit
+    // amount row: drain fundingOrder, then report the rest as unfunded.
+    expect(out.deficitFundedFromAssets).toBeGreaterThan(0);
+    expect(out.perAssetClosing.a1).toBeCloseTo(0, 2); // fully drained
+    expect(out.unfundedCashflow).toBeGreaterThan(0);
+    // Super still receives the full fill — the cash gap is the
+    // household's problem to fund, not a reason to silently shrink it.
+    expect(out.superDetail.su1.contributions).toBeGreaterThan(0);
+  });
+
+  it("a cap fill coexisting with SG and salary sacrifice in the same year fills exactly the remaining headroom", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
+      surplus: accumulate,
+      cashflows: {
+        income: [employmentRow({ amount: 100000, sgApplies: true })], // SG: 100,000 × 0.12 = 12,000
+        superContributions: [
+          scRow({ id: "ss1", type: "salarySacrifice", basis: "amount", amount: 5000 }),
+          scRow({ id: "fill", type: "personalDeductible", basis: "toConcessionalCap" }),
+        ],
+      },
+    });
+    const out = projectPlan(s).yearly[0];
+    const cap = 32500; // FY0 concessional cap (no indexation yet — see Commit 2's carry-forward test)
+    const sg = Math.min(100000, 270830) * 0.12;
+    const expectedFill = cap - sg - 5000;
+    // The fill is of type personalDeductible and there's no OTHER
+    // personalDeductible row this FY, so superDetail's personalDeductible
+    // breakdown isolates exactly the fill amount.
+    expect(out.superDetail.su1.personalDeductible).toBeCloseTo(expectedFill, 2);
+    // And it's genuinely charged to household cash: income already
+    // reflects the $5,000 salary-sacrifice reduction (unrelated to this
+    // fix), and the fill on top of that debits the WCA by exactly its
+    // own amount.
+    expect(out.income).toBeCloseTo(100000 - 5000, 2);
+    expect(out.wcaClosing).toBeCloseTo(out.income - out.tax - expectedFill, 2);
+  });
+});
+
+// --- Conservation invariant (engine-correctness fix, generalized). Both
+// money-creation bugs found so far (the original WCA-debit gap e1eb61a
+// fixed, and the toConcessionalCap gap this commit closes) would have
+// failed this invariant, and nothing in the suite checked it before now.
+// For every plan year (excluding the projection's final year — see
+// below), the change in total net position must equal the sum of every
+// NAMED source of cash entering or leaving the household — nothing left
+// unaccounted:
+//
+//   N(y) = financial assets + super + working cash − liabilities
+//        = out.yearly[y].netAssets (the engine's own figure)
+//
+//   ΔN(y) = income (incl. WCA interest — real household income — and any
+//           salary-sacrifice contribution, gross: it never touches
+//           `row.income`, since schedule.js/a-super-fill reduce that at
+//           the source like a real payroll would, but it's still real
+//           earned value, just redirected into super net of the
+//           contributions tax below — omitting it here would double-
+//           subtract it)
+//         + growth (asset growth + super earnings, NET of fund tax)
+//         + externalInflows (employer SG — money the household never
+//           had to forgo, entering only through super)
+//         − expenses
+//         − tax (income tax, CGT, Div293/296 — whatever `row.tax` is
+//           this FY)
+//         − contributionsTax (the 15%/30% skimmed off a contribution on
+//           the way into super — the one place a contribution's gross
+//           cash debit and net super credit are legitimately allowed to
+//           differ)
+//         − liabilityInterest (the real cost of debt; principal
+//           repayment is conservation-neutral — the WCA falls by the
+//           payment, the liability falls by the same principal, and the
+//           two mostly cancel in N)
+//         + liabilityRevaluation (a fixed nominal debt's REAL value
+//           erodes with inflation faster than cash principal repayment
+//           alone explains — a real gain to net worth with no cash flow
+//           behind it, the mirror image of an offset asset's CPI decay)
+//         − surplusSpent (the FY-end "spend" sweep — money that leaves
+//           the WCA with no asset on the other side, by design)
+//         + unfundedCashflow (an outflow the ledger recorded that the
+//           household couldn't actually pay — the WCA is forced back up
+//           to its minimum rather than left negative (convention 11), so
+//           this must be added back or the convention itself would read
+//           as a leak)
+//
+// Deliberately out of scope, so the invariant stays unambiguous rather
+// than merely thorough — each is its own already-tested subsystem:
+//  - properties (their own duty/FHOG/settlement cost accounting, D4)
+//  - explicit asset/super withdrawal rows (a shortfall there is cash the
+//    household simply didn't receive, not a leak — mixing it into the
+//    same `unfundedCashflow` figure as the WCA top-up's shortfall would
+//    make that one figure ambiguous)
+//  - non-concessional contributions (a rejected excess is a separate,
+//    already-tested modelling choice — Commit 2's "rejected... not
+//    credited" — not a target of this invariant)
+//  - the projection's final year (its CGT/Div293/Div296 assessment
+//    surfaces as an accrued liability, not a cashflow — decision 13/14 —
+//    so N doesn't yet reflect it; that's the documented convention, not
+//    a leak)
+describe("Conservation invariant (engine-correctness fix, generalized)", () => {
+  const rand = (min, max) => min + Math.random() * (max - min);
+  const randInt = (min, max) => Math.floor(rand(min, max + 1));
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+  const randomAllocation = () => ({
+    mode: "custom", incomePct: rand(0, 6), growthPct: rand(-2, 8),
+    frankingPct: pick([0, 0, 50, 100]), volBasis: "Balanced",
+  });
+
+  const randomAsset = (id) => {
+    const balance = rand(0, 200000);
+    const cgtAsset = Math.random() < 0.5;
+    return mkAsset({
+      id, balance, cgtAsset,
+      distributions: Math.random() < 0.5 ? "reinvest" : "cash",
+      allocation: randomAllocation(),
+      icrPct: 0,
+      costBase: cgtAsset ? balance * rand(0.3, 1) : null,
+    });
+  };
+
+  function randomScenario() {
+    const couple = Math.random() < 0.4;
+    const persons = couple ? ["client", "partner"] : ["client"];
+    const years = randInt(2, 4); // ≥2 so at least one non-final year exists
+    const endAge = 40 + years - 1;
+
+    const assets = Array.from({ length: randInt(1, 3) }, (_, i) => randomAsset(`a${i}`));
+
+    const superAccounts = persons.map((p) => superAcct({
+      id: `su_${p}`, owner: p, balance: rand(0, 200000), allocation: randomAllocation(),
+    }));
+
+    const income = persons.map((p) => employmentRow({
+      id: `sal_${p}`, owner: p, amount: rand(60000, 200000),
+      frequency: pick(["monthly", "annual"]),
+      from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+      sgApplies: Math.random() < 0.9,
+    }));
+
+    const expenses = [cf({
+      id: "exp1", assetId: null, amount: rand(20000, 60000) / 12, frequency: "monthly",
+      from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+    })];
+
+    const superContributions = [];
+    for (const p of persons) {
+      if (Math.random() < 0.5) {
+        superContributions.push(scRow({
+          id: `sc_amt_${p}`, owner: p, accountId: `su_${p}`,
+          type: pick(["salarySacrifice", "personalDeductible"]),
+          basis: "amount", amount: rand(1000, 15000), frequency: "annual",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+        }));
+      }
+      if (Math.random() < 0.5) {
+        superContributions.push(scRow({
+          id: `sc_cap_${p}`, owner: p, accountId: `su_${p}`,
+          type: pick(["salarySacrifice", "personalDeductible"]), basis: "toConcessionalCap",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+        }));
+      }
+    }
+
+    const liabilities = [];
+    if (Math.random() < 0.5) {
+      liabilities.push({
+        id: "lb1", name: "Loan", type: "mortgage", owner: couple ? "joint" : "client",
+        balance: rand(50000, 300000), interestRatePct: rand(4, 8),
+        termYears: randInt(10, 25), repayment: pick(["io", "pi"]), ioYears: 3,
+        deductible: Math.random() < 0.5, linkedAssetId: null, offsetAssetId: null,
+      });
+    }
+
+    const surplusMode = pick(["accumulate", "invest", "spend"]);
+    const surplus = { mode: surplusMode, assetId: surplusMode === "invest" ? assets[0].id : null };
+
+    return {
+      ...mkState({
+        endAge, cpi: rand(0.02, 0.04), assets,
+        plan: {
+          household: couple ? "couple" : "single",
+          client: { currentAge: 40 }, partner: couple ? { currentAge: 40 } : null,
+          superAccounts, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
+        },
+        cashflows: { income, expenses, superContributions },
+        surplus,
+        fundingOrder: assets.map((a) => a.id),
+      }),
+      liabilities,
+    };
+  }
+
+  function checkYearConservation(out, y, ctx) {
+    const row = out.yearly[y];
+    const prev = y > 0 ? out.yearly[y - 1] : null;
+    const sumVals = (obj, key) => Object.values(obj).reduce((s, v) => s + v[key], 0);
+
+    const openingN = prev
+      ? prev.netAssets
+      : row.openingBalance + row.wcaDetail.opening
+        + sumVals(row.superDetail, "opening") - sumVals(row.liabilities, "opening");
+    const closingN = row.netAssets;
+
+    const superEarningsNet = sumVals(row.superDetail, "earnings") - sumVals(row.superDetail, "earningsTax");
+    const contributionsTax = sumVals(row.superDetail, "contributionsTax");
+    const sgInflow = sumVals(row.superDetail, "sg");
+    const salarySacrificed = sumVals(row.superDetail, "salarySacrifice");
+    const liabilityInterest = sumVals(row.liabilities, "interest");
+    // A liability's nominal balance amortises independently of CPI, but
+    // its REAL value (opening/closing, both deflated by that month's
+    // cumulative CPI factor) erodes faster than cash principal
+    // repayment alone accounts for — the rest is inflation quietly
+    // shrinking the real burden of a fixed nominal debt, a genuine gain
+    // to net worth with no cash flow behind it at all (the mirror image
+    // of an offset asset's cpiDecayMonthly in deterministic.js's growth
+    // step). Deriving it from the engine's own opening/closing/principal
+    // figures (rather than reconstructing month-by-month deflation)
+    // keeps this exact regardless of the rate path.
+    const liabilityRevaluation = sumVals(row.liabilities, "opening") - sumVals(row.liabilities, "closing")
+      - sumVals(row.liabilities, "principal");
+
+    // A salary-sacrifice contribution (explicit or a toConcessionalCap
+    // fill of that type) never touches `row.income` — schedule.js/
+    // a-super-fill reduce it upstream, at the source, the same way an
+    // employer's payroll would. But the sacrificed amount is still real
+    // earned value, just redirected: it reappears net-of-contributions-
+    // tax in super. Add it back here so only the contributions tax
+    // itself (below) is counted as the leak — otherwise this formula
+    // would double-subtract it (once by excluding it from income, again
+    // implicitly by not crediting where it actually landed).
+    const income = row.income + row.wcaDetail.interest + salarySacrificed;
+    const growth = row.growth + superEarningsNet + liabilityRevaluation;
+
+    const expected =
+      income + growth + sgInflow
+      - row.expenses - row.tax - contributionsTax - liabilityInterest
+      - row.surplusSpent + row.unfundedCashflow;
+
+    const delta = closingN - openingN;
+    const gap = delta - expected;
+    const tol = Math.max(0.05, Math.abs(closingN) * 1e-6);
+    if (Math.abs(gap) > tol) {
+      throw new Error(
+        `Conservation invariant violated by ${gap.toFixed(4)} (tol ${tol.toFixed(4)}) at ${ctx}: ` +
+        `delta=${delta.toFixed(2)} expected=${expected.toFixed(2)}`
+      );
+    }
+  }
+
+  it("holds across a few hundred randomly generated scenarios", () => {
+    const RUNS = 300;
+    for (let i = 0; i < RUNS; i++) {
+      const state = randomScenario();
+      const out = projectPlan(state);
+      const years = out.yearly.length;
+      for (let y = 0; y < years - 1; y++) { // final year excluded — see header
+        checkYearConservation(out, y, `scenario ${i}, year ${y}`);
+      }
+    }
+  });
+});
+
 // --- Division 296 (Super thresholds Commit 2) — engine wiring. The
 // formula itself (Government worked examples, two-tier boundary,
 // higher-of-opening/closing, no-tax-below-threshold) is unit-tested

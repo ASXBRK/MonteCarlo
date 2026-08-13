@@ -427,17 +427,13 @@ export function buildSchedules(state) {
   // state, so deterministic.js resolves it directly (see
   // `toConcessionalCapRows` below).
   //
-  // DISCLOSED GAP (engine-correctness fix): a toConcessionalCap fill
-  // of type personalDeductible does NOT yet debit household cash the
-  // way an explicit amount/percentOfIncome personalDeductible row now
-  // does (deterministic.js only reads schedule.superFlows for that
-  // debit, and a fill is never written back into those arrays); one of
-  // type salarySacrifice likewise doesn't reduce `income` here, for
-  // the same reason. Both still create money for a toConcessionalCap
-  // row specifically. Not fixed in this pass — it needs the fill
-  // credit (currently real-pass-only) restructured to run ungated, the
-  // same way the WCA's other flows do, which is a larger change than
-  // this fix's scope. Tracked, not silent.
+  // A toConcessionalCap fill's household-cash and tax effects are NOT
+  // derived from these flow arrays — a fill is never written back into
+  // them, since its amount depends on the live carry-forward ledger
+  // (see toConcessionalCapRows below). deterministic.js resolves and
+  // applies both effects itself, once per FY, at the point the fill
+  // amount becomes known (a-super-fill, applied UNGATED so it feeds the
+  // tax measurement pass too, same as every other deduction here).
   const incomeRowsById = Object.fromEntries(state.cashflows.income.map((r) => [r.id, r]));
   const toConcessionalCapRows = [];
   for (const sc of state.cashflows.superContributions ?? []) {

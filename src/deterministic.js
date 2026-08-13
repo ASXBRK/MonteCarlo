@@ -649,6 +649,38 @@ export function projectPlan(state, profiles = PROFILES) {
         if (pd > 0) acc[superMeta[id].owner].deductions += pd;
       }
 
+      // a-super-fill. "toConcessionalCap" fills (resolved once per FY,
+      // above, in the caller — headroom isn't known at schedule-build
+      // time) apply their tax and household-cash effects here, UNGATED,
+      // for the same reason as a-super-deduct above: this must feed the
+      // tax measurement pass, not only the real pass's super-balance
+      // credit later in this same iteration (that credit stays
+      // row-gated below — accumulation-phase balances never feed
+      // measurement). Credited once, in the FY's July, matching where
+      // the balance credit lands. A personalDeductible fill is a full
+      // deduction funded like any other outflow (added to
+      // superContribCashOut below, so an unaffordable fill runs the
+      // same funding-order-then-unfunded fallback as everything else);
+      // a salarySacrifice fill is already pre-tax — it reduces the
+      // owner's assessable salary and the household's cash income by
+      // the same amount, exactly like an explicit salary-sacrifice row
+      // upstream in schedule.js. This closes the gap schedule.js's
+      // toConcessionalCapRows header comment tracks ("DISCLOSED GAP").
+      let fillCashDebit = 0;
+      const fillSalarySacrifice = { client: 0, partner: 0 };
+      if (m === julyOf(y)) {
+        for (const p of persons) {
+          for (const fill of superOutcome[p].fills) {
+            if (fill.type === "personalDeductible") {
+              acc[p].deductions += fill.amount;
+              fillCashDebit += fill.amount;
+            } else {
+              fillSalarySacrifice[p] += fill.amount;
+            }
+          }
+        }
+      }
+
       // a-deductions. Deductions (PAYG withholding, tax refund timing,
       // and deductions): each row reduces its OWNER's assessable income
       // directly — no household cash effect (see schedule.js's
@@ -914,13 +946,18 @@ export function projectPlan(state, profiles = PROFILES) {
       // of income (e.g. a July salary) cover the months before and
       // after it, instead of being "spent" that one month while the
       // rest of the year runs spurious deficit-funding sales.
-      const inc = schedule.income[m] + cashDist + rentIncome;
+      // A salarySacrifice-type toConcessionalCap fill reduces household
+      // cash income the same month it's resolved, exactly like an
+      // explicit salary-sacrifice row already does upstream in
+      // schedule.js (see a-super-fill above).
+      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
         if (own && own[m] > 0) {
           acc[p].ordinary += own[m];
           acc[p].incomeMonths.add(m);
         }
+        if (fillSalarySacrifice[p] > 0) acc[p].ordinary -= fillSalarySacrifice[p];
       }
       const exp = schedule.expenses[m];
       const tax = (taxOut ? taxOut[m] : 0) + (m === first ? cgtDue : 0);
@@ -931,11 +968,13 @@ export function projectPlan(state, profiles = PROFILES) {
       // upstream in schedule.js) are excluded here, or they'd be
       // debited twice. Without this, super gains the contribution and
       // tax falls by the deduction, but nothing ever leaves the
-      // household — the original defect.
+      // household — the original defect. fillCashDebit (a-super-fill
+      // above) extends this to a personalDeductible toConcessionalCap
+      // fill — same rule, same fallback if cash can't cover it.
       const superContribCashOut = superIds.reduce((s, id) => {
         const flows = schedule.superFlows[id];
         return s + (flows ? flows.personalDeductible[m] + flows.nonConcessional[m] : 0);
-      }, 0);
+      }, 0) + fillCashDebit;
       const net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut - superContribCashOut;
       wcaBal += net;
       if (row) {
