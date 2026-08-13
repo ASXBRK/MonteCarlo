@@ -89,50 +89,77 @@ describe("PROFILES.classWeights — asset class allocations (Commit: allocation-
   });
 });
 
-// Consistency check (profiles.js's header comment, reproduced here
-// programmatically rather than by hand, so it can't drift from the
-// weights it's meant to be checking): implied franking, from each
-// profile's own class weights and the firm's 4%-fully-franked
-// Australian-equity yield assumption, against the profile's stated
-// frankingPct. Hand calc for the one worked in profiles.js's comment:
-// Balanced — 22.5% Aus equity × 4% = 0.9% of the 3.35% total income =
-// 26.87% implied vs 25% stated (1.87pp gap).
-describe("impliedFrankingPct — implied-vs-stated franking consistency check", () => {
-  const GAP_TOLERANCE = 15; // percentage points — profiles.js's brief: flag beyond this, don't paper over it
+// impliedFrankingPct is now the ONLY source of a profile's franking
+// (Derive franking from class weights commit) — PROFILES no longer
+// carries a stored frankingPct to compare against. PREVIOUSLY_STATED
+// is the number that field used to hold, kept here purely as a
+// historical record so this test can confirm the derived figure
+// landed where the old placeholder already agreed, without implying
+// there are still two independent figures to reconcile going forward.
+// Hand calc for the one worked in profiles.js's comment: Balanced —
+// 22.5% Aus equity × 4% = 0.9% of the 3.35% total income = 26.87%
+// derived (1.87pp from the old 25% placeholder).
+const PREVIOUSLY_STATED_FRANKING = {
+  "Cash": 0, "Defensive": 0, "Moderately Defensive": 15, "Balanced": 25, "Moderate Growth": 30,
+  "High Growth – Income": 50, "High Growth – Capital": 30,
+  "Accelerated Growth – Income": 60, "Accelerated Growth – Growth": 35,
+  "Residential Property": 0,
+};
 
-  it("Balanced reproduces the ~27% implied franking worked example", () => {
-    const p = PROFILES["Balanced"];
-    expect(impliedFrankingPct(p.classWeights, p.incomeReturn)).toBeCloseTo(26.865671641791046, 6);
+describe("impliedFrankingPct — franking derived from class weights", () => {
+  const derived = (name) => impliedFrankingPct(PROFILES[name].classWeights, PROFILES[name].incomeReturn);
+
+  it("Balanced reproduces the ~27% derived franking worked example", () => {
+    expect(derived("Balanced")).toBeCloseTo(26.865671641791046, 6);
   });
 
-  it("every profile's implied franking is within 15pp of its stated frankingPct, EXCEPT the two flagged Accelerated Growth variants", () => {
-    const FLAGGED = new Set(["Accelerated Growth – Income", "Accelerated Growth – Growth"]);
-    for (const [name, profile] of Object.entries(PROFILES)) {
-      const implied = impliedFrankingPct(profile.classWeights, profile.incomeReturn);
-      const gap = Math.abs(implied - profile.frankingPct);
-      if (FLAGGED.has(name)) {
-        expect(gap, name).toBeGreaterThan(GAP_TOLERANCE);
-      } else {
-        expect(gap, name).toBeLessThanOrEqual(GAP_TOLERANCE);
-      }
+  // Only 5 of the 10 profiles land within 3pp of the old placeholder —
+  // Cash, Moderately Defensive, Balanced, Moderate Growth, Residential
+  // Property. Defensive (+7.7pp), High Growth – Income (-8.4pp) and
+  // High Growth – Capital (+10.8pp) sit further out than that but
+  // still inside the old 15pp flag threshold — they're not part of
+  // this "already agreed" group, but they're also not the CMA-flagged
+  // pair below. Listed explicitly rather than asserted as a blanket
+  // "within 3pp for everyone but the flagged two", since that blanket
+  // claim isn't actually true of these three.
+  const CLOSELY_AGREED = ["Cash", "Moderately Defensive", "Balanced", "Moderate Growth", "Residential Property"];
+  it("the closely-agreed profiles' derived franking is within 3pp of the old placeholder", () => {
+    for (const name of CLOSELY_AGREED) {
+      const gap = Math.abs(derived(name) - PREVIOUSLY_STATED_FRANKING[name]);
+      expect(gap, name).toBeLessThanOrEqual(3);
     }
   });
 
-  it("Accelerated Growth – Income is under-franked relative to its stated figure by ~17pp (43.1% implied vs 60% stated)", () => {
-    const p = PROFILES["Accelerated Growth – Income"];
-    expect(impliedFrankingPct(p.classWeights, p.incomeReturn)).toBeCloseTo(43.12, 1);
+  it("Defensive and the two High Growth variants agreed with the old placeholder within the old 15pp tolerance, but not within 3pp", () => {
+    for (const name of ["Defensive", "High Growth – Income", "High Growth – Capital"]) {
+      const gap = Math.abs(derived(name) - PREVIOUSLY_STATED_FRANKING[name]);
+      expect(gap, name).toBeGreaterThan(3);
+      expect(gap, name).toBeLessThanOrEqual(15);
+    }
   });
 
-  it("Accelerated Growth – Growth is over-franked relative to its stated figure by ~24pp (58.8% implied vs 35% stated)", () => {
-    const p = PROFILES["Accelerated Growth – Growth"];
-    expect(impliedFrankingPct(p.classWeights, p.incomeReturn)).toBeCloseTo(58.8, 1);
+  // CMA REVIEW: these two aren't a franking problem any more (franking
+  // is derived, so it can't disagree with itself) — they're a return-
+  // SPLIT problem. See profiles.js's "RESIDUAL CMA QUESTION" comment:
+  // each profile's own class weights, at the same yield assumptions
+  // used to derive franking, imply a total income return well away
+  // from the profile's stated incomeReturn (Accelerated Growth –
+  // Growth: ~2.85% implied vs 2.00% stated; Accelerated Growth –
+  // Income: ~3.34% implied vs 5.00% stated). Asserted here at their
+  // exact derived franking figures, unchanged from before this commit
+  // (the weights were not adjusted), so this stays the anchor for that
+  // open question.
+  it("Accelerated Growth – Income derives to ~43.1% franking (60% under the old placeholder) — flagged for CMA review of its return split, not adjusted", () => {
+    expect(derived("Accelerated Growth – Income")).toBeCloseTo(43.12, 1);
   });
 
-  it("Cash and Residential Property have zero Australian equity, so zero implied franking, matching their zero stated figure exactly", () => {
+  it("Accelerated Growth – Growth derives to ~58.8% franking (35% under the old placeholder) — flagged for CMA review of its return split, not adjusted", () => {
+    expect(derived("Accelerated Growth – Growth")).toBeCloseTo(58.8, 1);
+  });
+
+  it("Cash and Residential Property have zero Australian equity, so zero derived franking", () => {
     for (const name of ["Cash", "Residential Property"]) {
-      const p = PROFILES[name];
-      expect(impliedFrankingPct(p.classWeights, p.incomeReturn)).toBe(0);
-      expect(p.frankingPct).toBe(0);
+      expect(derived(name)).toBe(0);
     }
   });
 });

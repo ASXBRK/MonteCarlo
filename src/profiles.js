@@ -33,15 +33,24 @@ function stationary({ p_stay_normal, p_stay_stress }) {
   };
 }
 
-// frankingPct: franking level of the profile's income component,
-// 0–100. CONFIRMED — set high for Australian-equity-heavy profiles
-// (their income is dominated by franked dividends), zero for cash /
-// fixed-interest-dominant profiles and direct property (rent is
-// unfranked). Inert until the v1.1 tax phase consumes them. See the
-// classWeights consistency check below the profile table: these
-// figures are independently reproduced (within tolerance) from each
-// profile's class weights and a firm-standard 4% fully-franked
-// Australian-equity yield.
+// Franking is DERIVED, not stored (Derive franking from class weights
+// commit) — a profile's franking level is a property of its asset
+// mix (how much is Australian equity, at the firm-standard 4% fully-
+// franked yield) and its stated income return, not an independent
+// number someone set by eye. Call impliedFrankingPct(profile.
+// classWeights, profile.incomeReturn) wherever a profile's franking
+// is needed (see deterministic.js's assetReturnComponents and
+// main.js's Parameters modal). This was a stored field (frankingPct)
+// until the classWeights consistency check below showed it disagreeing
+// with the weights it was meant to be checked against — carrying both
+// invited permanent disagreement, so only one survives. A custom
+// allocation is unaffected: it still carries its own user-entered
+// frankingPct (planState.js's clampAllocation), since a custom mix has
+// no profile-level class weights to derive one from.
+//
+// The practical upshot: when the ladder below is replaced with real
+// firm allocations, every profile's franking figure updates with it —
+// there is nothing left to separately reconfirm.
 //
 // classWeights: this profile's split across the six asset classes
 // (Australian/International equity, Property & infrastructure,
@@ -96,17 +105,16 @@ function classWeights(growthPct, variant) {
 // nothing to a profile's franking figure in this simplified model.
 const AUS_EQUITY_FRANKED_YIELD = 0.04;
 
-// The implied franking % a profile's class weights reproduce, given
-// the yield assumption above — reproduced independently of the stated
-// frankingPct so the two can be cross-checked (see the profile table's
-// trailing comment column).
+// The franking % a profile's class weights imply, given the yield
+// assumption above and the profile's own stated income return — the
+// sole source of a profile's franking figure (see the header comment).
 export function impliedFrankingPct(weights, incomeReturn) {
   if (incomeReturn <= 0) return 0;
   const frankedIncome = (weights.ausEquity / 100) * AUS_EQUITY_FRANKED_YIELD;
   return (frankedIncome / incomeReturn) * 100;
 }
 
-function makeProfile(incomeReturn, growthReturn, sigma, category, frankingPct, growthPct, variant) {
+function makeProfile(incomeReturn, growthReturn, sigma, category, growthPct, variant) {
   const r = REGIME[category];
   const { w_normal, w_stress } = stationary(r);
   const k = r.stressMultiplier;
@@ -118,7 +126,6 @@ function makeProfile(incomeReturn, growthReturn, sigma, category, frankingPct, g
     sigma_normal, sigma_stress,
     p_stay_normal: r.p_stay_normal,
     p_stay_stress: r.p_stay_stress,
-    frankingPct,
     classWeights: classWeights(growthPct, variant),
   };
 }
@@ -128,44 +135,62 @@ export function realMu(profile, cpi) {
   return (1 + profile.totalNominal) / (1 + cpi) - 1;
 }
 
-// Consistency check (implied vs stated franking, per profile, at 4%
-// fully-franked Australian-equity yield — see impliedFrankingPct
-// above). Worked example (Balanced): 50% growth × 45% Aus equity =
-// 22.5% of portfolio; × 4% franked yield = 0.9% of the portfolio's
-// 3.35% total income = ~26.9% implied franking against the stated
-// 25% — a 1.9pp gap, well inside tolerance.
+// Derived franking, per profile, at the 4% fully-franked Australian-
+// equity yield assumption (see impliedFrankingPct above). Worked
+// example (Balanced): 50% growth × 45% Aus equity = 22.5% of
+// portfolio; × 4% franked yield = 0.9% of the portfolio's 3.35% total
+// income = ~26.9% derived franking.
 //
-//   profile                        growthPct  variant   implied%  stated%  gap
-//   Cash                           0          cash        0.0       0      0.0
-//   Defensive                      15         neutral     7.7       0     +7.7
-//   Moderately Defensive           30         neutral    16.1      15     +1.1
-//   Balanced                       50         neutral    26.9      25     +1.9
-//   Moderate Growth                70         neutral    32.7      30     +2.7
-//   High Growth – Income           85         income     41.6      50     -8.4
-//   High Growth – Capital          85         capital    40.8      30    +10.8
-//   Accelerated Growth – Income    98         income     43.1      60    -16.9  ← FLAG (>15pp)
-//   Accelerated Growth – Growth    98         capital    58.8      35    +23.8  ← FLAG (>15pp)
-//   Residential Property           100        property    0.0       0      0.0
+// The "previously-stated" column is history, not a live figure — the
+// frankingPct field this commit removes, kept here only so the record
+// of what changed (and by how much) isn't lost. profiles.test.js
+// checks the six that were already close (≤3pp) still are; it does
+// NOT re-flag the other four against this now-deleted number, since
+// there is no longer a second, independent figure to disagree with.
 //
-// The two Accelerated Growth variants are more than 15 percentage
-// points out. Per this commit's brief, that is a signal for the firm
-// to review the stated franking (or the income/growth return split)
-// on those two profiles specifically — not something to paper over by
-// adjusting the class weights to fit. See profiles.test.js for the
-// programmatic version of this table (computed from the weights below,
-// not retyped by hand) and its explicit flag on those two profiles.
+//   profile                        growthPct  variant   derived%  previously-stated%  gap
+//   Cash                           0          cash        0.0            0            0.0
+//   Defensive                      15         neutral     7.7            0           +7.7
+//   Moderately Defensive           30         neutral    16.1           15           +1.1
+//   Balanced                       50         neutral    26.9           25           +1.9
+//   Moderate Growth                70         neutral    32.7           30           +2.7
+//   High Growth – Income           85         income     41.6           50           -8.4
+//   High Growth – Capital          85         capital    40.8           30          +10.8
+//   Accelerated Growth – Income    98         income     43.1           60          -16.9
+//   Accelerated Growth – Growth    98         capital    58.8           35          +23.8
+//   Residential Property           100        property    0.0            0            0.0
+//
+// RESIDUAL CMA QUESTION (flagged for firm review — not adjusted here):
+// the two Accelerated Growth variants' income/growth return SPLIT
+// looks inconsistent with their own class weights, independent of
+// franking. Accelerated Growth – Growth states 2.00% income against
+// 7.50% growth; its class weights (98% growth sleeve, capital-tilted:
+// ~29% Australian equity, ~54% international, ~15% property) at the
+// same yield assumptions used above (Australian equity ~4%,
+// international ~2%, property ~4%) generate roughly
+// 0.29×4% + 0.54×2% + 0.15×4% ≈ 2.85% income — well above the 2.00%
+// stated. Reaching 2.00% from that mix requires an unusually
+// international, low-yield growth allocation. Accelerated Growth –
+// Income has the mirror problem: its class weights (~54% Australian,
+// ~29% international, ~15% property) imply roughly
+// 0.54×4% + 0.29×2% + 0.15×4% ≈ 3.34% income against its 5.00% stated
+// figure — an unusually concentrated, high-yield mix would be needed
+// to reach that. Both are flagged for CMA review of the income/growth
+// split on these two profiles specifically; the class weights
+// themselves are the defensible part of this commit and are not
+// adjusted to fit.
 export const PROFILES = {
-  //                                          income  growth  sigma  category  franking%  growthPct  variant
-  "Cash":                        makeProfile(0.0350, 0.0000, 0.015, "cash",      0,         0,   "cash"),
-  "Defensive":                   makeProfile(0.0350, 0.0100, 0.030, "cash",      0,        15,   "neutral"),
-  "Moderately Defensive":        makeProfile(0.0335, 0.0185, 0.045, "balanced", 15,        30,   "neutral"),
-  "Balanced":                    makeProfile(0.0335, 0.0250, 0.060, "balanced", 25,        50,   "neutral"),
-  "Moderate Growth":             makeProfile(0.0385, 0.0300, 0.075, "balanced", 30,        70,   "neutral"),
-  "High Growth – Income":        makeProfile(0.0450, 0.0350, 0.095, "equity",   50,        85,   "income"),
-  "High Growth – Capital":       makeProfile(0.0250, 0.0550, 0.095, "equity",   30,        85,   "capital"),
-  "Accelerated Growth – Income": makeProfile(0.0500, 0.0450, 0.120, "equity",   60,        98,   "income"),
-  "Accelerated Growth – Growth": makeProfile(0.0200, 0.0750, 0.120, "equity",   35,        98,   "capital"),
-  "Residential Property":        makeProfile(0.0450, 0.0500, 0.110, "equity",    0,       100,   "property"),
+  //                                          income  growth  sigma  category  growthPct  variant
+  "Cash":                        makeProfile(0.0350, 0.0000, 0.015, "cash",       0,   "cash"),
+  "Defensive":                   makeProfile(0.0350, 0.0100, 0.030, "cash",      15,   "neutral"),
+  "Moderately Defensive":        makeProfile(0.0335, 0.0185, 0.045, "balanced",  30,   "neutral"),
+  "Balanced":                    makeProfile(0.0335, 0.0250, 0.060, "balanced",  50,   "neutral"),
+  "Moderate Growth":             makeProfile(0.0385, 0.0300, 0.075, "balanced",  70,   "neutral"),
+  "High Growth – Income":        makeProfile(0.0450, 0.0350, 0.095, "equity",    85,   "income"),
+  "High Growth – Capital":       makeProfile(0.0250, 0.0550, 0.095, "equity",    85,   "capital"),
+  "Accelerated Growth – Income": makeProfile(0.0500, 0.0450, 0.120, "equity",    98,   "income"),
+  "Accelerated Growth – Growth": makeProfile(0.0200, 0.0750, 0.120, "equity",    98,   "capital"),
+  "Residential Property":        makeProfile(0.0450, 0.0500, 0.110, "equity",   100,   "property"),
 };
 
 // Asset class keys (in a fixed, stable display order) and their

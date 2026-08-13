@@ -5,7 +5,7 @@
 // derived summaries. The ledger that consumes these inputs arrives in
 // Phase B; tax in B.1 — income is captured gross and the UI says so.
 
-import { PROFILES, realMu, ASSET_CLASS_KEYS, ASSET_CLASS_LABELS } from "./profiles.js";
+import { PROFILES, realMu, impliedFrankingPct, ASSET_CLASS_KEYS, ASSET_CLASS_LABELS } from "./profiles.js";
 import { allocationSeries } from "./allocation.js";
 import {
   defaultState, createAsset, createLifestyleAsset, createCashflow, createLumpSum,
@@ -2491,7 +2491,11 @@ function switchAllocMode(a, mode) {
         mode: "custom",
         incomePct: +((p.incomeReturn ?? 0) * 100).toFixed(2),
         growthPct: +((p.growthReturn ?? 0) * 100).toFixed(2),
-        frankingPct: p.frankingPct ?? 0,
+        // Franking is derived, not stored (Derive franking from class
+        // weights commit) — seed the custom field with the profile's
+        // derived figure at the point of switching, same starting
+        // point as before; the user can then edit it freely.
+        frankingPct: p.classWeights ? Math.round(impliedFrankingPct(p.classWeights, p.incomeReturn ?? 0)) : 0,
         volBasis: a.allocation.profile,
       }, PROFILES);
     }
@@ -5157,7 +5161,7 @@ function populateParamsTable() {
         <td>${(p.totalNominal * 100).toFixed(2)}%</td>
         <td>${(realMu(p, cpi) * 100).toFixed(2)}%</td>
         <td>${(p.sigma * 100).toFixed(1)}%</td>
-        <td>${p.frankingPct}%</td>
+        <td>${impliedFrankingPct(p.classWeights, p.incomeReturn).toFixed(1)}%</td>
       </tr>
     `
   ).join("");

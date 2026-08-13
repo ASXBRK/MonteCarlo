@@ -39,7 +39,7 @@
 // The engine computes REAL values only; nominal is display-time
 // scaling. No DOM knowledge anywhere.
 
-import { PROFILES, DEFENSIVE_PROFILE } from "./profiles.js";
+import { PROFILES, DEFENSIVE_PROFILE, impliedFrankingPct } from "./profiles.js";
 import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
@@ -75,7 +75,10 @@ export function assetReturnComponents(asset, profiles = PROFILES) {
   return {
     incomeNominal: p ? p.incomeReturn : 0,
     growthNominal: p ? p.growthReturn : 0,
-    frankingPct: p ? (p.frankingPct ?? 0) : 0,
+    // Derived from the profile's class weights (Derive franking from
+    // class weights commit) — no longer a stored figure, so it can't
+    // drift out of step with the weights it's checked against.
+    frankingPct: p ? impliedFrankingPct(p.classWeights, p.incomeReturn) : 0,
   };
 }
 

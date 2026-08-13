@@ -24,7 +24,7 @@ import {
   createDeductionRow, clampDeductionRow, DEDUCTION_CATEGORIES, DEDUCTION_CATEGORY_LABELS,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
-import { PROFILES } from "./profiles.js";
+import { PROFILES, impliedFrankingPct } from "./profiles.js";
 
 const PROFILE_KEYS = Object.keys(PROFILES);
 const NOW = new Date("2026-08-12");
@@ -422,12 +422,14 @@ describe("allocation (carried from A.1)", () => {
     expect(PROFILE_KEYS).toContain(out.volBasis);
   });
 
-  it("profiles carry placeholder franking percentages", () => {
-    expect(PROFILES["Cash"].frankingPct).toBe(0);
-    expect(PROFILES["High Growth – Income"].frankingPct).toBeGreaterThan(PROFILES["High Growth – Capital"].frankingPct);
+  it("profiles' derived franking (from class weights, not a stored field) stays in range", () => {
+    const franking = (name) => impliedFrankingPct(PROFILES[name].classWeights, PROFILES[name].incomeReturn);
+    expect(franking("Cash")).toBe(0);
+    expect(franking("High Growth – Income")).toBeGreaterThan(franking("High Growth – Capital"));
     for (const p of Object.values(PROFILES)) {
-      expect(p.frankingPct).toBeGreaterThanOrEqual(0);
-      expect(p.frankingPct).toBeLessThanOrEqual(100);
+      const f = impliedFrankingPct(p.classWeights, p.incomeReturn);
+      expect(f).toBeGreaterThanOrEqual(0);
+      expect(f).toBeLessThanOrEqual(100);
     }
   });
 
