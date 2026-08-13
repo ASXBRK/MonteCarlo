@@ -1282,3 +1282,192 @@ describe("Tier 1.2 — Super (Commit 1): accounts, contributions, SG derivation,
     }
   });
 });
+
+// --- Tier 1.2, Commit 2: caps, contributions tax, Division 293 --------------
+
+function scRow(over = {}) {
+  return {
+    id: "sc1", label: "Contribution", owner: "client", accountId: "su1",
+    type: "salarySacrifice", basis: "amount", amount: 0, percent: 0, incomeRowId: null,
+    frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+    indexBasis: "none", indexExtraPct: 0,
+    ...over,
+  };
+}
+
+describe("Tier 1.2 — Super (Commit 2): caps, carry-forward, contributions tax, Division 293", () => {
+  it("contributions tax: 15% deducted from concessional contributions at the point of crediting", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] }, // 0% nominal allocation — growth math covered separately
+      cashflows: { income: [employmentRow({ amount: 100000 })] }, // SG only, default sgApplies
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    const grossSg = 100000 * 0.12;
+    expect(d.contributions).toBeCloseTo(grossSg, 2);
+    expect(d.contributionsTax).toBeCloseTo(grossSg * 0.15, 2);
+    // Net credited (gross − contributions tax) must exceed the closing
+    // balance only by the real-terms CPI decay on an otherwise-zero
+    // nominal return (see the dedicated growth-closed-form test) —
+    // never by more than that decay.
+    expect(d.closing).toBeLessThanOrEqual(grossSg * 0.85 + 1e-6);
+    expect(d.closing).toBeGreaterThan(grossSg * 0.85 * 0.95); // sanity: not wildly off
+  });
+
+  it("salary sacrifice and personal deductible produce IDENTICAL net tax outcomes for equal amounts", () => {
+    const scenario = (type) => mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [employmentRow({ amount: 100000, sgApplies: false })], // isolate — no SG noise
+        superContributions: [scRow({ type, amount: 10000 })],
+      },
+    });
+    const ss = projectPlan(scenario("salarySacrifice"));
+    const pd = projectPlan(scenario("personalDeductible"));
+    expect(ss.yearly[0].taxDetail.client.taxableIncome).toBeCloseTo(pd.yearly[0].taxDetail.client.taxableIncome, 4);
+    expect(ss.yearly[0].tax).toBeCloseTo(pd.yearly[0].tax, 2);
+    expect(ss.yearly[0].taxDetail.incomeTax).toBeCloseTo(pd.yearly[0].taxDetail.incomeTax, 4);
+  });
+
+  it("carry-forward: an under-cap year accrues unused cap, which a later over-cap year draws on (no excess)", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        superContributions: [
+          scRow({ id: "c1", amount: 10000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+          scRow({ id: "c2", amount: 50000, from: { kind: "age", age: 41 }, to: { kind: "age", age: 41 } }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    // Year 0: CC 10,000 < 32,500 cap → 22,500 unused accrues.
+    expect(out.yearly[0].taxDetail.client.excessConcessionalContributions).toBe(0);
+    // Year 1: CC 50,000; shortfall 17,500 fully covered by the 22,500
+    // carry-forward (TSB is trivially low) → no excess.
+    expect(out.yearly[1].taxDetail.client.excessConcessionalContributions).toBeCloseTo(0, 2);
+  });
+
+  it("excess concessional contributions (no carry-forward available) are assessable with the 15% offset", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [employmentRow({ amount: 80000, sgApplies: false })],
+        superContributions: [scRow({ type: "personalDeductible", amount: 50000 })],
+      },
+    });
+    const out = projectPlan(s);
+    // 50,000 − 32,500 cap = 17,500 excess (no prior carry-forward).
+    expect(out.yearly[0].taxDetail.client.excessConcessionalContributions).toBeCloseTo(17500, 2);
+    expect(out.yearly[0].taxDetail.client.excessCcOffset).toBeCloseTo(17500 * 0.15, 2);
+  });
+
+  it("toConcessionalCap fills the cap INCLUDING available carry-forward from a prior year", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        superContributions: [
+          scRow({ id: "c1", amount: 2500, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+          scRow({ id: "c2", basis: "toConcessionalCap", from: { kind: "age", age: 41 }, to: { kind: "age", age: 41 } }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    // Year 0: 2,500 contributed → 30,000 unused accrues to carry-forward.
+    // Year 1 fill = 32,500 cap + 30,000 available carry-forward = 62,500.
+    expect(out.yearly[1].superDetail.su1.contributions).toBeCloseTo(62500, 1);
+    expect(out.yearly[1].taxDetail.client.excessConcessionalContributions).toBeCloseTo(0, 2);
+  });
+
+  it("non-concessional bring-forward triggers when contributions exceed the annual cap, accepting the full multi-year total", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { superContributions: [scRow({ type: "personalNonDeductible", amount: 300000 })] },
+    });
+    const out = projectPlan(s);
+    // 300,000 > 130,000 annual cap, TSB well under $1.84m → 3-year
+    // bring-forward, $390,000 total → fully accepted, untaxed.
+    expect(out.yearly[0].superDetail.su1.contributions).toBeCloseTo(300000, 1);
+    expect(out.yearly[0].superDetail.su1.contributionsTax).toBe(0);
+  });
+
+  it("non-concessional excess beyond the bring-forward total is rejected with a flagged warning, not credited", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { superContributions: [scRow({ type: "personalNonDeductible", amount: 500000 })] },
+    });
+    const out = projectPlan(s);
+    // Accepted = 390,000 (the full 3-year bring-forward); 110,000 rejected.
+    expect(out.yearly[0].superDetail.su1.contributions).toBeCloseTo(390000, 1);
+    expect(out.superWarnings.some((w) => w.type === "nonConcessional")).toBe(true);
+  });
+
+  it("age 75 blocks member contributions (SG unaffected), flagged with a warning", () => {
+    const s = mkState({
+      plan: { client: { currentAge: 74 }, superAccounts: [superAcct()] },
+      endAge: 76,
+      cashflows: {
+        income: [employmentRow({ amount: 50000, from: { kind: "age", age: 74 }, to: { kind: "age", age: 76 } })],
+        superContributions: [scRow({
+          amount: 5000, from: { kind: "age", age: 74 }, to: { kind: "age", age: 76 },
+        })],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBeGreaterThan(0); // age 74: SG + SS
+    expect(out.yearly[1].superDetail.su1.contributions).toBeGreaterThan(0); // age 75: still allowed (boundary)
+    // age 76: salary sacrifice rejected, but SG (no age limit) still lands.
+    const sgOnlyGross = Math.min(50000, 270830) * 0.12;
+    expect(out.yearly[2].superDetail.su1.contributions).toBeCloseTo(sgOnlyGross, 2);
+    expect(out.superWarnings.some((w) => w.type === "salarySacrifice" && w.reason.includes("Age"))).toBe(true);
+  });
+
+  it("the work test (ages 67–74) blocks personal deductible contributions when workTestMet is false", () => {
+    const s = mkState({
+      plan: {
+        client: { currentAge: 70, super: { carryForward: [0, 0, 0, 0, 0], bringForwardTriggeredYear: null, workTestMet: false } },
+        superAccounts: [superAcct()],
+      },
+      endAge: 70,
+      cashflows: { superContributions: [scRow({ type: "personalDeductible", amount: 5000, from: { kind: "age", age: 70 }, to: { kind: "age", age: 70 } })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBe(0);
+    expect(out.superWarnings.some((w) => w.type === "personalDeductible" && w.reason.includes("Work test"))).toBe(true);
+  });
+
+  it("Division 293 is assessed on high income + concessional contributions, paid the following FY", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [employmentRow({ amount: 300000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[1].taxDetail.client.div293).toBeGreaterThan(0); // year 0's assessment, paid year 1
+    expect(out.accruedDiv293AtEnd).toBeGreaterThan(0); // year 1's own assessment, unpayable within the projection
+  });
+
+  it("regression gate: no-super scenarios are still bit-identical after the full Commit 2 cap/tax integration", () => {
+    const s = mkState({
+      endAge: 45,
+      cashflows: { income: [employmentRow({ amount: 90000 })] }, // employment income, no super account to receive SG
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.superClosing).toBe(0);
+      expect(row.taxDetail.div293).toBe(0);
+      expect(row.taxDetail.client.excessConcessionalContributions).toBe(0);
+      expect(row.taxDetail.client.div293).toBe(0);
+    }
+    expect(out.accruedDiv293AtEnd).toBe(0);
+    expect(out.superWarnings).toEqual([]);
+  });
+});

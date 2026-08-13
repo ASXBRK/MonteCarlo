@@ -40,9 +40,12 @@
 // scaling. No DOM knowledge anywhere.
 
 import { PROFILES } from "./profiles.js";
-import { buildSchedules, firstFyStartYear } from "./schedule.js";
+import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor } from "./data/superRates.js";
+import {
+  processConcessionalCap, processNonConcessionalCap, div293Tax, availableCarryForward,
+} from "./Tax/superContributions.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { assessPerson } from "./Tax/annual.js";
@@ -174,6 +177,26 @@ export function projectPlan(state, profiles = PROFILES) {
     superSeries[s.id] = new Float64Array(months + 1);
     superSeries[s.id][0] = s.balance;
   }
+  const superAccountsByOwner = { client: [], partner: [] };
+  for (const s of superAccounts) superAccountsByOwner[s.owner]?.push(s.id);
+  const workTestMetFor = (owner) =>
+    (owner === "partner" ? state.plan.partner?.super?.workTestMet : state.plan.client?.super?.workTestMet) !== false;
+
+  // Concessional carry-forward (5-year FIFO) SEEDS from the plan's
+  // opening ledger (a real client's already-accrued unused cap, same
+  // convention as openingCapitalLosses) and evolves FY over FY.
+  // Non-concessional bring-forward is engine-INTERNAL running state —
+  // every projection starts it fresh at year 0; plan.<person>.super.
+  // bringForwardTriggeredYear is informational only in this build (see
+  // src/Tax/superContributions.js's header for why a single stored
+  // field can't safely seed a mid-window resume).
+  const superCarryForward = {
+    client: [...(state.plan.client?.super?.carryForward ?? [0, 0, 0, 0, 0])],
+    partner: [...(state.plan.partner?.super?.carryForward ?? [0, 0, 0, 0, 0])],
+  };
+  let superBringForward = { client: null, partner: null };
+  let pendingDiv293 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT)
+  const superWarnings = [...schedule.superWarnings]; // age/work-test rejections, resolved in schedule.js
 
   // --- properties (D4) -------------------------------------------------------
   //
@@ -400,7 +423,7 @@ export function projectPlan(state, profiles = PROFILES) {
   //   trackUnfunded — record into the projection-level shortfall trackers
   // Returns per-person income components + realised gains + months in
   // which each person's income arose.
-  function runYear(y, { taxOut, cgtDue, row, trackUnfunded }) {
+  function runYear(y, { taxOut, cgtDue, row, trackUnfunded, superOutcome }) {
     const fyStart = fy0 + y;
     const acc = {};
     for (const p of persons) {
@@ -478,12 +501,31 @@ export function projectPlan(state, profiles = PROFILES) {
         }
       }
 
-      // a-super. Superannuation (Tier 1.2): grows like a financial
-      // asset (net-of-earnings-tax rate), then receives contributions.
-      // Gated on `row` only — super's own state never feeds the tax
-      // measurement pass (no household income, no realised gains in
-      // accumulation phase), so there is nothing to snapshot/roll back
-      // for the measurement pass, unlike `bal`/`pools` above.
+      // a-super-deduct. Personal deductible super contributions
+      // (Tier 1.2, Commit 2) reduce the owner's assessable income like
+      // any other deduction — on the FULL (gross, pre-contributions-tax)
+      // amount, exactly mirroring how salary sacrifice already reduced
+      // incomeByOwner upstream in schedule.js. This is what makes the
+      // two produce identical net tax outcomes for equal amounts.
+      // UNGATED (runs in both passes): it feeds the tax measurement
+      // pass just like ICR/interest deductions do.
+      for (const id of superIds) {
+        const flows = schedule.superFlows[id];
+        const pd = flows ? flows.personalDeductible[m] : 0;
+        if (pd > 0) acc[superMeta[id].owner].deductions += pd;
+      }
+
+      // a-super-credit. Superannuation grows like a financial asset
+      // (net-of-earnings-tax rate), then receives contributions net of
+      // the 15% contributions tax (concessional) or scaled by the
+      // accepted fraction (non-concessional, excess rejected) — both
+      // resolved once per FY by the caller (superOutcome), since caps/
+      // carry-forward/bring-forward are year-sequential state. Gated on
+      // `row` only: unlike the deduction above, crediting the actual
+      // balance never feeds the tax measurement pass (no household
+      // income, no realised gains in accumulation phase), so there is
+      // nothing to snapshot/roll back for that pass, unlike `bal`/
+      // `pools` above.
       if (row) {
         for (const id of superIds) {
           const sm = superMeta[id];
@@ -495,10 +537,28 @@ export function projectPlan(state, profiles = PROFILES) {
         }
         for (const id of superIds) {
           const flows = schedule.superFlows[id];
-          const c = flows ? flows.contributions[m] : 0;
-          if (c > 0) {
-            superBal[id] += c;
-            row.superDetail[id].contributions += c;
+          if (!flows) continue;
+          const outcome = superOutcome[superMeta[id].owner];
+          const ccGross = flows.sg[m] + flows.salarySacrifice[m] + flows.personalDeductible[m];
+          const nccGross = flows.nonConcessional[m];
+          const ccTax = ccGross * outcome.contributionsTaxRate;
+          const nccAccepted = nccGross * outcome.nccAcceptRatio;
+          superBal[id] += (ccGross - ccTax) + nccAccepted;
+          row.superDetail[id].contributions += ccGross + nccAccepted;
+          row.superDetail[id].contributionsTax += ccTax;
+        }
+        // "toConcessionalCap" fills: credited once, in the FY's July
+        // (see schedule.js's toConcessionalCapRows header comment) —
+        // skipped entirely in a partial first year with no firing July
+        // (convention 5), same as every other annual/one-off flow.
+        if (m === julyOf(y)) {
+          for (const p of persons) {
+            for (const fill of superOutcome[p].fills) {
+              const tax = fill.amount * superOutcome[p].contributionsTaxRate;
+              superBal[fill.accountId] += fill.amount - tax;
+              row.superDetail[fill.accountId].contributions += fill.amount;
+              row.superDetail[fill.accountId].contributionsTax += tax;
+            }
           }
         }
         for (const id of superIds) superSeries[id][m + 1] = superBal[id];
@@ -740,8 +800,85 @@ export function projectPlan(state, profiles = PROFILES) {
   // --- year loop -------------------------------------------------------------
   for (let y = 0; y < years; y++) {
     const fyStart = fy0 + y;
-    const cgtDue = y > 0 ? pendingCgt.client + pendingCgt.partner : 0;
+    const div293Due = y > 0 ? pendingDiv293.client + pendingDiv293.partner : 0;
+    const div293DueDetail = y > 0 ? pendingDiv293 : { client: 0, partner: 0 };
+    const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0) + div293Due;
     const cgtDueDetail = y > 0 ? pendingCgt : { client: 0, partner: 0 };
+
+    // Super contribution caps (Tier 1.2, Commit 2): resolved ONCE per
+    // FY, before either pass — concessional carry-forward and NCC
+    // bring-forward are year-SEQUENTIAL state that must advance exactly
+    // once per real FY, not once per measurement/real pass. The outcome
+    // (contributions tax rate, the accepted NCC fraction, dynamic
+    // "toConcessionalCap" fills, excess CC, and the Div293 inputs) is
+    // handed to runYear for crediting in the real pass only.
+    const superRatesY = superRatesFor(fyStart, bracketMode, cpi);
+    const superOutcome = { client: null, partner: null };
+    for (const p of persons) {
+      const tsbPriorJune = superAccountsByOwner[p].reduce((s, id) => s + superBal[id], 0);
+      let grossSG = 0, grossSS = 0, grossPD = 0, grossNCC = 0;
+      for (const id of superAccountsByOwner[p]) {
+        const flows = schedule.superFlows[id];
+        if (!flows) continue;
+        for (let m = yearStart(y); m < yearEnd(y); m++) {
+          grossSG += flows.sg[m];
+          grossSS += flows.salarySacrifice[m];
+          grossPD += flows.personalDeductible[m];
+          grossNCC += flows.nonConcessional[m];
+        }
+      }
+      const otherConcessional = grossSG + grossSS + grossPD;
+
+      // "toConcessionalCap": fills whatever headroom remains — resolved
+      // here (not schedule.js) because it needs the LIVE carry-forward
+      // ledger. Processed in row order so a second such row (unusual)
+      // sees the first row's fill.
+      let fillTotal = 0;
+      const fills = [];
+      for (const tc of schedule.toConcessionalCapRows) {
+        if (tc.owner !== p || y < tc.fromYear || y > tc.toYear) continue;
+        const age = p === "partner" ? schedule.partnerAges?.[y] : schedule.clientAges[y];
+        const allowed = superContributionAllowed(tc.type, age, workTestMetFor(p), superRatesY);
+        if (!allowed.ok) {
+          superWarnings.push({ fyLabel: schedule.fyLabels[y], owner: p, type: tc.type, reason: allowed.reason });
+          continue;
+        }
+        const capAvailableNow = superRatesY.concessionalCap +
+          availableCarryForward(superCarryForward[p], tsbPriorJune, superRatesY.carryForwardTsbGate);
+        const headroom = Math.max(0, capAvailableNow - otherConcessional - fillTotal);
+        if (headroom <= 0) continue;
+        fills.push({ accountId: tc.accountId, amount: headroom });
+        fillTotal += headroom;
+      }
+
+      const totalCC = otherConcessional + fillTotal;
+      const ccResult = processConcessionalCap({
+        totalCC, baseCap: superRatesY.concessionalCap, carryForward: superCarryForward[p],
+        tsbPriorJune, gate: superRatesY.carryForwardTsbGate,
+      });
+      superCarryForward[p] = ccResult.newCarryForward;
+
+      const nccResult = processNonConcessionalCap({
+        requestedNCC: grossNCC, baseCap: superRatesY.nonConcessionalCap, tsbPriorJune,
+        thresholds: superRatesY.bringForwardTsbThresholds, bringForward: superBringForward[p], planYear: y,
+      });
+      superBringForward[p] = nccResult.bringForward;
+      if (nccResult.rejected > 1e-6) {
+        superWarnings.push({
+          fyLabel: schedule.fyLabels[y], owner: p, type: "nonConcessional",
+          reason: `Exceeds the non-concessional cap — $${Math.round(nccResult.rejected)} rejected`,
+        });
+      }
+
+      superOutcome[p] = {
+        contributionsTaxRate: superRatesY.contributionsTaxRate,
+        nccAcceptRatio: grossNCC > 0 ? nccResult.accepted / grossNCC : 1,
+        fills,
+        excessCC: ccResult.excess,
+        reportableSuperContributions: grossSS + grossPD + fillTotal,
+        lowTaxContributions: Math.min(totalCC, ccResult.capAvailable),
+      };
+    }
 
     // FY rollover: this-FY pool additions age into old money.
     for (const id of ids) if (meta[id].cgt) pools[id] = poolNewFy(pools[id]);
@@ -753,7 +890,7 @@ export function projectPlan(state, profiles = PROFILES) {
     const loanSnap = { ...loanBal };
     const propValSnap = { ...propVal };
     const propPoolSnap = { ...propPools };
-    const measured = runYear(y, { taxOut: null, cgtDue, row: null, trackUnfunded: false });
+    const measured = runYear(y, { taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome });
     Object.assign(bal, balSnap);
     pools = poolSnap;
     Object.assign(loanBal, loanSnap);
@@ -791,6 +928,8 @@ export function projectPlan(state, profiles = PROFILES) {
     }
 
     // Assess income tax per person on the measured components.
+    // Excess concessional super contributions (Tier 1.2, Commit 2) are
+    // assessable here too — same treatment as ordinary income.
     const assessed = {};
     taxOutArr.fill(0, yearStart(y), yearEnd(y));
     for (const p of persons) {
@@ -804,9 +943,28 @@ export function projectPlan(state, profiles = PROFILES) {
         netCapitalGain: 0,
         capitalLossCarryFwd: lossCarryFwd[p],
         taxProfile: state.plan[p]?.taxProfile ?? null,
+        excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
       });
       assessed[p] = a;
       spreadTax(a.netIncomeTax, measured[p].incomeMonths, yearEnd(y) - 1);
+    }
+
+    // Division 293 (Tier 1.2, Commit 2): assessed this FY on the
+    // taxable income just computed, paid as a household outflow in
+    // July of FY t+1 (same convention as CGT — folded into cgtDue
+    // above, reported separately via div293DueDetail/taxDetail).
+    const newPendingDiv293 = { client: 0, partner: 0 };
+    for (const p of persons) {
+      const outcome = superOutcome[p];
+      if (!outcome) continue;
+      const { tax } = div293Tax({
+        taxableIncome: assessed[p].taxableIncome,
+        reportableSuperContributions: outcome.reportableSuperContributions,
+        lowTaxContributions: outcome.lowTaxContributions,
+        threshold: superRatesY.div293Threshold,
+        rate: superRatesY.div293Rate,
+      });
+      newPendingDiv293[p] = tax;
     }
 
     // Pass 2 — the real year, with the PAYG spread applied.
@@ -814,7 +972,7 @@ export function projectPlan(state, profiles = PROFILES) {
     row.openingBalance = combined[yearStart(y)];
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
-    const real = runYear(y, { taxOut: taxOutArr, cgtDue, row, trackUnfunded: true });
+    const real = runYear(y, { taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome });
     row.closingBalance = combined[yearEnd(y)];
     for (const id of ids) {
       row.perAssetClosing[id] = series[id][yearEnd(y)];
@@ -857,6 +1015,7 @@ export function projectPlan(state, profiles = PROFILES) {
         netCapitalGain: real[p].netCapitalGain,
         capitalLossCarryFwd: lossCarryFwd[p],
         taxProfile: state.plan[p]?.taxProfile ?? null,
+        excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
       });
       lossCarryFwd[p] = a2.lossCarryFwd;
       newPending[p] = a2.cgtTax;
@@ -868,8 +1027,11 @@ export function projectPlan(state, profiles = PROFILES) {
       grossTax: assessed[p].incomeTax,
       medicare: assessed[p].medicare,
       lito: assessed[p].lito,
+      excessCcOffset: assessed[p].excessCcOffset,
+      excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
       incomeTax: assessed[p].netIncomeTax,
       cgt: cgtDueDetail[p],
+      div293: div293DueDetail[p],
       frankingCredits: assessed[p].frankingCredits,
     } : null;
     for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY
@@ -877,11 +1039,13 @@ export function projectPlan(state, profiles = PROFILES) {
       client: detail("client"),
       partner: detail("partner"),
       incomeTax: persons.reduce((s, p) => s + assessed[p].netIncomeTax, 0),
-      cgt: cgtDue,
+      cgt: cgtDue - div293Due, // cgtDue folds in div293Due for the actual cash outflow; reported separately here
+      div293: div293Due,
       frankingCredits: persons.reduce((s, p) => s + assessed[p].frankingCredits, 0),
     };
     yearly.push(row);
     pendingCgt = newPending;
+    pendingDiv293 = newPendingDiv293;
   }
 
   let shortfall = null;
@@ -902,5 +1066,11 @@ export function projectPlan(state, profiles = PROFILES) {
     yearly,
     shortfall,
     accruedCgtAtEnd: pendingCgt.client + pendingCgt.partner,
+    // Tier 1.2: the final FY's Division 293 is unpayable inside the
+    // projection, same as accruedCgtAtEnd; superWarnings collects every
+    // rejected/gated contribution (age 75, work test, excess NCC)
+    // across the whole projection, not silently dropped.
+    accruedDiv293AtEnd: pendingDiv293.client + pendingDiv293.partner,
+    superWarnings,
   };
 }

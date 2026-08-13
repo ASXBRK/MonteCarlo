@@ -30,6 +30,26 @@
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor } from "./data/superRates.js";
 
+// Age 75 limit (member/spouse contributions — SG is exempt) and the
+// personal-deductible work test (ages 67–74, gated by the person's own
+// workTestMet toggle; the work-test EXEMPTION is not modelled).
+// Exported so deterministic.js can apply the same rule to a dynamic
+// "toConcessionalCap" fill, which it resolves itself (see schedule.js's
+// header comment on toConcessionalCapRows).
+export function superContributionAllowed(type, age, workTestMet, rates) {
+  if (type === "sg" || age == null) return { ok: true };
+  if (age > rates.contributionAgeLimit) {
+    return { ok: false, reason: `Age ${age} exceeds the age ${rates.contributionAgeLimit} contribution limit` };
+  }
+  if (type === "personalDeductible") {
+    const [lo, hi] = rates.workTestAges;
+    if (age >= lo && age <= hi && !workTestMet) {
+      return { ok: false, reason: `Work test not met at age ${age} (ages ${lo}–${hi})` };
+    }
+  }
+  return { ok: true };
+}
+
 // --- time helpers -------------------------------------------------------
 
 // Months in the partial first plan year (12 when starting in July).
@@ -255,26 +275,70 @@ export function buildSchedules(state) {
 
   // --- superannuation (Tier 1.2, accumulation phase) ------------------------
   //
-  // superFlows parallels assetFlows, but for included super accounts.
-  // Contributions come from two sources: derived SG (never
-  // user-entered) on employment income rows, and user-entered
-  // cashflows.superContributions rows. Caps, contributions tax, and
-  // carry-forward all arrive in Commit 2 — every contribution here
-  // enters at its full gross amount. Concessional caps are NOT yet
-  // carry-forward-aware (Commit 2 adds that); "toConcessionalCap"
-  // below is the simple version: cap minus this FY's other
-  // concessional contributions only.
+  // superFlows parallels assetFlows, but tracks GROSS requested amounts
+  // per super account, split by tax treatment: sg/salarySacrifice/
+  // personalDeductible (concessional — always 15% fund tax, cap+
+  // carry-forward only affects whether the EXCESS is also assessed to
+  // the member) and nonConcessional (personalNonDeductible + spouse —
+  // untaxed on entry, but capped/bring-forward-gated with the excess
+  // REJECTED rather than credited). Caps, contributions tax, Division
+  // 293, and age/work-test gating are all inherently YEAR-SEQUENTIAL
+  // (carry-forward and bring-forward evolve FY over FY) and so are
+  // computed in deterministic.js's year loop, not here — this module
+  // only resolves WHEN and WHERE each gross dollar lands.
   const superAccounts = (plan.superAccounts ?? []).filter((s) => s.include);
   const superFlows = {};
-  for (const s of superAccounts) superFlows[s.id] = { contributions: new Float64Array(months) };
+  for (const s of superAccounts) {
+    superFlows[s.id] = {
+      sg: new Float64Array(months),
+      salarySacrifice: new Float64Array(months),
+      personalDeductible: new Float64Array(months),
+      nonConcessional: new Float64Array(months),
+    };
+  }
   const yearStartM = (y) => (y === 0 ? 0 : firstYearMonths + 12 * (y - 1));
   const yearEndM = (y) => firstYearMonths + 12 * y;
-  const isConcessionalType = (type) => type === "sg" || type === "salarySacrifice" || type === "personalDeductible";
-  // Per person per FY, so toConcessionalCap rows (processed last) know
-  // how much headroom SG + explicit concessional rows have already used.
-  const concessionalByOwnerFy = {
-    client: new Float64Array(planYears),
-    partner: new Float64Array(planYears),
+  const FLOW_KEY_BY_TYPE = {
+    sg: "sg",
+    salarySacrifice: "salarySacrifice",
+    personalDeductible: "personalDeductible",
+    personalNonDeductible: "nonConcessional",
+    spouse: "nonConcessional",
+  };
+
+  // Both age and the work-test toggle are static per plan-year (ages
+  // tick once at 1 July; the toggle doesn't vary within a projection),
+  // so — unlike caps, which are year-sequential and live in
+  // deterministic.js — this can be resolved here, once, before any
+  // month is walked. Rejections are flagged (superWarnings), never
+  // silently dropped.
+  const superWarnings = [];
+  const memberAgeAt = (owner, y) => (owner === "partner" ? partnerAges?.[y] : clientAges[y]);
+  const workTestMetFor = (owner) =>
+    (owner === "partner" ? plan.partner?.super?.workTestMet : plan.client?.super?.workTestMet) !== false;
+
+  // Returns true (credit allowed) or false (rejected, warning pushed).
+  function gate(type, owner, y) {
+    const rates = superRatesFor(fy0 + y, bracketMode, cpi);
+    const result = superContributionAllowed(type, memberAgeAt(owner, y), workTestMetFor(owner), rates);
+    if (result.ok) return true;
+    superWarnings.push({ fyLabel: fyLabels[y], owner, type, reason: result.reason });
+    return false;
+  }
+
+  // Salary sacrifice reduces the CONTRIBUTING person's assessable
+  // salary at source (Commit 2) — every dollar credited here is also
+  // subtracted from that person's incomeByOwner the same month, floored
+  // at zero. It does NOT touch `income` (household cash): the money
+  // never reached the household as cash to begin with, but that's a
+  // side effect already fully captured by incomeByOwner feeding ONLY
+  // the tax layer — household cashflow accounting for contributions
+  // already treats them as outside the surplus/deficit ledger (same as
+  // every other asset contribution in this engine), so there is
+  // nothing further to adjust there.
+  const reduceTaxableIncome = (owner, m, amount) => {
+    const arr = owner === "partner" && incomeByOwner.partner ? incomeByOwner.partner : incomeByOwner.client;
+    arr[m] = Math.max(0, arr[m] - amount);
   };
 
   // SG: one "employer" per employment income row (sgApplies, default
@@ -302,33 +366,42 @@ export function buildSchedules(state) {
         const s = yearStartM(y), e = yearEndM(y);
         if (e > s) {
           const per = sgFy / (e - s);
-          for (let m = s; m < e; m++) flows.contributions[m] += per;
+          for (let m = s; m < e; m++) flows.sg[m] += per;
         }
       } else {
         const jm = julyMonthIndex(plan, y);
-        if (jm != null) flows.contributions[jm] += sgFy;
+        if (jm != null) flows.sg[jm] += sgFy;
       }
-      concessionalByOwnerFy[row.owner][y] += sgFy;
     }
   }
 
-  // User-entered contributions: "amount" and "percentOfIncome" bases
-  // first (their concessional total must be known before
-  // "toConcessionalCap" rows, processed after, can compute headroom).
+  // User-entered contributions. "toConcessionalCap" is excluded here —
+  // its fill amount depends on the carry-forward ledger's evolving
+  // state, so deterministic.js resolves it directly (see
+  // `toConcessionalCapRows` below).
   const incomeRowsById = Object.fromEntries(state.cashflows.income.map((r) => [r.id, r]));
-  const toConcessionalRows = [];
+  const toConcessionalCapRows = [];
   for (const sc of state.cashflows.superContributions ?? []) {
     const flows = superFlows[sc.accountId];
     if (!flows) continue;
-    if (sc.basis === "toConcessionalCap") { toConcessionalRows.push(sc); continue; }
-    const concessional = isConcessionalType(sc.type);
+    if (sc.basis === "toConcessionalCap") {
+      toConcessionalCapRows.push({
+        accountId: sc.accountId,
+        owner: sc.owner,
+        type: FLOW_KEY_BY_TYPE[sc.type] === "nonConcessional" ? "salarySacrifice" : sc.type, // toConcessionalCap only ever makes sense as a concessional fill
+        fromYear: resolveRef(sc.from, plan, dateSchedule, "client").planYear,
+        toYear: resolveRef(sc.to, plan, dateSchedule, "client").planYear,
+      });
+      continue;
+    }
+    const key = FLOW_KEY_BY_TYPE[sc.type] ?? "nonConcessional";
+    // Credit into a scratch buffer first — age/work-test gating (below)
+    // zeroes out whole rejected FYs before merging into the real flow,
+    // so a rejected row never partially lands.
+    const temp = new Float64Array(months);
 
     if (sc.basis === "amount") {
-      const fyTotals = concessional ? new Float64Array(planYears) : null;
-      applyRegular(sc, "client", flows.contributions, fyTotals);
-      if (concessional) {
-        for (let y = 0; y < planYears; y++) concessionalByOwnerFy[sc.owner][y] += fyTotals[y];
-      }
+      applyRegular(sc, "client", temp);
     } else if (sc.basis === "percentOfIncome") {
       const incomeRow = incomeRowsById[sc.incomeRowId];
       if (!incomeRow || !(sc.percent > 0)) continue;
@@ -348,35 +421,30 @@ export function buildSchedules(state) {
         if (incomeRow.frequency === "monthly") incomeAtM = realAmountAt(incomeRow, m, cpi, awote);
         else if (julyMonthIndex(plan, y) === m) incomeAtM = realAmountAt(incomeRow, m, cpi, awote);
         if (incomeAtM <= 0) continue;
-        const contrib = incomeAtM * (sc.percent / 100);
-        flows.contributions[m] += contrib;
-        if (concessional) concessionalByOwnerFy[sc.owner][y] += contrib;
+        temp[m] += incomeAtM * (sc.percent / 100);
       }
     }
-  }
 
-  // "toConcessionalCap": fills whatever headroom remains that FY —
-  // credited once, in the FY's July (a cap-fill is an annual-scale
-  // concept; the row's own frequency field doesn't apply to it).
-  // Processed after every other concessional contribution so the
-  // headroom is accurate; a second such row (unusual) sees the first
-  // row's fill via the same running total.
-  for (const sc of toConcessionalRows) {
-    const flows = superFlows[sc.accountId];
-    if (!flows) continue;
-    const bounds = {
-      from: resolveRef(sc.from, plan, dateSchedule, "client").planYear,
-      to: resolveRef(sc.to, plan, dateSchedule, "client").planYear,
-    };
-    for (let y = Math.max(0, bounds.from); y <= Math.min(planYears - 1, bounds.to); y++) {
-      const jm = julyMonthIndex(plan, y);
-      if (jm == null) continue;
-      const rates = superRatesFor(fy0 + y, bracketMode, cpi);
-      const headroom = Math.max(0, rates.concessionalCap - concessionalByOwnerFy[sc.owner][y]);
-      if (headroom <= 0) continue;
-      flows.contributions[jm] += headroom;
-      concessionalByOwnerFy[sc.owner][y] += headroom;
+    // Age 75 / work-test gate, resolved once per FY this row is active
+    // in (never per month) — a rejected FY is zeroed out in full.
+    for (let y = 0; y < planYears; y++) {
+      const s = yearStartM(y), e = yearEndM(y);
+      let anyThisYear = false;
+      for (let m = s; m < e; m++) if (temp[m] > 0) { anyThisYear = true; break; }
+      if (!anyThisYear) continue;
+      if (!gate(sc.type, sc.owner, y)) {
+        for (let m = s; m < e; m++) temp[m] = 0;
+      }
     }
+
+    // Salary sacrifice: reduce the contributing owner's taxable income
+    // by exactly what survives gating, month by month.
+    if (key === "salarySacrifice") {
+      for (let m = 0; m < months; m++) {
+        if (temp[m] > 0) reduceTaxableIncome(sc.owner, m, temp[m]);
+      }
+    }
+    for (let m = 0; m < months; m++) flows[key][m] += temp[m];
   }
 
   return {
@@ -392,6 +460,8 @@ export function buildSchedules(state) {
     expenses,
     assetFlows,
     superFlows,
+    toConcessionalCapRows,
+    superWarnings,
     rowTotals,
     oneOffsByAssetYear,
   };

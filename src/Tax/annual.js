@@ -87,12 +87,12 @@ export function bracketSettings(fyStartYear, bracketMode, cpi) {
 //                    simplifications. Medicare-exempt residents skip
 //                    the levy only.
 //
-// Returns { incomeTax, medicare, lito, frankingCredits, netIncomeTax,
-//           cgtTax, taxableIncome, taxableGain, lossCarryFwd }.
-// netIncomeTax = incomeTax − lito + medicare − frankingCredits and can
-// be NEGATIVE (refundable franking credits). cgtTax is assessed
-// separately because it is paid on a different timetable (July of the
-// following FY).
+// Returns { incomeTax, medicare, lito, excessCcOffset, frankingCredits,
+//           netIncomeTax, cgtTax, taxableIncome, taxableGain, lossCarryFwd }.
+// netIncomeTax = incomeTax − lito − excessCcOffset + medicare −
+// frankingCredits and can be NEGATIVE (refundable franking credits).
+// cgtTax is assessed separately because it is paid on a different
+// timetable (July of the following FY).
 export function assessPerson({
   fyStartYear,
   bracketMode = "indexed",
@@ -103,6 +103,14 @@ export function assessPerson({
   netCapitalGain = 0,
   capitalLossCarryFwd = 0,
   taxProfile = null,
+  // Excess concessional super contributions (Tier 1.2): included in
+  // assessable income at the member's marginal rate, with a
+  // non-refundable offset for the 15% contributions tax already paid
+  // in the fund (avoiding literal double taxation, not exempting the
+  // excess). Modelled: leave-in-fund (the default) — the
+  // release-from-fund election is not modelled.
+  excessConcessionalContributions = 0,
+  excessConcessionalOffsetRate = 0.15,
 }) {
   const { key, k } = bracketSettings(fyStartYear, bracketMode, cpi);
   const nonResident = taxProfile?.residency === "nonResident";
@@ -116,9 +124,12 @@ export function assessPerson({
   const frankingCredits = franked * FRANKING_RATE;
 
   // Taxable income base: gross income + grossed-up distributions less
-  // deductions. Excess deductions floor at zero (revenue losses are
-  // not carried in this model).
-  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions);
+  // deductions, plus any excess concessional super contributions
+  // (Tier 1.2 — assessable at the marginal rate like ordinary income,
+  // including for Medicare/LITO purposes). Excess deductions floor at
+  // zero (revenue losses are not carried in this model).
+  const excessCC = Math.max(0, excessConcessionalContributions);
+  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC);
 
   // Capital losses: a net loss year adds to the carry-forward; a gain
   // year consumes carried losses before any tax (losses never offset
@@ -138,7 +149,11 @@ export function assessPerson({
   // LITO withdraws on total taxable income (the gain is part of it)
   // but only ever offsets the income-tax side, never Medicare.
   const litoApplied = Math.min(lito(base + taxableGain), incomeTax);
-  const netIncomeTax = incomeTax - litoApplied + medicare - frankingCredits;
+  // Excess-CC offset applies after LITO, non-refundable (capped at
+  // whatever income tax remains) — the 15% already paid in the fund,
+  // credited back against (not exempting) the marginal-rate tax on it.
+  const excessCcOffset = Math.min(excessCC * excessConcessionalOffsetRate, Math.max(0, incomeTax - litoApplied));
+  const netIncomeTax = incomeTax - litoApplied - excessCcOffset + medicare - frankingCredits;
 
   // CGT: the gain stacks on top of the income base. Marginal tax and
   // Medicare on the gain by differencing; post-reform (FY2027-28
@@ -156,6 +171,7 @@ export function assessPerson({
     incomeTax,
     medicare,
     lito: litoApplied,
+    excessCcOffset,
     frankingCredits,
     netIncomeTax,
     cgtTax,

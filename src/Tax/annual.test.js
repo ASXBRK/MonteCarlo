@@ -189,3 +189,32 @@ describe("assessPerson — CGT", () => {
     expect(withGain.lito).toBeLessThan(700);
   });
 });
+
+describe("excess concessional super contributions (Tier 1.2)", () => {
+  it("excess CC is taxed at the marginal rate, offset by the 15% already paid in the fund", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    const withExcess = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, excessConcessionalContributions: 10000 });
+    // Taxable income rises by the excess, same as ordinary income would.
+    expect(withExcess.taxableIncome).toBeCloseTo(base.taxableIncome + 10000, 6);
+    // The offset is exactly 15% of the excess (well within the tax payable).
+    expect(withExcess.excessCcOffset).toBeCloseTo(1500, 6);
+    // Net tax rises by the marginal tax + Medicare on the excess, less the offset.
+    const marginalOnExcess = withExcess.incomeTax - base.incomeTax;
+    const medicareOnExcess = withExcess.medicare - base.medicare;
+    expect(marginalOnExcess + medicareOnExcess).toBeGreaterThan(1500); // MTR+Medicare here exceeds 15%, so it's a real net cost
+    expect(withExcess.netIncomeTax - base.netIncomeTax).toBeCloseTo(marginalOnExcess + medicareOnExcess - 1500, 2);
+  });
+
+  it("the offset is non-refundable — capped at the tax payable, never pushing net tax negative on its own", () => {
+    // A very low income: income tax payable is tiny, so a large excess
+    // CC's 15% offset can't exceed what's actually owed.
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 0, excessConcessionalContributions: 5000 });
+    expect(a.excessCcOffset).toBeLessThanOrEqual(a.incomeTax);
+  });
+
+  it("zero excess CC (the default) leaves every figure unchanged", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000 });
+    const explicit = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000, excessConcessionalContributions: 0 });
+    expect(explicit).toEqual(base);
+  });
+});
