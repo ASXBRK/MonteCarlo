@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { projectPlan, assetMonthlyRate, assetReturnComponents } from "./deterministic.js";
-import { hydrate } from "./planState.js";
+import { hydrate, SCHEMA_VERSION } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 
 // Minimal v3-shaped state factory. Custom allocations pin exact
@@ -479,7 +479,7 @@ describe("Key Dates — v5 → v6 migration gate", () => {
 
     const migrated = hydrate(JSON.stringify(v5), PROFILES);
     expect(migrated).not.toBeNull();
-    expect(migrated.schemaVersion).toBe(6);
+    expect(migrated.schemaVersion).toBe(SCHEMA_VERSION);
     // The shape work landed: every date field is now a DateRef.
     expect(migrated.cashflows.income[0].from).toEqual({ kind: "age", age: 40 });
     expect(migrated.cashflows.lumpSums[0].at).toEqual({ kind: "age", age: 43 });
@@ -1131,5 +1131,154 @@ describe("D5 — perAssetDetail.costBasePool", () => {
     const out = projectPlan(s);
     // 12 months × $1,000 contributed → pool = 50,000 + 12,000.
     expect(out.yearly[0].perAssetDetail.a1.costBasePool).toBeCloseTo(62000, 4);
+  });
+});
+
+// --- Tier 1.2, Commit 1: super accounts, contributions, SG, earnings tax ----
+
+function superAcct(over = {}) {
+  return {
+    id: "su1", name: "Super", owner: "client", balance: 0, taxFreeComponent: 0,
+    allocation: { mode: "custom", incomePct: 0, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+    icrPct: 0, include: true,
+    ...over,
+  };
+}
+
+function employmentRow(over = {}) {
+  return {
+    id: "i1", label: "Salary", owner: "client", amount: 100000, frequency: "annual",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 },
+    indexBasis: "cpi", indexExtraPct: 0, incomeType: "employment", sgApplies: true,
+    ...over,
+  };
+}
+
+describe("Tier 1.2 — Super (Commit 1): accounts, contributions, SG derivation, fund earnings tax", () => {
+  it("SG derives from employment income at sgRate, capped at sgMaximumSalary per FY", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [employmentRow({ amount: 300000 })] }, // exceeds the $270,830 cap
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBeCloseTo(270830 * 0.12, 2);
+  });
+
+  it("SG applies uncapped below the maximum salary", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [employmentRow({ amount: 100000 })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBeCloseTo(100000 * 0.12, 2);
+  });
+
+  it("the per-row sgApplies:false toggle suppresses SG on an otherwise-eligible employment row", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [employmentRow({ amount: 100000, sgApplies: false })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBe(0);
+  });
+
+  it("non-employment income types never generate SG", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [employmentRow({ amount: 100000, incomeType: "otherTaxable" })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBe(0);
+  });
+
+  it("SG with no super account for the owner credits nothing (disclosed simplification) but never throws", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [] },
+      cashflows: { income: [employmentRow({ amount: 100000 })] },
+    });
+    expect(() => projectPlan(s)).not.toThrow();
+  });
+
+  it("percentOfIncome contributions track an indexed salary", () => {
+    const s = mkState({
+      endAge: 50,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [{
+          id: "i1", label: "Salary", owner: "client", amount: 100000, frequency: "annual",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 50 },
+          indexBasis: "awote", indexExtraPct: 0, incomeType: "employment", sgApplies: false,
+        }],
+        superContributions: [{
+          id: "sc1", label: "Sacrifice", owner: "client", accountId: "su1",
+          type: "salarySacrifice", basis: "percentOfIncome", amount: 0, percent: 10,
+          incomeRowId: "i1", frequency: "annual",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 50 },
+          indexBasis: "cpi", indexExtraPct: 0,
+        }],
+      },
+      cpi: 0.025,
+    });
+    s.assumptions.awote = 0.035;
+    const out = projectPlan(s);
+    // Salary at year 5 grows in real terms at the AWOTE/CPI premium;
+    // the 10% contribution must track that same indexed value exactly.
+    const salaryY5 = 100000 * Math.pow(1.035 / 1.025, 5);
+    expect(out.yearly[5].superDetail.su1.contributions).toBeCloseTo(salaryY5 * 0.1, 2);
+  });
+
+  it("account growth is net of the 15%/10% earnings-tax haircut, matching the closed form", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: {
+        superAccounts: [superAcct({
+          balance: 100000,
+          allocation: { mode: "custom", incomePct: 4, growthPct: 3, frankingPct: 0, volBasis: "Balanced" },
+        })],
+      },
+    });
+    const out = projectPlan(s);
+    // income taxed at 15%, growth at 15%×2/3=10% (the CGT-discount
+    // assumption), combined THEN Fisher-converted — same structure as
+    // assetMonthlyRate.
+    const netNominal = 0.04 * (1 - 0.15) + 0.03 * (1 - 0.15 * (2 / 3));
+    const monthlyRate = Math.pow((1 + netNominal) / 1.025, 1 / 12) - 1;
+    const monthsInYear0 = out.schedule.monthsInFirstYear;
+    expect(out.yearly[0].superDetail.su1.closing).toBeCloseTo(100000 * Math.pow(1 + monthlyRate, monthsInYear0), 2);
+    // Reporting split: earnings (gross) minus earningsTax equals the
+    // actual (net) growth applied to the balance.
+    const d = out.yearly[0].superDetail.su1;
+    expect(d.earnings - d.earningsTax).toBeCloseTo(d.closing - d.opening - d.contributions, 4);
+  });
+
+  it("super never enters combined/netAssets financial totals, and netAssets includes superClosing additively", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct({ balance: 50000, allocation: { mode: "custom", incomePct: 0, growthPct: 5, frankingPct: 0, volBasis: "Balanced" } })] },
+    });
+    const out = projectPlan(s);
+    const y0 = out.yearly[0];
+    expect(y0.superClosing).toBeGreaterThan(50000); // grew
+    expect(y0.netAssets).toBeCloseTo(y0.closingBalance + y0.propertyClosing + y0.superClosing - y0.liabilitiesClosing, 6);
+  });
+
+  it("regression gate: a scenario with no super accounts is unaffected — superClosing is 0 and netAssets matches the pre-Tier-1.2 formula", () => {
+    const s = mkState({
+      endAge: 45,
+      cashflows: { income: [{ ...employmentRow({ amount: 80000 }), incomeType: "employment", sgApplies: true }] },
+    });
+    // No plan.superAccounts at all (undefined) — must not throw and
+    // must produce exactly the old (pre-super) netAssets formula.
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.superClosing).toBe(0);
+      expect(row.superDetail).toEqual({});
+      expect(row.netAssets).toBeCloseTo(row.closingBalance + row.propertyClosing - row.liabilitiesClosing, 6);
+    }
   });
 });

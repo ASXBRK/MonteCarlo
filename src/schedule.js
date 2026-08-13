@@ -28,6 +28,7 @@
 // resolves to exactly the plan year an equivalent integer age did.
 
 import { resolveRef } from "./keyDates.js";
+import { superRatesFor } from "./data/superRates.js";
 
 // --- time helpers -------------------------------------------------------
 
@@ -122,6 +123,8 @@ export function buildSchedules(state) {
   const plan = state.plan;
   const cpi = state.assumptions.cpi;
   const awote = state.assumptions.awote ?? 0.035;
+  const bracketMode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
+  const fy0 = firstFyStartYear(plan.start);
   const months = totalMonths(plan);
   const planYears = planYearCount(plan);
   const firstYearMonths = monthsInFirstYear(plan.start);
@@ -211,10 +214,16 @@ export function buildSchedules(state) {
   for (const row of state.cashflows.income) {
     rowTotals.income[row.id] = new Float64Array(planYears);
     applyRegular(row, row.owner, income, rowTotals.income[row.id]);
-    const ownerArr = row.owner === "partner" && incomeByOwner.partner
-      ? incomeByOwner.partner
-      : incomeByOwner.client;
-    applyRegular(row, row.owner, ownerArr);
+    // Non-taxable income (Tier 1.2) is real household cashflow (still
+    // counted in `income`/`rowTotals`) but bypasses tax assessment
+    // entirely — incomeByOwner feeds ONLY the tax layer, so it's the
+    // one place this row is excluded.
+    if (row.incomeType !== "nonTaxable") {
+      const ownerArr = row.owner === "partner" && incomeByOwner.partner
+        ? incomeByOwner.partner
+        : incomeByOwner.client;
+      applyRegular(row, row.owner, ownerArr);
+    }
   }
   for (const row of state.cashflows.expenses) {
     rowTotals.expenses[row.id] = new Float64Array(planYears);
@@ -244,6 +253,132 @@ export function buildSchedules(state) {
     oneOffsByAssetYear[ls.assetId][y] += signed;
   }
 
+  // --- superannuation (Tier 1.2, accumulation phase) ------------------------
+  //
+  // superFlows parallels assetFlows, but for included super accounts.
+  // Contributions come from two sources: derived SG (never
+  // user-entered) on employment income rows, and user-entered
+  // cashflows.superContributions rows. Caps, contributions tax, and
+  // carry-forward all arrive in Commit 2 — every contribution here
+  // enters at its full gross amount. Concessional caps are NOT yet
+  // carry-forward-aware (Commit 2 adds that); "toConcessionalCap"
+  // below is the simple version: cap minus this FY's other
+  // concessional contributions only.
+  const superAccounts = (plan.superAccounts ?? []).filter((s) => s.include);
+  const superFlows = {};
+  for (const s of superAccounts) superFlows[s.id] = { contributions: new Float64Array(months) };
+  const yearStartM = (y) => (y === 0 ? 0 : firstYearMonths + 12 * (y - 1));
+  const yearEndM = (y) => firstYearMonths + 12 * y;
+  const isConcessionalType = (type) => type === "sg" || type === "salarySacrifice" || type === "personalDeductible";
+  // Per person per FY, so toConcessionalCap rows (processed last) know
+  // how much headroom SG + explicit concessional rows have already used.
+  const concessionalByOwnerFy = {
+    client: new Float64Array(planYears),
+    partner: new Float64Array(planYears),
+  };
+
+  // SG: one "employer" per employment income row (sgApplies, default
+  // on), capped at sgMaximumSalary per FY, credited to the owner's
+  // default (first-listed, included) super account. No account for
+  // that owner → nothing to credit (disclosed simplification — SG
+  // still legally accrues, but this tool has nowhere to put it).
+  for (const row of state.cashflows.income) {
+    if (row.incomeType !== "employment" || row.sgApplies === false) continue;
+    const account = superAccounts.find((s) => s.owner === row.owner);
+    if (!account) continue;
+    const flows = superFlows[account.id];
+    const bounds = {
+      from: resolveRef(row.from, plan, dateSchedule, row.owner).planYear,
+      to: resolveRef(row.to, plan, dateSchedule, row.owner).planYear,
+    };
+    const fyTotals = rowTotals.income[row.id];
+    for (let y = Math.max(0, bounds.from); y <= Math.min(planYears - 1, bounds.to); y++) {
+      const salaryFy = fyTotals[y];
+      if (!(salaryFy > 0)) continue;
+      const rates = superRatesFor(fy0 + y, bracketMode, cpi);
+      const sgFy = Math.min(salaryFy, rates.sgMaximumSalary) * rates.sgRate;
+      if (sgFy <= 0) continue;
+      if (row.frequency === "monthly") {
+        const s = yearStartM(y), e = yearEndM(y);
+        if (e > s) {
+          const per = sgFy / (e - s);
+          for (let m = s; m < e; m++) flows.contributions[m] += per;
+        }
+      } else {
+        const jm = julyMonthIndex(plan, y);
+        if (jm != null) flows.contributions[jm] += sgFy;
+      }
+      concessionalByOwnerFy[row.owner][y] += sgFy;
+    }
+  }
+
+  // User-entered contributions: "amount" and "percentOfIncome" bases
+  // first (their concessional total must be known before
+  // "toConcessionalCap" rows, processed after, can compute headroom).
+  const incomeRowsById = Object.fromEntries(state.cashflows.income.map((r) => [r.id, r]));
+  const toConcessionalRows = [];
+  for (const sc of state.cashflows.superContributions ?? []) {
+    const flows = superFlows[sc.accountId];
+    if (!flows) continue;
+    if (sc.basis === "toConcessionalCap") { toConcessionalRows.push(sc); continue; }
+    const concessional = isConcessionalType(sc.type);
+
+    if (sc.basis === "amount") {
+      const fyTotals = concessional ? new Float64Array(planYears) : null;
+      applyRegular(sc, "client", flows.contributions, fyTotals);
+      if (concessional) {
+        for (let y = 0; y < planYears; y++) concessionalByOwnerFy[sc.owner][y] += fyTotals[y];
+      }
+    } else if (sc.basis === "percentOfIncome") {
+      const incomeRow = incomeRowsById[sc.incomeRowId];
+      if (!incomeRow || !(sc.percent > 0)) continue;
+      const bounds = {
+        from: resolveRef(sc.from, plan, dateSchedule, "client").planYear,
+        to: resolveRef(sc.to, plan, dateSchedule, "client").planYear,
+      };
+      const incBounds = {
+        from: resolveRef(incomeRow.from, plan, dateSchedule, incomeRow.owner).planYear,
+        to: resolveRef(incomeRow.to, plan, dateSchedule, incomeRow.owner).planYear,
+      };
+      for (let m = 0; m < months; m++) {
+        const y = yearOfMonth[m];
+        if (y < bounds.from || y > bounds.to) continue;
+        if (y < incBounds.from || y > incBounds.to) continue;
+        let incomeAtM = 0;
+        if (incomeRow.frequency === "monthly") incomeAtM = realAmountAt(incomeRow, m, cpi, awote);
+        else if (julyMonthIndex(plan, y) === m) incomeAtM = realAmountAt(incomeRow, m, cpi, awote);
+        if (incomeAtM <= 0) continue;
+        const contrib = incomeAtM * (sc.percent / 100);
+        flows.contributions[m] += contrib;
+        if (concessional) concessionalByOwnerFy[sc.owner][y] += contrib;
+      }
+    }
+  }
+
+  // "toConcessionalCap": fills whatever headroom remains that FY —
+  // credited once, in the FY's July (a cap-fill is an annual-scale
+  // concept; the row's own frequency field doesn't apply to it).
+  // Processed after every other concessional contribution so the
+  // headroom is accurate; a second such row (unusual) sees the first
+  // row's fill via the same running total.
+  for (const sc of toConcessionalRows) {
+    const flows = superFlows[sc.accountId];
+    if (!flows) continue;
+    const bounds = {
+      from: resolveRef(sc.from, plan, dateSchedule, "client").planYear,
+      to: resolveRef(sc.to, plan, dateSchedule, "client").planYear,
+    };
+    for (let y = Math.max(0, bounds.from); y <= Math.min(planYears - 1, bounds.to); y++) {
+      const jm = julyMonthIndex(plan, y);
+      if (jm == null) continue;
+      const rates = superRatesFor(fy0 + y, bracketMode, cpi);
+      const headroom = Math.max(0, rates.concessionalCap - concessionalByOwnerFy[sc.owner][y]);
+      if (headroom <= 0) continue;
+      flows.contributions[jm] += headroom;
+      concessionalByOwnerFy[sc.owner][y] += headroom;
+    }
+  }
+
   return {
     months,
     planYears,
@@ -256,6 +391,7 @@ export function buildSchedules(state) {
     incomeByOwner,
     expenses,
     assetFlows,
+    superFlows,
     rowTotals,
     oneOffsByAssetYear,
   };

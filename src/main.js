@@ -879,8 +879,8 @@ els.planBar.addEventListener("change", (e) => {
   if (kdField === "label") kd.label = e.target.value;
   else if (kdField === "basis") kd.basis = e.target.value === "partner" && state.plan.partner ? "partner" : "client";
   else if (kdField === "age") kd.age = Number(e.target.value);
-  state.plan = clampPlan(state.plan);
-  state = clampAllToPlan(state);
+  state.plan = clampPlan(state.plan, PROFILES);
+  state = clampAllToPlan(state, PROFILES);
   saveState();
   renderAll();
 });
@@ -908,7 +908,7 @@ els.planBar.addEventListener("click", (e) => {
       state = convertAnchorReferences(state, kdId, resolvedAge);
     }
     state.plan = removeKeyDate(state.plan, kdId);
-    state = clampAllToPlan(state);
+    state = clampAllToPlan(state, PROFILES);
     saveState();
     renderAll();
   }
@@ -1003,6 +1003,12 @@ els.planBar.addEventListener("change", (e) => {
       centrelinkEligible: field === `${prefix}Centrelink` ? e.target.checked : cur.taxProfile.centrelinkEligible,
       openingCapitalLosses: field === `${prefix}OpeningLosses` ? e.target.value : cur.taxProfile.openingCapitalLosses,
     },
+    // Super carry-forward ledger etc. (Tier 1.2) — carried through
+    // untouched by every OTHER Setup field edit; the work-test toggle
+    // (Commit 2/4) is the only one that writes it here.
+    super: field === `${prefix}WorkTestMet`
+      ? { ...cur.super, workTestMet: e.target.checked }
+      : cur.super,
   });
   let endBasis = { ...p.endBasis };
   if (field === "endMode") {
@@ -1025,9 +1031,10 @@ els.planBar.addEventListener("change", (e) => {
       month: field === "startMonth" ? e.target.value : p.start.month,
     },
     keyDates: p.keyDates,
+    superAccounts: p.superAccounts,
   };
-  state.plan = clampPlan(next);
-  state = clampAllToPlan(state);
+  state.plan = clampPlan(next, PROFILES);
+  state = clampAllToPlan(state, PROFILES);
   saveState();
   maybeDefaultWorkspaceClientName(field);
   renderAll();
@@ -1047,7 +1054,7 @@ els.planBar.addEventListener("click", (e) => {
       ...state.plan,
       household: target,
       partner: state.plan.partner ?? { currentAge: state.plan.client.currentAge },
-    });
+    }, PROFILES);
   } else {
     // Couple → single: never orphan an owner.
     if (wasCouple) {
@@ -1067,9 +1074,9 @@ els.planBar.addEventListener("click", (e) => {
         }
       }
     }
-    state.plan = clampPlan({ ...state.plan, household: "single", partner: null });
+    state.plan = clampPlan({ ...state.plan, household: "single", partner: null }, PROFILES);
   }
-  state = clampAllToPlan(state);
+  state = clampAllToPlan(state, PROFILES);
   saveState();
   renderAll();
 });

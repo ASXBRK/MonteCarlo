@@ -16,6 +16,9 @@ import {
   defaultReportPeriod, createKeyDate, clampKeyDate, normaliseKeyDates,
   clampDateRef, removeKeyDate, referencesToAnchor, convertAnchorReferences,
   DEFAULT_RETIREMENT_AGE,
+  createSuperAccount, clampSuperAccount, normaliseSuperAccounts,
+  createSuperContribution, clampSuperContribution, normaliseSuperContributions,
+  INCOME_TYPES, SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, CARRY_FORWARD_YEARS,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -799,5 +802,121 @@ describe("Key Dates (Tier 1.1) — retirementAge, keyDates, DateRef clamping", (
     expect(out.properties[0].purchaseAt).toEqual({ kind: "age", age: 46 });
     // No references left afterwards.
     expect(referencesToAnchor(out, "kd1")).toHaveLength(0);
+  });
+});
+
+describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributions, income type", () => {
+  it("defaultPlan/defaultState ship an empty superAccounts array and empty superContributions", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.plan.superAccounts).toEqual([]);
+    expect(s.cashflows.superContributions).toEqual([]);
+  });
+
+  it("every person defaults to an empty 5-entry carry-forward ledger, no bring-forward trigger, work test met", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    for (const person of [plan.client, plan.partner]) {
+      expect(person.super.carryForward).toEqual([0, 0, 0, 0, 0]);
+      expect(person.super.carryForward).toHaveLength(CARRY_FORWARD_YEARS);
+      expect(person.super.bringForwardTriggeredYear).toBeNull();
+      expect(person.super.workTestMet).toBe(true);
+    }
+  });
+
+  it("clampPersonSuper (via clampPlan) pads/truncates carryForward to exactly 5 entries and clamps values", () => {
+    const raw = { ...couplePlan(), client: { ...couplePlan().client, super: { carryForward: [-5, 100, 200] } } };
+    const plan = clampPlan(raw, PROFILES);
+    expect(plan.client.super.carryForward).toEqual([0, 100, 200, 0, 0]);
+  });
+
+  it("createSuperAccount defaults to the owner's default (mid) profile and a name derived from their identity", () => {
+    const plan = clampPlan({ ...couplePlan(), client: { ...couplePlan().client, firstName: "Jo" } }, PROFILES);
+    const sa = createSuperAccount(plan, [], PROFILES, "client");
+    expect(sa.owner).toBe("client");
+    expect(sa.name).toBe("Super — Jo");
+    expect(sa.balance).toBe(0);
+    expect(sa.taxFreeComponent).toBe(0);
+    expect(sa.include).toBe(true);
+    expect(Object.keys(PROFILES)).toContain(sa.allocation.profile);
+  });
+
+  it("clampSuperAccount clamps taxFreeComponent to [0, balance] and demotes an orphan partner owner", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const sa = clampSuperAccount({ owner: "partner", balance: 100000, taxFreeComponent: 999999 }, plan, PROFILES);
+    expect(sa.taxFreeComponent).toBe(100000); // clamped to the balance
+    const single = clampPlan({ ...couplePlan(), household: "single", partner: null }, PROFILES);
+    expect(clampSuperAccount({ owner: "partner", balance: 0 }, single, PROFILES).owner).toBe("client");
+  });
+
+  it("normaliseSuperAccounts defends non-array input", () => {
+    expect(normaliseSuperAccounts(null, clampPlan(couplePlan(), PROFILES), PROFILES)).toEqual([]);
+  });
+
+  it("super accounts are structurally invisible to fundingOrder and settings — there is no path to include one", () => {
+    // normaliseFundingOrder/normaliseSettings only ever consult
+    // state.assets; a super account id is never even a candidate.
+    expect(normaliseFundingOrder(["su1"], [])).toEqual([]);
+    const settings = normaliseSettings({ surplus: { mode: "invest", assetId: "su1" }, fundingOrder: ["su1"] }, []);
+    expect(settings.fundingOrder).toEqual([]);
+    expect(settings.surplus).toEqual({ mode: "spend", assetId: null });
+  });
+
+  it("hydrate drops contribution/withdrawal/lump-sum rows that target a super account id (not a financial asset)", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.plan.superAccounts = [{ id: "su1", owner: "client", balance: 1000 }];
+    s.cashflows.contributions.push({
+      id: "c2", assetId: "su1", amount: 500, frequency: "monthly",
+      from: { kind: "age", age: 40 }, to: { kind: "age", age: 90 }, indexBasis: "cpi", indexExtraPct: 0,
+    });
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.cashflows.contributions.some((c) => c.assetId === "su1")).toBe(false);
+  });
+
+  it("income rows default to incomeType employment with sgApplies true; other types force sgApplies false", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const row = createIncomeRow(plan, []);
+    expect(row.incomeType).toBe("employment");
+    expect(row.sgApplies).toBe(true);
+    const clamped = clampIncomeRow({ ...row, incomeType: "rental", sgApplies: true }, plan);
+    expect(clamped.incomeType).toBe("rental");
+    expect(clamped.sgApplies).toBe(false); // forced off — SG only ever applies to employment income
+    expect(INCOME_TYPES).toEqual(["employment", "rental", "otherTaxable", "nonTaxable"]);
+  });
+
+  it("createSuperContribution/clampSuperContribution: shape, type/basis validation, account and income-row reference checks", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const account = createSuperAccount(plan, [], PROFILES, "client");
+    const sc = createSuperContribution(plan, [account], "client");
+    expect(sc.accountId).toBe(account.id);
+    expect(sc.type).toBe("salarySacrifice");
+    expect(sc.basis).toBe("amount");
+
+    const accountIds = new Set([account.id]);
+    const incomeIds = new Set(["i1"]);
+    const clamped = clampSuperContribution(
+      { type: "bogus", basis: "bogus", accountId: "nope", incomeRowId: "nope", amount: -5, percent: 200 },
+      plan, accountIds, incomeIds
+    );
+    expect(SUPER_CONTRIBUTION_TYPES).toContain(clamped.type);
+    expect(clamped.type).toBe("salarySacrifice"); // default fallback
+    expect(SUPER_CONTRIBUTION_BASES).toContain(clamped.basis);
+    expect(clamped.basis).toBe("amount");
+    expect(clamped.accountId).toBeNull(); // unknown account dropped
+    expect(clamped.incomeRowId).toBeNull(); // unknown income row dropped
+    expect(clamped.amount).toBe(0);
+    expect(clamped.percent).toBe(100); // clamped to [0, 100]
+
+    const valid = clampSuperContribution(
+      { accountId: account.id, incomeRowId: "i1", type: "spouse", basis: "percentOfIncome" },
+      plan, accountIds, incomeIds
+    );
+    expect(valid.accountId).toBe(account.id);
+    expect(valid.incomeRowId).toBe("i1");
+    expect(valid.type).toBe("spouse");
+    expect(valid.basis).toBe("percentOfIncome");
+  });
+
+  it("normaliseSuperContributions defends non-array input", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(normaliseSuperContributions(null, plan, new Set(), new Set())).toEqual([]);
   });
 });

@@ -42,6 +42,7 @@
 import { PROFILES } from "./profiles.js";
 import { buildSchedules, firstFyStartYear } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
+import { superRatesFor } from "./data/superRates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { assessPerson } from "./Tax/annual.js";
@@ -136,6 +137,43 @@ export function projectPlan(state, profiles = PROFILES) {
   }
   const combined = new Float64Array(months + 1);
   combined[0] = ids.reduce((s, id) => s + bal[id], 0);
+
+  // --- superannuation (Tier 1.2, accumulation phase) --------------------------
+  //
+  // A distinct asset class, never merged into `bal`/`combined`/
+  // fundingOrder (same pattern as properties/liabilities): its own
+  // balance series, its own per-year detail block. 100% reinvest —
+  // there is no "cash payout" mode in accumulation phase, so nothing
+  // here ever feeds household cashflow (that starts in Commit 3, once
+  // preserved withdrawals exist). Earnings tax is a return haircut,
+  // applied to the income and growth components SEPARATELY because
+  // realised gains in super get a one-third discount (15% × 2/3 = 10%
+  // effective on growth, vs the full 15% on income) — a documented
+  // simplification: real funds realise gains irregularly, not smoothly.
+  const superAccounts = (state.plan.superAccounts ?? []).filter((s) => s.include);
+  const superIds = superAccounts.map((s) => s.id);
+  const superMeta = {};
+  for (const s of superAccounts) {
+    const { incomeNominal, growthNominal } = assetReturnComponents(s, profiles);
+    const icr = s.icrPct / 100;
+    const rates = superRatesFor(fy0, bracketMode, cpi); // flat rates — FY-invariant, safe to fix once
+    const growthTaxRate = rates.earningsTaxRate * (2 / 3);
+    superMeta[s.id] = {
+      // Actual compounding rate: both components taxed, THEN combined
+      // and Fisher-converted — same structure assetMonthlyRate uses.
+      rate: toMonthlyReal(incomeNominal * (1 - rates.earningsTaxRate) + growthNominal * (1 - growthTaxRate) - icr, cpi),
+      // Pre-tax rate, for the earnings/earnings-tax reporting split only.
+      grossRate: toMonthlyReal(incomeNominal + growthNominal - icr, cpi),
+      owner: s.owner,
+    };
+  }
+  const superBal = {};
+  const superSeries = {};
+  for (const s of superAccounts) {
+    superBal[s.id] = s.balance;
+    superSeries[s.id] = new Float64Array(months + 1);
+    superSeries[s.id][0] = s.balance;
+  }
 
   // --- properties (D4) -------------------------------------------------------
   //
@@ -343,6 +381,16 @@ export function projectPlan(state, profiles = PROFILES) {
       // non-CGT assets (no pool exists), including lifestyle.
       costBasePool: meta[id].cgt ? 0 : null,
     }])),
+    // Per-super-account detail (Tier 1.2): opening/closing balance,
+    // contributions in (gross in Commit 1; contributionsTax arrives in
+    // Commit 2), fund earnings and the earnings tax haircut, and
+    // withdrawals (Commit 3). opening + contributions − contributionsTax
+    // + earnings − earningsTax − withdrawals = closing, per account.
+    superDetail: Object.fromEntries(superIds.map((id) => [id, {
+      opening: 0, contributions: 0, contributionsTax: 0,
+      earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0,
+    }])),
+    superClosing: 0,
   });
 
   // Run one plan year's months. opts:
@@ -428,6 +476,32 @@ export function projectPlan(state, profiles = PROFILES) {
           row.growth += g;
           row.perAssetDetail[id].growth += g;
         }
+      }
+
+      // a-super. Superannuation (Tier 1.2): grows like a financial
+      // asset (net-of-earnings-tax rate), then receives contributions.
+      // Gated on `row` only — super's own state never feeds the tax
+      // measurement pass (no household income, no realised gains in
+      // accumulation phase), so there is nothing to snapshot/roll back
+      // for the measurement pass, unlike `bal`/`pools` above.
+      if (row) {
+        for (const id of superIds) {
+          const sm = superMeta[id];
+          const grossGrowth = superBal[id] * sm.grossRate;
+          const netGrowth = superBal[id] * sm.rate;
+          superBal[id] += netGrowth;
+          row.superDetail[id].earnings += grossGrowth;
+          row.superDetail[id].earningsTax += grossGrowth - netGrowth;
+        }
+        for (const id of superIds) {
+          const flows = schedule.superFlows[id];
+          const c = flows ? flows.contributions[m] : 0;
+          if (c > 0) {
+            superBal[id] += c;
+            row.superDetail[id].contributions += c;
+          }
+        }
+        for (const id of superIds) superSeries[id][m + 1] = superBal[id];
       }
 
       // a2. Properties (D4): planned purchases fire at this month's
@@ -739,12 +813,17 @@ export function projectPlan(state, profiles = PROFILES) {
     const row = mkYearRow(y);
     row.openingBalance = combined[yearStart(y)];
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
+    for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
     const real = runYear(y, { taxOut: taxOutArr, cgtDue, row, trackUnfunded: true });
     row.closingBalance = combined[yearEnd(y)];
     for (const id of ids) {
       row.perAssetClosing[id] = series[id][yearEnd(y)];
       row.perAssetDetail[id].closing = series[id][yearEnd(y)];
       if (meta[id].cgt) row.perAssetDetail[id].costBasePool = pools[id].pool;
+    }
+    for (const id of superIds) {
+      row.superDetail[id].closing = superSeries[id][yearEnd(y)];
+      row.superClosing += superSeries[id][yearEnd(y)];
     }
     const deflEnd = 1 / Math.pow(1 + cpi, yearEnd(y) / 12);
     for (const l of liabs) {
@@ -756,7 +835,7 @@ export function projectPlan(state, profiles = PROFILES) {
       row.properties[pid].value = propVal[pid];
       row.propertyClosing += propVal[pid];
     }
-    row.netAssets = row.closingBalance + row.propertyClosing - row.liabilitiesClosing;
+    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing - row.liabilitiesClosing;
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.

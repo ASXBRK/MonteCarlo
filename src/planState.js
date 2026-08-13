@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -88,6 +88,26 @@ export function personDisplayName(person, fallback) {
 // anchor and as the default report-period horizon.
 export const DEFAULT_RETIREMENT_AGE = 65;
 
+// Per-person super state (Tier 1.2): a rolling 5-entry FIFO ledger of
+// unused concessional cap (oldest first, real $) plus the plan year a
+// non-concessional bring-forward was triggered, if any. Padded/
+// truncated to exactly CARRY_FORWARD_YEARS entries so consumption
+// logic (commit 2) never has to guard array length.
+export const CARRY_FORWARD_YEARS = 5;
+
+function clampPersonSuper(raw) {
+  const carryForward = (Array.isArray(raw?.carryForward) ? raw.carryForward : [])
+    .slice(0, CARRY_FORWARD_YEARS)
+    .map((v) => clampNumber(v, 0));
+  while (carryForward.length < CARRY_FORWARD_YEARS) carryForward.push(0);
+  return {
+    carryForward,
+    bringForwardTriggeredYear: Number.isInteger(raw?.bringForwardTriggeredYear)
+      ? raw.bringForwardTriggeredYear : null,
+    workTestMet: raw?.workTestMet !== false, // default true (Commit 2/4)
+  };
+}
+
 function clampPerson(raw, start) {
   const parsed = typeof raw?.dob === "string" ? ageAtDate(raw.dob, start.year, start.month) : null;
   let dob = raw?.dob;
@@ -104,6 +124,7 @@ function clampPerson(raw, start) {
     currentAge, // derived — recomputed from DOB on every clamp
     retirementAge: clampInt(raw?.retirementAge ?? DEFAULT_RETIREMENT_AGE, 18, 120),
     taxProfile: clampTaxProfile(raw?.taxProfile),
+    super: clampPersonSuper(raw?.super),
   };
 }
 
@@ -154,6 +175,7 @@ export function defaultPlan(now = new Date()) {
     endBasis,
     start,
     keyDates: [],
+    superAccounts: [],
   };
 }
 
@@ -330,6 +352,8 @@ export function createLumpSum(plan, assetId = null, source = "input") {
   };
 }
 
+export const INCOME_TYPES = ["employment", "rental", "otherTaxable", "nonTaxable"];
+
 export function createIncomeRow(plan, existing = []) {
   return {
     id: uid("in"),
@@ -341,6 +365,8 @@ export function createIncomeRow(plan, existing = []) {
     to: anchorRef("retirement-client"), // new rows always default owner "client"
     indexBasis: "cpi",
     indexExtraPct: 0,
+    incomeType: "employment",
+    sgApplies: true, // Super Guarantee (Tier 1.2) — default on for employment income
   };
 }
 
@@ -533,6 +559,113 @@ export function normaliseLiabilities(liabilities, plan, assets, properties = [])
   return liabilities.map((l) => clampLiability(l, plan, assets, properties));
 }
 
+// --- superannuation accounts (Tier 1.2, accumulation phase only) -----------
+//
+// Super accounts are never joint (owner: "client" | "partner" only) and
+// live on plan.superAccounts, not state.assets — they are a distinct
+// asset class with their own (fund-level) tax treatment, never
+// reachable through ordinary fundingOrder/contributions/withdrawals/
+// one-offs (normaliseFundingOrder/normaliseSettings only ever look at
+// state.assets, so that exclusion holds structurally, at every layer,
+// without any extra guard here).
+
+export function createSuperAccount(plan, existing = [], profiles = {}, owner = "client") {
+  const keys = Object.keys(profiles);
+  const middleProfile = keys.length ? keys[Math.floor((keys.length - 1) / 2)] : null;
+  const person = owner === "partner" ? plan.partner : plan.client;
+  const label = personDisplayName(person, owner === "partner" ? "Partner" : "Client");
+  return {
+    id: uid("su"),
+    name: `Super — ${label}`,
+    owner,
+    balance: 0,
+    taxFreeComponent: 0,
+    allocation: { mode: "profile", profile: middleProfile },
+    icrPct: 0,
+    include: true,
+  };
+}
+
+export function clampSuperAccount(sa, plan, profiles = {}) {
+  const owner = sa.owner === "partner" && plan.partner ? "partner" : "client";
+  const balance = clampNumber(sa.balance, 0);
+  return {
+    id: typeof sa.id === "string" && sa.id ? sa.id : uid("su"),
+    name: typeof sa.name === "string" && sa.name.trim() ? sa.name : "Super account",
+    owner,
+    balance,
+    // Taxable component = balance − taxFreeComponent; never negative.
+    taxFreeComponent: clampNumber(sa.taxFreeComponent, 0, balance),
+    allocation: clampAllocation(sa.allocation, profiles),
+    icrPct: clampNumber(sa.icrPct, 0, 100),
+    include: sa.include !== false,
+  };
+}
+
+export function normaliseSuperAccounts(accounts, plan, profiles = {}) {
+  if (!Array.isArray(accounts)) return [];
+  return accounts.map((sa) => clampSuperAccount(sa, plan, profiles));
+}
+
+// --- superannuation contributions (Tier 1.2) -------------------------------
+//
+// A plan-level cashflow section like income/expenses, not asset-
+// targeted like contributions/withdrawals — accountId says which
+// super account receives it. from/to are client-anchored (Key Dates,
+// Tier 1.1), matching the convention for contributions/withdrawals
+// (never owner-anchored, regardless of the row's own owner).
+
+export const SUPER_CONTRIBUTION_TYPES = [
+  "sg", "salarySacrifice", "personalDeductible", "personalNonDeductible", "spouse",
+];
+export const SUPER_CONTRIBUTION_BASES = ["amount", "percentOfIncome", "toConcessionalCap"];
+
+export function createSuperContribution(plan, superAccounts = [], owner = "client") {
+  const account = superAccounts.find((s) => s.owner === owner) ?? null;
+  return {
+    id: uid("sc"),
+    label: "Contribution",
+    owner,
+    accountId: account ? account.id : null,
+    type: "salarySacrifice",
+    basis: "amount",
+    amount: 0,
+    percent: 0,
+    incomeRowId: null,
+    frequency: "monthly",
+    from: anchorRef("start"),
+    to: anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"),
+    indexBasis: "cpi",
+    indexExtraPct: 0,
+  };
+}
+
+export function clampSuperContribution(sc, plan, superAccountIds, incomeRowIds) {
+  const owner = sc.owner === "partner" && plan.partner ? "partner" : "client";
+  const type = SUPER_CONTRIBUTION_TYPES.includes(sc.type) ? sc.type : "salarySacrifice";
+  const basis = SUPER_CONTRIBUTION_BASES.includes(sc.basis) ? sc.basis : "amount";
+  const { from, to } = clampFromTo(sc, plan.client.currentAge, plan.endAge, plan);
+  return {
+    id: typeof sc.id === "string" && sc.id ? sc.id : uid("sc"),
+    label: typeof sc.label === "string" && sc.label.trim() ? sc.label : "Contribution",
+    owner,
+    accountId: superAccountIds.has(sc.accountId) ? sc.accountId : null,
+    type,
+    basis,
+    amount: clampNumber(sc.amount, 0),
+    percent: clampNumber(sc.percent, 0, 100),
+    incomeRowId: incomeRowIds.has(sc.incomeRowId) ? sc.incomeRowId : null,
+    frequency: sc.frequency === "annual" ? "annual" : "monthly",
+    from, to,
+    ...clampIndexation(sc),
+  };
+}
+
+export function normaliseSuperContributions(rows, plan, superAccountIds, incomeRowIds) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((sc) => clampSuperContribution(sc, plan, superAccountIds, incomeRowIds));
+}
+
 function nextAssetNumber(existing) {
   let max = 0;
   for (const a of existing) {
@@ -555,6 +688,7 @@ export function defaultState(profiles = {}, now = new Date()) {
       contributions: [createCashflow("contribution", plan, asset.id)],
       withdrawals: [],
       lumpSums: [],
+      superContributions: [],
     },
     liabilities: [],
     properties: [],
@@ -758,7 +892,9 @@ export function clampAllocation(alloc, profiles) {
   return { mode: "custom", incomePct, growthPct, frankingPct, volBasis };
 }
 
-export function clampPlan(plan) {
+// `profiles` is only needed to re-validate super accounts' allocation
+// (Tier 1.2) — every other caller may omit it.
+export function clampPlan(plan, profiles = {}) {
   const year = clampInt(plan.start?.year, 1900, 2200);
   const month = clampInt(plan.start?.month, 1, 12);
   const start = { year, month };
@@ -782,8 +918,13 @@ export function clampPlan(plan) {
   // (normaliseKeyDates itself falls a partner-basis date back to
   // client when there's no partner), so this order is safe either way.
   const keyDates = normaliseKeyDates(plan.keyDates, { client, partner });
+  // Super accounts (Tier 1.2) live on the plan, alongside client/
+  // partner — they are always person-owned, never joint, so they
+  // belong with identity rather than with the joint-ownable financial
+  // asset list.
+  const superAccounts = normaliseSuperAccounts(plan.superAccounts, { client, partner }, profiles);
 
-  return { household, client, partner, endAge, endBasis, start, keyDates };
+  return { household, client, partner, endAge, endBasis, start, keyDates, superAccounts };
 }
 
 // A v5-schema row still carries the bare-int field (fromAge/toAge/age)
@@ -821,13 +962,18 @@ export function clampLumpSum(ls, plan) {
   return { ...rest, at };
 }
 
-// Income rows anchor to their owner's window.
+// Income rows anchor to their owner's window. incomeType (Tier 1.2)
+// gates sgApplies: SG only ever makes sense for employment income, so
+// a non-employment row's toggle is force-cleared regardless of what
+// was stored (defensive — the UI hides the toggle for those rows too).
 export function clampIncomeRow(row, plan) {
   const owner = row.owner === "partner" && plan.partner ? "partner" : "client";
   const win = ownerWindow(plan, owner);
   const { from, to } = clampFromTo(row, win.from, win.to, plan);
   const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
-  return { ...rest, owner, from, to, ...clampIndexation(row) };
+  const incomeType = INCOME_TYPES.includes(row.incomeType) ? row.incomeType : "employment";
+  const sgApplies = incomeType === "employment" && row.sgApplies !== false;
+  return { ...rest, owner, from, to, incomeType, sgApplies, ...clampIndexation(row) };
 }
 
 export function clampExpenseRow(row, plan) {
@@ -855,16 +1001,24 @@ export function normaliseFundingOrder(order, assets) {
 }
 
 // Re-clamp everything after a plan change; also enforce settings
-// invariants. Returns a new state object (does not mutate).
-export function clampAllToPlan(state) {
-  const plan = clampPlan(state.plan);
+// invariants. Returns a new state object (does not mutate). `profiles`
+// is needed to re-validate super accounts' allocation (Tier 1.2) —
+// same reason hydrateAsset needs it for financial assets.
+export function clampAllToPlan(state, profiles = {}) {
+  const plan = clampPlan(state.plan, profiles);
   const assets = state.assets.map((a) => ({ ...a }));
+  const income = state.cashflows.income.map((r) => clampIncomeRow(r, plan));
+  const incomeRowIds = new Set(income.map((r) => r.id));
+  const superAccountIds = new Set(plan.superAccounts.map((s) => s.id));
   const cashflows = {
-    income: state.cashflows.income.map((r) => clampIncomeRow(r, plan)),
+    income,
     expenses: state.cashflows.expenses.map((r) => clampExpenseRow(r, plan)),
     contributions: state.cashflows.contributions.map((c) => clampCashflow(c, plan)),
     withdrawals: state.cashflows.withdrawals.map((w) => clampCashflow(w, plan)),
     lumpSums: state.cashflows.lumpSums.map((l) => clampLumpSum(l, plan)),
+    superContributions: normaliseSuperContributions(
+      state.cashflows.superContributions, plan, superAccountIds, incomeRowIds
+    ),
   };
   const settings = normaliseSettings(state.settings, assets);
   const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
@@ -1057,8 +1211,19 @@ function migrateV5toV6(raw) {
   return { ...raw, schemaVersion: 6 };
 }
 
+// v6 → v7 (Tier 1.2): superannuation. New shape entirely (superAccounts,
+// per-person super state, superContributions, income-row incomeType/
+// sgApplies) — nothing existing changes shape, so again just the
+// version gate; normaliseSuperAccounts/clampPerson/clampIncomeRow stamp
+// the new defaults ([] accounts, empty carry-forward ledger, incomeType
+// "employment"). No pre-existing scenario had super, so this migration
+// can never change a single projected figure — the regression gate.
+function migrateV6toV7(raw) {
+  return { ...raw, schemaVersion: 7 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
-// forward. Returns a clamped v6 state or null (caller falls back to
+// forward. Returns a clamped v7 state or null (caller falls back to
 // defaults). Never throws.
 export function hydrate(json, profiles = {}) {
   try {
@@ -1069,26 +1234,31 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 3) raw = migrateV3toV4(raw);
     if (raw.schemaVersion === 4) raw = migrateV4toV5(raw);
     if (raw.schemaVersion === 5) raw = migrateV5toV6(raw);
+    if (raw.schemaVersion === 6) raw = migrateV6toV7(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
-    const plan = clampPlan(raw.plan);
+    const plan = clampPlan(raw.plan, profiles);
     const assets = raw.assets.map((a, i) => hydrateAsset(a, i, profiles));
     // Cashflow rows may only target FINANCIAL assets (D2 validation);
     // rows pointing at lifestyle assets drop on hydrate.
     const assetIds = new Set(assets.filter(isFinancial).map((a) => a.id));
     const cf = raw.cashflows || {};
+    const income = hydrateIncomeRows(cf.income, plan);
+    const superAccountIds = new Set(plan.superAccounts.map((s) => s.id));
+    const incomeRowIds = new Set(income.map((r) => r.id));
 
     const state = {
       schemaVersion: SCHEMA_VERSION,
       plan,
       assets,
       cashflows: {
-        income: hydrateIncomeRows(cf.income, plan),
+        income,
         expenses: hydrateExpenseRows(cf.expenses, plan),
         contributions: hydrateCashflows(cf.contributions, plan, assetIds),
         withdrawals: hydrateCashflows(cf.withdrawals, plan, assetIds),
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
+        superContributions: hydrateSuperContributions(cf.superContributions, plan, superAccountIds, incomeRowIds),
       },
       liabilities: normaliseLiabilities(raw.liabilities, plan, assets, raw.properties),
       properties: normaliseProperties(raw.properties, plan),
@@ -1180,6 +1350,26 @@ function hydrateLumpSums(arr, plan, assetIds) {
     }, plan));
 }
 
+function hydrateSuperContributions(arr, plan, superAccountIds, incomeRowIds) {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((sc) => clampSuperContribution({
+    id: typeof sc.id === "string" && sc.id ? sc.id : uid("sc"),
+    label: sc.label,
+    owner: sc.owner,
+    accountId: sc.accountId,
+    type: sc.type,
+    basis: sc.basis,
+    amount: clampNumber(sc.amount, 0),
+    percent: clampNumber(sc.percent, 0, 100),
+    incomeRowId: sc.incomeRowId,
+    frequency: sc.frequency,
+    from: sc.from,
+    to: sc.to,
+    indexBasis: sc.indexBasis,
+    indexExtraPct: sc.indexExtraPct,
+  }, plan, superAccountIds, incomeRowIds));
+}
+
 function hydrateIncomeRows(arr, plan) {
   if (!Array.isArray(arr)) return [];
   return arr.map((r, i) => clampIncomeRow({
@@ -1193,6 +1383,8 @@ function hydrateIncomeRows(arr, plan) {
     indexBasis: r.indexBasis,
     indexExtraPct: r.indexExtraPct,
     indexed: r.indexed,
+    incomeType: r.incomeType,
+    sgApplies: r.sgApplies,
   }, plan));
 }
 
