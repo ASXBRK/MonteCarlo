@@ -1453,9 +1453,22 @@ function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax) {
   // switching to "Specific age…" starts from somewhere sensible rather
   // than a blank/zero box.
   const numberValue = isAnchor ? resolved.age : ref.age;
+  // Short label shown when the select is closed (Cashflow sections:
+  // table layout, one line per item) — "Start", "Retirement", "Age
+  // 45" — the full "Retirement — <name> — age N (FYxx–yy)" form stays
+  // exactly as-is in the open dropdown's own option text. A visual-only
+  // overlay (pointer-events:none) sits on top of the native select so
+  // clicking still opens its real popup, which is unaffected by the
+  // overlay sitting behind it in the layer order.
+  const shortLabel = isAnchor
+    ? (anchors.find((a) => a.id === selectValue)?.label ?? "").split(" — ")[0]
+    : `Age ${resolved.age}`;
   return `
     <div class="date-ref">
-      <select ${dataAttrs} data-dr-role="anchor">${options}</select>
+      <div class="date-ref-select-wrap">
+        <select ${dataAttrs} data-dr-role="anchor">${options}</select>
+        <span class="date-ref-short" aria-hidden="true">${escapeHTML(shortLabel)}</span>
+      </div>
       <input type="number" min="${ageMin}" max="${ageMax}" step="1" value="${numberValue}"
              ${dataAttrs} data-dr-role="age"${isAnchor ? " hidden" : ""} />
       <span class="date-ref-resolved${resolved.outOfRange ? " date-ref-outofrange" : ""}">${
@@ -1469,102 +1482,76 @@ function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax) {
 
 function incomeRowHTML(r) {
   return `
-    <div class="cf-row cf-row-income${isCouple() ? " with-owner" : ""}" data-cfid="${r.id}">
-      <div class="cf-cell cf-cell-label">
-        <label>Label</label>
+    <tr class="cf-tr" data-cfid="${r.id}">
+      <td class="cf-td-category">
+        <select data-kind="income" data-cfid="${r.id}" data-field="category">
+          ${INCOME_CATEGORIES.map((c) => `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(INCOME_CATEGORY_LABELS[c])}</option>`).join("")}
+        </select>
+        ${r.category === "salary" ? `
+          <label class="ptg-check cf-sg-check">
+            <input type="checkbox"${r.sgApplies !== false ? " checked" : ""}
+                   data-kind="income" data-cfid="${r.id}" data-field="sgApplies" />
+            <span>SG applies</span>
+          </label>
+        ` : ""}
+      </td>
+      <td class="cf-td-label">
         <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
                data-kind="income" data-cfid="${r.id}" data-field="label" />
-      </div>
+      </td>
       ${isCouple() ? `
-        <div class="cf-cell cf-cell-owner">
-          <label>Owner</label>
+        <td class="cf-td-owner">
           <select data-kind="income" data-cfid="${r.id}" data-field="owner">
             <option value="client"${r.owner === "client" ? " selected" : ""}>${escapeHTML(clientName())}</option>
             <option value="partner"${r.owner === "partner" ? " selected" : ""}>${escapeHTML(partnerName())}</option>
           </select>
-        </div>
+        </td>
       ` : ""}
-      <div class="cf-cell cf-cell-amount">
-        <label>Gross amount ($)</label>
-        <input type="number" min="0" step="1000" value="${r.amount}"
-               data-kind="income" data-cfid="${r.id}" data-field="amount" />
-      </div>
-      <div class="cf-cell cf-cell-freq">
-        <label>Frequency</label>
+      ${amountTdHTML("income", r.id, r.amount)}
+      <td class="cf-td-freq">
         <select data-kind="income" data-cfid="${r.id}" data-field="frequency">
           <option value="monthly"${r.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${r.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
-      </div>
-      <div class="cf-cell cf-cell-from">
-        <label>From</label>
-        ${dateRefControlHTML(r.from, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="from"`, 18, 120)}
-      </div>
-      <div class="cf-cell cf-cell-to">
-        <label>To</label>
-        ${dateRefControlHTML(r.to, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="to"`, 18, 120)}
-      </div>
-      ${indexationCellsHTML("income", r)}
-      <div class="cf-cell cf-cell-category">
-        <label>Category</label>
-        <select data-kind="income" data-cfid="${r.id}" data-field="category">
-          ${INCOME_CATEGORIES.map((c) => `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(INCOME_CATEGORY_LABELS[c])}</option>`).join("")}
-        </select>
-      </div>
-      ${r.category === "salary" ? `
-        <div class="cf-cell cf-cell-sg">
-          <label>Superannuation Guarantee</label>
-          <label class="ptg-check">
-            <input type="checkbox"${r.sgApplies !== false ? " checked" : ""}
-                   data-kind="income" data-cfid="${r.id}" data-field="sgApplies" />
-            <span>Applies</span>
-          </label>
-        </div>
-      ` : ""}
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-kind="income" data-cfid="${r.id}">×</button>
-    </div>
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(r.from, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="from"`, 18, 120)}</td>
+      <td class="cf-td-date">${dateRefControlHTML(r.to, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="to"`, 18, 120)}</td>
+      ${indexationTdHTML("income", r)}
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="income" data-cfid="${r.id}">×</button>
+      </td>
+    </tr>
   `;
 }
 
 function expenseRowHTML(r) {
   return `
-    <div class="cf-row cf-row-expense" data-cfid="${r.id}">
-      <div class="cf-cell cf-cell-label">
-        <label>Label</label>
-        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
-               data-kind="expenses" data-cfid="${r.id}" data-field="label" />
-      </div>
-      <div class="cf-cell cf-cell-category">
-        <label>Category</label>
+    <tr class="cf-tr" data-cfid="${r.id}">
+      <td class="cf-td-category">
         <select data-kind="expenses" data-cfid="${r.id}" data-field="category">
           ${EXPENSE_CATEGORIES.map((c) => `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(EXPENSE_CATEGORY_LABELS[c])}</option>`).join("")}
         </select>
-      </div>
-      <div class="cf-cell cf-cell-amount">
-        <label>Amount ($)</label>
-        <input type="number" min="0" step="1000" value="${r.amount}"
-               data-kind="expenses" data-cfid="${r.id}" data-field="amount" />
-      </div>
-      <div class="cf-cell cf-cell-freq">
-        <label>Frequency</label>
+      </td>
+      <td class="cf-td-label">
+        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
+               data-kind="expenses" data-cfid="${r.id}" data-field="label" />
+      </td>
+      ${amountTdHTML("expenses", r.id, r.amount)}
+      <td class="cf-td-freq">
         <select data-kind="expenses" data-cfid="${r.id}" data-field="frequency">
           <option value="monthly"${r.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${r.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
-      </div>
-      <div class="cf-cell cf-cell-from">
-        <label>From</label>
-        ${dateRefControlHTML(r.from, "client", `data-kind="expenses" data-cfid="${r.id}" data-field="from"`, 18, 120)}
-      </div>
-      <div class="cf-cell cf-cell-to">
-        <label>To</label>
-        ${dateRefControlHTML(r.to, "client", `data-kind="expenses" data-cfid="${r.id}" data-field="to"`, 18, 120)}
-      </div>
-      ${indexationCellsHTML("expenses", r)}
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-kind="expenses" data-cfid="${r.id}">×</button>
-    </div>
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(r.from, "client", `data-kind="expenses" data-cfid="${r.id}" data-field="from"`, 18, 120)}</td>
+      <td class="cf-td-date">${dateRefControlHTML(r.to, "client", `data-kind="expenses" data-cfid="${r.id}" data-field="to"`, 18, 120)}</td>
+      ${indexationTdHTML("expenses", r)}
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="expenses" data-cfid="${r.id}">×</button>
+      </td>
+    </tr>
   `;
 }
 
@@ -1575,149 +1562,167 @@ function expenseRowHTML(r) {
 // spend also needs to leave household cash.
 function deductionRowHTML(r) {
   return `
-    <div class="cf-row cf-row-deduction${isCouple() ? " with-owner" : ""}" data-cfid="${r.id}">
-      <div class="cf-cell cf-cell-label">
-        <label>Label</label>
-        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
-               data-kind="deductions" data-cfid="${r.id}" data-field="label" />
-      </div>
-      <div class="cf-cell cf-cell-category">
-        <label>Category</label>
+    <tr class="cf-tr" data-cfid="${r.id}">
+      <td class="cf-td-category">
         <select data-kind="deductions" data-cfid="${r.id}" data-field="category">
           ${DEDUCTION_CATEGORIES.map((c) =>
             `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(DEDUCTION_CATEGORY_LABELS[c])}</option>`
           ).join("")}
         </select>
-      </div>
+      </td>
+      <td class="cf-td-label">
+        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
+               data-kind="deductions" data-cfid="${r.id}" data-field="label" />
+      </td>
       ${isCouple() ? `
-        <div class="cf-cell cf-cell-owner">
-          <label>Owner</label>
+        <td class="cf-td-owner">
           <select data-kind="deductions" data-cfid="${r.id}" data-field="owner">
             <option value="client"${r.owner === "client" ? " selected" : ""}>${escapeHTML(clientName())}</option>
             <option value="partner"${r.owner === "partner" ? " selected" : ""}>${escapeHTML(partnerName())}</option>
           </select>
-        </div>
+        </td>
       ` : ""}
-      <div class="cf-cell cf-cell-amount">
-        <label>Amount ($)</label>
-        <input type="number" min="0" step="100" value="${r.amount}"
-               data-kind="deductions" data-cfid="${r.id}" data-field="amount" />
-      </div>
-      <div class="cf-cell cf-cell-freq">
-        <label>Frequency</label>
+      ${amountTdHTML("deductions", r.id, r.amount)}
+      <td class="cf-td-freq">
         <select data-kind="deductions" data-cfid="${r.id}" data-field="frequency">
           <option value="monthly"${r.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${r.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
-      </div>
-      <div class="cf-cell cf-cell-from">
-        <label>From</label>
-        ${dateRefControlHTML(r.from, r.owner, `data-kind="deductions" data-cfid="${r.id}" data-field="from"`, 18, 120)}
-      </div>
-      <div class="cf-cell cf-cell-to">
-        <label>To</label>
-        ${dateRefControlHTML(r.to, r.owner, `data-kind="deductions" data-cfid="${r.id}" data-field="to"`, 18, 120)}
-      </div>
-      ${indexationCellsHTML("deductions", r)}
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-kind="deductions" data-cfid="${r.id}">×</button>
-    </div>
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(r.from, r.owner, `data-kind="deductions" data-cfid="${r.id}" data-field="from"`, 18, 120)}</td>
+      <td class="cf-td-date">${dateRefControlHTML(r.to, r.owner, `data-kind="deductions" data-cfid="${r.id}" data-field="to"`, 18, 120)}</td>
+      ${indexationTdHTML("deductions", r)}
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="deductions" data-cfid="${r.id}">×</button>
+      </td>
+    </tr>
   `;
 }
 
 function contributionRowHTML(kind, cf) {
   return `
-    <div class="cf-row cf-row-asset" data-cfid="${cf.id}">
-      <div class="cf-cell cf-cell-asset">
-        <label>Asset</label>
+    <tr class="cf-tr" data-cfid="${cf.id}">
+      <td class="cf-td-asset">
         <select data-kind="${kind}" data-cfid="${cf.id}" data-field="assetId">${assetOptions(cf.assetId)}</select>
-      </div>
-      <div class="cf-cell cf-cell-amount">
-        <label>Amount ($)</label>
-        <input type="number" min="0" step="100" value="${cf.amount}"
-               data-kind="${kind}" data-cfid="${cf.id}" data-field="amount" />
-      </div>
-      <div class="cf-cell cf-cell-freq">
-        <label>Frequency</label>
+      </td>
+      ${amountTdHTML(kind, cf.id, cf.amount)}
+      <td class="cf-td-freq">
         <select data-kind="${kind}" data-cfid="${cf.id}" data-field="frequency">
           <option value="monthly"${cf.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${cf.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
-      </div>
-      <div class="cf-cell cf-cell-from">
-        <label>From</label>
-        ${dateRefControlHTML(cf.from, "client", `data-kind="${kind}" data-cfid="${cf.id}" data-field="from"`, 18, 120)}
-      </div>
-      <div class="cf-cell cf-cell-to">
-        <label>To</label>
-        ${dateRefControlHTML(cf.to, "client", `data-kind="${kind}" data-cfid="${cf.id}" data-field="to"`, 18, 120)}
-      </div>
-      ${indexationCellsHTML(kind, cf)}
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-kind="${kind}" data-cfid="${cf.id}">×</button>
-    </div>
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(cf.from, "client", `data-kind="${kind}" data-cfid="${cf.id}" data-field="from"`, 18, 120)}</td>
+      <td class="cf-td-date">${dateRefControlHTML(cf.to, "client", `data-kind="${kind}" data-cfid="${cf.id}" data-field="to"`, 18, 120)}</td>
+      ${indexationTdHTML(kind, cf)}
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="${kind}" data-cfid="${cf.id}">×</button>
+      </td>
+    </tr>
   `;
 }
 
-// Per-row indexation controls (D1): basis + additional %, with the
-// computed nominal total shown live as pure arithmetic ("3.5% + 0.0%
-// = 3.5%") — the basis name lives in the field's own label ("AWOTE
-// additional %") rather than being repeated in the value, so the sum
-// reads correctly once a nonzero additional % is entered.
-function indexationCellsHTML(kind, row) {
+// Amount cell (Cashflow sections: table layout, one line per item) —
+// right-aligned, thousands-separated on blur/render; a delegated
+// focusin handler (below) strips the separators back to a plain
+// editable number.
+const fmtAmountValue = (v) => Number(v || 0).toLocaleString("en-AU", { maximumFractionDigits: 2 });
+function amountTdHTML(kind, id, value) {
+  return `
+    <td class="cf-td-amount">
+      <input type="text" inputmode="decimal" class="cf-amount-input" value="${fmtAmountValue(value)}"
+             data-kind="${kind}" data-cfid="${id}" data-field="amount" />
+    </td>`;
+}
+
+// Indexation collapses to a single "Indexation" header over two narrow
+// adjacent inputs (basis select + additional %), with the computed
+// nominal total as muted subtext beneath — Cashflow sections: table
+// layout, one line per item. Basis option labels shortened to
+// None/CPI/Wages (the full "Wage index (AWOTE)" form stays on the
+// input-panel-only controls untouched by this — Assumptions/deduction
+// selects elsewhere are unaffected).
+function indexationTdHTML(kind, row) {
   const basis = row.indexBasis ?? (row.indexed === false ? "none" : "cpi");
   const extra = row.indexExtraPct ?? 0;
   const basisRate = basis === "awote"
     ? (state.assumptions.awote ?? 0.035)
     : basis === "cpi" ? state.assumptions.cpi : 0;
-  const basisLabel = basis === "awote" ? "Wages" : basis === "cpi" ? "CPI" : "None";
   const fixed1 = (v) => `${v.toFixed(1)}%`;
   const total = basis === "none" && extra === 0
     ? "Fixed nominal"
     : `${fixed1(basisRate * 100)} + ${fixed1(extra)} = ${fixed1(basisRate * 100 + extra)}`;
   return `
-      <div class="cf-cell cf-cell-basis">
-        <label>Index basis</label>
-        <select data-kind="${kind}" data-cfid="${row.id}" data-field="indexBasis">
+    <td class="cf-td-index">
+      <div class="cf-index-pair">
+        <select data-kind="${kind}" data-cfid="${row.id}" data-field="indexBasis" aria-label="Index basis">
           <option value="none"${basis === "none" ? " selected" : ""}>None</option>
           <option value="cpi"${basis === "cpi" ? " selected" : ""}>CPI</option>
           <option value="awote"${basis === "awote" ? " selected" : ""}>Wages</option>
         </select>
-      </div>
-      <div class="cf-cell cf-cell-extra">
-        <label>${basisLabel} additional %</label>
-        <input type="number" min="-10" max="10" step="0.1" value="${extra}"
+        <input type="number" min="-10" max="10" step="0.1" value="${extra}" aria-label="Additional %"
                data-kind="${kind}" data-cfid="${row.id}" data-field="indexExtraPct" />
-        <span class="index-total">${total}</span>
-      </div>`;
+      </div>
+      <span class="index-total">${total}</span>
+    </td>`;
+}
+
+// Super contributions carries too many columns to fit Indexation on
+// the same line at 1280px even with every other column trimmed —
+// "drop Indexation to a second line for that section only" (Cashflow
+// sections: table layout, one line per item). Same basis+extra%
+// controls and computed total, rendered as a full-width detail row
+// immediately beneath the contribution row instead of its own column.
+function indexationDetailRowHTML(kind, row) {
+  const basis = row.indexBasis ?? (row.indexed === false ? "none" : "cpi");
+  const extra = row.indexExtraPct ?? 0;
+  const basisRate = basis === "awote"
+    ? (state.assumptions.awote ?? 0.035)
+    : basis === "cpi" ? state.assumptions.cpi : 0;
+  const fixed1 = (v) => `${v.toFixed(1)}%`;
+  const total = basis === "none" && extra === 0
+    ? "Fixed nominal"
+    : `${fixed1(basisRate * 100)} + ${fixed1(extra)} = ${fixed1(basisRate * 100 + extra)}`;
+  return `
+    <tr class="cf-tr-detail">
+      <td colspan="99">
+        <div class="cf-detail-index-row">
+          <span class="cf-detail-label">Indexation</span>
+          <select data-kind="${kind}" data-cfid="${row.id}" data-field="indexBasis" aria-label="Index basis">
+            <option value="none"${basis === "none" ? " selected" : ""}>None</option>
+            <option value="cpi"${basis === "cpi" ? " selected" : ""}>CPI</option>
+            <option value="awote"${basis === "awote" ? " selected" : ""}>Wages</option>
+          </select>
+          <input type="number" min="-10" max="10" step="0.1" value="${extra}" aria-label="Additional %"
+                 data-kind="${kind}" data-cfid="${row.id}" data-field="indexExtraPct" />
+          <span class="index-total">${total}</span>
+        </div>
+      </td>
+    </tr>`;
 }
 
 function lumpSumRowHTML(ls) {
   return `
-    <div class="cf-row cf-row-lump" data-cfid="${ls.id}">
-      <div class="cf-cell">
-        <label>Asset${ls.source === "table" ? ' <span class="cf-tag">from table</span>' : ""}</label>
+    <tr class="cf-tr" data-cfid="${ls.id}">
+      <td class="cf-td-asset">
         <select data-kind="lumpSums" data-cfid="${ls.id}" data-field="assetId">${assetOptions(ls.assetId)}</select>
-      </div>
-      <div class="cf-cell">
-        <label>Amount ($)</label>
-        <input type="number" min="0" step="1000" value="${ls.amount}"
-               data-kind="lumpSums" data-cfid="${ls.id}" data-field="amount" />
-      </div>
-      <div class="cf-cell">
-        <label>Direction</label>
+        ${ls.source === "table" ? '<span class="cf-tag">from table</span>' : ""}
+      </td>
+      ${amountTdHTML("lumpSums", ls.id, ls.amount)}
+      <td class="cf-td-direction">
         <select data-kind="lumpSums" data-cfid="${ls.id}" data-field="direction">
           <option value="in"${ls.direction === "in" ? " selected" : ""}>In (deposit)</option>
           <option value="out"${ls.direction === "out" ? " selected" : ""}>Out (withdrawal)</option>
         </select>
-      </div>
-      <div class="cf-cell">
-        <label>At</label>
-        ${dateRefControlHTML(ls.at, "client", `data-kind="lumpSums" data-cfid="${ls.id}" data-field="at"`, 18, 120)}
-      </div>
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-kind="lumpSums" data-cfid="${ls.id}">×</button>
-    </div>
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(ls.at, "client", `data-kind="lumpSums" data-cfid="${ls.id}" data-field="at"`, 18, 120)}</td>
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="lumpSums" data-cfid="${ls.id}">×</button>
+      </td>
+    </tr>
   `;
 }
 
@@ -1732,6 +1737,24 @@ function addRowBtn(kind, label) {
   return `<button class="add-row-btn" type="button" data-action="add-row" data-kind="${kind}">+ ${label}</button>`;
 }
 
+// Header cell sets, one per cashflow-style list section (Cashflow
+// sections: table layout, one line per item) — computed per-render
+// since Owner columns only appear for couples. Column order matches
+// each row-HTML function's <td> order exactly.
+const cfHeaders = {
+  income: () => `<th>Category</th><th>Label</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
+  deductions: () => `<th>Category</th><th>Label</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
+  expenses: () => `<th>Category</th><th>Label</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
+  contributions: () => `<th>Asset</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
+  withdrawals: () => `<th>Asset</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
+  lumpSums: () => `<th>Asset</th><th>Amount ($)</th><th>Direction</th><th>At</th>`,
+  // No Indexation column — dropped to a second line beneath each row
+  // (Cashflow sections: table layout, point 6) — this section alone
+  // has too many columns to fit it on the same line at 1280px.
+  superContributions: () => `<th>Label</th><th>Type</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Account</th><th>Basis</th><th>Amount / detail</th><th>Freq</th><th>From</th><th>To</th>`,
+  superWithdrawals: () => `<th>Label</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Account</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
+};
+
 function pageEmptyHTML(sentence, actionsHTML) {
   return `
     <div class="page-empty">
@@ -1741,10 +1764,32 @@ function pageEmptyHTML(sentence, actionsHTML) {
   `;
 }
 
-// Top-level fact-find section (Income / Expenses): page-sized empty
-// state with a purpose sentence when empty; heading + panel of rows
-// otherwise.
-function ffSectionHTML(title, kind, addLabel, rowsHTML, helperHTML = "", purposeSentence = "") {
+// Cashflow sections: table layout, one line per item. Every
+// repeatable cashflow-style list section (Income, Expenses,
+// Deductions, Contributions, Withdrawals, One-off amounts, Super
+// contributions, Super withdrawals) renders as a real <table>: ONE
+// sticky header row per section, naming every column once, and one
+// compact <tr> per entered row underneath — replacing the old card
+// grid, which repeated its full label set on every row (five expenses
+// used to print the header set five times). headerCellsHTML is the
+// <th> markup for this section's own columns; a trailing blank <th>
+// for the remove button is added here so every caller doesn't repeat
+// it.
+function cfTableHTML(headerCellsHTML, rowsHTML) {
+  return `
+    <div class="cf-table-wrap">
+      <table class="cf-table">
+        <thead><tr>${headerCellsHTML}<th class="cf-th-remove" aria-hidden="true"></th></tr></thead>
+        <tbody>${rowsHTML}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// Top-level fact-find section (Income / Expenses / Deductions):
+// page-sized empty state with a purpose sentence when empty; heading +
+// table otherwise.
+function ffSectionHTML(title, kind, addLabel, headerCellsHTML, rowsHTML, helperHTML = "", purposeSentence = "") {
   const empty = rowsHTML === "";
   if (empty) {
     return `
@@ -1758,7 +1803,7 @@ function ffSectionHTML(title, kind, addLabel, rowsHTML, helperHTML = "", purpose
       <div class="cf-panel">
         <div class="cf-section">
           ${helperHTML}
-          ${rowsHTML}
+          ${cfTableHTML(headerCellsHTML, rowsHTML)}
           ${addRowBtn(kind, addLabel)}
         </div>
       </div>
@@ -1766,9 +1811,9 @@ function ffSectionHTML(title, kind, addLabel, rowsHTML, helperHTML = "", purpose
   `;
 }
 
-// Subsection inside the Investment cashflows panel: single compact
-// row when empty; title + rows + Add otherwise.
-function ffSubsectionHTML(title, kind, addLabel, rowsHTML) {
+// Subsection inside the Investment cashflows / Super panels: single
+// compact row when empty; title + table + Add otherwise.
+function ffSubsectionHTML(title, kind, addLabel, headerCellsHTML, rowsHTML) {
   if (rowsHTML === "") {
     return `
       <div class="cf-section cf-empty">
@@ -1782,7 +1827,7 @@ function ffSubsectionHTML(title, kind, addLabel, rowsHTML) {
   return `
     <div class="cf-section">
       <div class="cf-section-title">${title}</div>
-      ${rowsHTML}
+      ${cfTableHTML(headerCellsHTML, rowsHTML)}
       ${addRowBtn(kind, addLabel)}
     </div>
   `;
@@ -1793,6 +1838,7 @@ function renderCashflows() {
 
   els.incomeSection.innerHTML = ffSectionHTML(
     "Income", "income", "Add income",
+    cfHeaders.income(),
     cf.income.map(incomeRowHTML).join(""),
     `<p class="helper-text">Enter income before tax.</p>`,
     "Add income to include salary, rental, or other regular receipts in the projection."
@@ -1800,6 +1846,7 @@ function renderCashflows() {
 
   els.deductionsSection.innerHTML = ffSectionHTML(
     "Deductions", "deductions", "Add deduction",
+    cfHeaders.deductions(),
     cf.deductions.map(deductionRowHTML).join(""),
     `<p class="helper-text">Deductions reduce assessable income only — they never themselves debit household cash. If the underlying spend also needs to leave cash, enter a matching Expense row too.</p>`,
     "Add deductions such as work-related expenses, vehicle deductions, or salary packaging to reduce assessable income."
@@ -1807,6 +1854,7 @@ function renderCashflows() {
 
   els.expensesSection.innerHTML = ffSectionHTML(
     "Expenses", "expenses", "Add expense",
+    cfHeaders.expenses(),
     cf.expenses.map(expenseRowHTML).join(""),
     "",
     "Add expenses to model the household's regular spending."
@@ -1825,11 +1873,11 @@ function renderCashflows() {
       <div class="ff-section">
         <div class="ff-head"><h2 class="section-heading">Investment cashflows</h2></div>
         <div class="cf-panel">
-          ${ffSubsectionHTML("Contributions", "contributions", "Add contribution",
+          ${ffSubsectionHTML("Contributions", "contributions", "Add contribution", cfHeaders.contributions(),
             cf.contributions.map((c) => contributionRowHTML("contributions", c)).join(""))}
-          ${ffSubsectionHTML("Withdrawals", "withdrawals", "Add withdrawal",
+          ${ffSubsectionHTML("Withdrawals", "withdrawals", "Add withdrawal", cfHeaders.withdrawals(),
             cf.withdrawals.map((w) => contributionRowHTML("withdrawals", w)).join(""))}
-          ${ffSubsectionHTML("One-off amounts", "lumpSums", "Add one-off amount",
+          ${ffSubsectionHTML("One-off amounts", "lumpSums", "Add one-off amount", cfHeaders.lumpSums(),
             cf.lumpSums.map(lumpSumRowHTML).join(""))}
         </div>
       </div>
@@ -1962,6 +2010,15 @@ const CF_MOUNTS = [els.incomeSection, els.deductionsSection, els.expensesSection
 for (const container of [els.assets, els.lifestyleSection, ...CF_MOUNTS]) {
   container.addEventListener("input", (e) => applyFieldEdit(e.target, false));
   container.addEventListener("change", (e) => applyFieldEdit(e.target, true));
+  // Amount cells (Cashflow sections: table layout) show a thousands-
+  // separated value at rest; focusing one strips the separators back
+  // to a plain editable number, restored on blur/change above.
+  container.addEventListener("focusin", (e) => {
+    if (e.target.matches(".cf-amount-input")) {
+      e.target.value = e.target.value.replaceAll(",", "");
+      e.target.select();
+    }
+  });
 }
 
 function applyFieldEdit(el, commit) {
@@ -2087,7 +2144,7 @@ function applyRowEdit(kind, row, field, el, commit) {
         // survives" convention as clampSuperContribution.
         const acct = (state.plan.superAccounts ?? []).find((s) => s.id === row.accountId);
         if (acct && acct.owner !== el.value) row.accountId = null;
-        const rowEl = el.closest(".cf-row");
+        const rowEl = el.closest(".cf-tr");
         if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
         break;
       }
@@ -2102,7 +2159,7 @@ function applyRowEdit(kind, row, field, el, commit) {
       // The owner change can also change which anchor a "Retirement —
       // <name>" option resolves to, so the whole row (selects,
       // resolved readouts) needs a full refresh, not just two labels.
-      const rowEl = el.closest(".cf-row");
+      const rowEl = el.closest(".cf-tr");
       if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
       break;
     }
@@ -2114,13 +2171,13 @@ function applyRowEdit(kind, row, field, el, commit) {
       break;
     case "type": {
       if (SUPER_CONTRIBUTION_TYPES.includes(el.value)) row.type = el.value;
-      const rowEl = el.closest(".cf-row");
+      const rowEl = el.closest(".cf-tr");
       if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // cap-headroom note depends on type
       break;
     }
     case "basis": {
       if (SUPER_CONTRIBUTION_BASES.includes(el.value)) row.basis = el.value;
-      const rowEl = el.closest(".cf-row");
+      const rowEl = el.closest(".cf-tr");
       if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // amount vs percent vs fill-note fields differ
       break;
     }
@@ -2132,8 +2189,12 @@ function applyRowEdit(kind, row, field, el, commit) {
       if (state.cashflows.income.some((r) => r.id === el.value)) row.incomeRowId = el.value;
       break;
     case "amount":
-      row.amount = clampNumber(el.value, 0);
-      if (commit) el.value = row.amount;
+      // Thousands-separated on blur (Cashflow sections: table layout)
+      // — strip separators before parsing; the delegated focusin
+      // handler strips them back out for editing, so el.value is only
+      // ever comma-formatted while NOT focused.
+      row.amount = clampNumber(String(el.value).replaceAll(",", ""), 0);
+      if (commit) el.value = fmtAmountValue(row.amount);
       break;
     case "frequency":
       row.frequency = el.value === "annual" ? "annual" : "monthly";
@@ -2141,7 +2202,13 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "indexBasis": {
       row.indexBasis = ["none", "cpi", "awote"].includes(el.value) ? el.value : "cpi";
       delete row.indexed;
-      const rowEl = el.closest(".cf-row");
+      // Super contributions dropped Indexation to its own detail row
+      // (Cashflow sections: table layout, point 6) — that row has no
+      // .cf-tr ancestor to refresh via outerHTML, so update its total
+      // subtext directly instead of re-rendering.
+      const detailRow = el.closest(".cf-tr-detail");
+      if (detailRow) { updateIndexTotalText(detailRow, row); break; }
+      const rowEl = el.closest(".cf-tr");
       if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // refresh the computed total
       break;
     }
@@ -2149,7 +2216,9 @@ function applyRowEdit(kind, row, field, el, commit) {
       row.indexExtraPct = clampNumber(el.value, -10, 10);
       if (commit) {
         el.value = row.indexExtraPct;
-        const rowEl = el.closest(".cf-row");
+        const detailRow = el.closest(".cf-tr-detail");
+        if (detailRow) { updateIndexTotalText(detailRow, row); break; }
+        const rowEl = el.closest(".cf-tr");
         if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
       }
       break;
@@ -2168,7 +2237,7 @@ function applyRowEdit(kind, row, field, el, commit) {
         // convention) — force it off here too, and refresh the row so
         // the SG toggle appears/disappears.
         if (row.incomeType !== "employment") row.sgApplies = false;
-        const rowEl = el.closest(".cf-row");
+        const rowEl = el.closest(".cf-tr");
         if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
       } else if (kind === "expenses") {
         row.category = EXPENSE_CATEGORIES.includes(el.value) ? el.value : "other";
@@ -2187,7 +2256,7 @@ function applyRowEdit(kind, row, field, el, commit) {
         } else {
           row[field] = { kind: "anchor", anchorId: el.value };
         }
-        const rowEl = el.closest(".cf-row");
+        const rowEl = el.closest(".cf-tr");
         if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // select/number visibility changes
         break;
       }
@@ -2203,7 +2272,7 @@ function applyRowEdit(kind, row, field, el, commit) {
       // reference the user chose deliberately.
       if (field === "from" && row.to.kind === "age" && row.to.age < v) row.to = { kind: "age", age: v };
       flagIfClamped(el, v);
-      updateDateRefReadouts(el.closest(".cf-row"), row, owner);
+      updateDateRefReadouts(el.closest(".cf-tr"), row, owner);
       break;
     }
     case "at": { // lump sum
@@ -2213,7 +2282,7 @@ function applyRowEdit(kind, row, field, el, commit) {
         } else {
           row.at = { kind: "anchor", anchorId: el.value };
         }
-        const rowEl = el.closest(".cf-row");
+        const rowEl = el.closest(".cf-tr");
         if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
         break;
       }
@@ -2221,7 +2290,7 @@ function applyRowEdit(kind, row, field, el, commit) {
       const v = clampInt(el.value, plan.client.currentAge, plan.endAge);
       row.at = { kind: "age", age: v };
       flagIfClamped(el, v);
-      updateDateRefReadouts(el.closest(".cf-row"), row, "client");
+      updateDateRefReadouts(el.closest(".cf-tr"), row, "client");
       break;
     }
   }
@@ -2252,7 +2321,29 @@ function updateDateRefReadouts(rowEl, row, ownerForAges) {
     span.textContent = resolved.outOfRange
       ? `Falls outside the projection window — clamped to age ${resolved.age}`
       : `age ${resolved.age} (${resolved.fyLabel})`;
+    // Live-typing an explicit age also keeps the closed-select overlay
+    // (Cashflow sections: table layout) in sync without a full re-render.
+    const shortSpan = wrap.querySelector(".date-ref-short");
+    if (shortSpan && select?.value === "__age__") shortSpan.textContent = `Age ${resolved.age}`;
   }
+}
+
+// Recomputes an indexation total's subtext in place — used only for
+// super contributions' detail-row Indexation control (see
+// indexBasis/indexExtraPct above), which has no .cf-tr ancestor for
+// the usual outerHTML-refresh approach to target.
+function updateIndexTotalText(container, row) {
+  const span = container.querySelector(".index-total");
+  if (!span) return;
+  const basis = row.indexBasis ?? (row.indexed === false ? "none" : "cpi");
+  const extra = row.indexExtraPct ?? 0;
+  const basisRate = basis === "awote"
+    ? (state.assumptions.awote ?? 0.035)
+    : basis === "cpi" ? state.assumptions.cpi : 0;
+  const fixed1 = (v) => `${v.toFixed(1)}%`;
+  span.textContent = basis === "none" && extra === 0
+    ? "Fixed nominal"
+    : `${fixed1(basisRate * 100)} + ${fixed1(extra)} = ${fixed1(basisRate * 100 + extra)}`;
 }
 
 function refreshAssetSelects() {
@@ -2839,127 +2930,100 @@ function superContributionRowHTML(sc) {
   const showAmount = sc.basis === "amount";
   const showPercent = sc.basis === "percentOfIncome";
   const showFillNote = sc.basis === "toConcessionalCap";
+  // The Amount/detail column's content varies by basis (a fixed $,
+  // a %-of-income-row pair, or a plain note) — one column, contents
+  // vary, same discipline as super contribution rows have always
+  // needed (Cashflow sections: table layout, one line per item).
+  const detailHTML = showAmount
+    ? `<input type="text" inputmode="decimal" class="cf-amount-input" value="${fmtAmountValue(sc.amount)}"
+              data-kind="superContributions" data-cfid="${sc.id}" data-field="amount" />`
+    : showPercent
+    ? `<div class="cf-index-pair">
+        <input type="number" min="0" max="100" step="1" value="${sc.percent}" aria-label="% of income"
+               data-kind="superContributions" data-cfid="${sc.id}" data-field="percent" />
+        <select data-kind="superContributions" data-cfid="${sc.id}" data-field="incomeRowId" aria-label="Income row">${incomeRowOptions(sc.incomeRowId)}</select>
+       </div>`
+    : showFillNote
+    ? `<span class="cf-detail-note">Fills remaining concessional cap</span>`
+    : "";
+  const headroomRow = superCapHeadroomHTML(sc);
   return `
-    <div class="cf-row cf-row-super-contribution${isCouple() ? " with-owner" : ""}" data-cfid="${sc.id}">
-      <div class="cf-cell cf-cell-label">
-        <label>Label</label>
+    <tr class="cf-tr" data-cfid="${sc.id}">
+      <td class="cf-td-label">
         <input type="text" value="${escapeHTML(sc.label)}" maxlength="60"
                data-kind="superContributions" data-cfid="${sc.id}" data-field="label" />
-      </div>
-      <div class="cf-cell cf-cell-type">
-        <label>Type</label>
+      </td>
+      <td class="cf-td-type">
         <select data-kind="superContributions" data-cfid="${sc.id}" data-field="type">
           ${ENTERABLE_SUPER_TYPES.map((t) =>
             `<option value="${t}"${sc.type === t ? " selected" : ""}>${SUPER_TYPE_LABELS[t]}</option>`
           ).join("")}
         </select>
-      </div>
+      </td>
       ${isCouple() ? `
-        <div class="cf-cell cf-cell-owner">
-          <label>Owner</label>
+        <td class="cf-td-owner">
           <select data-kind="superContributions" data-cfid="${sc.id}" data-field="owner">${superOwnerOptions(sc.owner)}</select>
-        </div>
+        </td>
       ` : ""}
-      <div class="cf-cell cf-cell-account">
-        <label>Account</label>
+      <td class="cf-td-account">
         <select data-kind="superContributions" data-cfid="${sc.id}" data-field="accountId">${superAccountOptions(sc.accountId, sc.owner)}</select>
-      </div>
-      <div class="cf-cell cf-cell-cbasis">
-        <label>Basis</label>
+      </td>
+      <td class="cf-td-basis">
         <select data-kind="superContributions" data-cfid="${sc.id}" data-field="basis">
           <option value="amount"${sc.basis === "amount" ? " selected" : ""}>Fixed amount</option>
           <option value="percentOfIncome"${sc.basis === "percentOfIncome" ? " selected" : ""}>% of an income row</option>
           <option value="toConcessionalCap"${sc.basis === "toConcessionalCap" ? " selected" : ""}>Fill remaining concessional cap</option>
         </select>
-      </div>
-      ${showAmount ? `
-        <div class="cf-cell cf-cell-amount">
-          <label>Amount ($)</label>
-          <input type="number" min="0" step="100" value="${sc.amount}"
-                 data-kind="superContributions" data-cfid="${sc.id}" data-field="amount" />
-        </div>
-      ` : ""}
-      ${showPercent ? `
-        <div class="cf-cell cf-cell-percent">
-          <label>% of income</label>
-          <input type="number" min="0" max="100" step="1" value="${sc.percent}"
-                 data-kind="superContributions" data-cfid="${sc.id}" data-field="percent" />
-        </div>
-        <div class="cf-cell cf-cell-inrow">
-          <label>Income row</label>
-          <select data-kind="superContributions" data-cfid="${sc.id}" data-field="incomeRowId">${incomeRowOptions(sc.incomeRowId)}</select>
-        </div>
-      ` : ""}
-      ${showFillNote ? `
-        <div class="cf-cell cf-cell-cap-note">
-          <p class="helper-text">Fills whatever headroom remains in this FY's concessional cap, including available carry-forward.</p>
-        </div>
-      ` : ""}
-      <div class="cf-cell cf-cell-freq">
-        <label>Frequency</label>
+      </td>
+      <td class="cf-td-detail">${detailHTML}</td>
+      <td class="cf-td-freq">
         <select data-kind="superContributions" data-cfid="${sc.id}" data-field="frequency">
           <option value="monthly"${sc.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${sc.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
-      </div>
-      <div class="cf-cell cf-cell-from">
-        <label>From</label>
-        ${dateRefControlHTML(sc.from, "client", `data-kind="superContributions" data-cfid="${sc.id}" data-field="from"`, 18, 120)}
-      </div>
-      <div class="cf-cell cf-cell-to">
-        <label>To</label>
-        ${dateRefControlHTML(sc.to, "client", `data-kind="superContributions" data-cfid="${sc.id}" data-field="to"`, 18, 120)}
-      </div>
-      ${showAmount ? indexationCellsHTML("superContributions", sc) : ""}
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-kind="superContributions" data-cfid="${sc.id}">×</button>
-      ${superCapHeadroomHTML(sc)}
-    </div>
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(sc.from, "client", `data-kind="superContributions" data-cfid="${sc.id}" data-field="from"`, 18, 120)}</td>
+      <td class="cf-td-date">${dateRefControlHTML(sc.to, "client", `data-kind="superContributions" data-cfid="${sc.id}" data-field="to"`, 18, 120)}</td>
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="superContributions" data-cfid="${sc.id}">×</button>
+      </td>
+    </tr>
+    ${showAmount ? indexationDetailRowHTML("superContributions", sc) : ""}
+    ${headroomRow ? `<tr class="cf-tr-detail"><td colspan="99">${headroomRow}</td></tr>` : ""}
   `;
 }
 
 function superWithdrawalRowHTML(sw) {
   return `
-    <div class="cf-row cf-row-super-withdrawal${isCouple() ? " with-owner" : ""}" data-cfid="${sw.id}">
-      <div class="cf-cell cf-cell-label">
-        <label>Label</label>
+    <tr class="cf-tr" data-cfid="${sw.id}">
+      <td class="cf-td-label">
         <input type="text" value="${escapeHTML(sw.label)}" maxlength="60"
                data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="label" />
-      </div>
+      </td>
       ${isCouple() ? `
-        <div class="cf-cell cf-cell-owner">
-          <label>Owner</label>
+        <td class="cf-td-owner">
           <select data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="owner">${superOwnerOptions(sw.owner)}</select>
-        </div>
+        </td>
       ` : ""}
-      <div class="cf-cell cf-cell-account">
-        <label>Account</label>
+      <td class="cf-td-account">
         <select data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="accountId">${superAccountOptions(sw.accountId, sw.owner)}</select>
-      </div>
-      <div class="cf-cell cf-cell-amount">
-        <label>Amount ($)</label>
-        <input type="number" min="0" step="100" value="${sw.amount}"
-               data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="amount" />
-      </div>
-      <div class="cf-cell cf-cell-freq">
-        <label>Frequency</label>
+      </td>
+      ${amountTdHTML("superWithdrawals", sw.id, sw.amount)}
+      <td class="cf-td-freq">
         <select data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="frequency">
           <option value="monthly"${sw.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${sw.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
-      </div>
-      <div class="cf-cell cf-cell-from">
-        <label>From</label>
-        ${dateRefControlHTML(sw.from, "client", `data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="from"`, 18, 120)}
-      </div>
-      <div class="cf-cell cf-cell-to">
-        <label>To</label>
-        ${dateRefControlHTML(sw.to, "client", `data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="to"`, 18, 120)}
-      </div>
-      ${indexationCellsHTML("superWithdrawals", sw)}
-      <button class="cf-remove" type="button" aria-label="Remove row"
-              data-action="remove-row" data-kind="superWithdrawals" data-cfid="${sw.id}">×</button>
-    </div>
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(sw.from, "client", `data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="from"`, 18, 120)}</td>
+      <td class="cf-td-date">${dateRefControlHTML(sw.to, "client", `data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="to"`, 18, 120)}</td>
+      ${indexationTdHTML("superWithdrawals", sw)}
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="superWithdrawals" data-cfid="${sw.id}">×</button>
+      </td>
+    </tr>
   `;
 }
 
@@ -2969,9 +3033,9 @@ function renderSuper() {
   const cf = state.cashflows;
   const cashflowsHTML = `
     <div class="cf-panel">
-      ${ffSubsectionHTML("Contributions", "superContributions", "Add contribution",
+      ${ffSubsectionHTML("Contributions", "superContributions", "Add contribution", cfHeaders.superContributions(),
         (cf.superContributions ?? []).map(superContributionRowHTML).join(""))}
-      ${ffSubsectionHTML("Withdrawals", "superWithdrawals", "Add withdrawal",
+      ${ffSubsectionHTML("Withdrawals", "superWithdrawals", "Add withdrawal", cfHeaders.superWithdrawals(),
         (cf.superWithdrawals ?? []).map(superWithdrawalRowHTML).join(""))}
     </div>
   `;

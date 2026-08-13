@@ -242,10 +242,6 @@ html, body {
   margin-bottom: 10px;
 }
 
-/* One-offs have no indexation controls, so they fit a single row. */
-.cf-row-lump {
-  grid-template-columns: 1.3fr 0.9fr 0.9fr 1.2fr 32px;
-}
 
 .cf-cell {
   display: flex;
@@ -638,148 +634,164 @@ html, body {
   padding-top: 0;
 }
 
-/* Income/expense/asset rows carry 8–9 cells (label/asset [+owner],
-   amount, frequency, from, to, index basis, additional %, remove) —
-   more than comfortably fits one line at 1280px with the sidebar
-   open, so they wrap deliberately onto two explicit lines (identity +
-   amount/frequency on top, timing + indexation beneath) rather than
-   letting grid auto-flow decide where the overflow lands. Remove
-   spans both lines as the grid's last column, so it's never pushed
-   under an unrelated cell. Each cell carries an explicit grid-area
-   class mapping it to its named slot below. */
-.cf-cell-label   { grid-area: label; }
-.cf-cell-asset   { grid-area: asset; }
-.cf-cell-owner   { grid-area: owner; }
-.cf-cell-amount  { grid-area: amount; }
-.cf-cell-freq    { grid-area: freq; }
-.cf-cell-from    { grid-area: from; }
-.cf-cell-to      { grid-area: to; }
-.cf-cell-basis   { grid-area: basis; }
-.cf-cell-extra   { grid-area: extra; }
-.cf-cell-category { grid-area: category; }
-.cf-cell-sg       { grid-area: sg; }
-
-.cf-row-asset {
-  grid-template-columns: 1.5fr 1fr 0.8fr 0.8fr 32px;
-  grid-template-areas:
-    "asset   asset   amount  freq    remove"
-    "from    to      basis   extra   remove";
+/* Cashflow sections: table layout, one line per item. Every
+   repeatable cashflow-style list section (Income, Expenses,
+   Deductions, Contributions, Withdrawals, One-off amounts, Super
+   contributions, Super withdrawals) is a real <table>: headers once,
+   sticky if the section scrolls; one compact <tr> per item, with a
+   light separator (not a full alternating fill — the CMA-profile
+   cards below use the same soft palette, so a strong zebra would
+   compete with them) so five items still scan as five rows. Assets,
+   Property and Liabilities stay as cards (untouched) — they carry too
+   many fields for one line. */
+.cf-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
 }
-/* Income/expense/deduction rows (Cashflow table: firm row vocabulary
-   and category grouping) all carry a third, explicit line for their
-   category select (income's Superannuation Guarantee toggle shares it,
-   shown only for the Salary category) — named so the extra cell is
-   deliberately placed, not left to grid auto-placement (which has no
-   consistent column tracks to fall back on and visibly overlaps). */
-.cf-row-income {
-  grid-template-columns: 1.5fr 1fr 0.8fr 0.8fr 32px;
-  grid-template-areas:
-    "label    label    amount  freq   remove"
-    "from     to       basis   extra  remove"
-    "category category sg      sg     remove";
+.cf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
 }
-.cf-row-income.with-owner {
-  grid-template-columns: 1.05fr 0.8fr 0.8fr 0.7fr 32px;
-  grid-template-areas:
-    "label    owner    amount  freq   remove"
-    "from     to       basis   extra  remove"
-    "category category sg      sg     remove";
+.cf-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f4f5f7;
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
 }
-.cf-row-expense,
-.cf-row-deduction {
-  grid-template-columns: 1.5fr 1fr 0.8fr 0.8fr 32px;
-  grid-template-areas:
-    "label    label    amount   freq    remove"
-    "from     to       basis    extra   remove"
-    "category category category category remove";
+.cf-table tbody tr.cf-tr {
+  border-bottom: 1px solid var(--line);
 }
-.cf-row-deduction.with-owner {
-  grid-template-columns: 1.05fr 0.8fr 0.8fr 0.7fr 32px;
-  grid-template-areas:
-    "label    owner    amount   freq    remove"
-    "from     to       basis    extra   remove"
-    "category category category category remove";
+.cf-table tbody tr.cf-tr:nth-of-type(odd) {
+  background: #fafbfc;
 }
-
-/* Super contribution/withdrawal rows (Tier 1.2): more cells than the
-   income/expense/asset rows above, so their own explicit 3-line (or
-   2-line, for withdrawals) named templates — every cell it can render
-   gets a named slot, with remove spanning every line as the last
-   column, same discipline as the rows above. */
-.cf-cell-type     { grid-area: type; }
-.cf-cell-account  { grid-area: account; }
-.cf-cell-cbasis   { grid-area: cbasis; }
-.cf-cell-percent  { grid-area: percent; }
-.cf-cell-inrow    { grid-area: inrow; }
-
-.cf-row-super-contribution {
-  grid-template-columns: 1fr 1fr 1fr 1fr 32px;
-  grid-template-areas:
-    "label   type    account cbasis  remove"
-    "amount  percent inrow   freq    remove"
-    "from    to      basis   extra   remove";
+.cf-table td {
+  padding: 5px 4px;
+  vertical-align: middle;
 }
-.cf-row-super-contribution.with-owner {
-  grid-template-columns: 1fr 1fr 1fr 1fr 1fr 32px;
-  grid-template-areas:
-    "label   type    owner   account cbasis  remove"
-    "amount  percent inrow   freq    freq    remove"
-    "from    to      basis   extra   extra   remove";
-}
-.cf-row-super-withdrawal {
-  grid-template-columns: 1.3fr 1fr 0.9fr 0.9fr 32px;
-  grid-template-areas:
-    "label   account amount  freq    remove"
-    "from    to      basis   extra   remove";
-}
-.cf-row-super-withdrawal.with-owner {
-  grid-template-columns: 1fr 0.8fr 1fr 0.9fr 0.9fr 32px;
-  grid-template-areas:
-    "label   owner   account amount  freq    remove"
-    "from    to      basis   extra   extra   remove";
-}
-.cf-row-super-contribution .cf-remove,
-.cf-row-super-withdrawal .cf-remove {
-  grid-area: remove;
-  align-self: stretch;
-  height: auto;
-}
-/* The fillnote helper (toConcessionalCap basis) shares the amount
-   slot — the two never render at the same time. The cap-headroom bar
-   spans the full row width beneath everything else; it is correct as
-   shipped and untouched here. */
-.cf-cell-cap-note { grid-area: amount; }
-.super-cap-headroom {
-  grid-column: 1 / -1;
+.cf-table td input[type="text"],
+.cf-table td input[type="number"],
+.cf-table td select {
+  width: 100%;
+  height: 30px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
   font-size: 12.5px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.cf-table td input:focus, .cf-table td select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.cf-td-label { min-width: 130px; }
+.cf-td-category { min-width: 110px; }
+.cf-td-type, .cf-td-basis { min-width: 92px; }
+.cf-td-owner, .cf-td-account { min-width: 84px; }
+.cf-td-amount, .cf-td-detail { min-width: 96px; }
+.cf-td-freq { min-width: 72px; }
+.cf-td-date { min-width: 132px; }
+.cf-td-direction { min-width: 100px; }
+.cf-td-index { min-width: 142px; }
+.cf-td-remove { width: 30px; text-align: center; }
+/* Super contributions dropped Indexation to its own row (only that
+   many-columned section needed to), and (for couples) adds an Owner
+   column on top of every other section's set — the tightest section
+   overall, so it gets its own, further-trimmed widths rather than
+   fighting the browser's table auto-layout with min-width alone. */
+#superSection .cf-td-label { min-width: 96px; }
+#superSection .cf-td-type, #superSection .cf-td-basis { min-width: 80px; }
+#superSection .cf-td-owner, #superSection .cf-td-account { min-width: 70px; }
+#superSection .cf-td-detail { min-width: 86px; }
+#superSection .cf-td-freq { min-width: 64px; }
+#superSection .cf-td-date { min-width: 118px; }
+/* Amount inputs: right-aligned, thousands-separated on blur (a
+   delegated focusin handler strips the separators back out to edit). */
+.cf-amount-input { text-align: right; }
+/* Superannuation Guarantee toggle shares the Category cell (Salary
+   only) rather than its own column. */
+.cf-sg-check {
+  display: flex; align-items: center; gap: 4px;
+  margin-top: 3px; font-size: 11px; color: var(--ink-soft);
+  text-transform: none; letter-spacing: normal; font-weight: 500;
+}
+.cf-sg-check input { width: 14px; height: 14px; accent-color: var(--accent); }
+/* Indexation: one header, two narrow adjacent inputs, computed total
+   as muted subtext beneath. */
+.cf-index-pair { display: flex; gap: 4px; }
+.cf-index-pair select { flex: 1.1; }
+.cf-index-pair input { flex: 0.8; }
+.cf-detail-note {
+  display: block; font-size: 12px; color: var(--ink-soft); padding: 4px 0;
+}
+.cf-remove {
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  width: 26px;
+  height: 26px;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cf-remove:hover { color: #a33; border-color: #d9a5a5; }
+.cf-tag {
+  display: inline-block;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--ink-soft);
+  text-transform: none;
+}
+/* Super contribution cap-headroom note: a full-width detail row
+   directly beneath its contribution row (colspan="99" always spans
+   every column, regardless of exact count for single vs couple). */
+.cf-tr-detail td { padding: 0 6px 6px; border-bottom: 1px solid var(--line); }
+.cf-detail-index-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cf-table td .cf-detail-index-row select, .cf-table td .cf-detail-index-row input {
+  height: 26px; padding: 0 6px; font-size: 12px;
+  width: auto;
+}
+.cf-table td .cf-detail-index-row select { min-width: 80px; }
+.cf-table td .cf-detail-index-row input { width: 70px; }
+.cf-detail-label {
+  font-size: 10.5px; font-weight: 700; color: var(--ink-soft);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.super-cap-headroom {
+  font-size: 12px;
   color: var(--ink-soft);
   background: var(--accent-soft);
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 5px 9px;
   font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 900px) {
-  .cf-row-super-contribution, .cf-row-super-contribution.with-owner,
-  .cf-row-super-withdrawal, .cf-row-super-withdrawal.with-owner {
-    grid-template-columns: 1fr 1fr;
-    grid-template-areas: none;
+  /* Narrower than a 1280px desktop with the sidebar open: let the
+     table scroll horizontally rather than trying to compress every
+     column further — the wrapper's overflow-x:auto (above) already
+     handles this. */
+  .cf-td-label, .cf-td-category, .cf-td-type, .cf-td-basis,
+  .cf-td-owner, .cf-td-account, .cf-td-amount, .cf-td-detail,
+  .cf-td-date, .cf-td-index {
+    min-width: 110px;
   }
-  .cf-row-super-contribution .cf-remove,
-  .cf-row-super-withdrawal .cf-remove {
-    grid-area: auto;
-    align-self: center;
-    height: 34px;
-  }
-}
-
-.cf-row-income .cf-remove,
-.cf-row-expense .cf-remove,
-.cf-row-deduction .cf-remove,
-.cf-row-asset .cf-remove {
-  grid-area: remove;
-  align-self: stretch;
-  height: auto;
 }
 
 /* --- date-ref control (Tier 1.1): anchor select + hidden-until-chosen
@@ -803,6 +815,27 @@ html, body {
   font-size: 13px;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
+}
+/* Anchor select closed-state override (Cashflow sections: table
+   layout, one line per item): the native <select> shows its full
+   "Retirement — <name> — age N (FYxx–yy)" option text both open and
+   closed by default — an opaque overlay, sized to match and set to
+   pointer-events:none, sits on top showing just the short anchor name
+   instead. Clicks pass through to the real select beneath; its popup
+   list (a separate OS-rendered layer) is unaffected by the overlay. */
+.date-ref-select-wrap { position: relative; }
+.date-ref-short {
+  position: absolute; inset: 0;
+  display: flex; align-items: center;
+  padding: 0 24px 0 9px;
+  border-radius: 7px;
+  background: #fff;
+  font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
 .date-ref select:focus, .date-ref input:focus {
   outline: none;
@@ -956,26 +989,6 @@ html, body {
 .order-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .order-btn:disabled { opacity: 0.35; cursor: default; }
 
-@media (max-width: 900px) {
-  /* Narrower than a 1280px desktop with the sidebar open: drop the
-     named two-line layout for a plain auto-flowing 2-column stack —
-     grid-template-areas: none releases each cf-cell-* class's
-     grid-area back to auto-placement. */
-  .cf-row-income, .cf-row-income.with-owner, .cf-row-expense,
-  .cf-row-deduction, .cf-row-deduction.with-owner, .cf-row-asset {
-    grid-template-columns: 1fr 1fr;
-    grid-template-areas: none;
-  }
-  .cf-row-income .cf-remove,
-  .cf-row-expense .cf-remove,
-  .cf-row-deduction .cf-remove,
-  .cf-row-asset .cf-remove {
-    grid-area: auto;
-    align-self: center;
-    height: 34px;
-  }
-}
-
 /* Inline validation: field snapped to its clamped value. */
 .field-clamped {
   border-color: #d97b2f !important;
@@ -993,9 +1006,6 @@ html, body {
 }
 
 @media (max-width: 720px) {
-  .cf-row { grid-template-columns: 1fr 1fr; }
-  .cf-row-lump { grid-template-columns: 1fr 1fr; }
-  .cf-remove { grid-column: 2; justify-self: end; width: 60px; }
   .pcard-details, .pcard-fees { grid-template-columns: 1fr; }
   .summary-strip { grid-template-columns: 1fr; }
   .plan-derived { margin-left: 0; width: 100%; }
