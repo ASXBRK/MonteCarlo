@@ -1020,7 +1020,7 @@ function maybeDefaultWorkspaceClientName(field) {
   }
 }
 
-els.planBar.addEventListener("change", (e) => {
+wireDeferredDateCommit(els.planBar, (e) => {
   const field = e.target.dataset.planField;
   if (!field) return;
   const p = state.plan;
@@ -2180,6 +2180,34 @@ function flagIfClamped(el, clampedValue) {
   }
 }
 
+// Numeric inputs: validate on commit, not on keystroke. Every plain
+// number input in this app already gets this for free — the browser
+// only fires "change" once, on blur or Enter, never mid-keystroke
+// ("input" fires every keystroke, but nothing here listens for it on
+// these fields). <input type="date"> does NOT behave the same way:
+// Chromium (and other browsers) fire "change" repeatedly WHILE a
+// later date segment is still being edited, not only once the whole
+// date is complete and the user has moved on — so a date field wired
+// straight to "change" re-clamps and re-renders mid-edit, visibly
+// scrambling what's being typed (e.g. a DOB year). Route every date
+// input's commit through blur (the bubbling "focusout") or Enter
+// instead, so it gets the same "accept free text while focused,
+// validate on commit" treatment every other year/age field already
+// has structurally.
+function wireDeferredDateCommit(container, handler) {
+  container.addEventListener("change", (e) => {
+    if (e.target.type === "date") return; // deferred to focusout below
+    handler(e);
+  });
+  container.addEventListener("focusout", (e) => {
+    if (e.target.type !== "date") return;
+    handler(e);
+  });
+  container.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.type === "date") e.target.blur(); // blur triggers focusout above
+  });
+}
+
 // --- structural actions ------------------------------------------------------
 
 function onAssetSectionClick(e) {
@@ -2437,7 +2465,7 @@ function findProperty(pid) {
   return (state.properties ?? []).find((p) => p.id === pid) || null;
 }
 
-els.propertySection.addEventListener("change", (e) => {
+wireDeferredDateCommit(els.propertySection, (e) => {
   const field = e.target.dataset.pfield;
   const p = findProperty(e.target.dataset.pid);
   if (!field || !p) return;
