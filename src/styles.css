@@ -237,14 +237,14 @@ html, body {
 
 .cf-row {
   display: grid;
-  grid-template-columns: 1.4fr 1.1fr 0.9fr 0.9fr 0.7fr 32px;
-  gap: 10px;
+  gap: 8px 10px;
   align-items: end;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
+/* One-offs have no indexation controls, so they fit a single row. */
 .cf-row-lump {
-  grid-template-columns: 1.4fr 1.1fr 0.9fr 32px;
+  grid-template-columns: 1.3fr 0.9fr 0.9fr 1.2fr 32px;
 }
 
 .cf-cell {
@@ -638,17 +638,51 @@ html, body {
   padding-top: 0;
 }
 
-.cf-row-income {
-  grid-template-columns: 1.3fr 1.2fr 1fr 0.9fr 0.9fr 0.6fr 32px;
-}
-.cf-row-income.with-owner {
-  grid-template-columns: 1.2fr 0.9fr 1.1fr 1fr 0.9fr 0.9fr 0.6fr 32px;
-}
-.cf-row-expense {
-  grid-template-columns: 1.3fr 1.2fr 1fr 0.9fr 0.9fr 0.6fr 32px;
+/* Income/expense/asset rows carry 8–9 cells (label/asset [+owner],
+   amount, frequency, from, to, index basis, additional %, remove) —
+   more than comfortably fits one line at 1280px with the sidebar
+   open, so they wrap deliberately onto two explicit lines (identity +
+   amount/frequency on top, timing + indexation beneath) rather than
+   letting grid auto-flow decide where the overflow lands. Remove
+   spans both lines as the grid's last column, so it's never pushed
+   under an unrelated cell. Each cell carries an explicit grid-area
+   class mapping it to its named slot below. */
+.cf-cell-label   { grid-area: label; }
+.cf-cell-asset   { grid-area: asset; }
+.cf-cell-owner   { grid-area: owner; }
+.cf-cell-amount  { grid-area: amount; }
+.cf-cell-freq    { grid-area: freq; }
+.cf-cell-from    { grid-area: from; }
+.cf-cell-to      { grid-area: to; }
+.cf-cell-basis   { grid-area: basis; }
+.cf-cell-extra   { grid-area: extra; }
+
+.cf-row-income,
+.cf-row-expense,
+.cf-row-asset {
+  grid-template-columns: 1.5fr 1fr 0.8fr 0.8fr 32px;
+  grid-template-areas:
+    "label   label   amount  freq    remove"
+    "from    to      basis   extra   remove";
 }
 .cf-row-asset {
-  grid-template-columns: 1.2fr 1.2fr 1fr 0.9fr 0.9fr 0.6fr 32px;
+  grid-template-areas:
+    "asset   asset   amount  freq    remove"
+    "from    to      basis   extra   remove";
+}
+.cf-row-income.with-owner {
+  grid-template-columns: 1.05fr 0.8fr 0.8fr 0.7fr 32px;
+  grid-template-areas:
+    "label   owner   amount  freq    remove"
+    "from    to      basis   extra   remove";
+}
+
+.cf-row-income .cf-remove,
+.cf-row-expense .cf-remove,
+.cf-row-asset .cf-remove {
+  grid-area: remove;
+  align-self: stretch;
+  height: auto;
 }
 
 /* --- date-ref control (Tier 1.1): anchor select + hidden-until-chosen
@@ -826,8 +860,20 @@ html, body {
 .order-btn:disabled { opacity: 0.35; cursor: default; }
 
 @media (max-width: 900px) {
+  /* Narrower than a 1280px desktop with the sidebar open: drop the
+     named two-line layout for a plain auto-flowing 2-column stack —
+     grid-template-areas: none releases each cf-cell-* class's
+     grid-area back to auto-placement. */
   .cf-row-income, .cf-row-income.with-owner, .cf-row-expense, .cf-row-asset {
     grid-template-columns: 1fr 1fr;
+    grid-template-areas: none;
+  }
+  .cf-row-income .cf-remove,
+  .cf-row-expense .cf-remove,
+  .cf-row-asset .cf-remove {
+    grid-area: auto;
+    align-self: center;
+    height: 34px;
   }
 }
 

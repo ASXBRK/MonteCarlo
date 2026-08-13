@@ -1403,13 +1403,13 @@ function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax) {
 function incomeRowHTML(r) {
   return `
     <div class="cf-row cf-row-income${isCouple() ? " with-owner" : ""}" data-cfid="${r.id}">
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-label">
         <label>Label</label>
         <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
                data-kind="income" data-cfid="${r.id}" data-field="label" />
       </div>
       ${isCouple() ? `
-        <div class="cf-cell">
+        <div class="cf-cell cf-cell-owner">
           <label>Owner</label>
           <select data-kind="income" data-cfid="${r.id}" data-field="owner">
             <option value="client"${r.owner === "client" ? " selected" : ""}>${escapeHTML(clientName())}</option>
@@ -1417,23 +1417,23 @@ function incomeRowHTML(r) {
           </select>
         </div>
       ` : ""}
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-amount">
         <label>Gross amount ($)</label>
         <input type="number" min="0" step="1000" value="${r.amount}"
                data-kind="income" data-cfid="${r.id}" data-field="amount" />
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-freq">
         <label>Frequency</label>
         <select data-kind="income" data-cfid="${r.id}" data-field="frequency">
           <option value="monthly"${r.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${r.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-from">
         <label>From</label>
         ${dateRefControlHTML(r.from, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="from"`, 18, 120)}
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-to">
         <label>To</label>
         ${dateRefControlHTML(r.to, r.owner, `data-kind="income" data-cfid="${r.id}" data-field="to"`, 18, 120)}
       </div>
@@ -1447,28 +1447,28 @@ function incomeRowHTML(r) {
 function expenseRowHTML(r) {
   return `
     <div class="cf-row cf-row-expense" data-cfid="${r.id}">
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-label">
         <label>Label</label>
         <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
                data-kind="expenses" data-cfid="${r.id}" data-field="label" />
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-amount">
         <label>Amount ($)</label>
         <input type="number" min="0" step="1000" value="${r.amount}"
                data-kind="expenses" data-cfid="${r.id}" data-field="amount" />
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-freq">
         <label>Frequency</label>
         <select data-kind="expenses" data-cfid="${r.id}" data-field="frequency">
           <option value="monthly"${r.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${r.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-from">
         <label>From</label>
         ${dateRefControlHTML(r.from, "client", `data-kind="expenses" data-cfid="${r.id}" data-field="from"`, 18, 120)}
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-to">
         <label>To</label>
         ${dateRefControlHTML(r.to, "client", `data-kind="expenses" data-cfid="${r.id}" data-field="to"`, 18, 120)}
       </div>
@@ -1482,27 +1482,27 @@ function expenseRowHTML(r) {
 function contributionRowHTML(kind, cf) {
   return `
     <div class="cf-row cf-row-asset" data-cfid="${cf.id}">
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-asset">
         <label>Asset</label>
         <select data-kind="${kind}" data-cfid="${cf.id}" data-field="assetId">${assetOptions(cf.assetId)}</select>
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-amount">
         <label>Amount ($)</label>
         <input type="number" min="0" step="100" value="${cf.amount}"
                data-kind="${kind}" data-cfid="${cf.id}" data-field="amount" />
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-freq">
         <label>Frequency</label>
         <select data-kind="${kind}" data-cfid="${cf.id}" data-field="frequency">
           <option value="monthly"${cf.frequency === "monthly" ? " selected" : ""}>Monthly</option>
           <option value="annual"${cf.frequency === "annual" ? " selected" : ""}>Annual</option>
         </select>
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-from">
         <label>From</label>
         ${dateRefControlHTML(cf.from, "client", `data-kind="${kind}" data-cfid="${cf.id}" data-field="from"`, 18, 120)}
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-to">
         <label>To</label>
         ${dateRefControlHTML(cf.to, "client", `data-kind="${kind}" data-cfid="${cf.id}" data-field="to"`, 18, 120)}
       </div>
@@ -1514,29 +1514,32 @@ function contributionRowHTML(kind, cf) {
 }
 
 // Per-row indexation controls (D1): basis + additional %, with the
-// computed nominal total shown live ("CPI 2.5% + 1% = 3.5%").
+// computed nominal total shown live as pure arithmetic ("3.5% + 0.0%
+// = 3.5%") — the basis name lives in the field's own label ("AWOTE
+// additional %") rather than being repeated in the value, so the sum
+// reads correctly once a nonzero additional % is entered.
 function indexationCellsHTML(kind, row) {
   const basis = row.indexBasis ?? (row.indexed === false ? "none" : "cpi");
   const extra = row.indexExtraPct ?? 0;
   const basisRate = basis === "awote"
     ? (state.assumptions.awote ?? 0.035)
     : basis === "cpi" ? state.assumptions.cpi : 0;
-  const pct = (v) => `${(v).toFixed(1).replace(/\.0$/, "")}%`;
-  const basisLabel = basis === "awote" ? "AWOTE" : basis === "cpi" ? "CPI" : "None";
-  const total = extra === 0 && basis === "none"
+  const basisLabel = basis === "awote" ? "Wages" : basis === "cpi" ? "CPI" : "None";
+  const fixed1 = (v) => `${v.toFixed(1)}%`;
+  const total = basis === "none" && extra === 0
     ? "Fixed nominal"
-    : `${basisLabel} ${pct(basisRate * 100)}${extra ? ` + ${pct(extra)}` : ""} = ${pct(basisRate * 100 + extra)}`;
+    : `${fixed1(basisRate * 100)} + ${fixed1(extra)} = ${fixed1(basisRate * 100 + extra)}`;
   return `
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-basis">
         <label>Index basis</label>
         <select data-kind="${kind}" data-cfid="${row.id}" data-field="indexBasis">
           <option value="none"${basis === "none" ? " selected" : ""}>None</option>
           <option value="cpi"${basis === "cpi" ? " selected" : ""}>CPI</option>
-          <option value="awote"${basis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+          <option value="awote"${basis === "awote" ? " selected" : ""}>Wages</option>
         </select>
       </div>
-      <div class="cf-cell cf-index-extra">
-        <label>Additional %</label>
+      <div class="cf-cell cf-cell-extra">
+        <label>${basisLabel} additional %</label>
         <input type="number" min="-10" max="10" step="0.1" value="${extra}"
                data-kind="${kind}" data-cfid="${row.id}" data-field="indexExtraPct" />
         <span class="index-total">${total}</span>
@@ -1645,7 +1648,7 @@ function renderCashflows() {
   els.incomeSection.innerHTML = ffSectionHTML(
     "Income", "income", "Add income",
     cf.income.map(incomeRowHTML).join(""),
-    `<p class="helper-text">Enter income before tax. Tax is calculated from a later phase.</p>`,
+    `<p class="helper-text">Enter income before tax.</p>`,
     "Add income to include salary, rental, or other regular receipts in the projection."
   );
 
