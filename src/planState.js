@@ -27,6 +27,7 @@
 export const SCHEMA_VERSION = 5;
 
 import { remainingLE } from "./data/lifeTables.js";
+import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
 
 // --- id generation ---------------------------------------------------
 
@@ -444,7 +445,11 @@ export function defaultState(profiles = {}, now = new Date()) {
       surplus: { mode: "spend", assetId: null },
       fundingOrder: [asset.id],
     },
-    display: { units: "real", reportPeriod: { from: null, to: null } },
+    display: {
+      units: "real",
+      reportPeriod: { from: null, to: null },
+      lastVisited: { area: "input", section: DEFAULT_INPUT_SECTION },
+    },
     assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed" },
   };
 }
@@ -492,6 +497,65 @@ export function clampReportPeriod(raw) {
   const to = fy(raw?.to);
   if (from != null && to != null && to < from) return { from, to: from };
   return { from, to };
+}
+
+// --- sidebar navigation (page-per-section) -------------------------------
+//
+// Display state only — which page a scenario last showed, so reopening
+// it restores where the user left off (unless the scenario is
+// effectively empty, in which case landing always goes to Setup; see
+// isScenarioEffectivelyEmpty below).
+
+export function clampLastVisited(raw) {
+  if (raw?.area === "input" && INPUT_SECTIONS.includes(raw.section)) {
+    return { area: "input", section: raw.section };
+  }
+  if (raw?.area === "output" && OUTPUT_VIEWS.includes(raw.section)) {
+    return { area: "output", section: raw.section };
+  }
+  return { area: "input", section: DEFAULT_INPUT_SECTION };
+}
+
+// A scenario counts as "effectively empty" when nothing beyond the
+// single default financial asset has been entered — no cashflows, no
+// extra assets, no lifestyle assets, no property, no liabilities.
+// Landing always goes to Setup for these (rather than wherever the
+// scenario was last left, which for a never-configured scenario is
+// meaningless), and it's what a brand-new client/scenario naturally
+// satisfies on first visit.
+export function isScenarioEffectivelyEmpty(state) {
+  const cf = state.cashflows;
+  const financialCount = state.assets.filter(isFinancial).length;
+  const lifestyleCount = state.assets.filter(isLifestyle).length;
+  // A brand-new scenario ships with exactly one financial asset and
+  // one default contribution row targeting it — that seed doesn't
+  // count as "configured".
+  const investCashflowCount = cf.contributions.length + cf.withdrawals.length + cf.lumpSums.length;
+  return (
+    cf.income.length === 0 &&
+    cf.expenses.length === 0 &&
+    investCashflowCount <= 1 &&
+    financialCount <= 1 &&
+    lifestyleCount === 0 &&
+    (state.liabilities ?? []).length === 0 &&
+    (state.properties ?? []).length === 0
+  );
+}
+
+// Sidebar badge counts (item counts, not completion — a portfolio-only
+// scenario is finished, not partial). No entry for sections that
+// aren't "a list" (Setup, Settings).
+export function sectionCounts(state) {
+  const cf = state.cashflows;
+  return {
+    income: cf.income.length,
+    expenses: cf.expenses.length,
+    "financial-assets": state.assets.filter(isFinancial).length,
+    "lifestyle-assets": state.assets.filter(isLifestyle).length,
+    property: (state.properties ?? []).length,
+    liabilities: (state.liabilities ?? []).length,
+    "investment-cashflows": cf.contributions.length + cf.withdrawals.length + cf.lumpSums.length,
+  };
 }
 
 // --- validation / clamping ---------------------------------------------
@@ -824,6 +888,7 @@ export function hydrate(json, profiles = {}) {
       display: {
         units: raw.display?.units === "nominal" ? "nominal" : "real",
         reportPeriod: clampReportPeriod(raw.display?.reportPeriod),
+        lastVisited: clampLastVisited(raw.display?.lastVisited),
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,

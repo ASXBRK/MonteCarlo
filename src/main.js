@@ -19,6 +19,7 @@ import {
   personDisplayName, resolveEndBasis,
   createLiability, LIABILITY_TYPES, normaliseLiabilities,
   createProperty, normaliseProperties, PROPERTY_STATES, PROPERTY_TYPES,
+  clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
 } from "./planState.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
@@ -34,7 +35,10 @@ import {
   switchScenario, touchScenario,
   exportClientFile, exportScenarioFile, importFile,
 } from "./workspace.js";
-import { formatRoute, resolveRoute, initialRoute } from "./router.js";
+import {
+  formatRoute, resolveRoute, initialRoute,
+  INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION,
+} from "./router.js";
 
 // Legacy insight modules (firstDecade, drawdownTolerance, tornado,
 // sequenceRisk) are stubbed out. Deliberately NOT imported while
@@ -54,13 +58,10 @@ const els = {
   pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
   assets: $("assets"),
-  lifestyleAssets: $("lifestyleAssets"),
-  liabilities: $("liabilities"),
-  properties: $("properties"),
+  lifestyleSection: $("lifestyleSection"),
+  liabilitiesSection: $("liabilitiesSection"),
+  propertySection: $("propertySection"),
   addAssetBtn: $("addAssetBtn"),
-  addLifestyleBtn: $("addLifestyleBtn"),
-  addLiabilityBtn: $("addLiabilityBtn"),
-  addPropertyBtn: $("addPropertyBtn"),
   incomeSection: $("incomeSection"),
   expensesSection: $("expensesSection"),
   investSection: $("investSection"),
@@ -68,7 +69,9 @@ const els = {
   summaryStrip: $("summaryStrip"),
   chartNote: document.querySelector('[data-role="chartNote"]'),
   displayOptions: document.querySelectorAll(".display-option"),
-  viewRail: $("viewRail"),
+  sideNav: $("sideNav"),
+  workspaceCanvas: document.querySelector(".workspace-canvas"),
+  outputCanvas: $("outputCanvas"),
   exportBtn: $("exportBtn"),
   viewProjection: $("viewProjection"),
   viewCashflow: $("viewCashflow"),
@@ -156,11 +159,15 @@ function saveWorkspace() {
 }
 
 // Autosave: every mutation writes the active scenario's blob and
-// touches its updatedAt in the index.
+// touches its updatedAt in the index. Sidebar badges are counts of
+// plan-state lists, so this is also the single choke point that keeps
+// them live-updating without threading a render call through every
+// individual mutation handler.
 function saveState() {
   writeRaw(scenarioKey(workspace.activeScenarioId), serialize(state));
   workspace = touchScenario(workspace, workspace.activeScenarioId, Date.now());
   saveWorkspace();
+  if (mountedScenarioId) renderSideNav();
 }
 
 // --- pages + routing (A.5) --------------------------------------------------
@@ -186,15 +193,48 @@ function showPage(name) {
   els.pageWorkspace.hidden = name !== "workspace";
 }
 
+// A scenario lands on Setup when it hasn't been configured yet
+// (a brand-new client/scenario, or one cleared back down); otherwise
+// it reopens wherever it was last left.
+function landingRoute(clientId, scenarioId) {
+  if (isScenarioEffectivelyEmpty(state)) {
+    return { page: "workspace", clientId, scenarioId, area: "input", section: DEFAULT_INPUT_SECTION };
+  }
+  const lv = clampLastVisited(state.display.lastVisited);
+  return { page: "workspace", clientId, scenarioId, area: lv.area, section: lv.section };
+}
+
 function handleRoute() {
   const route = resolveRoute(location.hash, workspace);
   if (!route) { location.replace("#/clients"); return; } // invalid ids → Clients
+  // An invalid area/section was clamped (e.g. to input/setup) rather
+  // than rejected — normalise the visible URL to match, the same way
+  // an invalid client/scenario id normalises to #/clients. A genuine
+  // bare route (no area/section yet) formats back to the identical
+  // hash here, so this never fires for that case.
+  if (route.page === "workspace" && route.area != null && formatRoute(route) !== location.hash) {
+    location.replace(formatRoute(route));
+    return;
+  }
   currentRoute = route;
   if (route.page !== "workspace" && mountedScenarioId) unmountWorkspace();
   showPage(route.page);
-  if (route.page === "clients") renderClientsPage();
-  else if (route.page === "client") renderClientPage(route.clientId);
-  else if (mountedScenarioId !== route.scenarioId) mountWorkspace(route.clientId, route.scenarioId);
+  if (route.page === "clients") { renderClientsPage(); return; }
+  if (route.page === "client") { renderClientPage(route.clientId); return; }
+
+  // workspace
+  if (mountedScenarioId !== route.scenarioId) mountWorkspace(route.clientId, route.scenarioId);
+  if (route.area == null) {
+    // Bare scenario URL — now that state is loaded, resolve landing
+    // and replace the hash (fires hashchange; this function re-enters
+    // with area/section set and mountedScenarioId already current).
+    navigate(landingRoute(route.clientId, route.scenarioId));
+    return;
+  }
+  persistLastVisited(route.area, route.section);
+  renderWorkspaceBreadcrumb();
+  showSection(route.area, route.section);
+  renderSideNav();
 }
 
 function mountWorkspace(clientId, scenarioId) {
@@ -203,7 +243,6 @@ function mountWorkspace(clientId, scenarioId) {
   state = loadActiveState();
   resetRuntimeUiState();
   mountedScenarioId = scenarioId;
-  renderWorkspaceBreadcrumb();
   renderAll();
   applyUnitsLabel();
   populateParamsTable();
@@ -213,6 +252,91 @@ function mountWorkspace(clientId, scenarioId) {
   syncBracketModeInputs();
 }
 
+// --- sidebar navigation: one section per page (Sidebar nav) -----------------
+
+const INPUT_NAV = [
+  { id: "setup", label: "Setup" },
+  { id: "income", label: "Income" },
+  { id: "expenses", label: "Expenses" },
+  { id: "financial-assets", label: "Financial assets" },
+  { id: "lifestyle-assets", label: "Lifestyle assets" },
+  { id: "property", label: "Property" },
+  { id: "liabilities", label: "Liabilities" },
+  { id: "investment-cashflows", label: "Investment cashflows" },
+  { id: "settings", label: "Settings" },
+];
+const OUTPUT_NAV = {
+  Graphs: [{ id: "projection", label: "Projection" }],
+  Tables: [
+    { id: "cashflow", label: "Cashflow" },
+    { id: "assets", label: "Assets" },
+    { id: "tax", label: "Tax" },
+    { id: "assumptions", label: "Assumptions" },
+  ],
+};
+const SECTION_LABELS = Object.fromEntries([
+  ...INPUT_NAV.map((n) => [n.id, n.label]),
+  ...Object.values(OUTPUT_NAV).flat().map((n) => [n.id, n.label]),
+]);
+
+function renderSideNav() {
+  const counts = sectionCounts(state);
+  const badge = (id) => (counts[id] ? `<span class="nav-badge">${counts[id]}</span>` : "");
+  const item = (n, sub = false) => {
+    const area = INPUT_NAV.includes(n) ? "input" : "output";
+    const active = currentRoute?.area === area && currentRoute?.section === n.id;
+    return `
+      <button class="nav-item${sub ? " nav-item-sub" : ""}${active ? " active" : ""}" type="button"
+              data-nav-area="${area}" data-nav-section="${n.id}">
+        <span>${escapeHTML(n.label)}</span>${badge(n.id)}
+      </button>
+    `;
+  };
+  els.sideNav.innerHTML = `
+    <div class="nav-group-label">Input</div>
+    ${INPUT_NAV.map((n) => item(n)).join("")}
+    <button class="nav-item" type="button" disabled title="Coming soon">
+      <span>Super</span>
+    </button>
+    <div class="nav-group-label">Output</div>
+    <div class="nav-subgroup-label">Graphs</div>
+    ${OUTPUT_NAV.Graphs.map((n) => item(n, true)).join("")}
+    <div class="nav-subgroup-label">Tables</div>
+    ${OUTPUT_NAV.Tables.map((n) => item(n, true)).join("")}
+  `;
+}
+
+els.sideNav.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-nav-section]");
+  if (!btn || btn.disabled) return;
+  const { client, scenario } = findActive(workspace);
+  navigate({
+    page: "workspace", clientId: client.id, scenarioId: scenario.id,
+    area: btn.dataset.navArea, section: btn.dataset.navSection,
+  });
+});
+
+// Toggle which single canvas section is visible; drives the output
+// sub-view when area is "output". Every INPUT_SECTIONS id maps 1:1 to
+// a data-section element already rendered by renderAll().
+function showSection(area, section) {
+  const target = area === "output" ? "__output__" : section;
+  for (const el of els.workspaceCanvas.querySelectorAll("[data-section]")) {
+    el.hidden = el.dataset.section !== target;
+  }
+  if (area === "output") {
+    activeView = OUTPUT_VIEWS.includes(section) ? section : "projection";
+    renderActiveView();
+  }
+}
+
+// Persisted separately from saveState(): visiting a page is not an
+// edit, so it must not bump the scenario's "last updated" timestamp.
+function persistLastVisited(area, section) {
+  state.display.lastVisited = { area, section };
+  writeRaw(scenarioKey(workspace.activeScenarioId), serialize(state));
+}
+
 // Empty every dynamic mount so the list pages do not sit on top of a
 // live workspace DOM. The static skeleton and its listeners stay; the
 // content goes.
@@ -220,7 +344,8 @@ function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
   for (const el of [els.planBar, els.incomeSection, els.expensesSection, els.assets,
-                    els.lifestyleAssets, els.liabilities, els.properties, els.investSection, els.settingsPanel, els.summaryStrip,
+                    els.lifestyleSection, els.liabilitiesSection, els.propertySection,
+                    els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
                     els.viewTax, els.viewAssumptions]) {
     el.innerHTML = "";
@@ -359,7 +484,7 @@ els.breadcrumb.addEventListener("click", (e) => {
 function renderWorkspaceBreadcrumb() {
   const { client, scenario } = findActive(workspace);
   if (!client || !scenario) return;
-  renderBreadcrumb([
+  const items = [
     { label: "Clients", href: "#/clients" },
     { label: client.name, href: formatRoute({ page: "client", clientId: client.id }) },
     {
@@ -370,7 +495,10 @@ function renderWorkspaceBreadcrumb() {
       },
       rerender: renderWorkspaceBreadcrumb,
     },
-  ]);
+  ];
+  const sectionLabel = currentRoute?.section && SECTION_LABELS[currentRoute.section];
+  if (sectionLabel) items.push({ label: sectionLabel });
+  renderBreadcrumb(items);
 }
 
 // --- Clients page ---------------------------------------------------------
@@ -1039,14 +1167,33 @@ function assetCardHTML(a) {
   return `<div class="pcard${excluded ? " excluded" : ""}" data-aid="${a.id}">${head}${body}</div>`;
 }
 
+// Financial assets can never be empty (the last-financial-asset rule),
+// so its static heading/stack/Add-button markup in index.html never
+// needs the page-empty treatment. Lifestyle assets can be empty.
 function renderAssets() {
   els.assets.innerHTML = state.assets.filter((a) => a.class !== "lifestyle").map(assetCardHTML).join("");
-  els.lifestyleAssets.innerHTML = state.assets.filter((a) => a.class === "lifestyle").map(assetCardHTML).join("");
+
+  const lifestyleCards = state.assets.filter((a) => a.class === "lifestyle").map(assetCardHTML).join("");
+  els.lifestyleSection.innerHTML = lifestyleCards === ""
+    ? `
+      <h2 class="section-heading">Lifestyle assets</h2>
+      ${pageEmptyHTML(
+        "Add lifestyle assets like vehicles, contents, or jewellery to include their value in net assets.",
+        `<button class="add-row-btn" type="button" data-action="add-lifestyle-asset">+ Add lifestyle asset</button>`
+      )}
+    `
+    : `
+      <h2 class="section-heading">Lifestyle assets</h2>
+      <div id="lifestyleAssets" class="portfolio-stack">${lifestyleCards}</div>
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-action="add-lifestyle-asset">+ Add lifestyle asset</button>
+      </div>
+    `;
 }
 
 function assetCardEl(aid) {
   return els.assets.querySelector(`.pcard[data-aid="${aid}"]`)
-    || els.lifestyleAssets.querySelector(`.pcard[data-aid="${aid}"]`);
+    || els.lifestyleSection.querySelector(`.pcard[data-aid="${aid}"]`);
 }
 
 function refreshCardHead(aid) {
@@ -1272,27 +1419,35 @@ function lumpSumRowHTML(ls) {
   `;
 }
 
-// Fact-find empty-state treatment: a section (or subsection) with no
-// rows renders collapsed to a single row — header + Add button —
-// so a portfolio-only scenario stays visually simple. Adding the
-// first row expands it.
+// Fact-find empty-state treatment (A.3, extended for the sidebar's
+// one-section-per-page layout): each input section is now a full page
+// on its own, so an empty section renders a page-sized purpose
+// sentence + Add button rather than the old collapsed strip — nothing
+// crowds it, so it should read as "finished, not started" rather than
+// "half-built".
 
 function addRowBtn(kind, label) {
   return `<button class="add-row-btn" type="button" data-action="add-row" data-kind="${kind}">+ ${label}</button>`;
 }
 
-// Top-level fact-find section (Income / Expenses): heading with an
-// inline Add button when empty; heading + panel of rows otherwise.
-function ffSectionHTML(title, kind, addLabel, rowsHTML, helperHTML = "") {
+function pageEmptyHTML(sentence, actionsHTML) {
+  return `
+    <div class="page-empty">
+      <p class="page-empty-text">${escapeHTML(sentence)}</p>
+      <div class="page-empty-actions">${actionsHTML}</div>
+    </div>
+  `;
+}
+
+// Top-level fact-find section (Income / Expenses): page-sized empty
+// state with a purpose sentence when empty; heading + panel of rows
+// otherwise.
+function ffSectionHTML(title, kind, addLabel, rowsHTML, helperHTML = "", purposeSentence = "") {
   const empty = rowsHTML === "";
   if (empty) {
     return `
-      <div class="ff-section empty">
-        <div class="ff-head">
-          <h2 class="section-heading">${title}</h2>
-          ${addRowBtn(kind, addLabel)}
-        </div>
-      </div>
+      <h2 class="section-heading">${title}</h2>
+      ${pageEmptyHTML(purposeSentence, addRowBtn(kind, addLabel))}
     `;
   }
   return `
@@ -1337,27 +1492,39 @@ function renderCashflows() {
   els.incomeSection.innerHTML = ffSectionHTML(
     "Income", "income", "Add income",
     cf.income.map(incomeRowHTML).join(""),
-    `<p class="helper-text">Enter income before tax. Tax is calculated from a later phase.</p>`
+    `<p class="helper-text">Enter income before tax. Tax is calculated from a later phase.</p>`,
+    "Add income to include salary, rental, or other regular receipts in the projection."
   );
 
   els.expensesSection.innerHTML = ffSectionHTML(
     "Expenses", "expenses", "Add expense",
-    cf.expenses.map(expenseRowHTML).join("")
+    cf.expenses.map(expenseRowHTML).join(""),
+    "",
+    "Add expenses to model the household's regular spending."
   );
 
-  els.investSection.innerHTML = `
-    <div class="ff-section">
-      <div class="ff-head"><h2 class="section-heading">Investment cashflows</h2></div>
-      <div class="cf-panel">
-        ${ffSubsectionHTML("Contributions", "contributions", "Add contribution",
-          cf.contributions.map((c) => contributionRowHTML("contributions", c)).join(""))}
-        ${ffSubsectionHTML("Withdrawals", "withdrawals", "Add withdrawal",
-          cf.withdrawals.map((w) => contributionRowHTML("withdrawals", w)).join(""))}
-        ${ffSubsectionHTML("One-off amounts", "lumpSums", "Add one-off amount",
-          cf.lumpSums.map(lumpSumRowHTML).join(""))}
+  const allEmpty = cf.contributions.length === 0 && cf.withdrawals.length === 0 && cf.lumpSums.length === 0;
+  els.investSection.innerHTML = allEmpty
+    ? `
+      <h2 class="section-heading">Investment cashflows</h2>
+      ${pageEmptyHTML(
+        "Add contributions, withdrawals, or one-off amounts to model cashflows into and out of your assets.",
+        `${addRowBtn("contributions", "Add contribution")}${addRowBtn("withdrawals", "Add withdrawal")}${addRowBtn("lumpSums", "Add one-off amount")}`
+      )}
+    `
+    : `
+      <div class="ff-section">
+        <div class="ff-head"><h2 class="section-heading">Investment cashflows</h2></div>
+        <div class="cf-panel">
+          ${ffSubsectionHTML("Contributions", "contributions", "Add contribution",
+            cf.contributions.map((c) => contributionRowHTML("contributions", c)).join(""))}
+          ${ffSubsectionHTML("Withdrawals", "withdrawals", "Add withdrawal",
+            cf.withdrawals.map((w) => contributionRowHTML("withdrawals", w)).join(""))}
+          ${ffSubsectionHTML("One-off amounts", "lumpSums", "Add one-off amount",
+            cf.lumpSums.map(lumpSumRowHTML).join(""))}
+        </div>
       </div>
-    </div>
-  `;
+    `;
 }
 
 // --- settings section ------------------------------------------------------
@@ -1447,7 +1614,7 @@ els.settingsPanel.addEventListener("click", (e) => {
 // --- field mutation (delegated over assets + cashflows) ---------------------
 
 const CF_MOUNTS = [els.incomeSection, els.expensesSection, els.investSection];
-for (const container of [els.assets, els.lifestyleAssets, ...CF_MOUNTS]) {
+for (const container of [els.assets, els.lifestyleSection, ...CF_MOUNTS]) {
   container.addEventListener("input", (e) => applyFieldEdit(e.target, false));
   container.addEventListener("change", (e) => applyFieldEdit(e.target, true));
 }
@@ -1679,6 +1846,14 @@ function onAssetSectionClick(e) {
   const target = e.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
+  if (action === "add-lifestyle-asset") {
+    const a = createLifestyleAsset(state.plan, state.assets);
+    state.assets.push(a);
+    collapsed.set(a.id, false);
+    saveState();
+    renderAll();
+    return;
+  }
   const aid = target.dataset.aid;
   const a = findAsset(aid);
   if (!a) return;
@@ -1740,7 +1915,7 @@ function onAssetSectionClick(e) {
 }
 
 els.assets.addEventListener("click", onAssetSectionClick);
-els.lifestyleAssets.addEventListener("click", onAssetSectionClick);
+els.lifestyleSection.addEventListener("click", onAssetSectionClick);
 
 function switchAllocMode(a, mode) {
   if (a.allocation.mode === mode) return;
@@ -1893,14 +2068,29 @@ function propertyCardHTML(p) {
 }
 
 function renderProperties() {
-  els.properties.innerHTML = (state.properties ?? []).map(propertyCardHTML).join("");
+  const cards = (state.properties ?? []).map(propertyCardHTML).join("");
+  els.propertySection.innerHTML = cards === ""
+    ? `
+      <h2 class="section-heading">Property</h2>
+      ${pageEmptyHTML(
+        "Add property to project value growth, purchases, rent, and gearing.",
+        `<button class="add-row-btn" type="button" data-prop-action="add">+ Add property</button>`
+      )}
+    `
+    : `
+      <h2 class="section-heading">Property</h2>
+      <div id="properties" class="portfolio-stack">${cards}</div>
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-prop-action="add">+ Add property</button>
+      </div>
+    `;
 }
 
 function findProperty(pid) {
   return (state.properties ?? []).find((p) => p.id === pid) || null;
 }
 
-els.properties.addEventListener("change", (e) => {
+els.propertySection.addEventListener("change", (e) => {
   const field = e.target.dataset.pfield;
   const p = findProperty(e.target.dataset.pid);
   if (!field || !p) return;
@@ -1937,9 +2127,17 @@ els.properties.addEventListener("change", (e) => {
   renderLiabilities(); // linked-asset labels may change
 });
 
-els.properties.addEventListener("click", (e) => {
+els.propertySection.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-prop-action]");
   if (!btn) return;
+  if (btn.dataset.propAction === "add") {
+    const growthDefault = (PROFILES["Residential Property"]?.growthReturn ?? 0.05) * 100;
+    state.properties = [...(state.properties ?? []), createProperty(state.plan, state.properties ?? [], growthDefault)];
+    saveState();
+    refreshOutputs();
+    renderProperties();
+    return;
+  }
   const p = findProperty(btn.dataset.pid);
   if (!p) return;
   if (btn.dataset.propAction === "remove") {
@@ -1949,14 +2147,6 @@ els.properties.addEventListener("click", (e) => {
   } else if (btn.dataset.propAction === "status") {
     p.status = btn.dataset.value === "planned" ? "planned" : "owned";
   }
-  saveState();
-  refreshOutputs();
-  renderProperties();
-});
-
-els.addPropertyBtn.addEventListener("click", () => {
-  const growthDefault = (PROFILES["Residential Property"]?.growthReturn ?? 0.05) * 100;
-  state.properties = [...(state.properties ?? []), createProperty(state.plan, state.properties ?? [], growthDefault)];
   saveState();
   refreshOutputs();
   renderProperties();
@@ -2063,14 +2253,29 @@ function liabilityCardHTML(l) {
 }
 
 function renderLiabilities() {
-  els.liabilities.innerHTML = (state.liabilities ?? []).map(liabilityCardHTML).join("");
+  const cards = (state.liabilities ?? []).map(liabilityCardHTML).join("");
+  els.liabilitiesSection.innerHTML = cards === ""
+    ? `
+      <h2 class="section-heading">Liabilities</h2>
+      ${pageEmptyHTML(
+        "Add loans and mortgages to project repayments, interest and net assets.",
+        `<button class="add-row-btn" type="button" data-liab-action="add">+ Add liability</button>`
+      )}
+    `
+    : `
+      <h2 class="section-heading">Liabilities</h2>
+      <div id="liabilities" class="portfolio-stack">${cards}</div>
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-liab-action="add">+ Add liability</button>
+      </div>
+    `;
 }
 
 function findLiability(lid) {
   return (state.liabilities ?? []).find((l) => l.id === lid) || null;
 }
 
-els.liabilities.addEventListener("change", (e) => {
+els.liabilitiesSection.addEventListener("change", (e) => {
   const field = e.target.dataset.lfield;
   const l = findLiability(e.target.dataset.lid);
   if (!field || !l) return;
@@ -2090,9 +2295,16 @@ els.liabilities.addEventListener("change", (e) => {
   renderLiabilities();
 });
 
-els.liabilities.addEventListener("click", (e) => {
+els.liabilitiesSection.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-liab-action]");
   if (!btn) return;
+  if (btn.dataset.liabAction === "add") {
+    state.liabilities = [...(state.liabilities ?? []), createLiability(state.plan, state.liabilities ?? [])];
+    saveState();
+    refreshOutputs();
+    renderLiabilities();
+    return;
+  }
   const l = findLiability(btn.dataset.lid);
   if (!l) return;
   if (btn.dataset.liabAction === "remove") {
@@ -2104,21 +2316,6 @@ els.liabilities.addEventListener("click", (e) => {
   saveState();
   refreshOutputs();
   renderLiabilities();
-});
-
-els.addLiabilityBtn.addEventListener("click", () => {
-  state.liabilities = [...(state.liabilities ?? []), createLiability(state.plan, state.liabilities ?? [])];
-  saveState();
-  refreshOutputs();
-  renderLiabilities();
-});
-
-els.addLifestyleBtn.addEventListener("click", () => {
-  const a = createLifestyleAsset(state.plan, state.assets);
-  state.assets.push(a);
-  collapsed.set(a.id, false);
-  saveState();
-  renderAll();
 });
 
 // --- projection outputs (Phase B) -----------------------------------------
@@ -2153,27 +2350,19 @@ const VIEW_MOUNTS = {
   assumptions: () => els.viewAssumptions,
 };
 
+// Selection now happens via the sidebar (data-nav-section), which
+// routes through handleRoute → showSection → here.
 function renderActiveView() {
   for (const [name, mount] of Object.entries(VIEW_MOUNTS)) {
     mount().hidden = name !== activeView;
   }
   els.exportBtn.textContent = activeView === "projection" ? "Export PNG" : "Export CSV";
-  for (const btn of els.viewRail.querySelectorAll("[data-view]")) {
-    btn.classList.toggle("active", btn.dataset.view === activeView);
-  }
   if (activeView === "projection") renderProjectionChart();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
   else if (activeView === "tax") renderTaxView();
   else if (activeView === "assumptions") renderAssumptionsView();
 }
-
-els.viewRail.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-view]");
-  if (!btn || btn.disabled || btn.dataset.view === activeView) return;
-  activeView = btn.dataset.view;
-  renderActiveView();
-});
 
 const isNominal = () => state.display.units === "nominal";
 const displayFactor = (m) => (isNominal() ? nominalFactor(m, state.assumptions.cpi) : 1);

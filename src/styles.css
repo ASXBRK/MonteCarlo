@@ -12,6 +12,13 @@
 
 * { box-sizing: border-box; }
 
+/* The [hidden] attribute must win over any class's own `display`
+   declaration (author-origin rules otherwise beat the UA stylesheet's
+   [hidden] rule at equal specificity) — load-bearing for the
+   one-section-per-page canvas, which toggles `hidden` on elements
+   that also carry their own display:flex/grid classes. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -1105,26 +1112,49 @@ html, body {
   margin: 8px 0 4px;
 }
 
-/* --- output body: view rail + canvas (C1) --- */
+/* --- workspace sidebar: one section per page --- */
 
-.output-body {
+.workspace-layout {
   display: flex;
   align-items: flex-start;
-  gap: 14px;
+  gap: 20px;
 }
 
-.view-rail {
-  flex: 0 0 128px;
+.side-nav {
+  flex: 0 0 190px;
+  position: sticky;
+  top: 20px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  border-right: 1px solid var(--line);
-  padding-right: 10px;
 }
 
-.rail-item {
+.nav-group-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-soft);
+  margin: 14px 0 4px;
+  padding: 0 10px;
+}
+.nav-group-label:first-child { margin-top: 0; }
+
+.nav-subgroup-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  margin: 8px 0 2px;
+  padding: 0 10px 0 18px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   text-align: left;
   color: var(--ink-soft);
@@ -1134,26 +1164,74 @@ html, body {
   padding: 7px 10px;
   cursor: pointer;
 }
-.rail-item:hover:not(:disabled) { background: #eef1f5; color: var(--ink); }
-.rail-item.active { background: var(--accent-soft); color: var(--accent); }
-.rail-item:disabled { opacity: 0.4; cursor: default; }
+.nav-item.nav-item-sub { padding-left: 18px; font-weight: 500; }
+.nav-item:hover:not(:disabled) { background: #eef1f5; color: var(--ink); }
+.nav-item.active { background: var(--accent-soft); color: var(--accent); }
+.nav-item:disabled { opacity: 0.45; cursor: default; }
 
-.view-canvas {
+.nav-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  background: #eef1f5;
+  border-radius: 999px;
+  padding: 1px 7px;
+  flex: 0 0 auto;
+}
+.nav-item.active .nav-badge { color: var(--accent); background: var(--accent-soft); }
+
+.workspace-canvas {
   flex: 1 1 auto;
   min-width: 0; /* allow the table wrap to scroll, not the page */
 }
 
+.view-canvas { min-width: 0; }
+
 @media (max-width: 900px) {
-  .output-body { flex-direction: column; }
-  .view-rail {
+  .workspace-layout { flex-direction: column; }
+  .side-nav {
     flex: none;
+    position: static;
+    width: 100%;
     flex-direction: row;
     flex-wrap: wrap;
-    width: 100%;
-    border-right: none;
     border-bottom: 1px solid var(--line);
-    padding: 0 0 8px;
+    padding-bottom: 8px;
+    margin-bottom: 8px;
   }
+  .nav-group-label, .nav-subgroup-label { flex-basis: 100%; margin: 6px 0 0; }
+}
+
+/* --- page-sized empty state (extends the A.3 ff-section.empty pattern) --- */
+
+.page-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  text-align: center;
+  min-height: 260px;
+  background: var(--card);
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 32px 24px;
+}
+
+.page-empty-text {
+  margin: 0;
+  max-width: 420px;
+  font-size: 13.5px;
+  color: var(--ink-soft);
+}
+
+.page-empty .add-row-btn { margin: 0; }
+.page-empty-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 /* --- report period selector --- */

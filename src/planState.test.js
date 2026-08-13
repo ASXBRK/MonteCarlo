@@ -10,6 +10,8 @@ import {
   serialize, hydrate, summarise, planSummaryText, annualisedAmount,
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear, clampTaxProfile,
   ageAtDate, synthDob, resolveEndBasis, clampCashflow, createLifestyleAsset,
+  clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
+  createLiability, createProperty,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -567,5 +569,72 @@ describe("D2 — asset class model", () => {
     expect(removeAsset(s, s.assets[0].id)).toBe(s); // last financial — refused
     const out = removeAsset(s, lf.id);
     expect(out.assets).toHaveLength(1);
+  });
+});
+
+describe("sidebar navigation (page-per-section)", () => {
+  it("clampLastVisited accepts known area/section pairs", () => {
+    expect(clampLastVisited({ area: "input", section: "liabilities" }))
+      .toEqual({ area: "input", section: "liabilities" });
+    expect(clampLastVisited({ area: "output", section: "tax" }))
+      .toEqual({ area: "output", section: "tax" });
+  });
+
+  it("clampLastVisited defends junk by falling back to input/setup", () => {
+    expect(clampLastVisited(null)).toEqual({ area: "input", section: "setup" });
+    expect(clampLastVisited({ area: "input", section: "bogus" })).toEqual({ area: "input", section: "setup" });
+    expect(clampLastVisited({ area: "output", section: "liabilities" })).toEqual({ area: "input", section: "setup" });
+    expect(clampLastVisited({ area: "bogus", section: "setup" })).toEqual({ area: "input", section: "setup" });
+  });
+
+  it("lastVisited round-trips through serialize/hydrate", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.display.lastVisited = { area: "output", section: "tax" };
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.display.lastVisited).toEqual({ area: "output", section: "tax" });
+  });
+
+  it("a fresh default scenario is effectively empty", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(isScenarioEffectivelyEmpty(s)).toBe(true);
+  });
+
+  it("any real content makes a scenario not empty", () => {
+    const withIncome = defaultState(PROFILES, NOW);
+    withIncome.cashflows.income.push(createIncomeRow(withIncome.plan, []));
+    expect(isScenarioEffectivelyEmpty(withIncome)).toBe(false);
+
+    const withSecondAsset = defaultState(PROFILES, NOW);
+    withSecondAsset.assets.push(createAsset(withSecondAsset.plan, withSecondAsset.assets, PROFILES));
+    expect(isScenarioEffectivelyEmpty(withSecondAsset)).toBe(false);
+
+    const withLifestyle = defaultState(PROFILES, NOW);
+    withLifestyle.assets.push(createLifestyleAsset(withLifestyle.plan, withLifestyle.assets));
+    expect(isScenarioEffectivelyEmpty(withLifestyle)).toBe(false);
+
+    const withLiability = defaultState(PROFILES, NOW);
+    withLiability.liabilities.push(createLiability(withLiability.plan, []));
+    expect(isScenarioEffectivelyEmpty(withLiability)).toBe(false);
+
+    const withProperty = defaultState(PROFILES, NOW);
+    withProperty.properties.push(createProperty(withProperty.plan, []));
+    expect(isScenarioEffectivelyEmpty(withProperty)).toBe(false);
+  });
+
+  it("sectionCounts reports item counts, zero omits no entry (no badge is the caller's job)", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.cashflows.income.push(createIncomeRow(s.plan, []));
+    s.cashflows.income.push(createIncomeRow(s.plan, s.cashflows.income));
+    s.assets.push(createAsset(s.plan, s.assets, PROFILES));
+    s.assets.push(createLifestyleAsset(s.plan, s.assets));
+    s.liabilities.push(createLiability(s.plan, []));
+    const counts = sectionCounts(s);
+    expect(counts.income).toBe(2);
+    expect(counts.expenses).toBe(0);
+    expect(counts["financial-assets"]).toBe(2); // default + the added one
+    expect(counts["lifestyle-assets"]).toBe(1);
+    expect(counts.liabilities).toBe(1);
+    expect(counts.property).toBe(0);
+    expect(counts["investment-cashflows"]).toBe(1); // the default contribution row
   });
 });

@@ -18,116 +18,82 @@
       <div id="pageWorkspace" hidden>
       <header class="app-header">
         <h1>Portfolio Projection</h1>
-        <div class="header-actions">
-          <button id="paramsBtn" class="btn-text" type="button">Parameters</button>
-        </div>
       </header>
 
-      <section id="planBar" class="plan-bar" aria-label="Setup"></section>
+      <div class="workspace-layout">
+        <nav id="sideNav" class="side-nav" aria-label="Workspace sections"></nav>
 
-      <section id="incomeSection" aria-label="Income"></section>
+        <div class="workspace-canvas">
+          <section id="planBar" class="plan-bar" data-section="setup" aria-label="Setup"></section>
 
-      <section id="expensesSection" aria-label="Expenses"></section>
+          <section id="incomeSection" data-section="income" aria-label="Income"></section>
 
-      <section aria-label="Financial assets">
-        <h2 class="section-heading">Financial assets</h2>
-        <div id="assets" class="portfolio-stack"></div>
-        <div class="portfolio-actions">
-          <button id="addAssetBtn" class="btn-text" type="button">+ Add financial asset</button>
-        </div>
-      </section>
+          <section id="expensesSection" data-section="expenses" aria-label="Expenses"></section>
 
-      <section aria-label="Lifestyle assets">
-        <h2 class="section-heading">Lifestyle assets</h2>
-        <div id="lifestyleAssets" class="portfolio-stack"></div>
-        <div class="portfolio-actions">
-          <button id="addLifestyleBtn" class="btn-text" type="button">+ Add lifestyle asset</button>
-        </div>
-      </section>
-
-      <section id="investSection" aria-label="Investment cashflows"></section>
-
-      <section aria-label="Property">
-        <h2 class="section-heading">Property</h2>
-        <div id="properties" class="portfolio-stack"></div>
-        <div class="portfolio-actions">
-          <button id="addPropertyBtn" class="btn-text" type="button">+ Add property</button>
-        </div>
-      </section>
-
-      <section aria-label="Liabilities">
-        <h2 class="section-heading">Liabilities</h2>
-        <div id="liabilities" class="portfolio-stack"></div>
-        <div class="portfolio-actions">
-          <button id="addLiabilityBtn" class="btn-text" type="button">+ Add liability</button>
-        </div>
-      </section>
-
-      <section class="ff-section placeholder-section" aria-label="Superannuation">
-        <div class="ff-head">
-          <h2 class="section-heading">Super</h2>
-          <span class="coming-soon-tag">Coming soon</span>
-        </div>
-        <p class="placeholder-body">Superannuation accounts and contribution strategies will be added in a future version.</p>
-      </section>
-
-      <section aria-label="Settings">
-        <h2 class="section-heading">Surplus &amp; deficit settings</h2>
-        <div id="settingsPanel"></div>
-      </section>
-
-      <section id="summaryStrip" class="summary-strip" aria-live="polite"></section>
-
-      <section class="chart-wrap output-shell" aria-label="Projection output">
-        <div class="output-head">
-          <div class="period-select" aria-label="Report period">
-            <label>From <select id="periodFrom"></select></label>
-            <label>To <select id="periodTo"></select></label>
-            <div class="seg-toggle period-presets">
-              <button class="seg-option" type="button" data-preset="all">All</button>
-              <button class="seg-option" type="button" data-preset="10">Next 10</button>
-              <button class="seg-option" type="button" data-preset="20">Next 20</button>
+          <section data-section="financial-assets" aria-label="Financial assets">
+            <h2 class="section-heading">Financial assets</h2>
+            <div id="assets" class="portfolio-stack"></div>
+            <div class="portfolio-actions">
+              <button id="addAssetBtn" class="btn-text" type="button">+ Add financial asset</button>
             </div>
-          </div>
-          <div class="output-actions">
-            <div class="display-toggle" role="radiogroup" aria-label="Display units">
-              <button class="display-option" data-units="real" type="button" aria-pressed="true">Today's dollars</button>
-              <button class="display-option" data-units="nominal" type="button" aria-pressed="false">Future dollars</button>
+          </section>
+
+          <section id="lifestyleSection" data-section="lifestyle-assets" aria-label="Lifestyle assets"></section>
+
+          <section id="propertySection" data-section="property" aria-label="Property"></section>
+
+          <section id="liabilitiesSection" data-section="liabilities" aria-label="Liabilities"></section>
+
+          <section id="investSection" data-section="investment-cashflows" aria-label="Investment cashflows"></section>
+
+          <section data-section="settings" aria-label="Settings">
+            <h2 class="section-heading">Surplus &amp; deficit settings</h2>
+            <div id="settingsPanel"></div>
+          </section>
+
+          <section id="outputCanvas" class="chart-wrap output-shell" data-section="__output__" aria-label="Projection output">
+            <section id="summaryStrip" class="summary-strip" aria-live="polite"></section>
+
+            <div class="output-head">
+              <div class="period-select" aria-label="Report period">
+                <label>From <select id="periodFrom"></select></label>
+                <label>To <select id="periodTo"></select></label>
+                <div class="seg-toggle period-presets">
+                  <button class="seg-option" type="button" data-preset="all">All</button>
+                  <button class="seg-option" type="button" data-preset="10">Next 10</button>
+                  <button class="seg-option" type="button" data-preset="20">Next 20</button>
+                </div>
+              </div>
+              <div class="output-actions">
+                <div class="display-toggle" role="radiogroup" aria-label="Display units">
+                  <button class="display-option" data-units="real" type="button" aria-pressed="true">Today's dollars</button>
+                  <button class="display-option" data-units="nominal" type="button" aria-pressed="false">Future dollars</button>
+                </div>
+                <button id="paramsBtn" class="btn-text" type="button">Parameters</button>
+                <button id="exportBtn" class="btn-text" type="button">Export PNG</button>
+              </div>
             </div>
-            <button id="exportBtn" class="btn-text" type="button">Export PNG</button>
-          </div>
+            <div class="view-canvas">
+              <div id="viewProjection">
+                <label class="chart-opt">
+                  <input type="checkbox" id="showAssetsToggle" />
+                  <span>Show individual assets</span>
+                </label>
+                <div id="chart"></div>
+                <p id="shortfallNote" class="shortfall-note" hidden></p>
+              </div>
+              <div id="viewCashflow" hidden></div>
+              <div id="viewAssets" hidden>
+                <div id="assetsEntity" class="seg-toggle entity-select" role="tablist" aria-label="Asset"></div>
+                <div id="assetsTable"></div>
+              </div>
+              <div id="viewTax" hidden></div>
+              <div id="viewAssumptions" hidden></div>
+            </div>
+            <div class="chart-note" data-role="chartNote"></div>
+          </section>
         </div>
-        <div class="output-body">
-          <nav id="viewRail" class="view-rail" aria-label="Output views">
-            <button class="rail-item active" type="button" data-view="projection">Projection</button>
-            <button class="rail-item" type="button" data-view="cashflow">Cashflow</button>
-            <button class="rail-item" type="button" data-view="assets">Assets</button>
-            <button class="rail-item" type="button" data-view="tax">Tax</button>
-            <button class="rail-item" type="button" data-view="assumptions">Assumptions</button>
-            <button class="rail-item" type="button" disabled title="Coming soon">Super</button>
-            <button class="rail-item" type="button" disabled title="Coming soon">Liabilities</button>
-            <button class="rail-item" type="button" disabled title="Coming soon">Net assets</button>
-          </nav>
-          <div class="view-canvas">
-            <div id="viewProjection">
-              <label class="chart-opt">
-                <input type="checkbox" id="showAssetsToggle" />
-                <span>Show individual assets</span>
-              </label>
-              <div id="chart"></div>
-              <p id="shortfallNote" class="shortfall-note" hidden></p>
-            </div>
-            <div id="viewCashflow" hidden></div>
-            <div id="viewAssets" hidden>
-              <div id="assetsEntity" class="seg-toggle entity-select" role="tablist" aria-label="Asset"></div>
-              <div id="assetsTable"></div>
-            </div>
-            <div id="viewTax" hidden></div>
-            <div id="viewAssumptions" hidden></div>
-          </div>
-        </div>
-        <div class="chart-note" data-role="chartNote"></div>
-      </section>
+      </div>
 
       <!-- Legacy insight mounts. Modules are stubbed behind
            LEGACY_INSIGHTS_ENABLED = false in main.js and return as
