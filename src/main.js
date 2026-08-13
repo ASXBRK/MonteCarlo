@@ -99,6 +99,8 @@ const els = {
   viewSuperBalances: $("viewSuperBalances"),
   viewLiabilitiesBalances: $("viewLiabilitiesBalances"),
   viewCashflowBars: $("viewCashflowBars"),
+  viewKeyFigures: $("viewKeyFigures"),
+  keyFiguresTable: $("keyFiguresTable"),
   showAssetsToggle: $("showAssetsToggle"),
   shortfallNote: $("shortfallNote"),
   periodFromAge: $("periodFromAge"),
@@ -303,6 +305,7 @@ const OUTPUT_NAV = {
     { id: "liabilities-balances", label: "Liabilities" },
   ],
   Tables: [
+    { id: "key-figures", label: "Key figures" },
     { id: "cashflow", label: "Cashflow" },
     { id: "assets", label: "Assets" },
     { id: "tax", label: "Tax" },
@@ -3264,6 +3267,7 @@ const VIEW_MOUNTS = {
   "super-balances": () => els.viewSuperBalances,
   "liabilities-balances": () => els.viewLiabilitiesBalances,
   "cashflow-bars": () => els.viewCashflowBars,
+  "key-figures": () => els.viewKeyFigures,
   cashflow: () => els.viewCashflow,
   assets: () => els.viewAssets,
   tax: () => els.viewTax,
@@ -3287,6 +3291,7 @@ function renderActiveView() {
   else if (activeView === "super-balances") renderSuperBalancesChart();
   else if (activeView === "liabilities-balances") renderLiabilitiesBalancesChart();
   else if (activeView === "cashflow-bars") renderCashflowBarsChart();
+  else if (activeView === "key-figures") renderKeyFiguresView();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
   else if (activeView === "tax") renderTaxView();
@@ -4105,6 +4110,44 @@ function expenseCategorySums(y) {
   };
 }
 
+// --- View: Key figures (fix batch 3, item 3) --------------------------------
+//
+// The screen that gets pasted into a file note — dense, unadorned, one
+// flat list, every row always shown regardless of zero. Every value is
+// read straight from the yearly ledger or the same category-sum
+// functions the Cashflow table/chart already reconcile against — no
+// new engine fields, and each row equals its source in the detailed
+// views (Assets/Super/Liabilities/Cashflow) for every year.
+
+function buildKeyFiguresGroups() {
+  const yl = projection.yearly;
+  const totalAssets = (y) => yl[y].closingBalance + yl[y].propertyClosing + yl[y].superClosing + yl[y].wcaClosing;
+  const totalIncome = (y) => {
+    const s = incomeCategorySums(y);
+    return s.employment + s.rental + s.investment + s.wcaInterest + s.other;
+  };
+  const totalExpenses = (y) => {
+    const s = expenseCategorySums(y);
+    return s.living + s.investmentExpenses + s.loanInterest + s.loanPrincipal + s.tax + s.superContributions;
+  };
+  const rows = [
+    { label: "Total assets", cell: totalAssets, always: true },
+    { label: "Total liabilities", cell: (y) => -yl[y].liabilitiesClosing, always: true },
+    { label: "NET ASSETS", cell: (y) => yl[y].netAssets, always: true, cls: "tl-total" },
+    { label: "Total income", cell: totalIncome, always: true },
+    { label: "Total expenses", cell: (y) => -totalExpenses(y), always: true },
+    { label: "Total tax", cell: (y) => -yl[y].tax, always: true },
+    { label: "Surplus / (deficit)", cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
+    { label: "Super balance", cell: (y) => yl[y].superClosing, always: true },
+    { label: "Working cash balance", cell: (y) => yl[y].wcaClosing, always: true },
+  ];
+  return [{ title: null, rows }];
+}
+
+function renderKeyFiguresView() {
+  renderTransposed(els.keyFiguresTable, buildKeyFiguresGroups());
+}
+
 // Two input sections plus the resolution (Working Cash Account fix,
 // Commit 2): every inflow lives in Income, every outflow in Expenses —
 // Liabilities and One-off amounts as standalone sections are gone,
@@ -4719,6 +4762,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "super-balances") exportChartPNG("chartSuperBalances", "super-balances");
   else if (activeView === "liabilities-balances") exportChartPNG("chartLiabilitiesBalances", "liabilities-balances");
   else if (activeView === "cashflow-bars") exportChartPNG("chartCashflowBars", "cashflow-bars");
+  else if (activeView === "key-figures") exportTransposedCSV("key-figures", buildKeyFiguresGroups());
   else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());

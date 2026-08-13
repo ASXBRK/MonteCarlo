@@ -137,7 +137,7 @@ describe("known section/view ids", () => {
   it("exposes the output view list", () => {
     expect(OUTPUT_VIEWS).toEqual([
       "projection", "composite", "net-assets", "asset-balances", "super-balances", "liabilities-balances", "cashflow-bars",
-      "cashflow", "assets", "tax", "super", "liabilities", "assumptions",
+      "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "assumptions",
     ]);
     expect(DEFAULT_OUTPUT_VIEW).toBe("composite");
   });
