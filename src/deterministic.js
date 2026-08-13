@@ -596,7 +596,16 @@ export function projectPlan(state, profiles = PROFILES) {
       if (wcaInterest !== 0) {
         for (const p of persons) acc[p].ordinary += wcaInterest * (couple ? 0.5 : 1);
         markIncome(couple ? { client: 0.5, partner: 0.5 } : { client: 1 }, m);
-        if (row) row.wcaDetail.interest += wcaInterest;
+        if (row) {
+          row.wcaDetail.interest += wcaInterest;
+          // WCA interest is real household income (Cashflow view's
+          // Income section, Commit 2) — the household net below is
+          // "the rest of household cashflow", so surplusOrDeficit
+          // (income − expenses) needs this added on top of it to stay
+          // the sum of everything the Cashflow view now shows as income
+          // minus everything it shows as expenses.
+          row.surplusOrDeficit += wcaInterest;
+        }
       }
 
       // a-super-deduct. Personal deductible super contributions

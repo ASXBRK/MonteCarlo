@@ -1879,4 +1879,22 @@ describe("Working Cash Account (engine correctness fix)", () => {
     // The asset itself (zero real return) never moves.
     expect(out.yearly[3].perAssetClosing.a1).toBeCloseTo(100000, 2);
   });
+
+  it("surplusOrDeficit includes WCA interest (Cashflow view Commit 2: WCA interest is part of Total income)", () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "accumulate", assetId: null },
+    });
+    const out = projectPlan(s);
+    const r = out.yearly[0];
+    // household net (income − expenses − tax, no WCA interest) plus
+    // the WCA's own interest for the year should equal the reported
+    // surplusOrDeficit exactly — the two are no longer the same figure
+    // by design (see buildCashflowGroups' header comment in main.js).
+    const householdNet = r.income - r.expenses - r.tax;
+    expect(r.surplusOrDeficit).toBeCloseTo(householdNet + r.wcaDetail.interest, 4);
+    expect(r.wcaDetail.interest).toBeGreaterThan(0);
+  });
 });

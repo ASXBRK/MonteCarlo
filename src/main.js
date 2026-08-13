@@ -3860,11 +3860,22 @@ const accruedDiv293Footer = () => {
 
 // --- View: Cashflow -----------------------------------------------------------
 
+// Two input sections plus the resolution (Working Cash Account fix,
+// Commit 2): every inflow lives in Income, every outflow in Expenses —
+// Liabilities and One-off amounts as standalone sections are gone,
+// their rows folded in by direction. Tax detail stays in the Tax
+// view; this shows only the single Tax line. One-off amounts are
+// asset-level transactions, not household cashflow — they never touch
+// the Working Cash Account, so they show here for completeness but
+// Surplus/(deficit) (the engine's own household-net figure) doesn't
+// include them; in a year with a nonzero one-off, Total income minus
+// Total expenses can differ from Surplus/(deficit) by that amount.
 function buildCashflowGroups() {
   const yl = projection.yearly;
   const rt = projection.schedule.rowTotals;
   const couple = isCouple();
   const included = state.assets.filter((a) => a.include);
+  const editableAssets = included.filter((a) => a.class !== "lifestyle");
 
   const incomeRows = state.cashflows.income.map((rw) => ({
     label: couple
@@ -3881,7 +3892,24 @@ function buildCashflowGroups() {
     });
   }
   incomeRows.push({ label: "Distributions paid as cash", cell: (y) => yl[y].cashDistributions });
-  incomeRows.push({ label: "Total income", cell: (y) => yl[y].income, always: true, cls: "tl-total" });
+  incomeRows.push({ label: "Working Cash Account interest", cell: (y) => yl[y].wcaDetail.interest });
+  // One-off inflows: the positive slice of each asset's net one-off
+  // amount for the year. Same underlying signed value the "one-off
+  // out" row below edits (one editable figure per asset+year) — the
+  // cell whose sign matches shows the amount, the other shows zero.
+  for (const a of editableAssets) {
+    incomeRows.push({
+      label: `${a.name} — one-off in`,
+      cell: (y) => Math.max(0, projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0),
+      always: true,
+      cellAttrs: (y) => oneOffCellAttrs(a.id, y),
+    });
+  }
+  const incomeRowsSoFar = [...incomeRows];
+  incomeRows.push({
+    label: "Total income", always: true, cls: "tl-total",
+    cell: (y) => incomeRowsSoFar.reduce((s, r) => s + r.cell(y), 0),
+  });
 
   const expenseRows = state.cashflows.expenses.map((rw) => ({
     label: rw.label,
@@ -3893,58 +3921,50 @@ function buildCashflowGroups() {
       cell: (y) => -(yl[y].properties?.[pr.id]?.expenses ?? 0),
     });
   }
-  expenseRows.push({ label: "Total expenses", cell: (y) => -yl[y].expenses, always: true, cls: "tl-total" });
-
-  const surplusTarget = state.settings.surplus.mode === "invest"
-    ? state.assets.find((a) => a.id === state.settings.surplus.assetId)
-    : null;
-
   const loanName = (lid) =>
     (state.liabilities ?? []).find((l) => l.id === lid)?.name
       ?? ((state.properties ?? []).find((pr) => `prop-${pr.id}` === lid)
         ? `${(state.properties ?? []).find((pr) => `prop-${pr.id}` === lid).name} loan`
         : "Loan");
-  const liabilityRows = Object.keys(yl[0]?.liabilities ?? {}).flatMap((lid) => [
-    { label: `${loanName(lid)} — interest`, cell: (y) => -(yl[y].liabilities?.[lid]?.interest ?? 0) },
-    { label: `${loanName(lid)} — principal`, cell: (y) => -(yl[y].liabilities?.[lid]?.principal ?? 0) },
-  ]);
+  for (const lid of Object.keys(yl[0]?.liabilities ?? {})) {
+    expenseRows.push({ label: `${loanName(lid)} — interest`, cell: (y) => -(yl[y].liabilities?.[lid]?.interest ?? 0) });
+    expenseRows.push({ label: `${loanName(lid)} — principal`, cell: (y) => -(yl[y].liabilities?.[lid]?.principal ?? 0) });
+  }
+  expenseRows.push({ label: "Tax", cell: (y) => -yl[y].tax });
+  for (const a of editableAssets) {
+    expenseRows.push({
+      label: `${a.name} — one-off out`,
+      cell: (y) => Math.max(0, -(projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0)),
+      always: true,
+      cellAttrs: (y) => oneOffCellAttrs(a.id, y),
+    });
+  }
+  for (const pr of (state.properties ?? []).filter((x) => x.status === "planned")) {
+    expenseRows.push({ label: `${pr.name} settlement`, cell: (y) => -(yl[y].properties?.[pr.id]?.settlement ?? 0) });
+  }
+  const expenseRowsSoFar = [...expenseRows];
+  expenseRows.push({
+    label: "Total expenses", always: true, cls: "tl-total",
+    cell: (y) => expenseRowsSoFar.reduce((s, r) => s + r.cell(y), 0),
+  });
+
+  const surplusTarget = state.settings.surplus.mode === "invest"
+    ? state.assets.find((a) => a.id === state.settings.surplus.assetId)
+    : null;
 
   return [
     { title: "Income", rows: incomeRows },
     { title: "Expenses", rows: expenseRows },
-    ...(liabilityRows.length ? [{ title: "Liabilities", rows: liabilityRows }] : []),
     { title: null, rows: [
-      { label: "Tax", cell: (y) => -yl[y].tax },
       { label: "Surplus / (deficit)", cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
-    ] },
-    // Working Cash Account (engine correctness fix): all household
-    // cashflow passes through it before anything else happens — this
-    // group reconciles opening → closing, per FY.
-    { title: "Working Cash Account", rows: [
-      { label: "Opening balance", cell: (y) => yl[y].wcaDetail.opening, always: true },
-      { label: "Interest", cell: (y) => yl[y].wcaDetail.interest },
-      { label: "Net household cashflow", cell: (y) => yl[y].wcaDetail.netFlow },
-      { label: "Closing balance", cell: (y) => yl[y].wcaDetail.closing, always: true, cls: "tl-total" },
     ] },
     { title: "Funding", rows: [
       { label: surplusTarget ? `Surplus invested (to ${surplusTarget.name})` : "Surplus invested",
         cell: (y) => yl[y].surplusInvested },
-      { label: "Surplus accumulated (to cash)", cell: (y) => yl[y].surplusAccumulated },
+      { label: "Surplus swept to cash", cell: (y) => yl[y].surplusAccumulated },
       { label: "Surplus spent", cell: (y) => yl[y].surplusSpent },
       { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },
       { label: "Unfunded cashflow", cell: (y) => yl[y].unfundedCashflow },
-    ] },
-    { title: "One-off amounts", rows: [
-      ...included.filter((a) => a.class !== "lifestyle").map((a) => ({
-        label: a.name,
-        cell: (y) => projection.schedule.oneOffsByAssetYear[a.id]?.[y] ?? 0,
-        always: true, // editable grid — keep every cell present
-        cellAttrs: (y) => oneOffCellAttrs(a.id, y),
-      })),
-      ...(state.properties ?? []).filter((x) => x.status === "planned").map((pr) => ({
-        label: `${pr.name} settlement`,
-        cell: (y) => -(yl[y].properties?.[pr.id]?.settlement ?? 0),
-      })),
     ] },
   ];
 }
