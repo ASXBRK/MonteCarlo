@@ -415,8 +415,14 @@ describe("D1 — opening capital losses and migration gates", () => {
     const native = mkState({
       endAge: 55,
       cashflows: {
+        // incomeType/sgApplies explicit — hydrate() defaults a
+        // pre-Tier-1.2 row (no incomeType field, like v4 here) to
+        // incomeType:"employment", sgApplies:true; the native
+        // comparator must match that normalization exactly (see the
+        // v5 migration gate above for the same fix).
         income: [{
           ...rows.income[0], indexed: undefined, indexBasis: "cpi", indexExtraPct: 0,
+          incomeType: "employment", sgApplies: true,
           from: { kind: "age", age: rows.income[0].fromAge }, to: { kind: "age", age: rows.income[0].toAge },
         }],
         expenses: [{
@@ -509,7 +515,15 @@ describe("Key Dates — v5 → v6 migration gate", () => {
         endAge: 55,
         assets: v5.assets,
         cashflows: {
-          income: [{ ...v5.cashflows.income[0], from: age(40), to: age(55) }],
+          // incomeType/sgApplies explicit here — hydrate() defaults a
+        // pre-Tier-1.2 row (no incomeType field, like v5 above) to
+        // incomeType:"employment", sgApplies:true; the native
+        // comparator must match that normalization exactly, or it
+        // silently diverges from PAYG withholding onward (incomeType
+        // undefined ≠ "employment") even though it never used to
+        // matter back when SG was the only thing gated on it and no
+        // super account existed in this fixture to expose it.
+        income: [{ ...v5.cashflows.income[0], from: age(40), to: age(55), incomeType: "employment", sgApplies: true }],
           expenses: [{ ...v5.cashflows.expenses[0], from: age(40), to: age(55) }],
           contributions: [{ ...v5.cashflows.contributions[0], from: age(40), to: age(55) }],
           withdrawals: [{ ...v5.cashflows.withdrawals[0], from: age(45), to: age(55) }],
@@ -1383,8 +1397,10 @@ describe("Tier 1.2 — Super (Commit 2): caps, carry-forward, contributions tax,
     // dedicated "Super contribution cash flow" describe block below for the
     // full WCA-level version; this one keeps its original narrow tax scope
     // plus the one cash assertion that was missing.
+    // endAge 41 — two plan years — so PD's PAYG-deferred tax saving
+    // (see below) has a following FY to land in as a refund.
     const scenario = (type) => mkState({
-      endAge: 40,
+      endAge: 41,
       plan: { superAccounts: [superAcct()], workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
       surplus: { mode: "accumulate", assetId: null },
       cashflows: {
@@ -1395,9 +1411,19 @@ describe("Tier 1.2 — Super (Commit 2): caps, carry-forward, contributions tax,
     const ss = projectPlan(scenario("salarySacrifice"));
     const pd = projectPlan(scenario("personalDeductible"));
     expect(ss.yearly[0].taxDetail.client.taxableIncome).toBeCloseTo(pd.yearly[0].taxDetail.client.taxableIncome, 4);
-    expect(ss.yearly[0].tax).toBeCloseTo(pd.yearly[0].tax, 2);
     expect(ss.yearly[0].taxDetail.incomeTax).toBeCloseTo(pd.yearly[0].taxDetail.incomeTax, 4);
-    expect(ss.yearly[0].wcaClosing).toBeCloseTo(pd.yearly[0].wcaClosing, 2);
+    // PAYG withholding (PAYG withholding, tax refund timing, and
+    // deductions) treats the two DIFFERENTLY within year 0's own cash
+    // flow: salary sacrifice reduces the PAYG withholding base
+    // immediately (it reduced the salary actually paid); a personal
+    // deductible contribution doesn't (PAYG ignores deductions, same
+    // as a real employer's withholding) — so year 0's `.tax` and
+    // `.wcaClosing` no longer match between the two. They converge
+    // again only once PD's deferred saving lands as a bigger refund in
+    // year 1 — checked here as the cumulative two-year position.
+    const cumulativeTax = (out) => out.yearly[0].tax + out.yearly[1].tax;
+    expect(cumulativeTax(ss)).toBeCloseTo(cumulativeTax(pd), 2);
+    expect(ss.yearly[1].wcaClosing).toBeCloseTo(pd.yearly[1].wcaClosing, 2);
   });
 
   it("carry-forward: an under-cap year accrues unused cap, which a later over-cap year draws on (no excess)", () => {
@@ -1964,9 +1990,16 @@ describe("Super contribution cash flow (engine-correctness fix)", () => {
   const zeroRealWca = { balance: 0, minimumBalance: 0, ratePct: 2.5 };
   const accumulate = { mode: "accumulate", assetId: null };
 
-  it("personal deductible: the WCA falls by the contribution and rises by the tax saved — net household position is worse, never better", () => {
+  it("personal deductible: the WCA falls by the contribution immediately, and rises by the tax saved once the PAYG refund lands next FY — net household position is worse, never better", () => {
+    // PAYG withholding (PAYG withholding, tax refund timing, and
+    // deductions) is computed on gross salary alone, ignoring
+    // deductions — so a personal deductible contribution's tax saving
+    // no longer shows up in the SAME year's cash (unlike before that
+    // commit): year 0's WCA falls by exactly the contribution, and the
+    // saving arrives as a bigger refund settling in year 1. endAge 41
+    // gives a second year for that refund to land in.
     const scenario = (contribution) => mkState({
-      endAge: 40,
+      endAge: 41,
       plan: { superAccounts: [superAcct()], workingCash: zeroRealWca },
       surplus: accumulate,
       cashflows: {
@@ -1976,16 +2009,23 @@ describe("Super contribution cash flow (engine-correctness fix)", () => {
           : {}),
       },
     });
-    const withContrib = projectPlan(scenario(20000)).yearly[0];
-    const without = projectPlan(scenario(0)).yearly[0];
-    const taxSaved = without.tax - withContrib.tax;
-    expect(taxSaved).toBeGreaterThan(0); // the deduction actually reduces tax
+    const withContrib = projectPlan(scenario(20000)).yearly;
+    const without = projectPlan(scenario(0)).yearly;
+    const taxSaved = without[0].taxDetail.client.actualTaxPayable - withContrib[0].taxDetail.client.actualTaxPayable;
+    expect(taxSaved).toBeGreaterThan(0); // the deduction actually reduces actual tax payable
     expect(taxSaved).toBeLessThan(20000); // never a full-dollar refund
-    // WCA falls by exactly the contribution and rises by exactly the tax saved.
-    expect(withContrib.wcaClosing).toBeCloseTo(without.wcaClosing - 20000 + taxSaved, 2);
-    // Net household cash position: worse off by (contribution − tax saved),
-    // never better — this is the money-creation bug's exact inverse.
-    const worseOff = without.wcaClosing - withContrib.wcaClosing;
+    // Year 0: WCA falls by exactly the contribution — PAYG (computed on
+    // gross salary) is identical either way, so there is NO same-year
+    // tax offset yet.
+    expect(withContrib[0].wcaClosing).toBeCloseTo(without[0].wcaClosing - 20000, 2);
+    // Year 1: the deferred saving has now landed (as a bigger refund
+    // settling that July) — the cumulative two-year position falls by
+    // exactly (contribution − tax saved), not by the contribution alone.
+    expect(withContrib[1].wcaClosing).toBeCloseTo(without[1].wcaClosing - 20000 + taxSaved, 2);
+    // Net household cash position after both years: worse off by
+    // (contribution − tax saved), never better — the money-creation
+    // bug's exact inverse.
+    const worseOff = without[1].wcaClosing - withContrib[1].wcaClosing;
     expect(worseOff).toBeCloseTo(20000 - taxSaved, 2);
     expect(worseOff).toBeGreaterThan(0);
   });
@@ -2141,5 +2181,177 @@ describe("Division 296 — engine wiring", () => {
     expect(() => projectPlan(s)).not.toThrow();
     const out = projectPlan(s);
     for (const row of out.yearly) expect(row.taxDetail.div296).toBe(0);
+  });
+});
+
+// --- PAYG withholding, tax refund timing, and deductions --------------------
+describe("PAYG withholding and tax refund timing", () => {
+  it("an employee with only salary has a near-zero anticipated refund", () => {
+    const s = mkState({
+      endAge: 40,
+      assets: [], // no default asset's distribution income to muddy "salary only"
+      // 0% real WCA growth — isolates this from WCA-interest noise,
+      // which would otherwise add a small amount of non-employment
+      // ordinary income and legitimately break the equality below.
+      plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      cashflows: { income: [employmentRow({ amount: 100000, sgApplies: false })] },
+      surplus: { mode: "spend", assetId: null },
+    });
+    const out = projectPlan(s).yearly[0];
+    // Nothing else (no deductions, other income, or franking credits)
+    // differs between the PAYG estimate and the full assessment for a
+    // pure salary earner, so the two should match to the cent.
+    expect(out.taxDetail.client.refundOrBalancing).toBeCloseTo(0, 6);
+    expect(out.taxDetail.client.paygWithheld).toBeCloseTo(out.taxDetail.client.actualTaxPayable, 6);
+  });
+
+  it("adding a deduction produces a refund equal to the tax effect of that deduction", () => {
+    // PAYG ignores deductions (mirroring real employer withholding), so
+    // a $20,000 personal deductible super contribution (an existing,
+    // already-modelled deduction path) doesn't touch paygWithheld at
+    // all — the entire tax saving surfaces as a bigger
+    // refundOrBalancing.
+    const scenario = (contribution) => mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [employmentRow({ amount: 120000, sgApplies: false })],
+        ...(contribution
+          ? { superContributions: [scRow({ type: "personalDeductible", amount: contribution })] }
+          : {}),
+      },
+    });
+    const without = projectPlan(scenario(0)).yearly[0];
+    const withDeduction = projectPlan(scenario(20000)).yearly[0];
+    const taxSaved = without.taxDetail.client.actualTaxPayable - withDeduction.taxDetail.client.actualTaxPayable;
+    expect(taxSaved).toBeGreaterThan(0);
+    expect(withDeduction.taxDetail.client.paygWithheld).toBeCloseTo(without.taxDetail.client.paygWithheld, 4); // unaffected by the deduction
+    expect(withDeduction.taxDetail.client.refundOrBalancing).toBeCloseTo(without.taxDetail.client.refundOrBalancing + taxSaved, 4);
+  });
+
+  it("the refund/balancing assessed this FY settles as household cash in the FIRST MONTH of the following FY, not this one", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()], workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      surplus: { mode: "accumulate", assetId: null },
+      cashflows: {
+        income: [employmentRow({ amount: 120000, sgApplies: false })],
+        superContributions: [scRow({ type: "personalDeductible", amount: 20000 })],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].taxDetail.refundSettled).toBe(0); // nothing pending in the first year
+    // Year 0's assessed refund (paygWithheld − actualTaxPayable, a
+    // positive figure here since the deduction lowers actual tax below
+    // what PAYG withheld) settles as cash exactly in year 1.
+    const assessedY0 = out.yearly[0].taxDetail.client.refundOrBalancing;
+    expect(assessedY0).toBeGreaterThan(0);
+    expect(out.yearly[1].taxDetail.refundSettled).toBeCloseTo(assessedY0, 4);
+  });
+
+  it("withheld amounts are debited in the months salary is actually paid, not spread smoothly across the year", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      surplus: { mode: "accumulate", assetId: null },
+      cashflows: { income: [employmentRow({ amount: 120000, sgApplies: false })] }, // annual — fires in July only
+    });
+    const out = projectPlan(s);
+    const wca = out.monthly.wca; // wca[0] = opening; wca[m+1] = balance after month m
+    expect(wca[0]).toBe(0);
+    expect(wca[1]).not.toBeCloseTo(0, 2); // July's salary, net of PAYG withheld, moved it
+    // Every other month of the FY is flat — nothing else happens, so if
+    // tax were still smoothly spread across the year (the pre-PAYG
+    // behaviour) the balance would keep drifting down month by month
+    // instead of holding steady.
+    for (let m = 1; m < 12; m++) {
+      expect(wca[m + 1]).toBeCloseTo(wca[1], 6);
+    }
+  });
+
+  it("regression gate: a person with no employment income keeps the pre-existing smooth tax accrual, entirely unaffected by PAYG", () => {
+    const s = mkState({
+      endAge: 41,
+      cashflows: { income: [employmentRow({ amount: 100000, incomeType: "otherTaxable", sgApplies: false })] },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.taxDetail.client.paygWithheld).toBe(0);
+      expect(row.taxDetail.client.refundOrBalancing).toBe(0);
+      expect(row.taxDetail.refundSettled).toBe(0);
+      // The old invariant: with no CGT/Div293/Div296 due either, the
+      // year's own `.tax` is exactly the full assessed netIncomeTax —
+      // proof the smooth spreadTax accrual ran unmodified, not PAYG.
+      expect(row.tax).toBeCloseTo(row.taxDetail.incomeTax, 6);
+    }
+  });
+});
+
+describe("Deductions (PAYG withholding, tax refund timing, and deductions)", () => {
+  it("a deduction row reduces the owner's taxable income and actual tax payable, with no household cash effect", () => {
+    const scenario = (deduction) => mkState({
+      endAge: 40,
+      assets: [],
+      plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      surplus: { mode: "accumulate", assetId: null },
+      cashflows: {
+        income: [employmentRow({ amount: 100000, sgApplies: false })],
+        deductions: deduction ? [{
+          id: "ded1", label: "Working Expense", owner: "client", category: "workingExpense",
+          amount: deduction, frequency: "annual",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          indexBasis: "none", indexExtraPct: 0,
+        }] : [],
+      },
+    });
+    const without = projectPlan(scenario(0)).yearly[0];
+    const withDeduction = projectPlan(scenario(5000)).yearly[0];
+    expect(withDeduction.taxDetail.client.taxableIncome).toBeCloseTo(without.taxDetail.client.taxableIncome - 5000, 2);
+    expect(withDeduction.taxDetail.client.actualTaxPayable).toBeLessThan(without.taxDetail.client.actualTaxPayable);
+    // No household cash mechanism for a bare deduction row (disclosed —
+    // see schedule.js's deductionsByOwner header comment): PAYG ignores
+    // deductions just like it ignores the personal-deductible super
+    // case, so year 0's WCA is identical either way; the saving only
+    // ever shows up via the refund, exactly like a personalDeductible
+    // super contribution's.
+    expect(withDeduction.wcaClosing).toBeCloseTo(without.wcaClosing, 2);
+  });
+
+  it("regression gate: a scenario with no deductions is unaffected", () => {
+    const s = mkState({ endAge: 42, cashflows: { income: [employmentRow({ amount: 90000 })] } });
+    expect(() => projectPlan(s)).not.toThrow();
+    const out = projectPlan(s);
+    expect(out.yearly.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Property depreciation (PAYG withholding, tax refund timing, and deductions)", () => {
+  it("an investment property's depreciation reduces the owner's taxable income by the full annual amount, with no household cash effect", () => {
+    const scenario = (depreciation) => mkState({
+      endAge: 40,
+      assets: [],
+      cashflows: { income: [employmentRow({ amount: 100000, sgApplies: false })] },
+      plan: {},
+    });
+    const withProperty = (depreciation) => {
+      const s = scenario(depreciation);
+      s.properties = [{
+        id: "p1", name: "Unit", owner: "client", state: "NSW", propertyType: "investment", status: "owned",
+        currentValue: 500000, acquisitionDate: "2020-01-01", costBase: 400000,
+        priceToday: 0, purchaseAt: { kind: "age", age: 40 }, lvrPct: 0,
+        firstHomeBuyer: false, newBuild: false, purchaseCostsPct: 2, dutyOverride: null, growthPct: 0,
+        rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+        expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+        expensesDeductible: true,
+        depreciation,
+      }];
+      return s;
+    };
+    const without = projectPlan(withProperty(0)).yearly[0];
+    const withDep = projectPlan(withProperty(6000)).yearly[0];
+    expect(withDep.taxDetail.client.taxableIncome).toBeCloseTo(without.taxDetail.client.taxableIncome - 6000, 2);
+    expect(withDep.properties.p1.depreciation).toBeCloseTo(6000, 2);
+    // Never a household cash outflow — it's a non-cash deduction.
+    expect(withDep.wcaClosing).toBeCloseTo(without.wcaClosing, 2);
   });
 });

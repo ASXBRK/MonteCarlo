@@ -169,6 +169,29 @@ export function buildSchedules(state) {
     client: new Float64Array(months),
     partner: plan.partner ? new Float64Array(months) : null,
   };
+  // Employment income only, net of salary sacrifice (PAYG withholding,
+  // Commit "PAYG withholding, tax refund timing, and deductions") — a
+  // subset of incomeByOwner, tracked separately because PAYG withheld
+  // is computed on employment income ALONE, ignoring every other
+  // income type, deduction, and offset except the tax-free threshold
+  // and LITO. Reduced by salary sacrifice for the same reason
+  // incomeByOwner is: an employer withholds PAYG on what it actually
+  // pays the employee, not the pre-sacrifice salary.
+  const employmentIncomeByOwner = {
+    client: new Float64Array(months),
+    partner: plan.partner ? new Float64Array(months) : null,
+  };
+  // Deductions (PAYG withholding, tax refund timing, and deductions) —
+  // per-owner, like incomeByOwner, since each reduces ONE person's
+  // assessable income. Never a household cash outflow (disclosed —
+  // there's no linked income row to reduce at source the way salary
+  // sacrifice is, so entering a deduction here doesn't itself move
+  // cash; enter a matching Expense row too if the underlying spend
+  // also needs to leave household cash).
+  const deductionsByOwner = {
+    client: new Float64Array(months),
+    partner: plan.partner ? new Float64Array(months) : null,
+  };
 
   // Cashflows may only target included FINANCIAL assets (D2) —
   // lifestyle assets carry no flow arrays at all.
@@ -186,7 +209,7 @@ export function buildSchedules(state) {
 
   // Per-row FY totals for the transposed output views (one line per
   // entered row) — filled alongside the monthly arrays.
-  const rowTotals = { income: {}, expenses: {} };
+  const rowTotals = { income: {}, expenses: {}, deductions: {} };
   // Net one-off amounts per asset per FY (signed) for the one-off grid.
   const oneOffsByAssetYear = {};
   for (const id of includedIds) oneOffsByAssetYear[id] = new Float64Array(planYears);
@@ -244,10 +267,23 @@ export function buildSchedules(state) {
         : incomeByOwner.client;
       applyRegular(row, row.owner, ownerArr);
     }
+    if (row.incomeType === "employment") {
+      const empArr = row.owner === "partner" && employmentIncomeByOwner.partner
+        ? employmentIncomeByOwner.partner
+        : employmentIncomeByOwner.client;
+      applyRegular(row, row.owner, empArr);
+    }
   }
   for (const row of state.cashflows.expenses) {
     rowTotals.expenses[row.id] = new Float64Array(planYears);
     applyRegular(row, "client", expenses, rowTotals.expenses[row.id]);
+  }
+  for (const row of state.cashflows.deductions ?? []) {
+    rowTotals.deductions[row.id] = new Float64Array(planYears);
+    const ownerArr = row.owner === "partner" && deductionsByOwner.partner
+      ? deductionsByOwner.partner
+      : deductionsByOwner.client;
+    applyRegular(row, row.owner, ownerArr, rowTotals.deductions[row.id]);
   }
 
   for (const row of state.cashflows.contributions) {
@@ -340,6 +376,13 @@ export function buildSchedules(state) {
   const reduceTaxableIncome = (owner, m, amount) => {
     const arr = owner === "partner" && incomeByOwner.partner ? incomeByOwner.partner : incomeByOwner.client;
     arr[m] = Math.max(0, arr[m] - amount);
+    // Mirrored into employmentIncomeByOwner too: salary sacrifice is by
+    // definition a reduction of employment income at source, so the
+    // PAYG-withholding base (Commit "PAYG withholding...") must see the
+    // same reduced amount, not the pre-sacrifice salary.
+    const empArr = owner === "partner" && employmentIncomeByOwner.partner
+      ? employmentIncomeByOwner.partner : employmentIncomeByOwner.client;
+    empArr[m] = Math.max(0, empArr[m] - amount);
   };
   const reduceHouseholdCash = (m, amount) => {
     income[m] = Math.max(0, income[m] - amount);
@@ -511,6 +554,8 @@ export function buildSchedules(state) {
     yearOfMonth,
     income,
     incomeByOwner,
+    employmentIncomeByOwner,
+    deductionsByOwner,
     expenses,
     assetFlows,
     superFlows,

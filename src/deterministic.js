@@ -221,6 +221,12 @@ export function projectPlan(state, profiles = PROFILES) {
   let superBringForward = { client: null, partner: null };
   let pendingDiv293 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT)
   let pendingDiv296 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT/Div293)
+  // PAYG withholding / tax refund timing: assessed FY t (paygWithheld −
+  // actualTaxPayable, per person with employment income that FY), paid
+  // July t+1 (same convention). 0 for a person with no employment
+  // income that FY — their tax stays on the pre-existing smooth
+  // spreadTax accrual entirely (see the assessment loop below).
+  let pendingRefund = { client: 0, partner: 0 };
   const superWarnings = [...schedule.superWarnings]; // age/work-test rejections, resolved in schedule.js
 
   // --- properties (D4) -------------------------------------------------------
@@ -267,6 +273,13 @@ export function projectPlan(state, profiles = PROFILES) {
       rent: p.rent,
       expensesFlow: p.expenses,
       expensesDeductible: p.expensesDeductible !== false,
+      // PAYG withholding, tax refund timing, and deductions: a flat
+      // annual $ deduction to the owner, entered in today's (real)
+      // dollars and not indexed — spread evenly across the 12 months,
+      // same as ICR, while the property is an active investment. Never
+      // a household cash outflow (there is no cash event to debit —
+      // depreciation isn't money leaving the household).
+      depreciationMonthly: (p.depreciation ?? 0) / 12,
       loanId: null,
     };
     propVal[p.id] = owned ? p.currentValue : 0;
@@ -459,7 +472,7 @@ export function projectPlan(state, profiles = PROFILES) {
     liabilitiesClosing: 0,
     // Per-property detail (D4), real dollars.
     properties: Object.fromEntries(props.map((p) => [p.id, {
-      value: 0, rent: 0, expenses: 0, settlement: 0, costBaseSeed: 0,
+      value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0,
     }])),
     propertyClosing: 0,
     netAssets: 0,
@@ -636,6 +649,16 @@ export function projectPlan(state, profiles = PROFILES) {
         if (pd > 0) acc[superMeta[id].owner].deductions += pd;
       }
 
+      // a-deductions. Deductions (PAYG withholding, tax refund timing,
+      // and deductions): each row reduces its OWNER's assessable income
+      // directly — no household cash effect (see schedule.js's
+      // deductionsByOwner header comment). UNGATED, same as every other
+      // deduction here.
+      for (const p of persons) {
+        const dedArr = schedule.deductionsByOwner[p];
+        if (dedArr && dedArr[m] > 0) acc[p].deductions += dedArr[m];
+      }
+
       // a-super-credit. Superannuation grows like a financial asset
       // (net-of-earnings-tax rate), then receives contributions net of
       // the 15% contributions tax (concessional) or scaled by the
@@ -766,10 +789,12 @@ export function projectPlan(state, profiles = PROFILES) {
               acc[per].incomeMonths.add(m);
             }
             if (pm.expensesDeductible) acc[per].deductions += expM * s;
+            if (pm.depreciationMonthly > 0) acc[per].deductions += pm.depreciationMonthly * s;
           }
           if (row) {
             row.properties[pid].rent += rentM;
             row.properties[pid].expenses += expM;
+            row.properties[pid].depreciation += pm.depreciationMonthly;
           }
         }
       }
@@ -1037,7 +1062,11 @@ export function projectPlan(state, profiles = PROFILES) {
     const div293DueDetail = y > 0 ? pendingDiv293 : { client: 0, partner: 0 };
     const div296Due = y > 0 ? pendingDiv296.client + pendingDiv296.partner : 0;
     const div296DueDetail = y > 0 ? pendingDiv296 : { client: 0, partner: 0 };
-    const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0) + div293Due + div296Due;
+    // Positive refundDue = net refund settling this FY (reduces the
+    // household's tax outflow); negative = a net balancing payment
+    // owed (increases it) — see the assessment loop below.
+    const refundDue = y > 0 ? pendingRefund.client + pendingRefund.partner : 0;
+    const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0) + div293Due + div296Due - refundDue;
     const cgtDueDetail = y > 0 ? pendingCgt : { client: 0, partner: 0 };
 
     // Super contribution caps (Tier 1.2, Commit 2): resolved ONCE per
@@ -1193,6 +1222,8 @@ export function projectPlan(state, profiles = PROFILES) {
     // Excess concessional super contributions (Tier 1.2, Commit 2) are
     // assessable here too — same treatment as ordinary income.
     const assessed = {};
+    const paygWithheld = { client: 0, partner: 0 };
+    const newPendingRefund = { client: 0, partner: 0 };
     taxOutArr.fill(0, yearStart(y), yearEnd(y));
     for (const p of persons) {
       const a = assessPerson({
@@ -1208,7 +1239,38 @@ export function projectPlan(state, profiles = PROFILES) {
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
       });
       assessed[p] = a;
-      spreadTax(a.netIncomeTax, measured[p].incomeMonths, yearEnd(y) - 1);
+
+      // PAYG withholding, tax refund timing, and deductions: computed
+      // on employment income ALONE — the tax-free threshold, Medicare
+      // levy, and LITO only, ignoring deductions, every other income
+      // type, and franking credits, mirroring what an employer
+      // actually withholds. A person with no employment income this FY
+      // keeps the pre-existing smooth spreadTax accrual UNCHANGED (the
+      // no-employment-income regression gate); a person WITH employment
+      // income instead has PAYG debited in their salary months, and the
+      // full gap to their actual (whole-picture) tax liability settles
+      // as a single household outflow in July of FY t+1, same
+      // convention as CGT/Div293/Div296 — see pendingRefund above.
+      const empArr = schedule.employmentIncomeByOwner[p];
+      let employmentIncomeFy = 0;
+      if (empArr) for (let m = yearStart(y); m < yearEnd(y); m++) employmentIncomeFy += empArr[m];
+      if (employmentIncomeFy > 0) {
+        const payg = assessPerson({
+          fyStartYear: fyStart, bracketMode, cpi,
+          ordinaryIncome: employmentIncomeFy, deductions: 0,
+          distributions: { franked: 0, unfranked: 0 },
+          netCapitalGain: 0, capitalLossCarryFwd: 0,
+          taxProfile: state.plan[p]?.taxProfile ?? null,
+          excessConcessionalContributions: 0,
+        });
+        paygWithheld[p] = payg.netIncomeTax;
+        for (let m = yearStart(y); m < yearEnd(y); m++) {
+          if (empArr[m] > 0) taxOutArr[m] += paygWithheld[p] * (empArr[m] / employmentIncomeFy);
+        }
+        newPendingRefund[p] = paygWithheld[p] - a.netIncomeTax;
+      } else {
+        spreadTax(a.netIncomeTax, measured[p].incomeMonths, yearEnd(y) - 1);
+      }
     }
 
     // Division 293 (Tier 1.2, Commit 2): assessed this FY on the
@@ -1321,23 +1383,49 @@ export function projectPlan(state, profiles = PROFILES) {
       div293: div293DueDetail[p],
       div296: div296DueDetail[p],
       frankingCredits: assessed[p].frankingCredits,
+      // PAYG withholding, tax refund timing, and deductions — THIS FY's
+      // own assessment (not a payment-year figure like cgt/div293/
+      // div296 above): paygWithheld is 0 for a person with no
+      // employment income this FY (their tax stayed on the smooth
+      // accrual instead). actualTaxPayable is the same number as
+      // incomeTax above, named to match "NET INCOME = income − actual
+      // tax" directly. refundOrBalancing = paygWithheld −
+      // actualTaxPayable (positive = refund, negative = balancing
+      // payment) — settles as cash in July of FY t+1, see
+      // taxDetail.refundSettled below for the amount actually hitting
+      // cash THIS year (last year's figure).
+      paygWithheld: paygWithheld[p],
+      actualTaxPayable: assessed[p].netIncomeTax,
+      // Reuses newPendingRefund[p] rather than recomputing — that value
+      // is already 0 for a no-employment-income person (their tax
+      // stayed on the smooth accrual entirely; there is no PAYG
+      // estimate to compare against, so reporting a "balancing payment"
+      // here would be a number that never corresponds to any real cash
+      // event).
+      refundOrBalancing: newPendingRefund[p],
     } : null;
     for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY
     row.taxDetail = {
       client: detail("client"),
       partner: detail("partner"),
       incomeTax: persons.reduce((s, p) => s + assessed[p].netIncomeTax, 0),
-      // cgtDue folds in div293Due AND div296Due for the actual cash
-      // outflow; each reported separately here.
-      cgt: cgtDue - div293Due - div296Due,
+      // cgtDue folds in div293Due, div296Due AND −refundDue for the
+      // actual cash outflow; each reported separately here.
+      cgt: cgtDue - div293Due - div296Due + refundDue,
       div293: div293Due,
       div296: div296Due,
+      // The cash amount actually settling THIS year (last year's
+      // paygWithheld − actualTaxPayable, per person) — positive = net
+      // refund received, negative = net balancing payment owed. 0 in a
+      // projection's first year (nothing was assessed yet).
+      refundSettled: refundDue,
       frankingCredits: persons.reduce((s, p) => s + assessed[p].frankingCredits, 0),
     };
     yearly.push(row);
     pendingCgt = newPending;
     pendingDiv293 = newPendingDiv293;
     pendingDiv296 = newPendingDiv296;
+    pendingRefund = newPendingRefund;
   }
 
   let shortfall = null;
@@ -1365,6 +1453,10 @@ export function projectPlan(state, profiles = PROFILES) {
     accruedDiv293AtEnd: pendingDiv293.client + pendingDiv293.partner,
     // Same unpayable-final-FY convention as accruedCgtAtEnd/accruedDiv293AtEnd.
     accruedDiv296AtEnd: pendingDiv296.client + pendingDiv296.partner,
+    // PAYG withholding / tax refund timing: the final FY's assessed
+    // refund/balancing (signed — positive = refund owed TO the
+    // household) can't be settled inside the projection either.
+    accruedRefundAtEnd: pendingRefund.client + pendingRefund.partner,
     superWarnings,
   };
 }

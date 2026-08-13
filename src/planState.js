@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -384,6 +384,40 @@ export function createExpenseRow(plan, existing = []) {
   };
 }
 
+// Deductions (PAYG withholding, tax refund timing, and deductions) —
+// every category reduces the owner's assessable income in the existing
+// annual.js assessment, exactly like a property's ICR or a loan's
+// deductible interest already do. Label defaults to the category name
+// and stays free text/editable.
+export const DEDUCTION_CATEGORIES = [
+  "workingExpense", "vehicle", "insurance", "socialClub",
+  "novatedLease", "salaryPackaging", "other",
+];
+export const DEDUCTION_CATEGORY_LABELS = {
+  workingExpense: "Working Expense",
+  vehicle: "Vehicle Deductions",
+  insurance: "Deductible Insurance Premiums",
+  socialClub: "Social Club (pre-tax)",
+  novatedLease: "Novated Lease pre-tax",
+  salaryPackaging: "Salary Packaging (Living Expenses)",
+  other: "Other",
+};
+
+export function createDeductionRow(plan, existing = []) {
+  return {
+    id: uid("ded"),
+    label: DEDUCTION_CATEGORY_LABELS.workingExpense,
+    owner: "client",
+    category: "workingExpense",
+    amount: 0,
+    frequency: "annual",
+    from: anchorRef("start"),
+    to: anchorRef("end"),
+    indexBasis: "cpi",
+    indexExtraPct: 0,
+  };
+}
+
 // Pick the firm profile whose total nominal return sits nearest to a
 // custom allocation's income+growth total.
 export function nearestVolBasis(profiles, totalPct) {
@@ -470,6 +504,11 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
     rent: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
     expenses: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
     expensesDeductible: true,
+    // Investment only — an annual deduction to the owner, alongside
+    // deductible loan interest and expenses (PAYG withholding, tax
+    // refund timing, and deductions). Not indexed (a fixed depreciation
+    // schedule figure, entered in nominal-today dollars).
+    depreciation: 0,
   };
 }
 
@@ -501,6 +540,7 @@ export function clampProperty(p, plan) {
     rent: flow(p.rent),
     expenses: flow(p.expenses),
     expensesDeductible: p.expensesDeductible !== false,
+    depreciation: clampNumber(p.depreciation, 0),
   };
 }
 
@@ -730,6 +770,7 @@ export function defaultState(profiles = {}, now = new Date()) {
     cashflows: {
       income: [],
       expenses: [],
+      deductions: [],
       contributions: [createCashflow("contribution", plan, asset.id)],
       withdrawals: [],
       lumpSums: [],
@@ -881,6 +922,7 @@ export function isScenarioEffectivelyEmpty(state) {
   const investCashflowCount = cf.contributions.length + cf.withdrawals.length + cf.lumpSums.length;
   return (
     cf.income.length === 0 &&
+    (cf.deductions ?? []).length === 0 &&
     cf.expenses.length === 0 &&
     investCashflowCount <= 1 &&
     financialCount <= 1 &&
@@ -898,6 +940,7 @@ export function sectionCounts(state) {
   const cf = state.cashflows;
   return {
     income: cf.income.length,
+    deductions: (cf.deductions ?? []).length,
     expenses: cf.expenses.length,
     "financial-assets": state.assets.filter(isFinancial).length,
     "lifestyle-assets": state.assets.filter(isLifestyle).length,
@@ -1050,6 +1093,17 @@ export function clampExpenseRow(row, plan) {
   return { ...rest, from, to, ...clampIndexation(row) };
 }
 
+// Deduction rows anchor to their owner's window, same as income rows —
+// a deduction only makes sense for the person it belongs to.
+export function clampDeductionRow(row, plan) {
+  const owner = row.owner === "partner" && plan.partner ? "partner" : "client";
+  const win = ownerWindow(plan, owner);
+  const { from, to } = clampFromTo(row, win.from, win.to, plan);
+  const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
+  const category = DEDUCTION_CATEGORIES.includes(row.category) ? row.category : "other";
+  return { ...rest, owner, from, to, category, ...clampIndexation(row) };
+}
+
 // fundingOrder invariant: exactly the INCLUDED FINANCIAL assets, in
 // order. Known included ids keep their relative order; missing
 // included ids append in display order; excluded/unknown/lifestyle
@@ -1122,7 +1176,8 @@ export function normaliseSettings(settings, assets) {
 export function partnerOwnedItems(state) {
   const assets = state.assets.filter((a) => a.owner === "partner" || a.owner === "joint");
   const income = state.cashflows.income.filter((r) => r.owner === "partner");
-  return { assets, income, count: assets.length + income.length };
+  const deductions = (state.cashflows.deductions ?? []).filter((r) => r.owner === "partner");
+  return { assets, income, deductions, count: assets.length + income.length + deductions.length };
 }
 
 // Reassign all partner/joint ownership to the client. Income row ages
@@ -1135,10 +1190,13 @@ export function reassignPartnerToClient(state) {
   const income = state.cashflows.income.map((r) =>
     r.owner === "partner" ? { ...r, owner: "client" } : r
   );
+  const deductions = (state.cashflows.deductions ?? []).map((r) =>
+    r.owner === "partner" ? { ...r, owner: "client" } : r
+  );
   const liabilities = (state.liabilities ?? []).map((l) =>
     l.owner === "partner" || l.owner === "joint" ? { ...l, owner: "client" } : l
   );
-  return { ...state, assets, cashflows: { ...state.cashflows, income }, liabilities };
+  return { ...state, assets, cashflows: { ...state.cashflows, income, deductions }, liabilities };
 }
 
 // Delete everything partner-owned (income rows; partner/joint assets
@@ -1149,6 +1207,7 @@ export function deletePartnerOwned(state) {
   const cf = state.cashflows;
   const cashflows = {
     income: cf.income.filter((r) => r.owner !== "partner"),
+    deductions: (cf.deductions ?? []).filter((r) => r.owner !== "partner"),
     expenses: cf.expenses,
     contributions: cf.contributions.filter((c) => !removedIds.has(c.assetId)),
     withdrawals: cf.withdrawals.filter((w) => !removedIds.has(w.assetId)),
@@ -1318,6 +1377,16 @@ function migrateV8toV9(raw) {
   return { ...raw, schemaVersion: 9 };
 }
 
+// v9 → v10 (PAYG withholding, tax refund timing, and deductions):
+// cashflows.deductions is new (hydrateDeductionRows stamps [] for a
+// pre-v10 blob with no such array); properties gain a depreciation
+// field (normaliseProperties stamps 0). No existing field changes
+// shape, so again just the version gate — no pre-existing scenario had
+// either, so this migration can never change a single projected figure.
+function migrateV9toV10(raw) {
+  return { ...raw, schemaVersion: 10 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -1333,6 +1402,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 6) raw = migrateV6toV7(raw);
     if (raw.schemaVersion === 7) raw = migrateV7toV8(raw);
     if (raw.schemaVersion === 8) raw = migrateV8toV9(raw);
+    if (raw.schemaVersion === 9) raw = migrateV9toV10(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -1353,6 +1423,7 @@ export function hydrate(json, profiles = {}) {
       cashflows: {
         income,
         expenses: hydrateExpenseRows(cf.expenses, plan),
+        deductions: hydrateDeductionRows(cf.deductions, plan),
         contributions: hydrateCashflows(cf.contributions, plan, assetIds),
         withdrawals: hydrateCashflows(cf.withdrawals, plan, assetIds),
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
@@ -1508,6 +1579,23 @@ function hydrateExpenseRows(arr, plan) {
   return arr.map((r, i) => clampExpenseRow({
     id: typeof r.id === "string" && r.id ? r.id : uid("ex"),
     label: typeof r.label === "string" && r.label.trim() ? r.label : `Expense ${i + 1}`,
+    amount: clampNumber(r.amount, 0),
+    frequency: r.frequency === "monthly" ? "monthly" : "annual",
+    from: r.from, fromAge: r.fromAge,
+    to: r.to, toAge: r.toAge,
+    indexBasis: r.indexBasis,
+    indexExtraPct: r.indexExtraPct,
+    indexed: r.indexed,
+  }, plan));
+}
+
+function hydrateDeductionRows(arr, plan) {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((r, i) => clampDeductionRow({
+    id: typeof r.id === "string" && r.id ? r.id : uid("ded"),
+    label: typeof r.label === "string" && r.label.trim() ? r.label : `Deduction ${i + 1}`,
+    owner: r.owner === "partner" ? "partner" : "client",
+    category: r.category,
     amount: clampNumber(r.amount, 0),
     frequency: r.frequency === "monthly" ? "monthly" : "annual",
     from: r.from, fromAge: r.fromAge,

@@ -11,7 +11,7 @@ import {
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear, clampTaxProfile,
   ageAtDate, synthDob, resolveEndBasis, clampCashflow, createLifestyleAsset,
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
-  createLiability, createProperty,
+  createLiability, createProperty, clampProperty,
   clampReportPeriod, clampChartTreatment, defaultChartTreatment,
   defaultReportPeriod, createKeyDate, clampKeyDate, normaliseKeyDates,
   clampDateRef, removeKeyDate, referencesToAnchor, convertAnchorReferences,
@@ -21,6 +21,7 @@ import {
   createSuperWithdrawal, clampSuperWithdrawal, normaliseSuperWithdrawals,
   INCOME_TYPES, SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, CARRY_FORWARD_YEARS,
   clampWorkingCash,
+  createDeductionRow, clampDeductionRow, DEDUCTION_CATEGORIES, DEDUCTION_CATEGORY_LABELS,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -70,6 +71,49 @@ describe("defaults (v3)", () => {
     expect(exp.label).toBe("Expense 2");
     expect(exp.from).toEqual({ kind: "anchor", anchorId: "start" });
     expect(exp.to).toEqual({ kind: "anchor", anchorId: "end" });
+  });
+
+  it("deduction rows default sensibly (PAYG withholding, tax refund timing, and deductions)", () => {
+    const plan = couplePlan();
+    const ded = createDeductionRow(plan, []);
+    expect(ded.owner).toBe("client");
+    expect(ded.category).toBe("workingExpense");
+    expect(ded.label).toBe(DEDUCTION_CATEGORY_LABELS.workingExpense);
+    expect(ded.frequency).toBe("annual");
+    expect(DEDUCTION_CATEGORIES).toContain(ded.category);
+  });
+});
+
+describe("Property depreciation (PAYG withholding, tax refund timing, and deductions)", () => {
+  it("defaults to 0 and round-trips through clampProperty", () => {
+    const plan = couplePlan();
+    const p = createProperty(plan, []);
+    expect(p.depreciation).toBe(0);
+    const clamped = clampProperty({ ...p, depreciation: 6000 }, plan);
+    expect(clamped.depreciation).toBe(6000);
+    // A pre-Commit-1 property blob has no depreciation field at all —
+    // must default to 0, not NaN/undefined.
+    const { depreciation, ...withoutField } = p;
+    expect(clampProperty(withoutField, plan).depreciation).toBe(0);
+  });
+});
+
+describe("clampDeductionRow", () => {
+  it("clamps owner to the household window and defaults an invalid category to 'other'", () => {
+    const plan = couplePlan();
+    const row = clampDeductionRow({
+      id: "ded1", label: "Custom", owner: "partner", category: "notARealCategory",
+      amount: 500, frequency: "annual", fromAge: 30, toAge: 90,
+    }, plan);
+    expect(row.owner).toBe("partner");
+    expect(row.category).toBe("other");
+    expect(row.amount).toBe(500);
+  });
+
+  it("a single household reassigns a stray partner owner to client (mirrors income/expense rows)", () => {
+    const plan = { ...couplePlan(), household: "single", partner: null };
+    const row = clampDeductionRow({ id: "ded1", label: "X", owner: "partner", category: "other", amount: 100, frequency: "annual" }, plan);
+    expect(row.owner).toBe("client");
   });
 });
 
@@ -1056,5 +1100,34 @@ describe("Working Cash Account (engine correctness fix)", () => {
     // An existing scenario's explicit "spend" choice is preserved —
     // the new "accumulate" default only applies to brand-new scenarios.
     expect(s.settings.surplus).toEqual({ mode: "spend", assetId: null });
+  });
+});
+
+describe("hydrate migrates a pre-Commit-1 (v9) blob forward (PAYG withholding, tax refund timing, and deductions)", () => {
+  it("stamps an empty deductions array and defaults property depreciation to 0", () => {
+    const v9 = {
+      schemaVersion: 9,
+      plan: {
+        household: "single", client: { currentAge: 40 }, partner: null,
+        endAge: 90, start: { year: 2026, month: 7 },
+        workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
+      },
+      assets: [{ id: "a1", name: "A", include: true, owner: "client", distributions: "reinvest",
+                 balance: 1000, allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0,
+                 cgtAsset: false, costBase: null }],
+      cashflows: { income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [],
+                   superContributions: [], superWithdrawals: [] },
+      properties: [{ id: "p1", name: "Unit", owner: "client", state: "NSW", propertyType: "investment",
+                     status: "owned", currentValue: 500000, acquisitionDate: null, costBase: 400000,
+                     priceToday: 0, purchaseAge: 40, lvrPct: 0, rent: { amount: 0 }, expenses: { amount: 0 } }],
+      settings: { surplus: { mode: "accumulate", assetId: null }, fundingOrder: ["a1"] },
+      display: { units: "real" },
+      assumptions: { cpi: 0.025 },
+    };
+    const s = hydrate(JSON.stringify(v9), PROFILES);
+    expect(s).not.toBeNull();
+    expect(s.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(s.cashflows.deductions).toEqual([]);
+    expect(s.properties[0].depreciation).toBe(0);
   });
 });

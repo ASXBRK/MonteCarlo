@@ -8,7 +8,8 @@
 import { PROFILES, realMu } from "./profiles.js";
 import {
   defaultState, createAsset, createLifestyleAsset, createCashflow, createLumpSum,
-  createIncomeRow, createExpenseRow,
+  createIncomeRow, createExpenseRow, createDeductionRow, clampDeductionRow,
+  DEDUCTION_CATEGORIES, DEDUCTION_CATEGORY_LABELS,
   clampPlan, clampAllToPlan, clampAllocation, clampIncomeRow,
   nearestVolBasis, normaliseSettings, normaliseFundingOrder,
   partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
@@ -80,6 +81,7 @@ const els = {
   superSection: $("superSection"),
   addAssetBtn: $("addAssetBtn"),
   incomeSection: $("incomeSection"),
+  deductionsSection: $("deductionsSection"),
   expensesSection: $("expensesSection"),
   investSection: $("investSection"),
   settingsPanel: $("settingsPanel"),
@@ -292,6 +294,7 @@ function mountWorkspace(clientId, scenarioId) {
 const INPUT_NAV = [
   { id: "setup", label: "Setup" },
   { id: "income", label: "Income" },
+  { id: "deductions", label: "Deductions" },
   { id: "expenses", label: "Expenses" },
   { id: "financial-assets", label: "Financial assets" },
   { id: "lifestyle-assets", label: "Lifestyle assets" },
@@ -387,7 +390,7 @@ function persistLastVisited(area, section) {
 function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
-  for (const el of [els.planBar, els.incomeSection, els.expensesSection, els.assets,
+  for (const el of [els.planBar, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
                     els.lifestyleSection, els.liabilitiesSection, els.propertySection,
                     els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
@@ -1114,7 +1117,7 @@ els.planBar.addEventListener("click", (e) => {
       if (owned.count > 0) {
         const reassign = window.confirm(
           `${owned.count} item(s) are owned by the partner (or jointly): ` +
-          `${owned.assets.map((a) => a.name).concat(owned.income.map((r) => r.label)).join(", ")}.\n\n` +
+          `${owned.assets.map((a) => a.name).concat(owned.income.map((r) => r.label)).concat(owned.deductions.map((r) => r.label)).join(", ")}.\n\n` +
           `OK — reassign them to the client.\nCancel — choose what else to do.`
         );
         if (reassign) {
@@ -1561,6 +1564,63 @@ function expenseRowHTML(r) {
   `;
 }
 
+// PAYG withholding, tax refund timing, and deductions: a deduction row
+// reduces its owner's assessable income only — it never itself debits
+// household cash (disclosed — see schedule.js's deductionsByOwner
+// header comment). Enter a matching Expense row too if the underlying
+// spend also needs to leave household cash.
+function deductionRowHTML(r) {
+  return `
+    <div class="cf-row cf-row-deduction${isCouple() ? " with-owner" : ""}" data-cfid="${r.id}">
+      <div class="cf-cell cf-cell-label">
+        <label>Label</label>
+        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
+               data-kind="deductions" data-cfid="${r.id}" data-field="label" />
+      </div>
+      <div class="cf-cell cf-cell-category">
+        <label>Category</label>
+        <select data-kind="deductions" data-cfid="${r.id}" data-field="category">
+          ${DEDUCTION_CATEGORIES.map((c) =>
+            `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(DEDUCTION_CATEGORY_LABELS[c])}</option>`
+          ).join("")}
+        </select>
+      </div>
+      ${isCouple() ? `
+        <div class="cf-cell cf-cell-owner">
+          <label>Owner</label>
+          <select data-kind="deductions" data-cfid="${r.id}" data-field="owner">
+            <option value="client"${r.owner === "client" ? " selected" : ""}>${escapeHTML(clientName())}</option>
+            <option value="partner"${r.owner === "partner" ? " selected" : ""}>${escapeHTML(partnerName())}</option>
+          </select>
+        </div>
+      ` : ""}
+      <div class="cf-cell cf-cell-amount">
+        <label>Amount ($)</label>
+        <input type="number" min="0" step="100" value="${r.amount}"
+               data-kind="deductions" data-cfid="${r.id}" data-field="amount" />
+      </div>
+      <div class="cf-cell cf-cell-freq">
+        <label>Frequency</label>
+        <select data-kind="deductions" data-cfid="${r.id}" data-field="frequency">
+          <option value="monthly"${r.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${r.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </div>
+      <div class="cf-cell cf-cell-from">
+        <label>From</label>
+        ${dateRefControlHTML(r.from, r.owner, `data-kind="deductions" data-cfid="${r.id}" data-field="from"`, 18, 120)}
+      </div>
+      <div class="cf-cell cf-cell-to">
+        <label>To</label>
+        ${dateRefControlHTML(r.to, r.owner, `data-kind="deductions" data-cfid="${r.id}" data-field="to"`, 18, 120)}
+      </div>
+      ${indexationCellsHTML("deductions", r)}
+      <button class="cf-remove" type="button" aria-label="Remove row"
+              data-action="remove-row" data-kind="deductions" data-cfid="${r.id}">×</button>
+    </div>
+  `;
+}
+
 function contributionRowHTML(kind, cf) {
   return `
     <div class="cf-row cf-row-asset" data-cfid="${cf.id}">
@@ -1734,6 +1794,13 @@ function renderCashflows() {
     "Add income to include salary, rental, or other regular receipts in the projection."
   );
 
+  els.deductionsSection.innerHTML = ffSectionHTML(
+    "Deductions", "deductions", "Add deduction",
+    cf.deductions.map(deductionRowHTML).join(""),
+    `<p class="helper-text">Deductions reduce assessable income only — they never themselves debit household cash. If the underlying spend also needs to leave cash, enter a matching Expense row too.</p>`,
+    "Add deductions such as work-related expenses, vehicle deductions, or salary packaging to reduce assessable income."
+  );
+
   els.expensesSection.innerHTML = ffSectionHTML(
     "Expenses", "expenses", "Add expense",
     cf.expenses.map(expenseRowHTML).join(""),
@@ -1887,7 +1954,7 @@ els.settingsPanel.addEventListener("click", (e) => {
 
 // --- field mutation (delegated over assets + cashflows) ---------------------
 
-const CF_MOUNTS = [els.incomeSection, els.expensesSection, els.investSection, els.superSection];
+const CF_MOUNTS = [els.incomeSection, els.deductionsSection, els.expensesSection, els.investSection, els.superSection];
 for (const container of [els.assets, els.lifestyleSection, ...CF_MOUNTS]) {
   container.addEventListener("input", (e) => applyFieldEdit(e.target, false));
   container.addEventListener("change", (e) => applyFieldEdit(e.target, true));
@@ -1997,7 +2064,7 @@ function applyAssetEdit(a, field, el, commit) {
 
 function applyRowEdit(kind, row, field, el, commit) {
   const plan = state.plan;
-  const owner = kind === "income" ? row.owner : "client";
+  const owner = (kind === "income" || kind === "deductions") ? row.owner : "client";
   const win = ownerWindow(plan, owner);
 
   switch (field) {
@@ -2020,11 +2087,12 @@ function applyRowEdit(kind, row, field, el, commit) {
         if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
         break;
       }
-      // income rows only, from here.
+      // income/deduction rows only, from here.
       // Anchors resolve dynamically against whichever owner window
       // applies — only explicit ages need re-clamping into the new
-      // owner's window (clampIncomeRow does both via clampDateRef).
-      const clamped = clampIncomeRow(row, plan);
+      // owner's window (clampIncomeRow/clampDeductionRow do both via
+      // clampDateRef).
+      const clamped = kind === "deductions" ? clampDeductionRow(row, plan) : clampIncomeRow(row, plan);
       row.from = clamped.from;
       row.to = clamped.to;
       // The owner change can also change which anchor a "Retirement —
@@ -2098,6 +2166,9 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "sgApplies":
       row.sgApplies = el.checked;
       break;
+    case "category":
+      row.category = DEDUCTION_CATEGORIES.includes(el.value) ? el.value : "other";
+      break;
     case "from":
     case "to": {
       if (el.dataset.drRole === "anchor") {
@@ -2151,6 +2222,7 @@ function applyRowEdit(kind, row, field, el, commit) {
 function rowHTMLFor(kind, row) {
   if (kind === "income") return incomeRowHTML(row);
   if (kind === "expenses") return expenseRowHTML(row);
+  if (kind === "deductions") return deductionRowHTML(row);
   if (kind === "lumpSums") return lumpSumRowHTML(row);
   if (kind === "superContributions") return superContributionRowHTML(row);
   if (kind === "superWithdrawals") return superWithdrawalRowHTML(row);
@@ -2338,6 +2410,7 @@ function onCashflowSectionClick(e) {
   if (action === "add-row") {
     const firstAsset = state.assets.find((a) => a.class !== "lifestyle")?.id ?? null;
     if (kind === "income") cf.income.push(createIncomeRow(state.plan, cf.income));
+    else if (kind === "deductions") cf.deductions.push(createDeductionRow(state.plan, cf.deductions));
     else if (kind === "expenses") cf.expenses.push(createExpenseRow(state.plan, cf.expenses));
     else if (kind === "contributions") cf.contributions.push(createCashflow("contribution", state.plan, firstAsset));
     else if (kind === "withdrawals") cf.withdrawals.push(createCashflow("withdrawal", state.plan, firstAsset));
@@ -2452,6 +2525,7 @@ function propertyCardHTML(p) {
             ${flowCells("Rent", "rent", p.rent)}
             ${flowCells("Expenses", "expenses", p.expenses)}
             ${cell("Expenses deductible", `<label class="ptg-check"><input type="checkbox"${p.expensesDeductible ? " checked" : ""} data-pid="${p.id}" data-pfield="expensesDeductible" /><span>Yes</span></label>`)}
+            ${num("Depreciation ($ p.a., deductible)", "depreciation", p.depreciation ?? 0)}
           ` : ""}
         </div>
         ${helper ? `<p class="helper-text">${escapeHTML(helper)}</p>` : ""}
@@ -2512,6 +2586,7 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field === "firstHomeBuyer") p.firstHomeBuyer = e.target.checked;
   else if (field === "newBuild") p.newBuild = e.target.checked;
   else if (field === "expensesDeductible") p.expensesDeductible = e.target.checked;
+  else if (field === "depreciation") p.depreciation = clampNumber(v, 0);
   else if (field.includes(".")) {
     const [group, sub] = field.split(".");
     if ((group === "rent" || group === "expenses") && p[group]) {
