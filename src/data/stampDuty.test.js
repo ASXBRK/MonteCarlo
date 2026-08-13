@@ -44,6 +44,21 @@ describe("stamp duty — general schedules (two spot checks per state)", () => {
 });
 
 describe("stamp duty — FHB concessions + FHOG", () => {
+  it("WA FHB (2026-27 Housing Taxation Package, from 7 May 2026): exempt to 600k, taper to 800k", () => {
+    expect(dutyWithConcessions("WA", 550000, { firstHomeBuyer: true })).toBe(0);
+    const general700 = transferDuty("WA", 700000);
+    expect(dutyWithConcessions("WA", 700000, { firstHomeBuyer: true }))
+      .toBeCloseTo(general700 * 0.5, 6); // halfway between 600k and 800k
+    expect(dutyWithConcessions("WA", 850000, { firstHomeBuyer: true }))
+      .toBeCloseTo(transferDuty("WA", 850000), 6);
+  });
+
+  it("WA FHOG cap lifted to 800k (from 7 May 2026)", () => {
+    expect(fhogAmount("WA", 750000, { firstHomeBuyer: true, newBuild: true })).toBe(10000);
+    expect(fhogAmount("WA", 800000, { firstHomeBuyer: true, newBuild: true })).toBe(10000);
+    expect(fhogAmount("WA", 850000, { firstHomeBuyer: true, newBuild: true })).toBe(0);
+  });
+
   it("NSW FHB: exempt to 800k, linear taper to 1m, full duty beyond", () => {
     expect(dutyWithConcessions("NSW", 750000, { firstHomeBuyer: true })).toBe(0);
     const general900 = transferDuty("NSW", 900000);

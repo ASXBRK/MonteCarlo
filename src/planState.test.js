@@ -445,7 +445,7 @@ describe("D1 — identity, DOB, and end basis", () => {
       endBasis: { mode: "le", offset: 0 },
       start,
     });
-    // Client male 40: LE 42.7 → 43y. Partner female 36: LE ≈ 50.1 →
+    // Client male 40: LE 42.54 → 43y. Partner female 36: LE 49.95 →
     // 50y — the longer horizon anchors the projection.
     const years = Math.round(remainingLE(36, "female"));
     expect(client.endAge).toBe(40 + years);

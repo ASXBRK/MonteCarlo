@@ -2,12 +2,21 @@
 // jurisdictions: general schedules, first-home-buyer concessions, and
 // first home owner grants (new builds).
 //
-// AS AT 1 JULY 2025. Schedules are legislated nominal-dollar bracket
-// tables and are NOT indexed here (disclosed in the Parameters modal);
-// the per-property dutyOverride field exists for precision. Sources
-// per state below are the revenue-office published scales current at
-// the as-at date; VERIFY against the revenue offices before production
-// use — this build environment could not reach them.
+// AS AT 1 JULY 2025 (WA's first-home-buyer concession updated below to
+// the 2026-27 Housing Taxation Package). Schedules are legislated
+// nominal-dollar bracket tables and are NOT indexed here (disclosed in
+// the Parameters modal); the per-property dutyOverride field exists
+// for precision.
+//
+// VERIFICATION STATUS: general transfer-duty brackets for all eight
+// states/territories, and the FHB/FHOG rules for NSW/VIC/QLD/SA/TAS/
+// ACT/NT, were built from training knowledge and have NOT been
+// re-verified against the live revenue-office pages this session
+// (egress to those domains is blocked from this build environment —
+// see each schedule's "UNVERIFIED" tag below). WA's FHB/FHOG figures
+// ARE verified against a live WA Government announcement (see the WA
+// block). Confirm every UNVERIFIED schedule against its revenue office
+// before this data is relied on for advice.
 //
 // FHB phase-outs are modelled as a LINEAR taper from full exemption at
 // `exemptTo` to full duty at `phaseTo` — a documented simplification
@@ -20,11 +29,12 @@
 
 export const STAMP_DUTY_META = Object.freeze({
   asAt: "2025-07-01",
-  note: "Nominal-dollar schedules held at their as-at values (not indexed); FHB tapers linearised. Use the duty override for precision.",
+  note: "Nominal-dollar schedules held at their as-at values (not indexed); FHB tapers linearised. Use the duty override for precision. Most schedules are UNVERIFIED against source this session — see per-state comments; WA's FHB/FHOG figures are verified against a live WA Government announcement dated 7 May 2026.",
 });
 
 const SCHEDULES = {
-  // Revenue NSW, transfer duty standard rates (FY2024-25 indexed scale)
+  // UNVERIFIED this session. Revenue NSW, transfer duty standard rates
+  // (FY2024-25 indexed scale) — confirm against revenue.nsw.gov.au.
   NSW: {
     brackets: [
       [0, 0, 0.0125],
@@ -38,7 +48,8 @@ const SCHEDULES = {
     fhb: { exemptTo: 800000, phaseTo: 1000000, newOnly: false }, // First Home Buyers Assistance Scheme
     fhog: { amount: 10000, cap: 750000 }, // new homes
   },
-  // State Revenue Office Victoria, general land transfer duty
+  // UNVERIFIED this session. State Revenue Office Victoria, general
+  // land transfer duty — confirm against sro.vic.gov.au.
   VIC: {
     brackets: [
       [0, 0, 0.014],
@@ -50,7 +61,8 @@ const SCHEDULES = {
     fhb: { exemptTo: 600000, phaseTo: 750000, newOnly: false },
     fhog: { amount: 10000, cap: 750000 },
   },
-  // Queensland Revenue Office, transfer duty general rate
+  // UNVERIFIED this session. Queensland Revenue Office, transfer duty
+  // general rate — confirm against qro.qld.gov.au.
   QLD: {
     brackets: [
       [0, 0, 0],
@@ -62,7 +74,19 @@ const SCHEDULES = {
     fhb: { exemptTo: 700000, phaseTo: 800000, newOnly: false }, // from June 2024
     fhog: { amount: 30000, cap: 750000 }, // new builds, extended program
   },
-  // RevenueWA, general rate
+  // UNVERIFIED this session for the general bracket table — confirm
+  // against wa.gov.au (RevenueWA). The FHB/FHOG figures below ARE
+  // verified: WA's 2026-27 Housing Taxation Package, announced by the
+  // WA Government, lifts the First Home Owner Rate of Duty to a full
+  // exemption up to $600,000 and a tapered concession to $800,000
+  // (uniform for houses and vacant-land-with-house purchases; the
+  // announcement separately lists lower vacant-land-only thresholds of
+  // $450,000/$550,000, not modelled here — this tool treats "property"
+  // uniformly), and lifts the FHOG cap (south of the 26th parallel) to
+  // $800,000. Both changes commence for transactions from 7 May 2026
+  // and were, at the time of writing, still subject to the WA
+  // Parliamentary process and RevenueWA system updates — treat as
+  // announced, not yet fully legislated, and reconfirm.
   WA: {
     brackets: [
       [0, 0, 0.019],
@@ -71,10 +95,11 @@ const SCHEDULES = {
       [360000, 11115, 0.0475],
       [725000, 28453, 0.0515],
     ],
-    fhb: { exemptTo: 450000, phaseTo: 600000, newOnly: false }, // first home owner rate
-    fhog: { amount: 10000, cap: 750000 },
+    fhb: { exemptTo: 600000, phaseTo: 800000, newOnly: false }, // first home owner rate, from 7 May 2026
+    fhog: { amount: 10000, cap: 800000 }, // cap lifted from 7 May 2026
   },
-  // RevenueSA, general (non-qualifying land) scale
+  // UNVERIFIED this session. RevenueSA, general (non-qualifying land)
+  // scale — confirm against revenuesa.sa.gov.au.
   SA: {
     brackets: [
       [0, 0, 0.01],
@@ -92,7 +117,8 @@ const SCHEDULES = {
     fhb: { exemptTo: Infinity, phaseTo: Infinity, newOnly: true },
     fhog: { amount: 15000, cap: 650000 },
   },
-  // State Revenue Office Tasmania
+  // UNVERIFIED this session. State Revenue Office Tasmania — confirm
+  // against sro.tas.gov.au.
   TAS: {
     brackets: [
       [0, 50, 0],
@@ -106,9 +132,11 @@ const SCHEDULES = {
     fhb: { exemptTo: 750000, phaseTo: 750000, newOnly: false }, // 100% established-home exemption ≤ 750k
     fhog: { amount: 10000, cap: Infinity }, // new builds
   },
-  // ACT Revenue Office, non-commercial conveyance scale. The ACT Home
-  // Buyer Concession is income-tested with no price cap — modelled as
-  // a full exemption (simplification; disclose via override).
+  // UNVERIFIED this session. ACT Revenue Office, non-commercial
+  // conveyance scale — confirm against revenue.act.gov.au. The ACT
+  // Home Buyer Concession is income-tested with no price cap —
+  // modelled as a full exemption (simplification; disclose via
+  // override).
   ACT: {
     brackets: [
       [0, 0, 0.012],
@@ -122,9 +150,10 @@ const SCHEDULES = {
     fhb: { exemptTo: Infinity, phaseTo: Infinity, newOnly: false },
     fhog: { amount: 0, cap: 0 }, // ACT grant abolished
   },
-  // Territory Revenue Office NT: formula D = (0.06571441·V² + 15V)
-  // where V = price/1000, for prices ≤ $525,000; marginal-free flat
-  // percentages above.
+  // UNVERIFIED this session. Territory Revenue Office NT: formula
+  // D = (0.06571441·V² + 15V) where V = price/1000, for prices ≤
+  // $525,000; marginal-free flat percentages above — confirm against
+  // treasury.nt.gov.au.
   NT: {
     formula: (price) => {
       if (price <= 525000) {
