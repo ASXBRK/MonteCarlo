@@ -102,7 +102,21 @@ function ownerShares(asset, couple) {
 //   shortfall: { firstMonth, planYear, fyLabel, clientAge, total } | null,
 //   accruedCgtAtEnd,   // final FY's CGT, unpayable inside the projection
 // }
-export function projectPlan(state, profiles = PROFILES) {
+// mc (Monte Carlo overlay, Session B): optional { shockFor(holdingId, m) }
+// returning a REAL monthly return shock (zero-mean; mu stays exactly
+// the deterministic rate below) for a financial asset or super
+// account id, at absolute month index m. Read at the single point
+// each holding's monthly return is realised (the "a. Growth" step for
+// assets, "a-super-credit" for super) so the SAME value is seen by
+// both the measurement and real passes of a plan year — critical,
+// since those two passes must replay identical balances for the tax
+// timing split to mean anything (see the module header). monteCarlo.js
+// pre-generates the whole path's shocks before either pass runs, for
+// exactly this reason; it is never drawn from inline. Omitted (the
+// default), every holding's return is the plan's normal deterministic
+// expectation — bit-identical to every existing regression gate.
+export function projectPlan(state, profiles = PROFILES, mc = null) {
+  const shockFor = mc?.shockFor ?? (() => 0);
   const schedule = buildSchedules(state);
   const cpi = state.assumptions.cpi;
   const bracketMode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
@@ -600,14 +614,24 @@ export function projectPlan(state, profiles = PROFILES) {
       const cpiDecayMonthly = Math.pow(1 / (1 + cpi), 1 / 12) - 1;
       for (const id of ids) {
         let g;
+        // Monte Carlo shock (Session B): added to the rate, never
+        // applied to the offset portion below — that portion never
+        // "invests" (it just decays at CPI, earning the loan rate
+        // implicitly), so it has no market exposure to shock. A
+        // payout-mode asset's distribution yield (mt.incomeNominal,
+        // paid at step b below) is deliberately left unshocked too —
+        // disclosed simplification: real-world income yields are far
+        // more stable than capital values, which is where this rate
+        // already concentrates the shock.
+        const rate = meta[id].rate + shockFor(id, m);
         const offsetting = offsetLoansByAsset[id];
         if (offsetting) {
           const loanReal = offsetting.reduce((s, lid) => s + loanBal[lid], 0) / inflAt(m);
           const excess = Math.max(0, bal[id] - loanReal);
           const offsetPortion = bal[id] - excess;
-          g = excess * meta[id].rate + offsetPortion * cpiDecayMonthly;
+          g = excess * rate + offsetPortion * cpiDecayMonthly;
         } else {
-          g = bal[id] * meta[id].rate;
+          g = bal[id] * rate;
         }
         bal[id] += g;
         if (row) {
@@ -708,8 +732,16 @@ export function projectPlan(state, profiles = PROFILES) {
       if (row) {
         for (const id of superIds) {
           const sm = superMeta[id];
-          const grossGrowth = superBal[id] * sm.grossRate;
-          const netGrowth = superBal[id] * sm.rate;
+          // Monte Carlo shock (Session B): the SAME shock added to
+          // both gross and net — the 15%/10% earnings-tax wedge is a
+          // fixed proportional tax on whatever the fund actually
+          // earned, not something that itself needs to be redrawn per
+          // path (this block runs real-pass-only already — see the
+          // header comment above — so there's no measurement/real
+          // replay concern here the way there is for asset growth).
+          const shock = shockFor(id, m);
+          const grossGrowth = superBal[id] * (sm.grossRate + shock);
+          const netGrowth = superBal[id] * (sm.rate + shock);
           superBal[id] += netGrowth;
           row.superDetail[id].earnings += grossGrowth;
           row.superDetail[id].earningsTax += grossGrowth - netGrowth;

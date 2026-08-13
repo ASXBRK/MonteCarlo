@@ -134,6 +134,17 @@
                 <div id="chartAssetAllocation"></div>
                 <p id="assetAllocationNote" class="chart-note-inline"></p>
               </div>
+              <div id="viewMonteCarlo" hidden>
+                <div class="mc-controls">
+                  <button id="runMonteCarloBtn" class="btn-text" type="button">Run Monte Carlo (2,000 paths)</button>
+                  <span id="monteCarloStatus" class="mc-status"></span>
+                </div>
+                <div id="monteCarloResults" hidden>
+                  <div id="chartMonteCarlo"></div>
+                  <div id="monteCarloStats" class="summary-strip"></div>
+                  <div id="monteCarloTable"></div>
+                </div>
+              </div>
               <div id="viewSuperBalances" hidden><div id="chartSuperBalances"></div></div>
               <div id="viewLiabilitiesBalances" hidden><div id="chartLiabilitiesBalances"></div></div>
               <div id="viewCashflowBars" hidden><div id="chartCashflowBars"></div></div>
@@ -178,10 +189,11 @@
         <section>
           <h3>Engine</h3>
           <ul class="param-list">
-            <li>Paths per scenario (Monte Carlo overlay): 2,000</li>
+            <li>Paths per scenario (Monte Carlo overlay): 2,000, through the full tax-aware engine (Session B) — not the legacy single-bucket sampler</li>
             <li>Step: monthly (12 steps per year)</li>
-            <li>Return distribution: i.i.d. normal within regime, sampled via Box-Muller</li>
+            <li>Return distribution: normal within each holding's own regime, sampled via Box-Muller</li>
             <li>Per-step return: <code>r = μ/12 + (σ/√12) × z</code>, where <code>z ~ N(0,1)</code></li>
+            <li>Cross-holding correlation: a single shared market factor at ρ = 0.85 (<code>z = √ρ × z_market + √(1−ρ) × z_idiosyncratic</code>), loaded identically onto every included financial asset and super account, combined with each holding's own profile-based regime switching. A genuine per-asset-class correlation matrix (Australian vs international equity, property, fixed interest, cash each with their own factor loading) is a considered future refinement, not built: it would need per-class σ calibrated to reproduce each profile's firm-set total σ, and an incorrect calibration would silently contradict the firm's stated volatility assumptions.</li>
             <li>Balance update: <code>B(t+1) = B(t) × (1+r) + contribution</code></li>
             <li>Stored snapshots: yearly only</li>
           </ul>

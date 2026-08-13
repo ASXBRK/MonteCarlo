@@ -21,12 +21,20 @@
 
 import { ASSET_CLASS_KEYS } from "./profiles.js";
 
-// The profile whose classWeights apply to a given allocation: the
-// selected profile directly ("profile" mode), or the volatility-basis
-// profile a custom allocation borrows from ("custom" mode).
-export function classWeightsForAllocation(allocation, profiles) {
+// The profile object a given allocation resolves to: the selected
+// profile directly ("profile" mode), or the volatility-basis profile a
+// custom allocation borrows from ("custom" mode) — the same resolution
+// Monte Carlo (monteCarlo.js) uses to find a holding's σ/regime
+// parameters, and this module uses for its classWeights.
+export function profileForAllocation(allocation, profiles) {
   const profileName = allocation?.mode === "custom" ? allocation.volBasis : allocation?.profile;
-  return profiles[profileName]?.classWeights ?? null;
+  return profiles[profileName] ?? null;
+}
+
+// The classWeights of the profile a given allocation resolves to (see
+// profileForAllocation above).
+export function classWeightsForAllocation(allocation, profiles) {
+  return profileForAllocation(allocation, profiles)?.classWeights ?? null;
 }
 
 function zeroTotals() {

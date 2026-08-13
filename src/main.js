@@ -7,6 +7,7 @@
 
 import { PROFILES, realMu, impliedFrankingPct, ASSET_CLASS_KEYS, ASSET_CLASS_LABELS } from "./profiles.js";
 import { allocationSeries } from "./allocation.js";
+import { runMonteCarlo, DEFAULT_NUM_PATHS } from "./monteCarlo.js";
 import {
   defaultState, createAsset, createLifestyleAsset, createCashflow, createLumpSum,
   createIncomeRow, createExpenseRow, createDeductionRow, clampDeductionRow,
@@ -127,6 +128,11 @@ const els = {
   viewNetAssets: $("viewNetAssets"),
   viewAssetBalances: $("viewAssetBalances"),
   viewAssetAllocation: $("viewAssetAllocation"),
+  viewMonteCarlo: $("viewMonteCarlo"),
+  runMonteCarloBtn: $("runMonteCarloBtn"),
+  monteCarloStatus: $("monteCarloStatus"),
+  monteCarloResults: $("monteCarloResults"),
+  monteCarloStats: $("monteCarloStats"),
   chartTreatmentSelects: document.querySelectorAll("[data-treatment]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
@@ -320,6 +326,7 @@ const OUTPUT_NAV = {
     { id: "net-assets", label: "Net assets" },
     { id: "asset-balances", label: "Asset balances" },
     { id: "asset-allocation", label: "Asset allocation" },
+    { id: "monte-carlo", label: "Monte Carlo" },
     { id: "super-balances", label: "Super balances" },
     { id: "liabilities-balances", label: "Liabilities" },
   ],
@@ -3408,6 +3415,17 @@ let assetsEntity = "all"; // Assets view entity selector: "all" | assetId
 let superEntity = "all"; // Super view entity selector: "all" | super account id
 let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liability id
 
+// Monte Carlo (Session B): unlike the deterministic engine above,
+// 2,000 paths through the full tax-aware year loop is NOT sub-
+// millisecond (order of several seconds for a realistic plan — see
+// monteCarlo.js's own header and this session's measured benchmark),
+// so it never runs automatically. mcResult is invalidated on every
+// plan mutation (refreshOutputs, below) rather than silently going
+// stale — the Monte Carlo view shows "Run" again rather than an old
+// simulation's chart for a plan that's since changed.
+let mcResult = null;
+let mcRunning = false;
+
 function recomputeProjection() {
   projection = projectPlan(state);
 }
@@ -3416,6 +3434,7 @@ function recomputeProjection() {
 // that displays engine output.
 function refreshOutputs() {
   recomputeProjection();
+  mcResult = null;
   renderPeriodSelector();
   renderSummaryStrip();
   renderActiveView();
@@ -3427,6 +3446,7 @@ const VIEW_MOUNTS = {
   "net-assets": () => els.viewNetAssets,
   "asset-balances": () => els.viewAssetBalances,
   "asset-allocation": () => els.viewAssetAllocation,
+  "monte-carlo": () => els.viewMonteCarlo,
   "super-balances": () => els.viewSuperBalances,
   "liabilities-balances": () => els.viewLiabilitiesBalances,
   "cashflow-bars": () => els.viewCashflowBars,
@@ -3438,7 +3458,7 @@ const VIEW_MOUNTS = {
   liabilities: () => els.viewLiabilities,
   assumptions: () => els.viewAssumptions,
 };
-const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars"]);
+const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
 // Selection now happens via the sidebar (data-nav-section), which
 // routes through handleRoute → showSection → here.
@@ -3457,6 +3477,7 @@ function renderActiveView() {
   else if (activeView === "net-assets") renderNetAssetsChart();
   else if (activeView === "asset-balances") renderAssetBalancesChart();
   else if (activeView === "asset-allocation") renderAssetAllocationChart();
+  else if (activeView === "monte-carlo") renderMonteCarloView();
   else if (activeView === "super-balances") renderSuperBalancesChart();
   else if (activeView === "liabilities-balances") renderLiabilitiesBalancesChart();
   else if (activeView === "cashflow-bars") renderCashflowBarsChart();
@@ -3920,6 +3941,132 @@ function renderAssetAllocationChart() {
     ? "Assets and super accounts with a custom allocation are shown using their selected volatility-basis profile's class weights (the same profile Monte Carlo variability borrows from)."
     : "";
 }
+
+// --- View: Monte Carlo (Session B) -------------------------------------------
+//
+// Runs 2,000 full paths through the real, tax-aware engine (monte
+// Carlo.js's runMonteCarlo — NOT the legacy scalar sim.js, which stays
+// behind LEGACY_INSIGHTS_ENABLED) with randomised, correlated monthly
+// returns per included financial asset and super account. This is
+// order-of-seconds, not sub-millisecond like the deterministic engine
+// above — never auto-run on a mutation; only the explicit button below
+// triggers it, and any plan edit invalidates the cached result
+// (refreshOutputs) rather than leaving a stale chart on screen.
+
+function renderMonteCarloView() {
+  els.monteCarloResults.hidden = !mcResult;
+  els.runMonteCarloBtn.disabled = mcRunning;
+  els.runMonteCarloBtn.textContent = mcRunning
+    ? "Running…"
+    : `Run Monte Carlo (${DEFAULT_NUM_PATHS.toLocaleString()} paths)`;
+  if (mcRunning) {
+    els.monteCarloStatus.textContent = "Simulating — this can take several seconds for a complex plan.";
+    return;
+  }
+  if (!mcResult) {
+    els.monteCarloStatus.textContent = "";
+    return;
+  }
+  els.monteCarloStatus.textContent =
+    `${mcResult.numPaths.toLocaleString()} paths in ${(mcResult.elapsedMs / 1000).toFixed(1)}s. ` +
+    "Re-run after changing the plan — this result is a snapshot, not live.";
+  renderMonteCarloChart();
+  renderMonteCarloStats();
+  renderMonteCarloTable();
+}
+
+function renderMonteCarloChart() {
+  const el = $("chartMonteCarlo");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const band = (key) => yearIdxs.map((y) => mcResult.netAssets[key][y] * factor(y));
+  const p05 = band("p05"), p25 = band("p25"), p50 = band("p50"), p75 = band("p75"), p95 = band("p95");
+
+  const outer = "rgba(28, 90, 180, 0.12)";
+  const inner = "rgba(28, 90, 180, 0.28)";
+  const traces = [
+    { x: ages, y: p05, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: p95, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: outer,
+      name: "5th–95th percentile", hovertemplate: "Age %{x}<br>P95 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: p25, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: p75, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: inner,
+      name: "25th–75th percentile", hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: p50, mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
+      name: "Median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
+  ];
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function renderMonteCarloStats() {
+  const years = mcResult.years;
+  const factor = displayFactor(endMonthOfYear(years - 1));
+  const pct = (mcResult.successProbability * 100).toFixed(0);
+  els.monteCarloStats.innerHTML = `
+    <div class="stat stat-headline">
+      <div class="stat-label">No-shortfall probability</div>
+      <div class="stat-value">${pct}%</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Median ending net assets</div>
+      <div class="stat-value">${fmtMoney(mcResult.netAssets.p50[years - 1] * factor)}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">5th percentile ending</div>
+      <div class="stat-value">${fmtMoney(mcResult.netAssets.p05[years - 1] * factor)}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">95th percentile ending</div>
+      <div class="stat-value">${fmtMoney(mcResult.netAssets.p95[years - 1] * factor)}</div>
+    </div>
+  `;
+}
+
+function renderMonteCarloTable() {
+  const groups = [{
+    title: "Net assets — simulated percentiles",
+    rows: [
+      { label: "5th percentile", cell: (y) => mcResult.netAssets.p05[y], always: true },
+      { label: "25th percentile", cell: (y) => mcResult.netAssets.p25[y], always: true },
+      { label: "Median (50th)", cell: (y) => mcResult.netAssets.p50[y], always: true, cls: "tl-total" },
+      { label: "75th percentile", cell: (y) => mcResult.netAssets.p75[y], always: true },
+      { label: "95th percentile", cell: (y) => mcResult.netAssets.p95[y], always: true },
+    ],
+  }];
+  renderTransposed($("monteCarloTable"), groups,
+    `<p class="chart-note-inline">Single shared market factor (ρ = 0.85) plus each holding's own profile-based regime switching — not a per-asset-class correlation matrix (would need per-class σ calibrated to reproduce each profile's firm-set σ; a future refinement, see Parameters). Lifestyle assets and property carry no profile and are not randomised.</p>`);
+}
+
+els.runMonteCarloBtn.addEventListener("click", () => {
+  if (mcRunning) return;
+  mcRunning = true;
+  renderMonteCarloView();
+  // Defer the actual (blocking, multi-second) run one tick so the
+  // "Running…" state above actually paints first — a synchronous
+  // multi-second call here would freeze the UI before it could show
+  // anything changed.
+  setTimeout(() => {
+    try {
+      mcResult = runMonteCarlo(state, PROFILES);
+    } finally {
+      mcRunning = false;
+      renderMonteCarloView();
+    }
+  }, 0);
+});
 
 // --- View: Super balances chart (Tier 1.2, Commit 4) ------------------------
 //

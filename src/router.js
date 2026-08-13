@@ -18,8 +18,8 @@ export const DEFAULT_INPUT_SECTION = "setup";
 // Output view ids are flat (not nested by Graphs/Tables group) — the
 // grouping is a sidebar presentation concern, not a routing one.
 export const OUTPUT_VIEWS = [
-  "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars", // Graphs
-  "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "assumptions",                                                        // Tables
+  "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars", "monte-carlo", // Graphs
+  "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "assumptions",                                                                      // Tables
 ];
 export const DEFAULT_OUTPUT_VIEW = "composite"; // the composite chart is the default Graphs view (D5)
 
