@@ -5,7 +5,8 @@
 // derived summaries. The ledger that consumes these inputs arrives in
 // Phase B; tax in B.1 — income is captured gross and the UI says so.
 
-import { PROFILES, realMu } from "./profiles.js";
+import { PROFILES, realMu, ASSET_CLASS_KEYS, ASSET_CLASS_LABELS } from "./profiles.js";
+import { allocationSeries } from "./allocation.js";
 import {
   defaultState, createAsset, createLifestyleAsset, createCashflow, createLumpSum,
   createIncomeRow, createExpenseRow, createDeductionRow, clampDeductionRow,
@@ -125,11 +126,13 @@ const els = {
   viewComposite: $("viewComposite"),
   viewNetAssets: $("viewNetAssets"),
   viewAssetBalances: $("viewAssetBalances"),
+  viewAssetAllocation: $("viewAssetAllocation"),
   chartTreatmentSelects: document.querySelectorAll("[data-treatment]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
   paramAssetTable: $("paramAssetTable"),
   inflationInput: $("inflationInput"),
+  unitsToggle: document.querySelector(".display-toggle"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -316,6 +319,7 @@ const OUTPUT_NAV = {
     { id: "composite", label: "Cashflow, Assets & Liabilities" },
     { id: "net-assets", label: "Net assets" },
     { id: "asset-balances", label: "Asset balances" },
+    { id: "asset-allocation", label: "Asset allocation" },
     { id: "super-balances", label: "Super balances" },
     { id: "liabilities-balances", label: "Liabilities" },
   ],
@@ -3418,6 +3422,7 @@ const VIEW_MOUNTS = {
   composite: () => els.viewComposite,
   "net-assets": () => els.viewNetAssets,
   "asset-balances": () => els.viewAssetBalances,
+  "asset-allocation": () => els.viewAssetAllocation,
   "super-balances": () => els.viewSuperBalances,
   "liabilities-balances": () => els.viewLiabilitiesBalances,
   "cashflow-bars": () => els.viewCashflowBars,
@@ -3429,7 +3434,7 @@ const VIEW_MOUNTS = {
   liabilities: () => els.viewLiabilities,
   assumptions: () => els.viewAssumptions,
 };
-const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "super-balances", "liabilities-balances", "cashflow-bars"]);
+const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
 // Selection now happens via the sidebar (data-nav-section), which
 // routes through handleRoute → showSection → here.
@@ -3438,10 +3443,16 @@ function renderActiveView() {
     mount().hidden = name !== activeView;
   }
   els.exportBtn.textContent = GRAPH_VIEWS.has(activeView) ? "Export PNG" : "Export CSV";
+  // Asset allocation is a pure mix (always 100%, whichever way you cut
+  // it) — real vs nominal dollars has nothing to say about it, so the
+  // units toggle is suppressed here rather than left showing a control
+  // with no effect (Asset class allocations commit).
+  els.unitsToggle.hidden = activeView === "asset-allocation";
   if (activeView === "projection") renderProjectionChart();
   else if (activeView === "composite") renderCompositeChart();
   else if (activeView === "net-assets") renderNetAssetsChart();
   else if (activeView === "asset-balances") renderAssetBalancesChart();
+  else if (activeView === "asset-allocation") renderAssetAllocationChart();
   else if (activeView === "super-balances") renderSuperBalancesChart();
   else if (activeView === "liabilities-balances") renderLiabilitiesBalancesChart();
   else if (activeView === "cashflow-bars") renderCashflowBarsChart();
@@ -3853,6 +3864,57 @@ function renderAssetBalancesChart() {
     },
     font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
   }, { displayModeBar: false, responsive: true });
+}
+
+// --- View: Asset allocation chart (Asset class allocations commit) ----------
+//
+// 100% stacked area, by client age, one band per asset class
+// (profiles.js's ASSET_CLASS_KEYS/ASSET_CLASS_LABELS) — weights come
+// from allocation.js's allocationSeries, which derives them from each
+// included, non-lifestyle financial asset's and super account's own
+// profile (a custom allocation borrows its volatility-basis profile's
+// weights, same as Monte Carlo does — noted beneath the chart when
+// that applies). Lifestyle assets and property carry no profile and
+// are excluded from the mix entirely (see allocation.js's header).
+// Real vs nominal is meaningless for a 100%-stacked mix, so the units
+// toggle is suppressed for this view (renderActiveView).
+
+function renderAssetAllocationChart() {
+  const el = $("chartAssetAllocation");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const { perYear, usesCustom } = allocationSeries(
+    yearIdxs.map((y) => projection.yearly[y]), state.assets, state.plan.superAccounts ?? [], PROFILES
+  );
+  const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#d97b2f"];
+
+  const traces = ASSET_CLASS_KEYS.map((k, i) => ({
+    x: ages,
+    y: perYear.map((p) => p.weightPct[k]),
+    name: ASSET_CLASS_LABELS[k], type: "scatter", mode: "lines",
+    stackgroup: "alloc", fill: "tonexty",
+    line: { color: palette[i % palette.length], width: 1 },
+    hovertemplate: `Age %{x}<br>%{y:.1f}%<extra>${escapeHTML(ASSET_CLASS_LABELS[k])}</extra>`,
+  }));
+
+  Plotly.react(el, traces, {
+    margin: { l: 60, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: "Allocation", standoff: 10 },
+      tickformat: ".0f", ticksuffix: "%", dtick: 25,
+      range: [0, 100], gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+
+  $("assetAllocationNote").textContent = usesCustom
+    ? "Assets and super accounts with a custom allocation are shown using their selected volatility-basis profile's class weights (the same profile Monte Carlo variability borrows from)."
+    : "";
 }
 
 // --- View: Super balances chart (Tier 1.2, Commit 4) ------------------------
