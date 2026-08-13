@@ -41,6 +41,7 @@
 
 import { PROFILES } from "./profiles.js";
 import { buildSchedules, firstFyStartYear } from "./schedule.js";
+import { resolveRef } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { assessPerson } from "./Tax/annual.js";
@@ -157,8 +158,11 @@ export function projectPlan(state, profiles = PROFILES) {
     const owned = p.status === "owned";
     let purchaseMonth = null;
     if (!owned) {
-      const y = p.purchaseAge - state.plan.client.currentAge;
-      purchaseMonth = y >= 0 && y < years ? julyOf(y) : null; // null = never fires (convention 5)
+      // Key Dates: resolved once here (not per month) — an anchor or
+      // an explicit age both clamp into the projection window, so this
+      // never needs a separate bounds check.
+      const y = resolveRef(p.purchaseAt, state.plan, schedule, "client").planYear;
+      purchaseMonth = julyOf(y); // null = never fires (convention 5's partial-year skip)
     }
     const invest = p.propertyType === "investment";
     // Negative gearing is unrestricted when the loss year is pre-FY2027-28,

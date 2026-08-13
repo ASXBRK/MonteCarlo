@@ -34,11 +34,19 @@ function mkState({
   };
 }
 
-const cf = (over = {}) => ({
-  id: "row", assetId: "a1", amount: 100, frequency: "monthly",
-  fromAge: 40, toAge: 44, indexed: true, owner: "client", label: "x",
-  ...over,
-});
+// fromAge/toAge are a convenience shim over the real DateRef fields
+// (from/to) — Key Dates (Tier 1.1) — so existing call sites below stay
+// unchanged while schedule.js is exercised against its real shape.
+const cf = (over = {}) => {
+  const { fromAge, toAge, from, to, ...rest } = over;
+  return {
+    id: "row", assetId: "a1", amount: 100, frequency: "monthly",
+    from: from ?? { kind: "age", age: fromAge ?? 40 },
+    to: to ?? { kind: "age", age: toAge ?? 44 },
+    indexed: true, owner: "client", label: "x",
+    ...rest,
+  };
+};
 
 describe("time helpers", () => {
   it("partial first year month counts", () => {
@@ -113,8 +121,8 @@ describe("annual/July timing (convention 5)", () => {
     const s = mkState({
       start: { year: 2026, month: 8 },
       lumpSums: [
-        { id: "l1", assetId: "a1", amount: 50000, direction: "in", age: 40, source: "input" }, // partial year → skipped
-        { id: "l2", assetId: "a1", amount: 20000, direction: "out", age: 42, source: "input" },
+        { id: "l1", assetId: "a1", amount: 50000, direction: "in", at: { kind: "age", age: 40 }, source: "input" }, // partial year → skipped
+        { id: "l2", assetId: "a1", amount: 20000, direction: "out", at: { kind: "age", age: 42 }, source: "input" },
       ],
     });
     const out = buildSchedules(s);

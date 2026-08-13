@@ -21,6 +21,13 @@
 //
 // All amounts in the output are REAL dollars. Nominal is a display
 // scaling applied by the renderer via nominalFactor().
+//
+// Key Dates (Tier 1.1): every row's from/to/at is a DateRef, resolved
+// to a plan-year bound HERE, once, before any month is walked — never
+// inside the per-month loop. Engine semantics are unchanged: an anchor
+// resolves to exactly the plan year an equivalent integer age did.
+
+import { resolveRef } from "./keyDates.js";
 
 // --- time helpers -------------------------------------------------------
 
@@ -161,21 +168,29 @@ export function buildSchedules(state) {
   const oneOffsByAssetYear = {};
   for (const id of includedIds) oneOffsByAssetYear[id] = new Float64Array(planYears);
 
-  // A regular cashflow row is active in plan year y iff the anchor
-  // owner's age that year lies in [fromAge, toAge] (inclusive of both
+  // Key Dates: a partial schedule — just enough for resolveRef
+  // (planYears/fyLabels/clientAges) — built from the arrays above, so
+  // every row's from/to/at resolves against the SAME plan-year numbering
+  // the rest of this function uses. Resolved once per row below, never
+  // per month.
+  const dateSchedule = { planYears, fyLabels, clientAges };
+
+  // A regular cashflow row is active in plan year y iff y lies within
+  // its resolved [from, to] plan-year bounds (inclusive of both
   // boundary plan years — convention 4).
-  const activeInYear = (row, owner, y) => {
-    const age = ownerAgeAt(plan, owner, y);
-    return age >= row.fromAge && age <= row.toAge;
-  };
+  const activeInPlanYear = (bounds, y) => y >= bounds.from && y <= bounds.to;
 
   // Accumulate a regular row into a target Float64Array (and its
   // per-FY totals when a `totals` array is supplied).
   const applyRegular = (row, owner, target, totals = null) => {
     if (row.amount <= 0) return;
+    const bounds = {
+      from: resolveRef(row.from, plan, dateSchedule, owner).planYear,
+      to: resolveRef(row.to, plan, dateSchedule, owner).planYear,
+    };
     if (row.frequency === "monthly") {
       for (let m = 0; m < months; m++) {
-        if (activeInYear(row, owner, yearOfMonth[m])) {
+        if (activeInPlanYear(bounds, yearOfMonth[m])) {
           const v = realAmountAt(row, m, cpi, awote);
           target[m] += v;
           if (totals) totals[yearOfMonth[m]] += v;
@@ -183,7 +198,7 @@ export function buildSchedules(state) {
       }
     } else { // annual — fires in July (convention 5)
       for (let y = 0; y < planYears; y++) {
-        if (!activeInYear(row, owner, y)) continue;
+        if (!activeInPlanYear(bounds, y)) continue;
         const jm = julyMonthIndex(plan, y);
         if (jm == null) continue; // partial first year without a firing July
         const v = realAmountAt(row, jm, cpi, awote);
@@ -215,14 +230,13 @@ export function buildSchedules(state) {
     if (flows) applyRegular(row, "client", flows.withdrawals);
   }
 
-  // One-offs fire in the July of the plan year where the client is
-  // ls.age, subject to convention 5's partial-first-year skip. They
-  // carry no indexed flag — amounts are real as entered.
+  // One-offs fire in the July of the plan year resolved from ls.at,
+  // subject to convention 5's partial-first-year skip. They carry no
+  // indexed flag — amounts are real as entered.
   for (const ls of state.cashflows.lumpSums) {
     const flows = assetFlows[ls.assetId];
     if (!flows || ls.amount <= 0) continue;
-    const y = ls.age - plan.client.currentAge;
-    if (y < 0 || y >= planYears) continue;
+    const y = resolveRef(ls.at, plan, dateSchedule, "client").planYear;
     const jm = julyMonthIndex(plan, y);
     if (jm == null) continue;
     const signed = ls.direction === "out" ? -ls.amount : ls.amount;

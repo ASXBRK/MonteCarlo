@@ -13,7 +13,7 @@ import {
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
   createLiability, createProperty,
   clampReportPeriod, clampChartTreatment, defaultChartTreatment,
-  defaultReportPeriod, ASSUMED_RETIREMENT_AGE,
+  defaultReportPeriod,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -55,10 +55,14 @@ describe("defaults (v3)", () => {
     const inc = createIncomeRow(plan, []);
     expect(inc.owner).toBe("client");
     expect(inc.frequency).toBe("annual");
-    expect(inc.fromAge).toBe(40);
-    expect(inc.toAge).toBe(90);
+    // New rows open already anchored (Tier 1.1): Start → Retirement for
+    // income, no numbers typed into an age box.
+    expect(inc.from).toEqual({ kind: "anchor", anchorId: "start" });
+    expect(inc.to).toEqual({ kind: "anchor", anchorId: "retirement-client" });
     const exp = createExpenseRow(plan, [inc]);
     expect(exp.label).toBe("Expense 2");
+    expect(exp.from).toEqual({ kind: "anchor", anchorId: "start" });
+    expect(exp.to).toEqual({ kind: "anchor", anchorId: "end" });
   });
 });
 
@@ -90,10 +94,13 @@ describe("owner windows + FY labels", () => {
 
   it("clampIncomeRow anchors to the owner window and demotes orphan partners", () => {
     const plan = couplePlan();
-    const row = { id: "x", owner: "partner", amount: 1, frequency: "annual", fromAge: 30, toAge: 99, indexed: true };
+    const row = {
+      id: "x", owner: "partner", amount: 1, frequency: "annual",
+      from: { kind: "age", age: 30 }, to: { kind: "age", age: 99 }, indexed: true,
+    };
     const out = clampIncomeRow(row, plan);
-    expect(out.fromAge).toBe(36);
-    expect(out.toAge).toBe(86);
+    expect(out.from).toEqual({ kind: "age", age: 36 });
+    expect(out.to).toEqual({ kind: "age", age: 86 });
     const single = clampPlan({ ...plan, household: "single", partner: null });
     const demoted = clampIncomeRow(row, single);
     expect(demoted.owner).toBe("client");
@@ -154,7 +161,7 @@ describe("household transitions", () => {
     s.settings = normaliseSettings(s.settings, s.assets);
     const inc = createIncomeRow(s.plan, []);
     inc.owner = "partner";
-    inc.fromAge = 36; inc.toAge = 65;
+    inc.from = { kind: "age", age: 36 }; inc.to = { kind: "age", age: 65 };
     s.cashflows.income.push(inc);
     return { s, pa, ja };
   }
@@ -172,7 +179,7 @@ describe("household transitions", () => {
     const out = reassignPartnerToClient(s);
     expect(out.assets.every((a) => a.owner === "client")).toBe(true);
     expect(out.cashflows.income[0].owner).toBe("client");
-    expect(out.cashflows.income[0].fromAge).toBe(36); // numeric ages kept
+    expect(out.cashflows.income[0].from).toEqual({ kind: "age", age: 36 }); // numeric ages kept
   });
 
   it("deletePartnerOwned cascades through cashflows and settings", () => {
@@ -267,7 +274,8 @@ describe("persistence round-trip (v3)", () => {
     }, s.assets);
 
     const inc = createIncomeRow(s.plan, []);
-    inc.owner = "partner"; inc.amount = 90000; inc.fromAge = 36; inc.toAge = 65;
+    inc.owner = "partner"; inc.amount = 90000;
+    inc.from = { kind: "age", age: 36 }; inc.to = { kind: "age", age: 65 };
     s.cashflows.income.push(inc);
     const exp = createExpenseRow(s.plan, []);
     exp.amount = 60000; exp.label = "Living expenses";
@@ -280,7 +288,10 @@ describe("persistence round-trip (v3)", () => {
     expect(back.assets[1]).toMatchObject({ owner: "joint", distributions: "cash" });
     expect(back.settings.surplus).toEqual({ mode: "invest", assetId: a2.id });
     expect(back.settings.fundingOrder).toEqual([a2.id, s.assets[0].id]);
-    expect(back.cashflows.income[0]).toMatchObject({ owner: "partner", amount: 90000, fromAge: 36, toAge: 65 });
+    expect(back.cashflows.income[0]).toMatchObject({
+      owner: "partner", amount: 90000,
+      from: { kind: "age", age: 36 }, to: { kind: "age", age: 65 },
+    });
     expect(back.cashflows.expenses[0]).toMatchObject({ label: "Living expenses", amount: 60000 });
   });
 
@@ -350,13 +361,13 @@ describe("allocation (carried from A.1)", () => {
 });
 
 describe("one-off grid helpers (C2)", () => {
-  const input = { id: "in1", assetId: "a1", amount: 5000, direction: "in", age: 45, source: "input" };
+  const input = { id: "in1", assetId: "a1", amount: 5000, direction: "in", at: { kind: "age", age: 45 }, source: "input" };
 
   it("creates, updates, and deletes the table-sourced entry", () => {
     let ls = upsertTableLumpSum([input], "a1", 45, -20000);
     expect(ls).toHaveLength(2);
     const t = tableLumpSumFor(ls, "a1", 45);
-    expect(t).toMatchObject({ assetId: "a1", age: 45, amount: 20000, direction: "out", source: "table" });
+    expect(t).toMatchObject({ assetId: "a1", at: { kind: "age", age: 45 }, amount: 20000, direction: "out", source: "table" });
 
     // Update keeps the id and flips direction.
     const ls2 = upsertTableLumpSum(ls, "a1", 45, 7500);
@@ -672,19 +683,23 @@ describe("D5 — report period + chart treatment display state", () => {
   it("defaultReportPeriod defaults toAge to retirement+25 (capped at endAge) and thins beyond a 25-year span", () => {
     // Short horizon: retirement+25 exceeds endAge, so toAge is just
     // endAge, and the span is short enough that no thinning applies.
-    expect(defaultReportPeriod({ client: { currentAge: 60 }, endAge: 70 }))
+    expect(defaultReportPeriod({ client: { currentAge: 60, retirementAge: 65 }, endAge: 70 }))
       .toEqual({ fromAge: null, toAge: 70, everyN: 1, forceKeyYears: true });
 
     // Long horizon (>25 years, but endAge still under retirement+25):
     // toAge equals endAge, but the overall span triggers thinning.
-    expect(defaultReportPeriod({ client: { currentAge: 40 }, endAge: 80 }))
+    expect(defaultReportPeriod({ client: { currentAge: 40, retirementAge: 65 }, endAge: 80 }))
       .toEqual({ fromAge: null, toAge: 80, everyN: 5, forceKeyYears: true });
 
     // Very long horizon: retirement+25 caps toAge well short of
     // endAge — "a 63-year x-axis with 38 flat years at the end" is
     // exactly what this cap avoids.
-    expect(defaultReportPeriod({ client: { currentAge: 30 }, endAge: 110 }))
-      .toEqual({ fromAge: null, toAge: ASSUMED_RETIREMENT_AGE + 25, everyN: 5, forceKeyYears: true });
+    expect(defaultReportPeriod({ client: { currentAge: 30, retirementAge: 65 }, endAge: 110 }))
+      .toEqual({ fromAge: null, toAge: 90, everyN: 5, forceKeyYears: true });
+
+    // A non-default retirementAge feeds straight into the horizon.
+    expect(defaultReportPeriod({ client: { currentAge: 30, retirementAge: 60 }, endAge: 110 }))
+      .toEqual({ fromAge: null, toAge: 85, everyN: 5, forceKeyYears: true });
   });
 
   it("defaultState wires display.reportPeriod through defaultReportPeriod for the initial plan", () => {

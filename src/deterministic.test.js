@@ -40,11 +40,19 @@ function mkState(over = {}) {
   };
 }
 
-const cf = (over = {}) => ({
-  id: "row", assetId: "a1", amount: 0, frequency: "monthly",
-  fromAge: 40, toAge: 120, indexed: true, owner: "client", label: "x",
-  ...over,
-});
+// fromAge/toAge are a convenience shim over the real DateRef fields
+// (from/to) — Key Dates (Tier 1.1) — so existing call sites below stay
+// unchanged while the engine is exercised against its real shape.
+const cf = (over = {}) => {
+  const { fromAge, toAge, from, to, ...rest } = over;
+  return {
+    id: "row", assetId: "a1", amount: 0, frequency: "monthly",
+    from: from ?? { kind: "age", age: fromAge ?? 40 },
+    to: to ?? { kind: "age", age: toAge ?? 120 },
+    indexed: true, owner: "client", label: "x",
+    ...rest,
+  };
+};
 
 // An allocation whose net nominal equals the CPI → real return exactly 0.
 const zeroRealAlloc = (cpi = 0.025) =>
@@ -227,10 +235,15 @@ describe("aggregation + partial first year", () => {
 const growthOnlyAlloc = (cpi = 0.025) =>
   ({ mode: "custom", incomePct: 0, growthPct: cpi * 100, frankingPct: 0, volBasis: "Balanced" });
 
-const salary = (amount, over = {}) => ({
-  id: "sal", label: "Salary", owner: "client", amount, frequency: "monthly",
-  fromAge: 40, toAge: 120, indexed: true, assetId: null, ...over,
-});
+const salary = (amount, over = {}) => {
+  const { fromAge, toAge, from, to, ...rest } = over;
+  return {
+    id: "sal", label: "Salary", owner: "client", amount, frequency: "monthly",
+    from: from ?? { kind: "age", age: fromAge ?? 40 },
+    to: to ?? { kind: "age", age: toAge ?? 120 },
+    indexed: true, assetId: null, ...rest,
+  };
+};
 
 // --- Phase C1: per-line and per-asset reconciliation --------------------------
 
@@ -245,16 +258,16 @@ describe("output view reconciliation (C1)", () => {
     surplus: { mode: "invest", assetId: "x" },
     cashflows: {
       income: [
-        { id: "i1", label: "Salary", owner: "client", amount: 4000, frequency: "monthly", fromAge: 40, toAge: 45, indexed: true },
-        { id: "i2", label: "Bonus", owner: "client", amount: 5000, frequency: "annual", fromAge: 40, toAge: 42, indexed: true },
+        { id: "i1", label: "Salary", owner: "client", amount: 4000, frequency: "monthly", from: { kind: "age", age: 40 }, to: { kind: "age", age: 45 }, indexed: true },
+        { id: "i2", label: "Bonus", owner: "client", amount: 5000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 }, indexed: true },
       ],
       expenses: [
-        { id: "e1", label: "Living", amount: 3000, frequency: "monthly", fromAge: 40, toAge: 120, indexed: true },
-        { id: "e2", label: "Travel", amount: 8000, frequency: "annual", fromAge: 46, toAge: 50, indexed: false },
+        { id: "e1", label: "Living", amount: 3000, frequency: "monthly", from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 }, indexed: true },
+        { id: "e2", label: "Travel", amount: 8000, frequency: "annual", from: { kind: "age", age: 46 }, to: { kind: "age", age: 50 }, indexed: false },
       ],
       contributions: [cf({ assetId: "x", amount: 250, toAge: 50 })],
       withdrawals: [cf({ id: "w", assetId: "y", amount: 300, fromAge: 47, toAge: 50 })],
-      lumpSums: [{ id: "l1", assetId: "x", amount: 20000, direction: "in", age: 43, source: "input" }],
+      lumpSums: [{ id: "l1", assetId: "x", amount: 20000, direction: "in", at: { kind: "age", age: 43 }, source: "input" }],
     },
   });
 
@@ -320,7 +333,7 @@ describe("output view reconciliation (C1)", () => {
     const mk = (source) => mkState({
       endAge: 50,
       cashflows: {
-        lumpSums: [{ id: "l1", assetId: "a1", amount: 25000, direction: "out", age: 45, source }],
+        lumpSums: [{ id: "l1", assetId: "a1", amount: 25000, direction: "out", at: { kind: "age", age: 45 }, source }],
       },
     });
     const a = projectPlan(mk("input"));
@@ -349,7 +362,7 @@ describe("D1 — opening capital losses and migration gates", () => {
       },
       assets: [mkAsset({ allocation: growthOnlyAlloc(), cgtAsset: true, costBase: 20000 })],
       cashflows: {
-        lumpSums: [{ id: "l1", assetId: "a1", amount: 10000, direction: "in", age: 40, source: "input" }],
+        lumpSums: [{ id: "l1", assetId: "a1", amount: 10000, direction: "in", at: { kind: "age", age: 40 }, source: "input" }],
       },
     });
     // direction out for a sale:
@@ -382,11 +395,20 @@ describe("D1 — opening capital losses and migration gates", () => {
     };
     const migrated = hydrate(JSON.stringify(v4), PROFILES);
     expect(migrated).not.toBeNull();
+    // native bypasses hydrate/clamp entirely, so it needs the real
+    // from/to DateRef fields directly (fromAge/toAge here are the raw
+    // v4 shape hydrate() migrates FROM, not what the engine reads).
     const native = mkState({
       endAge: 55,
       cashflows: {
-        income: [{ ...rows.income[0], indexed: undefined, indexBasis: "cpi", indexExtraPct: 0 }],
-        expenses: [{ ...rows.expenses[0], indexed: undefined, indexBasis: "none", indexExtraPct: 0 }],
+        income: [{
+          ...rows.income[0], indexed: undefined, indexBasis: "cpi", indexExtraPct: 0,
+          from: { kind: "age", age: rows.income[0].fromAge }, to: { kind: "age", age: rows.income[0].toAge },
+        }],
+        expenses: [{
+          ...rows.expenses[0], indexed: undefined, indexBasis: "none", indexExtraPct: 0,
+          from: { kind: "age", age: rows.expenses[0].fromAge }, to: { kind: "age", age: rows.expenses[0].toAge },
+        }],
       },
     });
     const a = projectPlan(migrated);
@@ -397,6 +419,99 @@ describe("D1 — opening capital losses and migration gates", () => {
       expect(a.yearly[y].income).toBe(b.yearly[y].income);
       expect(a.yearly[y].expenses).toBe(b.yearly[y].expenses);
     }
+  });
+});
+
+// --- Key Dates (Tier 1.1): v5 → v6 migration gate ----------------------------
+//
+// Every bare-int date field (fromAge/toAge/age/purchaseAge) becomes a
+// DateRef ({kind:"age", age}) on migration. This is the whole point of
+// Commit 1: a scenario touching every row type that carries a date
+// field — income, expenses, contributions, withdrawals, a one-off, a
+// liability, and a planned property purchase — must migrate to
+// bit-identical yearly ledger rows, per-asset closings, and tax
+// figures, because clampDateRef's {kind:"age"} branch clamps into
+// EXACTLY the same [lo, hi] window the old bare-int fields did.
+describe("Key Dates — v5 → v6 migration gate", () => {
+  it("a v5 blob exercising income, expenses, contributions, withdrawals, a one-off, a liability, and a planned property migrates bit-identically", () => {
+    const v5 = {
+      schemaVersion: 5,
+      plan: {
+        household: "single",
+        client: {
+          currentAge: 40,
+          taxProfile: { residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 },
+        },
+        partner: null,
+        endAge: 55,
+        endBasis: { mode: "fixedAge", offset: 0, fixedAge: 55, fixedYears: 40 },
+        start: { year: 2026, month: 7 },
+      },
+      assets: [{
+        id: "a1", name: "A1", include: true, owner: "client", distributions: "reinvest",
+        balance: 200000, allocation: { mode: "custom", incomePct: 0, growthPct: 2.5, frankingPct: 0, volBasis: "Balanced" },
+        icrPct: 0, cgtAsset: true, costBase: 150000,
+      }],
+      cashflows: {
+        income: [{ id: "i1", label: "Salary", owner: "client", amount: 80000, frequency: "annual", fromAge: 40, toAge: 55, indexBasis: "cpi", indexExtraPct: 0 }],
+        expenses: [{ id: "e1", label: "Living", amount: 3500, frequency: "monthly", fromAge: 40, toAge: 55, indexBasis: "cpi", indexExtraPct: 0 }],
+        contributions: [{ id: "c1", assetId: "a1", amount: 500, frequency: "monthly", fromAge: 40, toAge: 55, indexBasis: "cpi", indexExtraPct: 0 }],
+        withdrawals: [{ id: "w1", assetId: "a1", amount: 200, frequency: "monthly", fromAge: 45, toAge: 55, indexBasis: "cpi", indexExtraPct: 0 }],
+        lumpSums: [{ id: "l1", assetId: "a1", amount: 10000, direction: "in", age: 43, source: "input" }],
+      },
+      liabilities: [{
+        id: "lb1", name: "Loan", type: "personal", owner: "client", balance: 50000,
+        interestRatePct: 6, termYears: 10, repayment: "pi", ioYears: 0,
+        deductible: false, linkedAssetId: null, offsetAssetId: null,
+      }],
+      properties: [{
+        id: "p1", name: "Investment unit", owner: "client", state: "NSW", propertyType: "investment", status: "planned",
+        currentValue: 0, acquisitionDate: null, costBase: 0, priceToday: 500000, purchaseAge: 44, lvrPct: 80,
+        firstHomeBuyer: false, newBuild: false, purchaseCostsPct: 2, dutyOverride: null, growthPct: 4,
+        rent: { amount: 20000, indexBasis: "cpi", indexExtraPct: 0 },
+        expenses: { amount: 4000, indexBasis: "cpi", indexExtraPct: 0 },
+        expensesDeductible: true,
+      }],
+      settings: { surplus: { mode: "spend", assetId: null }, fundingOrder: ["a1"] },
+      display: { units: "real" },
+      assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed" },
+    };
+
+    const migrated = hydrate(JSON.stringify(v5), PROFILES);
+    expect(migrated).not.toBeNull();
+    expect(migrated.schemaVersion).toBe(6);
+    // The shape work landed: every date field is now a DateRef.
+    expect(migrated.cashflows.income[0].from).toEqual({ kind: "age", age: 40 });
+    expect(migrated.cashflows.lumpSums[0].at).toEqual({ kind: "age", age: 43 });
+    expect(migrated.properties[0].purchaseAt).toEqual({ kind: "age", age: 44 });
+    expect(migrated.plan.client.retirementAge).toBe(65); // new field default
+    expect(migrated.plan.keyDates).toEqual([]);
+
+    // native bypasses hydrate/clamp entirely — same values, real
+    // DateRef shape from the start.
+    const age = (n) => ({ kind: "age", age: n });
+    const native = {
+      ...mkState({
+        endAge: 55,
+        assets: v5.assets,
+        cashflows: {
+          income: [{ ...v5.cashflows.income[0], from: age(40), to: age(55) }],
+          expenses: [{ ...v5.cashflows.expenses[0], from: age(40), to: age(55) }],
+          contributions: [{ ...v5.cashflows.contributions[0], from: age(40), to: age(55) }],
+          withdrawals: [{ ...v5.cashflows.withdrawals[0], from: age(45), to: age(55) }],
+          lumpSums: [{ ...v5.cashflows.lumpSums[0], at: age(43) }],
+        },
+      }),
+      liabilities: v5.liabilities,
+      properties: [{ ...v5.properties[0], purchaseAt: age(44) }],
+    };
+
+    const a = projectPlan(migrated);
+    const b = projectPlan(native);
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+    expect(a.yearly).toEqual(b.yearly); // every ledger row, per-asset closing, and tax figure
+    expect(a.accruedCgtAtEnd).toBe(b.accruedCgtAtEnd);
+    expect(a.shortfall).toEqual(b.shortfall);
   });
 });
 
@@ -522,7 +637,7 @@ describe("tax — CGT timing and pools through the engine", () => {
       start: { year: 2027, month: 7 },
       assets: [mkAsset({ allocation: zeroRealAlloc(), cgtAsset: true, costBase: 50000 })],
       cashflows: {
-        lumpSums: [{ id: "l1", assetId: "a1", amount: 100000, direction: "out", age: 41, source: "input" }],
+        lumpSums: [{ id: "l1", assetId: "a1", amount: 100000, direction: "out", at: { kind: "age", age: 41 }, source: "input" }],
       },
     });
     const out = projectPlan(s);
@@ -805,17 +920,23 @@ describe("D4 — property", () => {
   // Growth-only allocation: no distribution income muddying the tax
   // assertions; still zero-real so balances are predictable.
   const bigCash = () => mkAsset({ allocation: growthOnlyAlloc(), balance: 3000000 });
-  const prop = (over = {}) => ({
-    id: "p1", name: "Investment unit", owner: "client", state: "NSW",
-    propertyType: "investment", status: "owned",
-    currentValue: 800000, acquisitionDate: "2020-01-15", costBase: 600000,
-    priceToday: 0, purchaseAge: 41, lvrPct: 80, firstHomeBuyer: false, newBuild: false,
-    purchaseCostsPct: 2, dutyOverride: null, growthPct: 5,
-    rent: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
-    expenses: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
-    expensesDeductible: true,
-    ...over,
-  });
+  // purchaseAge is a convenience shim over the real DateRef field
+  // (purchaseAt) — Key Dates (Tier 1.1).
+  const prop = (over = {}) => {
+    const { purchaseAge, purchaseAt, ...rest } = over;
+    return {
+      id: "p1", name: "Investment unit", owner: "client", state: "NSW",
+      propertyType: "investment", status: "owned",
+      currentValue: 800000, acquisitionDate: "2020-01-15", costBase: 600000,
+      priceToday: 0, purchaseAt: purchaseAt ?? { kind: "age", age: purchaseAge ?? 41 },
+      lvrPct: 80, firstHomeBuyer: false, newBuild: false,
+      purchaseCostsPct: 2, dutyOverride: null, growthPct: 5,
+      rent: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
+      expenses: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
+      expensesDeductible: true,
+      ...rest,
+    };
+  };
   const withProps = (properties, over = {}) => ({
     ...mkState({ assets: [bigCash()], ...over }),
     properties,
@@ -957,7 +1078,7 @@ describe("D4 — property", () => {
         assets: [mkAsset({ allocation: growthOnlyAlloc(), cgtAsset: true, costBase: 20000 })],
         cashflows: {
           income: [salary(100000 / 12)],
-          lumpSums: [{ id: "l1", assetId: "a1", amount: 10000, direction: "out", age: 41, source: "input" }],
+          lumpSums: [{ id: "l1", assetId: "a1", amount: 10000, direction: "out", at: { kind: "age", age: 41 }, source: "input" }],
         },
       }),
       properties: [a],

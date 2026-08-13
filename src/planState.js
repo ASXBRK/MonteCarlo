@@ -24,10 +24,11 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
+import { isValidAnchorId } from "./keyDates.js";
 
 // --- id generation ---------------------------------------------------
 
@@ -82,6 +83,11 @@ export function personDisplayName(person, fallback) {
   return n || fallback;
 }
 
+// Default Retirement key date basis (Tier 1.1) — every person defaults
+// to 65 until they say otherwise; used as the built-in "Retirement"
+// anchor and as the default report-period horizon.
+export const DEFAULT_RETIREMENT_AGE = 65;
+
 function clampPerson(raw, start) {
   const parsed = typeof raw?.dob === "string" ? ageAtDate(raw.dob, start.year, start.month) : null;
   let dob = raw?.dob;
@@ -96,6 +102,7 @@ function clampPerson(raw, start) {
     dob,
     sex: raw?.sex === "female" ? "female" : "male",
     currentAge, // derived — recomputed from DOB on every clamp
+    retirementAge: clampInt(raw?.retirementAge ?? DEFAULT_RETIREMENT_AGE, 18, 120),
     taxProfile: clampTaxProfile(raw?.taxProfile),
   };
 }
@@ -146,8 +153,51 @@ export function defaultPlan(now = new Date()) {
     endAge: resolveEndBasis(endBasis, client, null).endAge,
     endBasis,
     start,
+    keyDates: [],
   };
 }
+
+// --- key dates (Tier 1.1) -----------------------------------------------
+//
+// User-defined named anchors, referenced by DateRefs elsewhere in the
+// plan (see clampDateRef below). Built-in anchors (start/end/the two
+// retirement anchors) are derived, never stored here — see keyDates.js.
+
+export function createKeyDate(plan) {
+  return { id: uid("kd"), label: "", basis: "client", age: plan.client.currentAge };
+}
+
+export function clampKeyDate(raw, plan) {
+  return {
+    id: typeof raw?.id === "string" && raw.id ? raw.id : uid("kd"),
+    label: typeof raw?.label === "string" ? raw.label.trim().slice(0, 60) : "",
+    basis: raw?.basis === "partner" && plan.partner ? "partner" : "client",
+    age: clampInt(raw?.age, 0, 130),
+  };
+}
+
+export function normaliseKeyDates(raw, plan) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((kd) => clampKeyDate(kd, plan));
+}
+
+// A DateRef is either a reference to a built-in/user anchor or an
+// explicit age — see keyDates.js for resolution. Clamping here only
+// validates SHAPE: an anchor reference is stored as-is (its
+// out-of-window handling happens at resolution time, against the
+// built schedule, never by silently rewriting the stored reference);
+// an explicit age is clamped into [lo, hi] exactly as the old bare
+// integer fields were, so migrated {kind:"age"} rows keep their exact
+// pre-migration clamping behaviour (the regression gate).
+export function clampDateRef(raw, lo, hi, plan) {
+  if (raw?.kind === "anchor" && typeof raw.anchorId === "string" && isValidAnchorId(raw.anchorId, plan)) {
+    return { kind: "anchor", anchorId: raw.anchorId };
+  }
+  const age = raw?.kind === "age" ? raw.age : raw;
+  return { kind: "age", age: clampInt(age, lo, hi) };
+}
+
+export const dateRefAge = (ref) => (ref?.kind === "age" ? ref.age : null);
 
 // Horizon in plan years (client-anchored).
 export function horizonYears(plan) {
@@ -194,26 +244,37 @@ export function clampIndexation(row) {
   return { indexBasis: basis, indexExtraPct: clampNumber(row?.indexExtraPct ?? 0, -10, 10) };
 }
 
+// New rows open already anchored (Tier 1.1) — never a number typed
+// into an age box. Migrated rows are untouched (they keep whatever
+// {kind:"age"} ints they had); this only governs freshly-created rows.
+const anchorRef = (anchorId) => ({ kind: "anchor", anchorId });
+const ageRef = (age) => ({ kind: "age", age });
+
+// Contributions stop at retirement (kind is "contribution" or
+// "withdrawal" — only contributions default to the retirement anchor;
+// withdrawals, like expenses, default to running for life).
 export function createCashflow(kind, plan, assetId = null) {
   return {
     id: uid("cf"),
     assetId,
     amount: 0,
     frequency: "monthly",
-    fromAge: plan.client.currentAge,
-    toAge: plan.endAge,
+    from: anchorRef("start"),
+    to: kind === "contribution" ? anchorRef("retirement-client") : anchorRef("end"),
     indexBasis: "cpi",
     indexExtraPct: 0,
   };
 }
 
+// One-off amounts are point events the user always sets deliberately,
+// so they default to an explicit age rather than an anchor.
 export function createLumpSum(plan, assetId = null, source = "input") {
   return {
     id: uid("ls"),
     assetId,
     amount: 0,
     direction: "in",
-    age: plan.client.currentAge,
+    at: ageRef(plan.client.currentAge),
     source: source === "table" ? "table" : "input",
   };
 }
@@ -225,8 +286,8 @@ export function createIncomeRow(plan, existing = []) {
     owner: "client",
     amount: 0,
     frequency: "annual",
-    fromAge: plan.client.currentAge,
-    toAge: plan.endAge,
+    from: anchorRef("start"),
+    to: anchorRef("retirement-client"), // new rows always default owner "client"
     indexBasis: "cpi",
     indexExtraPct: 0,
   };
@@ -238,8 +299,8 @@ export function createExpenseRow(plan, existing = []) {
     label: `Expense ${existing.length + 1}`,
     amount: 0,
     frequency: "annual",
-    fromAge: plan.client.currentAge,
-    toAge: plan.endAge,
+    from: anchorRef("start"),
+    to: anchorRef("end"),
     indexBasis: "cpi",
     indexExtraPct: 0,
   };
@@ -315,9 +376,11 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
     currentValue: 0,
     acquisitionDate: null,   // ISO date (past); drives CGT regime + gearing rules
     costBase: 0,
-    // planned:
+    // planned: a purchase is a point event the user always sets
+    // deliberately, so it defaults to an explicit age (client + 5,
+    // not +1 — a placeholder immediate purchase reads as an error).
     priceToday: 0,
-    purchaseAge: plan.client.currentAge + 1,
+    purchaseAt: ageRef(plan.client.currentAge + 5),
     lvrPct: 80,
     firstHomeBuyer: false,
     newBuild: false,
@@ -347,7 +410,10 @@ export function clampProperty(p, plan) {
       ? p.acquisitionDate : null,
     costBase: clampNumber(p.costBase, 0),
     priceToday: clampNumber(p.priceToday, 0),
-    purchaseAge: clampInt(p.purchaseAge ?? plan.client.currentAge + 1, plan.client.currentAge, plan.endAge),
+    purchaseAt: clampDateRef(
+      p.purchaseAt ?? (p.purchaseAge != null ? ageRef(p.purchaseAge) : ageRef(plan.client.currentAge + 5)),
+      plan.client.currentAge, plan.endAge, plan
+    ),
     lvrPct: clampNumber(p.lvrPct ?? 80, 0, 100),
     firstHomeBuyer: p.firstHomeBuyer === true,
     newBuild: p.newBuild === true,
@@ -462,9 +528,11 @@ export function defaultState(profiles = {}, now = new Date()) {
 // table-sourced lump sum per asset+FY; input-panel-sourced rows for
 // the same cell live alongside untouched.
 
+// Table-sourced one-offs are always an explicit age (never an anchor
+// — they're identified by their grid column, a bare client age).
 export function tableLumpSumFor(lumpSums, assetId, age) {
   return lumpSums.find(
-    (l) => l.source === "table" && l.assetId === assetId && l.age === age
+    (l) => l.source === "table" && l.assetId === assetId && l.at?.kind === "age" && l.at.age === age
   ) || null;
 }
 
@@ -480,7 +548,7 @@ export function upsertTableLumpSum(lumpSums, assetId, age, value) {
     assetId,
     amount: Math.abs(v),
     direction: v < 0 ? "out" : "in",
-    age,
+    at: ageRef(age),
     source: "table",
   }];
 }
@@ -500,22 +568,17 @@ export function canEditOneOffYear(plan, planYear) {
 // thinning ever applies — the "All" default).
 export const PERIOD_STEP_OPTIONS = [1, 2, 5, 10];
 
-// No "retirement age" field exists anywhere in the data model — this
-// is a disclosed simplification used only to pick a sensible default
-// report-period width the first time a scenario is opened. A 60+-year
-// x-axis with decades of flat post-retirement years at the end is not
-// a useful default; the user can still widen the period to "All" from
-// the period selector at any time. Never used by the engine.
-export const ASSUMED_RETIREMENT_AGE = 65;
-
 // Default report period for a freshly-created scenario: full detail
-// out to a sensible horizon (retirement + 25 years, capped at the
-// plan's actual end) rather than the full projection end, and thinned
-// (every 5th plan year beyond toAge) when the overall projection span
-// is long enough that per-year detail at the far end adds no value.
+// out to a sensible horizon (the client's Retirement key date + 25
+// years, capped at the plan's actual end) rather than the full
+// projection end, and thinned (every 5th plan year beyond toAge) when
+// the overall projection span is long enough that per-year detail at
+// the far end adds no value. A 60+-year x-axis with decades of flat
+// post-retirement years at the end is not a useful default; the user
+// can still widen the period to "All" from the period selector.
 export function defaultReportPeriod(plan) {
   const span = plan.endAge - plan.client.currentAge;
-  const toAge = Math.min(plan.endAge, ASSUMED_RETIREMENT_AGE + 25);
+  const toAge = Math.min(plan.endAge, plan.client.retirementAge + 25);
   return { fromAge: null, toAge, everyN: span > 25 ? 5 : 1, forceKeyYears: true };
 }
 
@@ -664,37 +727,62 @@ export function clampPlan(plan) {
     plan.endBasis ?? { mode: "fixedAge", fixedAge: clampInt(plan.endAge, 19, 120) }
   );
   const { endAge } = resolveEndBasis(endBasis, client, partner);
+  // keyDates are validated against the PRE-clamp partner presence too
+  // (normaliseKeyDates itself falls a partner-basis date back to
+  // client when there's no partner), so this order is safe either way.
+  const keyDates = normaliseKeyDates(plan.keyDates, { client, partner });
 
-  return { household, client, partner, endAge, endBasis, start };
+  return { household, client, partner, endAge, endBasis, start, keyDates };
 }
 
-// Clamp a cashflow with client-anchored ages into the plan window.
+// A v5-schema row still carries the bare-int field (fromAge/toAge/age)
+// instead of the DateRef field (from/to/at) — the migration bumps the
+// version and leaves the shape work to these clamps, exactly the
+// established pattern (see migrateV4toV5). Prefer the new field when
+// both happen to be present.
+const legacyOrRef = (row, newField, oldField) =>
+  row?.[newField] !== undefined ? row[newField] : row?.[oldField];
+
+// from/to clamping shared by every client-anchored row (contributions,
+// withdrawals, expenses; income rows use their own owner window
+// instead of [lo, hi] but the same logic). "to" is floored at "from"'s
+// resolved age only when from is itself {kind:"age"} — an anchored
+// "from" can't be resolved into a concrete age without the built
+// schedule, so its out-of-order case is left to resolution time
+// (an empty active window, never a crash) rather than enforced here.
+function clampFromTo(row, lo, hi, plan) {
+  const from = clampDateRef(legacyOrRef(row, "from", "fromAge"), lo, hi, plan);
+  const toLo = from.kind === "age" ? from.age : lo;
+  const to = clampDateRef(legacyOrRef(row, "to", "toAge"), toLo, hi, plan);
+  return { from, to };
+}
+
+// Clamp a cashflow with client-anchored dates into the plan window.
 export function clampCashflow(cf, plan) {
-  const fromAge = clampInt(cf.fromAge, plan.client.currentAge, plan.endAge);
-  const toAge = clampInt(cf.toAge, fromAge, plan.endAge);
-  const { indexed, ...rest } = cf;
-  return { ...rest, fromAge, toAge, ...clampIndexation(cf) };
+  const { from, to } = clampFromTo(cf, plan.client.currentAge, plan.endAge, plan);
+  const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = cf;
+  return { ...rest, from, to, ...clampIndexation(cf) };
 }
 
 export function clampLumpSum(ls, plan) {
-  return { ...ls, age: clampInt(ls.age, plan.client.currentAge, plan.endAge) };
+  const at = clampDateRef(legacyOrRef(ls, "at", "age"), plan.client.currentAge, plan.endAge, plan);
+  const { age, at: _a, ...rest } = ls;
+  return { ...rest, at };
 }
 
 // Income rows anchor to their owner's window.
 export function clampIncomeRow(row, plan) {
   const owner = row.owner === "partner" && plan.partner ? "partner" : "client";
   const win = ownerWindow(plan, owner);
-  const fromAge = clampInt(row.fromAge, win.from, win.to);
-  const toAge = clampInt(row.toAge, fromAge, win.to);
-  const { indexed, ...rest } = row;
-  return { ...rest, owner, fromAge, toAge, ...clampIndexation(row) };
+  const { from, to } = clampFromTo(row, win.from, win.to, plan);
+  const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
+  return { ...rest, owner, from, to, ...clampIndexation(row) };
 }
 
 export function clampExpenseRow(row, plan) {
-  const fromAge = clampInt(row.fromAge, plan.client.currentAge, plan.endAge);
-  const toAge = clampInt(row.toAge, fromAge, plan.endAge);
-  const { indexed, ...rest } = row;
-  return { ...rest, fromAge, toAge, ...clampIndexation(row) };
+  const { from, to } = clampFromTo(row, plan.client.currentAge, plan.endAge, plan);
+  const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
+  return { ...rest, from, to, ...clampIndexation(row) };
 }
 
 // fundingOrder invariant: exactly the INCLUDED FINANCIAL assets, in
@@ -904,8 +992,22 @@ function migrateV4toV5(raw) {
   return { ...raw, schemaVersion: 5 };
 }
 
+// v5 → v6 (Tier 1.1): Key Dates. Every date field becomes a DateRef
+// (bare fromAge/toAge/age/purchaseAge → {kind:"age", age: <the
+// integer>}); retirementAge defaults to 65 per person; keyDates
+// defaults to []. As with D1, the clamps do the shape work (clampPlan
+// stamps retirementAge/keyDates, clampFromTo/clampDateRef read the old
+// field names as a fallback) — this migration only advances the
+// version gate. Because clampDateRef's {kind:"age"} branch clamps the
+// integer into EXACTLY the same [lo, hi] window the old bare-int
+// fields did, every migrated row resolves to the same plan year it
+// did pre-migration: the regression gate.
+function migrateV5toV6(raw) {
+  return { ...raw, schemaVersion: 6 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
-// forward. Returns a clamped v5 state or null (caller falls back to
+// forward. Returns a clamped v6 state or null (caller falls back to
 // defaults). Never throws.
 export function hydrate(json, profiles = {}) {
   try {
@@ -915,6 +1017,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 2) raw = migrateV2toV3(raw);
     if (raw.schemaVersion === 3) raw = migrateV3toV4(raw);
     if (raw.schemaVersion === 4) raw = migrateV4toV5(raw);
+    if (raw.schemaVersion === 5) raw = migrateV5toV6(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -1004,8 +1107,8 @@ function hydrateCashflows(arr, plan, assetIds) {
       assetId: c.assetId,
       amount: clampNumber(c.amount, 0),
       frequency: c.frequency === "annual" ? "annual" : "monthly",
-      fromAge: c.fromAge,
-      toAge: c.toAge,
+      from: c.from, fromAge: c.fromAge, // new field wins; fromAge is the pre-Key-Dates fallback
+      to: c.to, toAge: c.toAge,
       indexBasis: c.indexBasis,
       indexExtraPct: c.indexExtraPct,
       indexed: c.indexed,
@@ -1021,7 +1124,7 @@ function hydrateLumpSums(arr, plan, assetIds) {
       assetId: l.assetId,
       amount: clampNumber(l.amount, 0),
       direction: l.direction === "out" ? "out" : "in",
-      age: l.age,
+      at: l.at, age: l.age,
       source: l.source === "table" ? "table" : "input",
     }, plan));
 }
@@ -1034,8 +1137,8 @@ function hydrateIncomeRows(arr, plan) {
     owner: r.owner === "partner" ? "partner" : "client",
     amount: clampNumber(r.amount, 0),
     frequency: r.frequency === "monthly" ? "monthly" : "annual",
-    fromAge: r.fromAge,
-    toAge: r.toAge,
+    from: r.from, fromAge: r.fromAge,
+    to: r.to, toAge: r.toAge,
     indexBasis: r.indexBasis,
     indexExtraPct: r.indexExtraPct,
     indexed: r.indexed,
@@ -1049,8 +1152,8 @@ function hydrateExpenseRows(arr, plan) {
     label: typeof r.label === "string" && r.label.trim() ? r.label : `Expense ${i + 1}`,
     amount: clampNumber(r.amount, 0),
     frequency: r.frequency === "monthly" ? "monthly" : "annual",
-    fromAge: r.fromAge,
-    toAge: r.toAge,
+    from: r.from, fromAge: r.fromAge,
+    to: r.to, toAge: r.toAge,
     indexBasis: r.indexBasis,
     indexExtraPct: r.indexExtraPct,
     indexed: r.indexed,

@@ -24,7 +24,7 @@ function scenarioWithLiabilitiesAndProperty() {
   const ppr = {
     id: "home", name: "Home", owner: "client", state: "NSW", propertyType: "ppr", status: "owned",
     currentValue: 900000, acquisitionDate: "2015-01-01", costBase: 0, priceToday: 0,
-    purchaseAge: 40, lvrPct: 0, firstHomeBuyer: false, newBuild: false, purchaseCostsPct: 2,
+    purchaseAt: { kind: "age", age: 40 }, lvrPct: 0, firstHomeBuyer: false, newBuild: false, purchaseCostsPct: 2,
     dutyOverride: null, growthPct: 2.5,
     rent: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
     expenses: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 }, expensesDeductible: true,
@@ -52,8 +52,8 @@ function scenarioWithLiabilitiesAndProperty() {
     properties: [ppr, invest],
     liabilities: [liability],
     cashflows: {
-      income: [{ id: "sal", label: "Salary", owner: "client", amount: 100000, frequency: "annual", fromAge: 40, toAge: 45, indexBasis: "cpi", indexExtraPct: 0 }],
-      expenses: [{ id: "liv", label: "Living", amount: 40000, frequency: "annual", fromAge: 40, toAge: 45, indexBasis: "cpi", indexExtraPct: 0 }],
+      income: [{ id: "sal", label: "Salary", owner: "client", amount: 100000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 45 }, indexBasis: "cpi", indexExtraPct: 0 }],
+      expenses: [{ id: "liv", label: "Living", amount: 40000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 45 }, indexBasis: "cpi", indexExtraPct: 0 }],
       contributions: [], withdrawals: [], lumpSums: [],
     },
     settings: { surplus: { mode: "spend", assetId: null }, fundingOrder: ["a1"] },
