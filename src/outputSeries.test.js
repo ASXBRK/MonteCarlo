@@ -3,7 +3,7 @@ import { projectPlan } from "./deterministic.js";
 import { defaultChartTreatment } from "./planState.js";
 import {
   compositeSeries, compositeExpenditure, compositeIncome, compositeDrawdown,
-  sharedZeroRanges, seriesIsAllZero,
+  sharedZeroRanges, seriesIsAllZero, axisTickVals,
 } from "./outputSeries.js";
 
 const zeroFractionOfRange = ([min, max]) => -min / (max - min);
@@ -151,15 +151,66 @@ describe("sharedZeroRanges — shared zero baseline across both y-axes", () => {
     expect(rightRange[1]).toBeCloseTo(rawRightMax, 6);
   });
 
-  it("all-positive case: the fraction clamps to the 0.05 floor and both axes still agree", () => {
+  it("all-positive case: the fraction clamps to the 0.05 floor and BOTH axes are rescaled to it", () => {
     const left = [100, 200, 300];
     const right = [50, 80, 120];
     const { leftRange, rightRange, zeroFraction } = sharedZeroRanges(left, right);
     expect(zeroFraction).toBeCloseTo(0.05, 10);
-    // Left's own natural fraction (~0.045) is below the floor, so the
-    // clamp — not the raw left range — is what both sides agree on.
-    expect(zeroFractionOfRange(leftRange)).toBeLessThan(zeroFraction);
-    expect(zeroFractionOfRange(rightRange)).toBeCloseTo(zeroFraction, 10);
+    // Left's own natural fraction (~0.045) is below the floor — it
+    // must be rescaled to the clamp too, not left at its natural value.
+    expect(zeroFractionOfRange(leftRange)).toBeCloseTo(zeroFraction, 9);
+    expect(zeroFractionOfRange(rightRange)).toBeCloseTo(zeroFraction, 9);
+  });
+
+  it("all-negative case: the fraction clamps to the 0.95 ceiling and both axes agree", () => {
+    const left = [-300, -200, -100];
+    const right = [-120, -80, -50];
+    const { leftRange, rightRange, zeroFraction } = sharedZeroRanges(left, right);
+    expect(zeroFraction).toBeCloseTo(0.95, 10);
+    expect(zeroFractionOfRange(leftRange)).toBeCloseTo(zeroFraction, 9);
+    expect(zeroFractionOfRange(rightRange)).toBeCloseTo(zeroFraction, 9);
+  });
+
+  it("both axes' zero fractions agree to within 1e-9 in all-positive, all-negative and straddle cases", () => {
+    const cases = [
+      [[100, 200, 300], [50, 80, 120]],       // all-positive → clamps to 0.05
+      [[-300, -200, -100], [-120, -80, -50]], // all-negative → clamps to 0.95
+      [[-100, 50, 200], [0, 300, 600]],       // straddle → unclamped
+    ];
+    for (const [left, right] of cases) {
+      const { leftRange, rightRange, zeroFraction } = sharedZeroRanges(left, right);
+      expect(Math.abs(zeroFractionOfRange(leftRange) - zeroFraction)).toBeLessThan(1e-9);
+      expect(Math.abs(zeroFractionOfRange(rightRange) - zeroFraction)).toBeLessThan(1e-9);
+    }
+  });
+});
+
+describe("axisTickVals — confine tick labels to the axis's own data span", () => {
+  it("suppresses ticks in the stretch of axis added purely to align zero", () => {
+    // All-negative left, small positive-only right: the right axis
+    // gets pulled far negative to match the left's clamped zero
+    // fraction, but the right series never goes below ~0.
+    const left = [-1400000, -900000, -200000];
+    const right = [50000, 80000, 120000];
+    const { rightRange, rightDataRange } = sharedZeroRanges(left, right);
+    const ticks = axisTickVals(rightRange, rightDataRange);
+    expect(ticks.length).toBeGreaterThan(0);
+    for (const t of ticks) {
+      expect(t).toBeGreaterThanOrEqual(rightDataRange[0]);
+      expect(t).toBeLessThanOrEqual(rightDataRange[1]);
+    }
+    // The whole point: no tick anywhere near the axis's stretched-out
+    // negative floor, which no series ever reaches.
+    expect(ticks.every((t) => t > rightRange[0] + 1)).toBe(true);
+  });
+
+  it("produces evenly spaced nice values covering an ordinary range", () => {
+    const range = [-15, 315];
+    const ticks = axisTickVals(range, range);
+    expect(ticks.length).toBeGreaterThanOrEqual(3);
+    for (let i = 1; i < ticks.length; i++) {
+      expect(ticks[i] - ticks[i - 1]).toBeCloseTo(ticks[1] - ticks[0], 9);
+    }
   });
 });
 

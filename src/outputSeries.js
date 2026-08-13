@@ -119,20 +119,57 @@ function rescaleToFraction([min, max], f) {
   return [-below, aboveNeeded];
 }
 
-// sharedZeroRanges(leftValues, rightValues, pad) →
-//   { leftRange: [min, max], rightRange: [min, max], zeroFraction }
+// sharedZeroRanges(leftValues, rightValues) →
+//   { leftRange, rightRange, zeroFraction, leftDataRange, rightDataRange }
 //
-// Both ranges include 0 by construction (bounds() prepends it), each
-// padded by ~5%. zeroFraction is taken from the LEFT axis (the assets
-// axis, which is never all-zero in practice) and clamped away from
-// the plot edges so zero never lands exactly on a border; the right
-// axis is then rescaled to place its own zero at that same fraction.
+// Both raw (data-only) ranges include 0 by construction (bounds()
+// prepends it), each padded by ~5%. The target fraction f is taken
+// from the LEFT axis's own natural zero position (the assets axis,
+// which is never all-zero in practice) and clamped away from the plot
+// edges so zero never lands exactly on a border. BOTH axes are then
+// rescaled (expand-only — the raw padded bounds are never shrunk) to
+// place their zero at that same fraction f, so a clamp doesn't leave
+// the two axes' zeros close but not quite aligned. leftDataRange /
+// rightDataRange are the pre-rescale (data-only) bounds — callers use
+// them to suppress tick labels on the stretch of axis that exists
+// purely to align zero, not because any series reaches there.
 export function sharedZeroRanges(leftValues, rightValues) {
-  const leftRange = bounds(leftValues);
-  const rightRangeRaw = bounds(rightValues);
-  const f = Math.min(0.95, Math.max(0.05, zeroFractionOf(leftRange)));
-  const rightRange = rescaleToFraction(rightRangeRaw, f);
-  return { leftRange, rightRange, zeroFraction: f };
+  const leftDataRange = bounds(leftValues);
+  const rightDataRange = bounds(rightValues);
+  const f = Math.min(0.95, Math.max(0.05, zeroFractionOf(leftDataRange)));
+  const leftRange = rescaleToFraction(leftDataRange, f);
+  const rightRange = rescaleToFraction(rightDataRange, f);
+  return { leftRange, rightRange, zeroFraction: f, leftDataRange, rightDataRange };
+}
+
+// --- axis tick values confined to the data's own occupied range -------------
+//
+// A "nice" (1/2/5 × 10^n) step size for roughly targetCount intervals
+// across span.
+function niceStep(span, targetCount = 5) {
+  if (!(span > 0)) return 1;
+  const raw = span / targetCount;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10;
+  return step * mag;
+}
+
+// axisTickVals(axisRange, dataRange, targetCount) → nice, evenly
+// spaced tick values sized for axisRange, but restricted to
+// dataRange — the span the axis's own series actually occupy. An
+// axis stretched beyond its data purely to align its zero with the
+// other axis (see sharedZeroRanges) would otherwise carry tick labels
+// (e.g. "−$1.4m") that no series ever reaches.
+export function axisTickVals(axisRange, dataRange, targetCount = 5) {
+  const step = niceStep(axisRange[1] - axisRange[0], targetCount);
+  const [dMin, dMax] = dataRange;
+  const vals = [];
+  const start = Math.ceil(dMin / step) * step;
+  for (let v = start; v <= dMax + step * 1e-9; v += step) {
+    vals.push(Math.round(v / step) * step); // snap away from float drift
+  }
+  return vals;
 }
 
 // A series that is (numerically) zero across every displayed point —

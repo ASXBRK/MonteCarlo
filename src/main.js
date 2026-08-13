@@ -27,7 +27,7 @@ import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
 import { thinnedYearIndices } from "./periodThinning.js";
-import { compositeSeries, sharedZeroRanges, seriesIsAllZero } from "./outputSeries.js";
+import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { realThreshold, LITO } from "./Tax/annual.js";
 import { LEG } from "./Tax/engine.js";
 import {
@@ -2662,7 +2662,14 @@ function renderCompositeChart() {
   const leftValues = hasSeparate ? [...netArea, ...topArea] : netArea;
   const stackTop = ages.map((_, i) => (hasIncome ? incomeArea[i] : 0) + (hasDrawdown ? drawdownArea[i] : 0));
   const rightValues = hasExpenditure ? [...stackTop, ...expenditureArea] : stackTop;
-  const { leftRange, rightRange, zeroFraction } = sharedZeroRanges(leftValues, rightValues);
+  const { leftRange, rightRange, zeroFraction, leftDataRange, rightDataRange } =
+    sharedZeroRanges(leftValues, rightValues);
+  // Each axis may be stretched past its own data purely to align its
+  // zero with the other axis — confine tick labels to the span the
+  // axis's own series actually occupy so no axis labels a value no
+  // series ever reaches.
+  const leftTicks = axisTickVals(leftRange, leftDataRange);
+  const rightTicks = axisTickVals(rightRange, rightDataRange);
 
   const periods = ages.length;
   const dtick = periods <= 15 ? 1 : periods <= 40 ? 5 : 10;
@@ -2677,11 +2684,13 @@ function renderCompositeChart() {
       title: { text: `Assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10, font: { size: 11 } },
       tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.05)", zeroline: false,
       range: leftRange, autorange: false,
+      tickmode: "array", tickvals: leftTicks,
     },
     yaxis2: {
       title: { text: "Income / expenditure", standoff: 10, font: { size: 11 } },
       tickformat: "$,.2s", overlaying: "y", side: "right", showgrid: false, zeroline: false,
       range: rightRange, autorange: false,
+      tickmode: "array", tickvals: rightTicks,
     },
     shapes: [{
       type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: zeroFraction, y1: zeroFraction,
