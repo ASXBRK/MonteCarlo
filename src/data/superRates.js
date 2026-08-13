@@ -50,16 +50,11 @@ export const SUPER_RATES_BASE = Object.freeze({
   // internally consistent with (full = GTBC − 2×NCC, two = GTBC − NCC,
   // one = GTBC), so this re-base introduces no discontinuity in those.
   generalTransferBalanceCap: 2100000,
-  // Untaxed plan cap: AWOTE-indexed, rounds DOWN to the nearest $5,000
-  // (same mechanism as the concessional cap, different step). UNVERIFIED
-  // against the firm's FY2026/27 source: the last confirmed published
-  // figure is the ATO's 2024-25 amount, $1,780,000; rolled forward two
-  // years at the default 3.5% AWOTE assumption and rounded per the
-  // legislated method: $1,780,000 × 1.035² = $1,906,745.15 → $1,905,000.
-  // Flagged for confirmation against the Big Black Book before relying
-  // on the exact figure (the indexation MECHANISM is legislated and not
-  // in doubt; only this one base number is an estimate).
-  untaxedPlanCap: 1905000,
+  // Untaxed plan cap: CONFIRMED against the firm's FY2026/27 source
+  // (Macquarie Big Black Book). AWOTE-indexed, rounds DOWN to the
+  // nearest $5,000 (same mechanism as the concessional cap, different
+  // step).
+  untaxedPlanCap: 1935000,
   // = GTBC-derived every FY (see generalTransferBalanceCap above), NOT
   // independently indexed. Kept here as the FY2026/27 spot-check figure
   // only — see the field's own note above.

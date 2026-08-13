@@ -4974,10 +4974,10 @@ function buildAssumptionsGroups() {
         { label: "Bring-forward threshold — nil bring-forward", cell: (y) => sr(y).bringForwardTsbThresholds.one },
         { label: "Carry-forward TSB gate (not indexed)", cell: (y) => sr(y).carryForwardTsbGate, always: true },
         { label: "SG maximum salary", cell: (y) => sr(y).sgMaximumSalary, always: true },
-        { label: "Untaxed plan cap", cell: (y) => sr(y).untaxedPlanCap },
+        { label: "Untaxed plan cap", cell: (y) => sr(y).untaxedPlanCap, always: true },
         { label: "Division 293 threshold (not indexed)", cell: (y) => sr(y).div293Threshold, always: true },
-        { label: "Division 296 lower threshold ($3m)", cell: (y) => sr(y).div296LowerThreshold },
-        { label: "Division 296 upper threshold ($10m)", cell: (y) => sr(y).div296UpperThreshold },
+        { label: "Division 296 lower threshold ($3m)", cell: (y) => sr(y).div296LowerThreshold, always: true },
+        { label: "Division 296 upper threshold ($10m)", cell: (y) => sr(y).div296UpperThreshold, always: true },
       ],
     });
   }

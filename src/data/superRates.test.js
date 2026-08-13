@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SUPER_RATES_BASE, superRatesFor, superReleaseAge } from "./superRates.js";
+import { div296Tax } from "../Tax/div296.js";
 
 // Source-figure spot checks (encoding tests verify the encoding, not
 // the source — CLAUDE.md convention). Hand-checked against the spec's
@@ -17,7 +18,7 @@ describe("SUPER_RATES_BASE — FY2026/27 source-figure spot checks", () => {
 
   it("general transfer balance cap and untaxed plan cap", () => {
     expect(SUPER_RATES_BASE.generalTransferBalanceCap).toBe(2100000);
-    expect(SUPER_RATES_BASE.untaxedPlanCap).toBe(1905000);
+    expect(SUPER_RATES_BASE.untaxedPlanCap).toBe(1935000);
   });
 
   it("bring-forward TSB thresholds", () => {
@@ -129,7 +130,7 @@ describe("superRatesFor — per-figure indexation bases and rounding (Commit 1)"
     const k = Math.pow(1.025, 10);
     expect(r10.concessionalCap).toBeCloseTo(32500 / k, 6);
     expect(r10.generalTransferBalanceCap).toBeCloseTo(2100000 / k, 6);
-    expect(r10.untaxedPlanCap).toBeCloseTo(1905000 / k, 6);
+    expect(r10.untaxedPlanCap).toBeCloseTo(1935000 / k, 6);
     expect(r10.nonConcessionalCap).toBeCloseTo(130000 / k, 6);
     expect(r10.sgMaximumSalary).toBeCloseTo(270830 / k, 6);
     expect(r10.bringForwardTsbThresholds.full).toBeCloseTo(1840000 / k, 6);
@@ -151,6 +152,70 @@ describe("superRatesFor — per-figure indexation bases and rounding (Commit 1)"
     expect(nomLower20 % 150000).toBe(0);
     expect(nomUpper20).toBeGreaterThan(10000000);
     expect(nomUpper20 % 500000).toBe(0);
+  });
+
+  it("the untaxed plan cap steps in whole $5,000 nominal increments on AWOTE, never gliding smoothly, never decreasing", () => {
+    const awote = 0.035;
+    let prevNominal = null;
+    for (let fy = 2026; fy <= 2036; fy++) {
+      const r = superRatesFor(fy, "indexed", 0.025, awote);
+      const nominal = Math.round(r.untaxedPlanCap * Math.pow(1.025, fy - 2026));
+      if (prevNominal != null) {
+        expect((nominal - prevNominal) % 5000).toBe(0);
+        expect(nominal).toBeGreaterThanOrEqual(prevNominal);
+      }
+      prevNominal = nominal;
+    }
+    expect(prevNominal).toBeGreaterThan(1935000);
+  });
+
+  it('the Division 296 $3m threshold is basis-sensitive to CPI, not AWOTE — a materially different rate would move it a different amount, and this confirms it is the CPI figure that lands', () => {
+    // AWOTE (3.5%) and CPI (2.5%) diverge deliberately here so a
+    // basis mix-up (indexing to AWOTE instead of CPI, the original
+    // placeholder mistake this commit confirms was NOT shipped) would
+    // fail this assertion.
+    const cpi = 0.025, awote = 0.05;
+    const r1 = superRatesFor(2027, "indexed", cpi, awote);
+    const nominal1 = Math.round(r1.div296LowerThreshold * Math.pow(1 + cpi, 1));
+    // 3,000,000 × 1.025¹ = 3,075,000 → floor to $150,000 = 3,000,000
+    // (CPI basis, unchanged). Had AWOTE (5% here) been used instead,
+    // 3,000,000 × 1.05¹ = 3,150,000 → floor = 3,150,000 (a full step,
+    // one year early) — the two bases are far enough apart at year 1
+    // that this distinguishes them unambiguously.
+    expect(nominal1).toBe(3000000);
+  });
+
+  it("Division 296 $3m threshold: does NOT move in year 1 (cumulative CPI hasn't yet implied a full $150,000 increment), then steps by exactly $150,000 in year 2 — step indexation, not continuous", () => {
+    const cpi = 0.025, awote = 0.035;
+    const r0 = superRatesFor(2026, "indexed", cpi, awote);
+    const r1 = superRatesFor(2027, "indexed", cpi, awote);
+    const r2 = superRatesFor(2028, "indexed", cpi, awote);
+    const nominalAt = (r, t) => Math.round(r.div296LowerThreshold * Math.pow(1 + cpi, t));
+    expect(nominalAt(r0, 0)).toBe(3000000);
+    expect(nominalAt(r1, 1)).toBe(3000000); // unchanged — 3,075,000 still floors to 3,000,000
+    expect(nominalAt(r2, 2)).toBe(3150000); // 3,151,875 floors to exactly one $150,000 step up
+    expect(nominalAt(r2, 2) - nominalAt(r1, 1)).toBe(150000);
+  });
+
+  it("a client comfortably under the Division 296 $3m threshold is never assessed, in any early year, purely from the threshold's real-terms erosion between steps", () => {
+    // The threshold's REAL value legitimately drifts down a little
+    // every year it hasn't stepped (disclosed in superRates.js's
+    // header: nominal is flat, CPI deflation still applies) — that is
+    // the corrected, intended behaviour, not something to hide. What
+    // must NOT happen is a client comfortably below $3m ever being
+    // caught by that drift alone, the way an accidentally-unindexed
+    // threshold (held nominally flat forever, like div293Threshold)
+    // would eventually catch them through unbounded erosion.
+    const cpi = 0.025, awote = 0.035;
+    const comfortablyUnder = 2500000; // real dollars, well clear of the erosion band around $3m
+    for (let fy = 2026; fy <= 2036; fy++) {
+      const r = superRatesFor(fy, "indexed", cpi, awote);
+      const { tax } = div296Tax({
+        openingTsb: comfortablyUnder, closingTsb: comfortablyUnder, earnings: 50000,
+        lowerThreshold: r.div296LowerThreshold, upperThreshold: r.div296UpperThreshold,
+      });
+      expect(tax).toBe(0);
+    }
   });
 
   it("flat rates and ages never scale under either mode", () => {
