@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -176,6 +176,7 @@ export function defaultPlan(now = new Date()) {
     start,
     keyDates: [],
     superAccounts: [],
+    workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
   };
 }
 
@@ -738,7 +739,7 @@ export function defaultState(profiles = {}, now = new Date()) {
     liabilities: [],
     properties: [],
     settings: {
-      surplus: { mode: "spend", assetId: null },
+      surplus: { mode: "accumulate", assetId: null },
       fundingOrder: [asset.id],
     },
     display: {
@@ -970,8 +971,28 @@ export function clampPlan(plan, profiles = {}) {
   // belong with identity rather than with the joint-ownable financial
   // asset list.
   const superAccounts = normaliseSuperAccounts(plan.superAccounts, { client, partner }, profiles);
+  const workingCash = clampWorkingCash(plan.workingCash);
 
-  return { household, client, partner, endAge, endBasis, start, keyDates, superAccounts };
+  return { household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash };
+}
+
+// --- Working Cash Account ---------------------------------------------------
+//
+// A system cash account that always exists and cannot be deleted —
+// all household cashflow passes through it (see deterministic.js's
+// monthly loop). Lives on the plan, not state.assets: it is never a
+// CGT asset and never targetable by contributions/withdrawals/one-offs
+// (structurally excluded the same way super accounts are — those
+// mechanisms only ever look at state.assets).
+export function clampWorkingCash(raw) {
+  const balance = clampNumber(raw?.balance, 0);
+  return {
+    balance,
+    minimumBalance: clampNumber(raw?.minimumBalance, 0),
+    // null = "use the Cash profile's return" (deterministic.js resolves
+    // this at projection time, since it needs the profiles table).
+    ratePct: raw?.ratePct == null ? null : clampNumber(raw.ratePct, -10, 30),
+  };
 }
 
 // A v5-schema row still carries the bare-int field (fromAge/toAge/age)
@@ -1074,14 +1095,22 @@ export function clampAllToPlan(state, profiles = {}) {
   return { ...state, plan, assets, cashflows, settings, liabilities, properties };
 }
 
+// Surplus treatment (Working Cash Account FY-end sweep): "accumulate"
+// (leave it in the WCA — the default), "invest" (move it to a
+// nominated asset), or "spend" (it leaves the model). Any unrecognised
+// or missing value falls back to "accumulate", not "spend" — an
+// invalid setting should never silently start spending the client's
+// money out of the model.
 export function normaliseSettings(settings, assets) {
   const fundingOrder = normaliseFundingOrder(settings?.fundingOrder, assets);
-  let surplus = settings?.surplus || { mode: "spend", assetId: null };
+  let surplus = settings?.surplus || { mode: "accumulate", assetId: null };
   if (surplus.mode === "invest") {
     const valid = assets.some((a) => a.include && isFinancial(a) && a.id === surplus.assetId);
-    surplus = valid ? { mode: "invest", assetId: surplus.assetId } : { mode: "spend", assetId: null };
-  } else {
+    surplus = valid ? { mode: "invest", assetId: surplus.assetId } : { mode: "accumulate", assetId: null };
+  } else if (surplus.mode === "spend") {
     surplus = { mode: "spend", assetId: null };
+  } else {
+    surplus = { mode: "accumulate", assetId: null };
   }
   return { surplus, fundingOrder };
 }
@@ -1277,8 +1306,20 @@ function migrateV7toV8(raw) {
   return { ...raw, schemaVersion: 8 };
 }
 
+// v8 → v9 (Working Cash Account): plan.workingCash is new (clampPlan
+// stamps the default {balance:0, minimumBalance:0, ratePct:null}); no
+// existing field changes shape, so again just the version gate. The
+// default surplus mode changes from "spend" to "accumulate" for BRAND
+// NEW scenarios only (defaultState) — an existing scenario's already-
+// stored settings.surplus.mode is a valid value either way and is left
+// exactly as normaliseSettings finds it, so this migration never
+// changes an existing scenario's chosen surplus treatment.
+function migrateV8toV9(raw) {
+  return { ...raw, schemaVersion: 9 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
-// forward. Returns a clamped v8 state or null (caller falls back to
+// forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
 export function hydrate(json, profiles = {}) {
   try {
@@ -1291,6 +1332,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 5) raw = migrateV5toV6(raw);
     if (raw.schemaVersion === 6) raw = migrateV6toV7(raw);
     if (raw.schemaVersion === 7) raw = migrateV7toV8(raw);
+    if (raw.schemaVersion === 8) raw = migrateV8toV9(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 

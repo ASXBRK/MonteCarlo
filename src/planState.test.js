@@ -20,6 +20,7 @@ import {
   createSuperContribution, clampSuperContribution, normaliseSuperContributions,
   createSuperWithdrawal, clampSuperWithdrawal, normaliseSuperWithdrawals,
   INCOME_TYPES, SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, CARRY_FORWARD_YEARS,
+  clampWorkingCash,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES } from "./profiles.js";
@@ -52,7 +53,7 @@ describe("defaults (v3)", () => {
     expect(s.cashflows.expenses).toEqual([]);
     expect(s.cashflows.contributions).toHaveLength(1);
     expect(s.cashflows.contributions[0].assetId).toBe(s.assets[0].id);
-    expect(s.settings.surplus).toEqual({ mode: "spend", assetId: null });
+    expect(s.settings.surplus).toEqual({ mode: "accumulate", assetId: null });
     expect(s.settings.fundingOrder).toEqual([s.assets[0].id]);
   });
 
@@ -125,13 +126,19 @@ describe("fundingOrder invariants", () => {
     expect(normaliseFundingOrder(["b", "a"], [a, b, c])).toEqual(["b", "a", "c"]);
   });
 
-  it("surplus invest mode resets to spend when its target is invalid", () => {
+  it("surplus invest mode resets to accumulate when its target is invalid", () => {
     const assets = [{ id: "a", include: true }, { id: "b", include: false }];
     expect(normaliseSettings({ surplus: { mode: "invest", assetId: "a" }, fundingOrder: [] }, assets).surplus)
       .toEqual({ mode: "invest", assetId: "a" });
     expect(normaliseSettings({ surplus: { mode: "invest", assetId: "b" }, fundingOrder: [] }, assets).surplus)
-      .toEqual({ mode: "spend", assetId: null });
+      .toEqual({ mode: "accumulate", assetId: null });
     expect(normaliseSettings({ surplus: { mode: "invest", assetId: "gone" }, fundingOrder: [] }, assets).surplus)
+      .toEqual({ mode: "accumulate", assetId: null });
+  });
+
+  it("surplus spend mode is preserved as-is (a valid, explicit choice — never silently upgraded)", () => {
+    const assets = [{ id: "a", include: true }];
+    expect(normaliseSettings({ surplus: { mode: "spend", assetId: null }, fundingOrder: [] }, assets).surplus)
       .toEqual({ mode: "spend", assetId: null });
   });
 
@@ -146,7 +153,7 @@ describe("fundingOrder invariants", () => {
     expect(out.assets).toHaveLength(1);
     expect(out.cashflows.withdrawals).toHaveLength(0);
     expect(out.settings.fundingOrder).toEqual([s.assets[0].id]);
-    expect(out.settings.surplus).toEqual({ mode: "spend", assetId: null });
+    expect(out.settings.surplus).toEqual({ mode: "accumulate", assetId: null });
   });
 
   it("never removes the last asset", () => {
@@ -567,7 +574,7 @@ describe("D2 — asset class model", () => {
     const lf = { id: "l", include: true, class: "lifestyle" };
     expect(normaliseFundingOrder(["l", "f"], [fin, lf])).toEqual(["f"]);
     expect(normaliseSettings({ surplus: { mode: "invest", assetId: "l" }, fundingOrder: [] }, [fin, lf]).surplus)
-      .toEqual({ mode: "spend", assetId: null });
+      .toEqual({ mode: "accumulate", assetId: null });
   });
 
   it("cashflow rows targeting lifestyle assets drop on hydrate", () => {
@@ -858,7 +865,7 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(normaliseFundingOrder(["su1"], [])).toEqual([]);
     const settings = normaliseSettings({ surplus: { mode: "invest", assetId: "su1" }, fundingOrder: ["su1"] }, []);
     expect(settings.fundingOrder).toEqual([]);
-    expect(settings.surplus).toEqual({ mode: "spend", assetId: null });
+    expect(settings.surplus).toEqual({ mode: "accumulate", assetId: null });
   });
 
   it("hydrate drops contribution/withdrawal/lump-sum rows that target a super account id (not a financial asset)", () => {
@@ -986,5 +993,68 @@ describe("Tier 1.2 — Super (Commit 3): withdrawals, preservation, proportionin
     const back = hydrate(serialize(s), PROFILES);
     expect(back.cashflows.superWithdrawals).toHaveLength(1);
     expect(back.cashflows.superWithdrawals[0].accountId).toBe(account.id);
+  });
+});
+
+describe("Working Cash Account (engine correctness fix)", () => {
+  it("clampWorkingCash defaults balance/minimumBalance to 0 and ratePct to null", () => {
+    expect(clampWorkingCash(undefined)).toEqual({ balance: 0, minimumBalance: 0, ratePct: null });
+    expect(clampWorkingCash(null)).toEqual({ balance: 0, minimumBalance: 0, ratePct: null });
+  });
+
+  it("clampWorkingCash clamps balance/minimumBalance to >= 0 and ratePct into [-10, 30] when set", () => {
+    expect(clampWorkingCash({ balance: -500, minimumBalance: -10, ratePct: 4 }))
+      .toEqual({ balance: 0, minimumBalance: 0, ratePct: 4 });
+    expect(clampWorkingCash({ balance: 20000, minimumBalance: 5000, ratePct: 999 }))
+      .toEqual({ balance: 20000, minimumBalance: 5000, ratePct: 30 });
+    expect(clampWorkingCash({ balance: 20000, minimumBalance: 5000, ratePct: null }).ratePct).toBeNull();
+  });
+
+  it("defaultPlan ships a zeroed workingCash with a null (profile-derived) rate", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.plan.workingCash).toEqual({ balance: 0, minimumBalance: 0, ratePct: null });
+  });
+
+  it("clampPlan stamps workingCash even when the raw plan never had one (pre-WCA migration)", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(plan.workingCash).toEqual({ balance: 0, minimumBalance: 0, ratePct: null });
+  });
+
+  it("clampPlan preserves an explicit workingCash through the clamp", () => {
+    const raw = { ...couplePlan(), workingCash: { balance: 15000, minimumBalance: 2000, ratePct: 4.5 } };
+    const plan = clampPlan(raw, PROFILES);
+    expect(plan.workingCash).toEqual({ balance: 15000, minimumBalance: 2000, ratePct: 4.5 });
+  });
+
+  it("defaultState's default surplus treatment is accumulate, not spend", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.settings.surplus).toEqual({ mode: "accumulate", assetId: null });
+  });
+
+  it("hydrate migrates a pre-WCA (v8) blob forward, stamping the default workingCash", () => {
+    const v8 = {
+      schemaVersion: 8,
+      plan: {
+        household: "single",
+        client: { currentAge: 40 },
+        partner: null,
+        endAge: 90,
+        start: { year: 2026, month: 7 },
+      },
+      assets: [{ id: "a1", name: "A", include: true, owner: "client", distributions: "reinvest",
+                 balance: 1000, allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0,
+                 cgtAsset: false, costBase: null }],
+      cashflows: { income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [],
+                   superContributions: [], superWithdrawals: [] },
+      settings: { surplus: { mode: "spend", assetId: null }, fundingOrder: ["a1"] },
+      display: { units: "real" },
+      assumptions: { cpi: 0.025 },
+    };
+    const s = hydrate(JSON.stringify(v8), PROFILES);
+    expect(s).not.toBeNull();
+    expect(s.plan.workingCash).toEqual({ balance: 0, minimumBalance: 0, ratePct: null });
+    // An existing scenario's explicit "spend" choice is preserved —
+    // the new "accumulate" default only applies to brand-new scenarios.
+    expect(s.settings.surplus).toEqual({ mode: "spend", assetId: null });
   });
 });

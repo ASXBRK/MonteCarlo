@@ -173,9 +173,19 @@ describe("deficit funding (conventions 9d–e, 10)", () => {
       assets: [mkAsset({ allocation: zeroRealAlloc() })],
       cashflows: { income: [cf({ assetId: null, amount: 1000, toAge: 40 })] },
     };
+    // The $1,000/mo surplus now sits in the Working Cash Account until
+    // the FY-end sweep invests it in one lump, earning WCA interest
+    // along the way — a few tens of dollars more than the raw $12,000
+    // sum of contributions (the WCA fix's documented, expected small
+    // discrepancy; asserting the shape, not bit-identity).
     const invest = projectPlan(mkState({ ...base, surplus: { mode: "invest", assetId: "a1" } }));
-    expect(invest.monthly.combined[12]).toBeCloseTo(100000 + 12000, 6);
-    expect(invest.yearly[0].surplusInvested).toBeCloseTo(12000, 6);
+    expect(invest.monthly.combined[12]).toBeGreaterThan(100000 + 12000);
+    expect(invest.monthly.combined[12]).toBeCloseTo(100000 + 12000, -3);
+    expect(invest.yearly[0].surplusInvested).toBeGreaterThan(12000);
+    expect(invest.yearly[0].surplusInvested).toBeCloseTo(12000, -3);
+    // "spend" mode: the WCA absorbs the surplus all year, then the
+    // FY-end sweep discards it — same end state as before (nothing
+    // reaches the asset), modulo the same small WCA-interest residue.
     const spend = projectPlan(mkState({ ...base, surplus: { mode: "spend", assetId: null } }));
     expect(spend.monthly.combined[12]).toBeCloseTo(100000, 6);
   });
@@ -313,6 +323,10 @@ describe("output view reconciliation (C1)", () => {
       endAge: 41,
       assets: [mkAsset({ allocation: growthOnlyAlloc() })],
       cashflows: { income: [salary(100000 / 12)] },
+      // ratePct 2.5 == cpi → exactly 0% real WCA growth (same
+      // zero-real-rate trick as zeroRealAlloc), isolating this tax-
+      // bracket check from the WCA interest effect entirely.
+      plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
     });
     const d = projectPlan(s).yearly[1].taxDetail.client; // FY2027-28
     expect(d.taxableIncome).toBeCloseTo(100000, 4);
@@ -548,6 +562,9 @@ describe("tax — income tax and franking", () => {
       endAge: 41,
       assets: [mkAsset({ allocation: growthOnlyAlloc() })],
       cashflows: { income: [salary(100000 / 12)] },
+      // Isolate this hand-checked tax figure from WCA interest — see
+      // the "taxDetail carries the full per-person assessment" test.
+      plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
     });
     const out = projectPlan(s);
     expect(out.yearly[0].tax).toBeCloseTo(22520, 4);
@@ -875,6 +892,9 @@ describe("D3 — liabilities", () => {
         household: "married",
         client: { currentAge: 40 },
         partner: { currentAge: 40 },
+        // Isolate this known-value split from WCA interest — see the
+        // "taxDetail carries the full per-person assessment" test.
+        workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 },
       },
     };
     const out = projectPlan({
@@ -1020,6 +1040,10 @@ describe("D4 — property", () => {
         start,
         assets: [mkAsset({ allocation: growthOnlyAlloc() })],
         cashflows: { income: [salary(100000 / 12)] },
+        // Isolate these known-value taxable-income checks from WCA
+        // interest — see the "taxDetail carries the full per-person
+        // assessment" test.
+        plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
       }),
       properties: [prop({
         acquisitionDate, newBuild,
@@ -1059,6 +1083,10 @@ describe("D4 — property", () => {
         start: { year: 2027, month: 7 },
         assets: [mkAsset({ allocation: growthOnlyAlloc() })],
         cashflows: { income: [salary(100000 / 12)] },
+        // Isolate these known-value taxable-income checks from WCA
+        // interest — see the "taxDetail carries the full per-person
+        // assessment" test.
+        plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
       }),
       properties: [a, b],
       liabilities: [],
@@ -1660,5 +1688,195 @@ describe("Tier 1.2 — Super (Commit 4): superDetail type breakdown, superCapUsa
     expect(out.yearly[0].superDetail).toEqual({});
     expect(out.yearly[0].superCapUsage.client.available).toBe(32500);
     expect(out.yearly[0].superCapUsage.client.sg).toBe(0);
+  });
+});
+
+// --- Working Cash Account (engine correctness fix) --------------------------
+
+// Annual income row (fires in July only) — the exact shape that
+// exposed the bug: surplus/deficit evaluated monthly meant this whole
+// year's salary was "spent" the month it landed, starving the other
+// eleven.
+function annualSalary(amount, over = {}) {
+  return {
+    id: "sal", label: "Salary", owner: "client", amount, frequency: "annual",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+    indexed: true, assetId: null, ...over,
+  };
+}
+
+describe("Working Cash Account (engine correctness fix)", () => {
+  it("bug repro: annual salary + monthly expenses no longer force spurious deficit funding", () => {
+    // The exact repro from the bug report: $100k annual salary, $5k/mo
+    // expenses ($60k/yr), one $200k asset, surplus mode "spend".
+    const s = mkState({
+      endAge: 43,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "spend", assetId: null },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      // Zero deficit funding every year — the WCA absorbs July's lump
+      // and pays the other eleven months out of it.
+      expect(row.deficitFundedFromAssets).toBe(0);
+      expect(row.unfundedCashflow).toBe(0);
+      // A positive-surplus year cannot show deficit funding — the two
+      // figures must be mutually consistent.
+      expect(row.surplusOrDeficit).toBeGreaterThan(0);
+    }
+    // The asset is never sold — it only ever grows via the zero-real
+    // allocation's own (zero) return.
+    expect(out.yearly[2].perAssetClosing.a1).toBeCloseTo(200000, 2);
+  });
+
+  it("WCA ledger reconciles: opening + interest + netFlow − sweeps = closing, per year", () => {
+    const s = mkState({
+      endAge: 43,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "accumulate", assetId: null },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      const d = row.wcaDetail;
+      // sweptToCash is informational only (accumulate mode moves
+      // nothing — the excess already sits in the balance via netFlow),
+      // so it does NOT appear in the reconciliation; only the sweeps
+      // that actually move money OUT (invest/spend) are subtracted.
+      expect(d.opening + d.interest + d.netFlow - d.sweptInvested - d.sweptSpent)
+        .toBeCloseTo(d.closing, 4);
+      expect(d.closing).toBeCloseTo(row.wcaClosing, 6);
+    }
+  });
+
+  it('FY-end sweep "accumulate" (the default) leaves the surplus in the WCA', () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "accumulate", assetId: null },
+    });
+    const out = projectPlan(s);
+    const r = out.yearly[0];
+    expect(r.surplusAccumulated).toBeGreaterThan(15000); // ~100k − 60k expenses − ~22.5k tax
+    expect(r.surplusInvested).toBe(0);
+    expect(r.surplusSpent).toBe(0);
+    expect(r.wcaClosing).toBeCloseTo(r.surplusAccumulated, 2);
+    expect(out.yearly[0].perAssetClosing.a1).toBeCloseTo(200000, 2); // untouched — nothing invested
+  });
+
+  it('FY-end sweep "invest" moves the WCA surplus into the nominated asset, once, at FY-end', () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "invest", assetId: "a1" },
+    });
+    const out = projectPlan(s);
+    const r = out.yearly[0];
+    expect(r.surplusInvested).toBeGreaterThan(15000); // ~100k − 60k expenses − ~22.5k tax
+    expect(r.surplusAccumulated).toBe(0);
+    expect(r.wcaClosing).toBeCloseTo(0, 2); // swept out, nothing left accumulating in the WCA
+    expect(r.perAssetClosing.a1).toBeCloseTo(200000 + r.surplusInvested, 2);
+  });
+
+  it('FY-end sweep "spend" discards the WCA surplus — it leaves the model', () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "spend", assetId: null },
+    });
+    const out = projectPlan(s);
+    const r = out.yearly[0];
+    expect(r.surplusSpent).toBeGreaterThan(15000); // ~100k − 60k expenses − ~22.5k tax
+    expect(r.surplusAccumulated).toBe(0);
+    expect(r.surplusInvested).toBe(0);
+    expect(r.wcaClosing).toBeCloseTo(0, 2);
+    expect(r.perAssetClosing.a1).toBeCloseTo(200000, 2); // nothing invested either
+  });
+
+  it("minimumBalance draws a top-up from fundingOrder before the WCA would fall below it", () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "accumulate", assetId: null },
+      plan: { workingCash: { balance: 0, minimumBalance: 20000, ratePct: 2.5 } },
+    });
+    const out = projectPlan(s);
+    // Before July's salary lands, five months of $5k expenses (25,000)
+    // exceed the WCA's zero starting balance well before minimumBalance
+    // (20,000) is breached — a top-up from the asset must occur.
+    expect(out.yearly[0].deficitFundedFromAssets).toBeGreaterThan(0);
+    expect(out.yearly[0].unfundedCashflow).toBe(0); // the asset has plenty — never truly unfunded
+  });
+
+  it("a genuinely unfunded month reports exactly that month's shortfall, not a compounding running total", () => {
+    // No income at all, a small asset that runs out fast — the same
+    // shape as the pre-existing "records unfunded deficit" test, which
+    // already exercises the non-compounding fix at scale; this checks
+    // the per-month figure directly.
+    const s = mkState({
+      endAge: 40,
+      assets: [mkAsset({ id: "a1", balance: 2000, allocation: zeroRealAlloc() })],
+      cashflows: { expenses: [cf({ assetId: null, amount: 1000 })] },
+    });
+    const out = projectPlan(s);
+    // Asset covers 2 months; every month after that is unfunded at
+    // exactly $1,000 — not a growing figure.
+    expect(out.shortfall.total).toBeCloseTo(1000 * (12 - 2), 4);
+  });
+
+  it("netAssets includes the WCA balance additively", () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "accumulate", assetId: null },
+    });
+    const out = projectPlan(s);
+    const r = out.yearly[0];
+    expect(r.netAssets).toBeCloseTo(r.closingBalance + r.propertyClosing + r.superClosing + r.wcaClosing - r.liabilitiesClosing, 6);
+  });
+
+  it("a configured ratePct overrides the Cash profile default", () => {
+    const withRate = (ratePct) => mkState({
+      endAge: 41,
+      assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() })],
+      cashflows: { income: [annualSalary(100000)], expenses: [cf({ assetId: null, amount: 5000 })] },
+      surplus: { mode: "accumulate", assetId: null },
+      plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct } },
+    });
+    // ratePct == cpi*100 → exactly 0% real WCA growth: interest is 0.
+    const zero = projectPlan(withRate(2.5));
+    expect(zero.yearly[0].wcaDetail.interest).toBeCloseTo(0, 6);
+    // A higher rate produces strictly more interest than a lower one.
+    const low = projectPlan(withRate(2.5));
+    const high = projectPlan(withRate(6));
+    expect(high.yearly[0].wcaDetail.interest).toBeGreaterThan(low.yearly[0].wcaDetail.interest);
+  });
+
+  it("regression gate: monthly income matching monthly expenses (no timing mismatch) stays materially unchanged", () => {
+    // Same income and outflow cadence — the WCA should sit near zero
+    // all year, so this should closely match the pre-WCA behaviour.
+    // Expect only a small difference from WCA interest (spec's own
+    // regression note) — asserting the shape, not bit-identity.
+    const s = mkState({
+      endAge: 44,
+      assets: [mkAsset({ balance: 100000, allocation: zeroRealAlloc() })],
+      cashflows: {
+        income: [cf({ assetId: null, amount: 1000, toAge: 44 })],
+        expenses: [cf({ assetId: null, amount: 1000, toAge: 44 })],
+      },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.deficitFundedFromAssets).toBe(0);
+      expect(row.unfundedCashflow).toBe(0);
+    }
+    // The asset itself (zero real return) never moves.
+    expect(out.yearly[3].perAssetClosing.a1).toBeCloseTo(100000, 2);
   });
 });

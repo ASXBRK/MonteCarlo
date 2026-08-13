@@ -25,6 +25,7 @@ import {
   createSuperContribution, normaliseSuperContributions,
   createSuperWithdrawal, normaliseSuperWithdrawals,
   SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, INCOME_TYPES,
+  clampWorkingCash,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -1768,14 +1769,40 @@ function renderSettings() {
     `;
   }).join("");
 
+  const wca = state.plan.workingCash;
+  const SURPLUS_HELP = {
+    accumulate: "left in the Working Cash Account, building a cash balance",
+    invest: "invested into the selected asset",
+    spend: "treated as additional spending and disappears from the projection",
+  };
   els.settingsPanel.innerHTML = `
     <div class="cf-panel">
+      <div class="cf-section">
+        <div class="cf-section-title">Working Cash Account</div>
+        <p class="helper-text">All household cashflow passes through this account before anything else happens — it exists to absorb timing mismatches (e.g. annual income vs. monthly expenses) so a lump of income doesn't get "spent" the month it lands while the rest of the year runs a spurious deficit.</p>
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Opening balance ($)</label>
+            <input type="number" min="0" step="1000" value="${wca.balance}" data-settings-field="wcaBalance" />
+          </div>
+          <div class="cf-cell">
+            <label>Minimum balance ($)</label>
+            <input type="number" min="0" step="1000" value="${wca.minimumBalance}" data-settings-field="wcaMinimum" />
+          </div>
+          <div class="cf-cell">
+            <label>Interest rate (% p.a. nominal)</label>
+            <input type="number" step="0.05" placeholder="Cash profile" value="${wca.ratePct ?? ""}" data-settings-field="wcaRate" />
+          </div>
+        </div>
+        <p class="helper-text">If the account would fall below its minimum, the shortfall is drawn from the deficit funding order below. Leave the rate blank to use the firm's Cash profile return.</p>
+      </div>
       <div class="cf-section">
         <div class="cf-section-title">Surplus treatment</div>
         <div class="settings-row">
           <select data-settings-field="surplusMode">
-            <option value="spend"${s.surplus.mode === "spend" ? " selected" : ""}>Spend (additional expenses)</option>
+            <option value="accumulate"${s.surplus.mode === "accumulate" ? " selected" : ""}>Accumulate in the Working Cash Account</option>
             <option value="invest"${s.surplus.mode === "invest" ? " selected" : ""}>Invest to…</option>
+            <option value="spend"${s.surplus.mode === "spend" ? " selected" : ""}>Spend (additional expenses)</option>
           </select>
           ${s.surplus.mode === "invest" ? `
             <select data-settings-field="surplusAsset">
@@ -1785,12 +1812,12 @@ function renderSettings() {
             </select>
           ` : ""}
         </div>
-        <p class="helper-text">When income exceeds expenses, the surplus is ${s.surplus.mode === "invest" ? "invested into the selected asset" : "treated as additional spending and disappears from the projection"}.</p>
+        <p class="helper-text">Once a year, at the end of each financial year, whatever is sitting in the Working Cash Account above its minimum is ${SURPLUS_HELP[s.surplus.mode]}.</p>
       </div>
       <div class="cf-section">
         <div class="cf-section-title">Deficit funding order</div>
         <div class="order-list">${orderItems}</div>
-        <p class="helper-text">When expenses exceed income, money is drawn from these assets in this order.</p>
+        <p class="helper-text">When the Working Cash Account needs topping up, money is drawn from these assets in this order.</p>
       </div>
     </div>
   `;
@@ -1805,13 +1832,23 @@ els.settingsPanel.addEventListener("change", (e) => {
       state.settings.surplus = { mode: "invest", assetId: first ? first.id : null };
       state.settings = normaliseSettings(state.settings, state.assets);
     } else {
-      state.settings.surplus = { mode: "spend", assetId: null };
+      state.settings.surplus = { mode: e.target.value === "spend" ? "spend" : "accumulate", assetId: null };
     }
   } else if (field === "surplusAsset") {
     state.settings.surplus = { mode: "invest", assetId: e.target.value };
     state.settings = normaliseSettings(state.settings, state.assets);
+  } else if (field === "wcaBalance") {
+    state.plan.workingCash = clampWorkingCash({ ...state.plan.workingCash, balance: clampNumber(e.target.value, 0) });
+  } else if (field === "wcaMinimum") {
+    state.plan.workingCash = clampWorkingCash({ ...state.plan.workingCash, minimumBalance: clampNumber(e.target.value, 0) });
+  } else if (field === "wcaRate") {
+    const v = e.target.value;
+    state.plan.workingCash = clampWorkingCash({ ...state.plan.workingCash, ratePct: v === "" ? null : clampNumber(v, -10, 30) });
+  } else {
+    return;
   }
   saveState();
+  refreshOutputs();
   renderSettings();
 });
 
@@ -3880,9 +3917,20 @@ function buildCashflowGroups() {
       { label: "Tax", cell: (y) => -yl[y].tax },
       { label: "Surplus / (deficit)", cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
     ] },
+    // Working Cash Account (engine correctness fix): all household
+    // cashflow passes through it before anything else happens — this
+    // group reconciles opening → closing, per FY.
+    { title: "Working Cash Account", rows: [
+      { label: "Opening balance", cell: (y) => yl[y].wcaDetail.opening, always: true },
+      { label: "Interest", cell: (y) => yl[y].wcaDetail.interest },
+      { label: "Net household cashflow", cell: (y) => yl[y].wcaDetail.netFlow },
+      { label: "Closing balance", cell: (y) => yl[y].wcaDetail.closing, always: true, cls: "tl-total" },
+    ] },
     { title: "Funding", rows: [
       { label: surplusTarget ? `Surplus invested (to ${surplusTarget.name})` : "Surplus invested",
         cell: (y) => yl[y].surplusInvested },
+      { label: "Surplus accumulated (to cash)", cell: (y) => yl[y].surplusAccumulated },
+      { label: "Surplus spent", cell: (y) => yl[y].surplusSpent },
       { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },
       { label: "Unfunded cashflow", cell: (y) => yl[y].unfundedCashflow },
     ] },
@@ -4033,6 +4081,18 @@ function buildAssetsGroups(entity) {
     if (lifestyle.length) {
       groups.splice(2, 0, { title: "Lifestyle assets", rows: lifestyle.map(closingRow) });
     }
+    // Working Cash Account (engine correctness fix): always exists,
+    // so always shown here — same reconciliation as the Cashflow
+    // view's own WCA group.
+    groups.push({
+      title: "Working Cash Account",
+      rows: [
+        { label: "Opening balance", cell: (y) => yl[y].wcaDetail.opening, always: true },
+        { label: "Interest", cell: (y) => yl[y].wcaDetail.interest },
+        { label: "Net household cashflow", cell: (y) => yl[y].wcaDetail.netFlow },
+        { label: "Closing balance", cell: (y) => yl[y].wcaClosing, always: true, cls: "tl-total" },
+      ],
+    });
     const propList = state.properties ?? [];
     if (propList.length) {
       groups.push({
@@ -4061,12 +4121,10 @@ function buildAssetsGroups(entity) {
         ],
       });
     }
-    if (liabs.length || propList.length || Object.keys(yl[0]?.liabilities ?? {}).length) {
-      groups.push({
-        title: null,
-        rows: [{ label: "NET ASSETS", cell: (y) => yl[y].netAssets, always: true, cls: "tl-total" }],
-      });
-    }
+    groups.push({
+      title: null,
+      rows: [{ label: "NET ASSETS", cell: (y) => yl[y].netAssets, always: true, cls: "tl-total" }],
+    });
     return groups;
   }
 

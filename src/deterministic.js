@@ -39,7 +39,7 @@
 // The engine computes REAL values only; nominal is display-time
 // scaling. No DOM knowledge anywhere.
 
-import { PROFILES } from "./profiles.js";
+import { PROFILES, DEFENSIVE_PROFILE } from "./profiles.js";
 import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
@@ -346,6 +346,32 @@ export function projectPlan(state, profiles = PROFILES) {
       ? state.settings.surplus.assetId
       : null;
 
+  // --- Working Cash Account (household cashflow buffer) ----------------------
+  //
+  // All household cashflow (income, expenses, tax, loan repayments,
+  // property settlement) passes through the WCA rather than being
+  // netted and immediately spent/sold within the same month. Without
+  // it, annual income (e.g. a July salary) is "spent" that one month
+  // and the other eleven run spurious deficits, selling down assets
+  // that the same year's income would in reality have covered — cash
+  // that exists is not available to the months that need it. The WCA
+  // fixes this: it grows like a cash asset every month, absorbs that
+  // month's net cashflow, tops itself back up from fundingOrder only
+  // when it falls below its minimum, and only sweeps surplus above the
+  // minimum at FY-end (per settings.surplus.mode) — see runYear below.
+  const wca = state.plan.workingCash ?? { balance: 0, minimumBalance: 0, ratePct: null };
+  // A pure cash instrument has no growth component to split from its
+  // income component the way a diversified asset does — its whole
+  // real return IS its interest (disclosed simplification: unlike
+  // ordinary distributions, there is no separate nominal-rate-for-tax
+  // figure; the same real, Fisher-converted rate drives both the
+  // balance and the taxable amount).
+  const wcaAnnualNominal = wca.ratePct != null ? wca.ratePct / 100 : (profiles[DEFENSIVE_PROFILE]?.incomeReturn ?? 0);
+  const wcaMonthlyRate = toMonthlyReal(wcaAnnualNominal, cpi);
+  let wcaBal = wca.balance;
+  const wcaSeries = new Float64Array(months + 1);
+  wcaSeries[0] = wcaBal;
+
   const yearStart = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
   const yearEnd = (y) => schedule.monthsInFirstYear + 12 * y;
 
@@ -395,6 +421,13 @@ export function projectPlan(state, profiles = PROFILES) {
     tax: 0,
     surplusOrDeficit: 0,
     surplusInvested: 0,
+    // FY-end sweep of WCA surplus above minimumBalance (Working Cash
+    // Account fix), per settings.surplus.mode. surplusInvested (above)
+    // is reused for "invest" — same field, same meaning as before,
+    // just swept once at FY-end instead of monthly; these two are new,
+    // one for each of the other two modes.
+    surplusSpent: 0,
+    surplusAccumulated: 0,
     deficitFundedFromAssets: 0,
     unfundedCashflow: 0,
     contributions: 0,
@@ -446,6 +479,15 @@ export function projectPlan(state, profiles = PROFILES) {
     }])),
     superClosing: 0,
     superCapUsage: { client: null, partner: null },
+    // Working Cash Account detail: opening + interest + netFlow +
+    // sweptToCash − sweptInvested − sweptSpent = closing (the top-up-
+    // from-assets draws are reported under deficitFundedFromAssets
+    // above, same field as before — the WCA is just its new trigger).
+    wcaDetail: {
+      opening: 0, interest: 0, netFlow: 0,
+      sweptToCash: 0, sweptInvested: 0, sweptSpent: 0, closing: 0,
+    },
+    wcaClosing: 0,
   });
 
   // Run one plan year's months. opts:
@@ -542,6 +584,19 @@ export function projectPlan(state, profiles = PROFILES) {
           row.growth += g;
           row.perAssetDetail[id].growth += g;
         }
+      }
+
+      // a-wca. Working Cash Account growth (interest) — grows on the
+      // OPENING balance, before this month's net household cashflow
+      // lands, same convention as asset growth above. Interest is
+      // assessable ordinary income to the client (joint: 50/50, the
+      // same split every other jointly-shared income source uses).
+      const wcaInterest = wcaBal * wcaMonthlyRate;
+      wcaBal += wcaInterest;
+      if (wcaInterest !== 0) {
+        for (const p of persons) acc[p].ordinary += wcaInterest * (couple ? 0.5 : 1);
+        markIncome(couple ? { client: 0.5, partner: 0.5 } : { client: 1 }, m);
+        if (row) row.wcaDetail.interest += wcaInterest;
       }
 
       // a-super-deduct. Personal deductible super contributions
@@ -798,7 +853,12 @@ export function projectPlan(state, profiles = PROFILES) {
         }
       }
 
-      // d. Household position, including tax outflows (decision 14).
+      // c. Household net, including tax outflows (decision 14) —
+      // applied to the WCA balance rather than spent/sold immediately
+      // (Working Cash Account fix): this is what lets an annual lump
+      // of income (e.g. a July salary) cover the months before and
+      // after it, instead of being "spent" that one month while the
+      // rest of the year runs spurious deficit-funding sales.
       const inc = schedule.income[m] + cashDist + rentIncome;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
@@ -810,30 +870,28 @@ export function projectPlan(state, profiles = PROFILES) {
       const exp = schedule.expenses[m];
       const tax = (taxOut ? taxOut[m] : 0) + (m === first ? cgtDue : 0);
       const net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut;
+      wcaBal += net;
       if (row) {
         row.income += inc;
         row.cashDistributions += cashDist;
         row.expenses += exp + propExpenseOut;
         row.tax += tax;
         row.surplusOrDeficit += net;
+        row.wcaDetail.netFlow += net;
       }
 
-      if (net > 0) {
-        if (surplusTargetId) {
-          bal[surplusTargetId] += net;
-          if (meta[surplusTargetId].cgt) pools[surplusTargetId] = poolAdd(pools[surplusTargetId], net);
-          if (row) {
-            row.surplusInvested += net;
-            row.perAssetDetail[surplusTargetId].surplusInvested += net;
-          }
-        }
-        // "spend" → disappears.
-      } else if (net < 0) {
-        let shortfall = -net;
+      // d. Top the WCA back up to its minimum from fundingOrder (then
+      // released super, same fallback as before) when this month's net
+      // has pushed it below — fundingOrder never touches the WCA above
+      // minimum; it only ever refills it. No monthly surplus sweep:
+      // surplus just sits in the WCA, growing, until FY-end below.
+      if (wcaBal < wca.minimumBalance) {
+        let shortfall = wca.minimumBalance - wcaBal;
         for (const id of fundingOrder) {
           if (shortfall <= 0) break;
           const paid = sell(id, shortfall, m);
           shortfall -= paid;
+          wcaBal += paid;
           if (row) {
             row.deficitFundedFromAssets += paid;
             row.perAssetDetail[id].deficitFunding += paid;
@@ -854,10 +912,54 @@ export function projectPlan(state, profiles = PROFILES) {
             if (!superReleased[superMeta[id].owner]) continue;
             const paid = withdrawFromSuper(id, shortfall);
             shortfall -= paid;
+            wcaBal += paid;
             row.superDetail[id].withdrawals += paid;
           }
         }
+        if (shortfall > 0) {
+          // Truly unfunded — same "balances never go negative"
+          // convention as every other balance in this engine. The
+          // shortfall is reported once, here, via recordUnfunded; it
+          // must NOT persist as a negative WCA balance, or it would
+          // compound (via WCA interest) and be rediscovered — bigger
+          // each time — every subsequent month (unchanged semantics
+          // means one unfunded month reports that month's gap, not a
+          // running total of every gap since the funding order ran
+          // out).
+          wcaBal = wca.minimumBalance;
+        }
         recordUnfunded(shortfall, m);
+      }
+
+      // FY-end sweep: the WCA's balance above minimumBalance, only on
+      // the FY's final month, per settings.surplus.mode. Ungated (runs
+      // in both passes, the same way the old monthly surplus-invest
+      // step did) — bal/wcaBal are snapshotted and discarded after the
+      // measurement pass regardless, and the sweep can't affect this
+      // year's already-accrued income, so there is nothing to gate.
+      if (m === last - 1 && wcaBal > wca.minimumBalance) {
+        const excess = wcaBal - wca.minimumBalance;
+        if (surplusMode === "invest" && surplusTargetId) {
+          wcaBal -= excess;
+          bal[surplusTargetId] += excess;
+          if (meta[surplusTargetId].cgt) pools[surplusTargetId] = poolAdd(pools[surplusTargetId], excess);
+          if (row) {
+            row.surplusInvested += excess;
+            row.perAssetDetail[surplusTargetId].surplusInvested += excess;
+            row.wcaDetail.sweptInvested += excess;
+          }
+        } else if (surplusMode === "spend") {
+          wcaBal -= excess;
+          if (row) {
+            row.surplusSpent += excess;
+            row.wcaDetail.sweptSpent += excess;
+          }
+        } else if (row) {
+          // "accumulate" (default): stays in the WCA — nothing moves,
+          // just recorded for the Funding section's "swept to cash" row.
+          row.surplusAccumulated += excess;
+          row.wcaDetail.sweptToCash += excess;
+        }
       }
 
       if (row) {
@@ -867,6 +969,7 @@ export function projectPlan(state, profiles = PROFILES) {
           total += bal[id];
         }
         combined[m + 1] = total;
+        wcaSeries[m + 1] = wcaBal;
       }
     }
     return acc;
@@ -990,17 +1093,22 @@ export function projectPlan(state, profiles = PROFILES) {
 
     // Pass 1 — measure the year's income with no income-tax outflows.
     // Pool objects are immutable, so a shallow copy snapshots them.
+    // wcaBal evolves ungated in both passes (its interest feeds
+    // acc[p].ordinary, and each month's evolution depends on the
+    // last), so it's snapshotted and restored the same way bal is.
     const balSnap = { ...bal };
     const poolSnap = { ...pools };
     const loanSnap = { ...loanBal };
     const propValSnap = { ...propVal };
     const propPoolSnap = { ...propPools };
+    const wcaBalSnap = wcaBal;
     const measured = runYear(y, { taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome });
     Object.assign(bal, balSnap);
     pools = poolSnap;
     Object.assign(loanBal, loanSnap);
     Object.assign(propVal, propValSnap);
     propPools = propPoolSnap;
+    wcaBal = wcaBalSnap;
 
     // Negative gearing rules (D4): a net rental loss offsets other
     // income only when the loss year is pre-FY2027-28, the property is
@@ -1076,10 +1184,13 @@ export function projectPlan(state, profiles = PROFILES) {
     const row = mkYearRow(y);
     row.superCapUsage = superCapUsage;
     row.openingBalance = combined[yearStart(y)];
+    row.wcaDetail.opening = wcaSeries[yearStart(y)];
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
     const real = runYear(y, { taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome });
     row.closingBalance = combined[yearEnd(y)];
+    row.wcaDetail.closing = wcaSeries[yearEnd(y)];
+    row.wcaClosing = wcaSeries[yearEnd(y)];
     for (const id of ids) {
       row.perAssetClosing[id] = series[id][yearEnd(y)];
       row.perAssetDetail[id].closing = series[id][yearEnd(y)];
@@ -1100,7 +1211,7 @@ export function projectPlan(state, profiles = PROFILES) {
       row.properties[pid].value = propVal[pid];
       row.propertyClosing += propVal[pid];
     }
-    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing - row.liabilitiesClosing;
+    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.wcaClosing - row.liabilitiesClosing;
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.
@@ -1169,7 +1280,7 @@ export function projectPlan(state, profiles = PROFILES) {
 
   return {
     schedule,
-    monthly: { combined, perAsset: series },
+    monthly: { combined, perAsset: series, wca: wcaSeries },
     yearly,
     shortfall,
     accruedCgtAtEnd: pendingCgt.client + pendingCgt.partner,
