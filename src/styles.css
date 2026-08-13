@@ -678,22 +678,75 @@ html, body {
 }
 
 /* Super contribution/withdrawal rows (Tier 1.2): more cells than the
-   fixed named-area rows above, so a flowing auto-fit grid rather than
-   a hand-laid-out template. */
-.cf-row-super {
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+   income/expense/asset rows above, so their own explicit 3-line (or
+   2-line, for withdrawals) named templates — every cell it can render
+   gets a named slot, with remove spanning every line as the last
+   column, same discipline as the rows above. */
+.cf-cell-type     { grid-area: type; }
+.cf-cell-account  { grid-area: account; }
+.cf-cell-cbasis   { grid-area: cbasis; }
+.cf-cell-percent  { grid-area: percent; }
+.cf-cell-inrow    { grid-area: inrow; }
+
+.cf-row-super-contribution {
+  grid-template-columns: 1fr 1fr 1fr 1fr 32px;
+  grid-template-areas:
+    "label   type    account cbasis  remove"
+    "amount  percent inrow   freq    remove"
+    "from    to      basis   extra   remove";
 }
-.cf-cell-cap-note,
+.cf-row-super-contribution.with-owner {
+  grid-template-columns: 1fr 1fr 1fr 1fr 1fr 32px;
+  grid-template-areas:
+    "label   type    owner   account cbasis  remove"
+    "amount  percent inrow   freq    freq    remove"
+    "from    to      basis   extra   extra   remove";
+}
+.cf-row-super-withdrawal {
+  grid-template-columns: 1.3fr 1fr 0.9fr 0.9fr 32px;
+  grid-template-areas:
+    "label   account amount  freq    remove"
+    "from    to      basis   extra   remove";
+}
+.cf-row-super-withdrawal.with-owner {
+  grid-template-columns: 1fr 0.8fr 1fr 0.9fr 0.9fr 32px;
+  grid-template-areas:
+    "label   owner   account amount  freq    remove"
+    "from    to      basis   extra   extra   remove";
+}
+.cf-row-super-contribution .cf-remove,
+.cf-row-super-withdrawal .cf-remove {
+  grid-area: remove;
+  align-self: stretch;
+  height: auto;
+}
+/* The fillnote helper (toConcessionalCap basis) shares the amount
+   slot — the two never render at the same time. The cap-headroom bar
+   spans the full row width beneath everything else; it is correct as
+   shipped and untouched here. */
+.cf-cell-cap-note { grid-area: amount; }
 .super-cap-headroom {
   grid-column: 1 / -1;
-}
-.super-cap-headroom {
   font-size: 12.5px;
   color: var(--ink-soft);
   background: var(--accent-soft);
   border-radius: 6px;
   padding: 6px 10px;
   font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 900px) {
+  .cf-row-super-contribution, .cf-row-super-contribution.with-owner,
+  .cf-row-super-withdrawal, .cf-row-super-withdrawal.with-owner {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas: none;
+  }
+  .cf-row-super-contribution .cf-remove,
+  .cf-row-super-withdrawal .cf-remove {
+    grid-area: auto;
+    align-self: center;
+    height: 34px;
+  }
 }
 
 .cf-row-income .cf-remove,

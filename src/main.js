@@ -2711,13 +2711,13 @@ function superContributionRowHTML(sc) {
   const showPercent = sc.basis === "percentOfIncome";
   const showFillNote = sc.basis === "toConcessionalCap";
   return `
-    <div class="cf-row cf-row-super" data-cfid="${sc.id}">
+    <div class="cf-row cf-row-super-contribution${isCouple() ? " with-owner" : ""}" data-cfid="${sc.id}">
       <div class="cf-cell cf-cell-label">
         <label>Label</label>
         <input type="text" value="${escapeHTML(sc.label)}" maxlength="60"
                data-kind="superContributions" data-cfid="${sc.id}" data-field="label" />
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-type">
         <label>Type</label>
         <select data-kind="superContributions" data-cfid="${sc.id}" data-field="type">
           ${ENTERABLE_SUPER_TYPES.map((t) =>
@@ -2726,16 +2726,16 @@ function superContributionRowHTML(sc) {
         </select>
       </div>
       ${isCouple() ? `
-        <div class="cf-cell">
+        <div class="cf-cell cf-cell-owner">
           <label>Owner</label>
           <select data-kind="superContributions" data-cfid="${sc.id}" data-field="owner">${superOwnerOptions(sc.owner)}</select>
         </div>
       ` : ""}
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-account">
         <label>Account</label>
         <select data-kind="superContributions" data-cfid="${sc.id}" data-field="accountId">${superAccountOptions(sc.accountId, sc.owner)}</select>
       </div>
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-cbasis">
         <label>Basis</label>
         <select data-kind="superContributions" data-cfid="${sc.id}" data-field="basis">
           <option value="amount"${sc.basis === "amount" ? " selected" : ""}>Fixed amount</option>
@@ -2751,12 +2751,12 @@ function superContributionRowHTML(sc) {
         </div>
       ` : ""}
       ${showPercent ? `
-        <div class="cf-cell">
+        <div class="cf-cell cf-cell-percent">
           <label>% of income</label>
           <input type="number" min="0" max="100" step="1" value="${sc.percent}"
                  data-kind="superContributions" data-cfid="${sc.id}" data-field="percent" />
         </div>
-        <div class="cf-cell">
+        <div class="cf-cell cf-cell-inrow">
           <label>Income row</label>
           <select data-kind="superContributions" data-cfid="${sc.id}" data-field="incomeRowId">${incomeRowOptions(sc.incomeRowId)}</select>
         </div>
@@ -2791,19 +2791,19 @@ function superContributionRowHTML(sc) {
 
 function superWithdrawalRowHTML(sw) {
   return `
-    <div class="cf-row cf-row-super" data-cfid="${sw.id}">
+    <div class="cf-row cf-row-super-withdrawal${isCouple() ? " with-owner" : ""}" data-cfid="${sw.id}">
       <div class="cf-cell cf-cell-label">
         <label>Label</label>
         <input type="text" value="${escapeHTML(sw.label)}" maxlength="60"
                data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="label" />
       </div>
       ${isCouple() ? `
-        <div class="cf-cell">
+        <div class="cf-cell cf-cell-owner">
           <label>Owner</label>
           <select data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="owner">${superOwnerOptions(sw.owner)}</select>
         </div>
       ` : ""}
-      <div class="cf-cell">
+      <div class="cf-cell cf-cell-account">
         <label>Account</label>
         <select data-kind="superWithdrawals" data-cfid="${sw.id}" data-field="accountId">${superAccountOptions(sw.accountId, sw.owner)}</select>
       </div>
