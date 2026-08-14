@@ -105,6 +105,17 @@ function clampPersonSuper(raw) {
     bringForwardTriggeredYear: Number.isInteger(raw?.bringForwardTriggeredYear)
       ? raw.bringForwardTriggeredYear : null,
     workTestMet: raw?.workTestMet !== false, // default true (Commit 2/4)
+    // Division 293/296: release from super by default commit. Default
+    // "super" — a release authority against a super interest, which is
+    // what most clients actually elect (the cost lands on the super
+    // balance instead of cash available for other strategy); "cash"
+    // reproduces the tool's original behaviour exactly. Validated
+    // loosely here (type only) — deterministic.js resolves the
+    // nominated account defensively (falls back to the largest-balance
+    // account, or to cash if none exists), the same pattern
+    // surplusTargetId/fundingOrder already use for a stale reference.
+    divTaxPaidFrom: raw?.divTaxPaidFrom === "cash" ? "cash" : "super",
+    divTaxReleaseAccountId: typeof raw?.divTaxReleaseAccountId === "string" ? raw.divTaxReleaseAccountId : null,
   };
 }
 

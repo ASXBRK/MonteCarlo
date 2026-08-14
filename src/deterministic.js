@@ -556,7 +556,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     superDetail: Object.fromEntries(superIds.map((id) => [id, {
       opening: 0, contributions: 0, contributionsTax: 0,
       sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0,
-      earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0, taxFreeClosing: 0,
+      earnings: 0, earningsTax: 0, withdrawals: 0,
+      // Division 293/296 release authority payments — a direct balance
+      // reduction, separate from `withdrawals` (a benefit payment) since
+      // it's not assessable and not preservation-gated. See the Division
+      // 293/296 release-from-super feature.
+      release: 0,
+      closing: 0, taxFreeClosing: 0,
     }])),
     superClosing: 0,
     superCapUsage: { client: null, partner: null },
@@ -578,7 +584,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   //   trackUnfunded — record into the projection-level shortfall trackers
   // Returns per-person income components + realised gains + months in
   // which each person's income arose.
-  function runYear(y, { taxOut, cgtDue, row, trackUnfunded, superOutcome }) {
+  function runYear(y, { taxOut, cgtDue, row, trackUnfunded, superOutcome, divReleaseFromSuper, divReleaseAccountId }) {
     const fyStart = fy0 + y;
     // Condition of release (Tier 1.2, Commit 3): static for the whole
     // projection (retirementAge doesn't change), so cheap to recompute
@@ -767,6 +773,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // nothing to snapshot/roll back for that pass, unlike `bal`/
       // `pools` above.
       if (row) {
+        // Division 293/296 release authority: resolved once per FY
+        // (above, before either pass, against the opening balance) —
+        // applied here, at the very top of July's month, before growth/
+        // contributions/withdrawals touch `superBal` for the year. A
+        // release authority is not a benefit payment: no preservation
+        // gate, no assessable income, no lump-sum tax — just a direct
+        // balance reduction via the same proportioning withdrawFromSuper
+        // already uses for ordinary withdrawals.
+        if (m === first) {
+          for (const p of persons) {
+            const accountId = divReleaseAccountId?.[p];
+            const want = divReleaseFromSuper?.[p] ?? 0;
+            if (!accountId || want <= 0) continue;
+            const paid = withdrawFromSuper(accountId, want);
+            row.superDetail[accountId].release += paid;
+          }
+        }
         for (const id of superIds) {
           const sm = superMeta[id];
           // Monte Carlo shock (Session B): the SAME shock added to
@@ -1169,15 +1192,69 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // --- year loop -------------------------------------------------------------
   for (let y = 0; y < years; y++) {
     const fyStart = fy0 + y;
-    const div293Due = y > 0 ? pendingDiv293.client + pendingDiv293.partner : 0;
     const div293DueDetail = y > 0 ? pendingDiv293 : { client: 0, partner: 0 };
-    const div296Due = y > 0 ? pendingDiv296.client + pendingDiv296.partner : 0;
     const div296DueDetail = y > 0 ? pendingDiv296 : { client: 0, partner: 0 };
+    const div293Due = div293DueDetail.client + div293DueDetail.partner;
+    const div296Due = div296DueDetail.client + div296DueDetail.partner;
     // Positive refundDue = net refund settling this FY (reduces the
     // household's tax outflow); negative = a net balancing payment
     // owed (increases it) — see the assessment loop below.
     const refundDue = y > 0 ? pendingRefund.client + pendingRefund.partner : 0;
-    const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0) + div293Due + div296Due - refundDue;
+
+    // Division 293/296: release from super by default. Resolved ONCE
+    // per FY, here, BEFORE either pass runs — using `superBal` at its
+    // opening-of-year value (neither pass has touched it yet this
+    // year), the same "resolve once against pre-pass state" pattern
+    // superOutcome/tsbOpening below already use for contribution caps.
+    // A release authority is NOT a benefit payment: it's not
+    // assessable, not subject to lump-sum tax, and — critically —
+    // NOT gated by the preservation/condition-of-release check
+    // (superReleased in runYear) that ordinary withdrawals go through.
+    // withdrawFromSuper() itself has no such gate built in (the gate is
+    // applied at ordinary-withdrawal call sites only), so calling it
+    // directly here is sufficient to bypass preservation correctly.
+    const divReleaseFromSuper = { client: 0, partner: 0 };
+    const divReleaseAccountId = { client: null, partner: null };
+    const divReleaseCash = { client: 0, partner: 0 };
+    for (const p of persons) {
+      const person = p === "partner" ? state.plan.partner : state.plan.client;
+      const personDue = div293DueDetail[p] + div296DueDetail[p];
+      if (personDue <= 0) continue;
+      const paidFrom = person?.super?.divTaxPaidFrom === "cash" ? "cash" : "super";
+      if (paidFrom === "cash") { divReleaseCash[p] = personDue; continue; }
+      const candidateIds = superAccountsByOwner[p] ?? [];
+      const nominated = person?.super?.divTaxReleaseAccountId;
+      // Defensive fallback (same pattern as fundingOrder/
+      // surplusTargetId elsewhere): a stale/missing nomination falls
+      // back to the largest-balance account for this owner, or to cash
+      // if the owner has no super account at all.
+      let accountId = candidateIds.includes(nominated)
+        ? nominated
+        : candidateIds.reduce((best, id) => (best === null || superBal[id] > superBal[best] ? id : best), null);
+      if (accountId === null) {
+        divReleaseCash[p] = personDue;
+        superWarnings.push({
+          fyLabel: schedule.fyLabels[y], owner: p, type: "divTaxRelease",
+          reason: `Division 293/296 is set to release from super, but ${p} has no super account — $${Math.round(personDue)} paid from household cash instead`,
+        });
+        continue;
+      }
+      const released = Math.min(personDue, superBal[accountId]);
+      divReleaseFromSuper[p] = released;
+      divReleaseAccountId[p] = accountId;
+      // Insufficient balance: take what's there, fall back to cash for
+      // the remainder (which then flows through the normal fundingOrder
+      // → unfunded cascade like any other household outflow).
+      divReleaseCash[p] = personDue - released;
+      if (divReleaseCash[p] > 1e-6) {
+        superWarnings.push({
+          fyLabel: schedule.fyLabels[y], owner: p, type: "divTaxRelease",
+          reason: `Super balance couldn't cover the full Division 293/296 release — $${Math.round(divReleaseCash[p])} fell back to household cash`,
+        });
+      }
+    }
+    const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0)
+      + divReleaseCash.client + divReleaseCash.partner - refundDue;
     const cgtDueDetail = y > 0 ? pendingCgt : { client: 0, partner: 0 };
 
     // Super contribution caps (Tier 1.2, Commit 2): resolved ONCE per
@@ -1291,7 +1368,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const propValSnap = { ...propVal };
     const propPoolSnap = { ...propPools };
     const wcaBalSnap = wcaBal;
-    const measured = runYear(y, { taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome });
+    const measured = runYear(y, {
+      taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome,
+      divReleaseFromSuper, divReleaseAccountId,
+    });
     Object.assign(bal, balSnap);
     pools = poolSnap;
     Object.assign(loanBal, loanSnap);
@@ -1410,7 +1490,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     for (const l of liabs) row.liabilities[l.id].opening = liabSeries[l.id][yearStart(y)];
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
-    const real = runYear(y, { taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome });
+    const real = runYear(y, {
+      taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
+      divReleaseFromSuper, divReleaseAccountId,
+    });
     row.closingBalance = combined[yearEnd(y)];
     row.wcaDetail.closing = wcaSeries[yearEnd(y)];
     row.wcaClosing = wcaSeries[yearEnd(y)];
@@ -1498,6 +1581,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       cgt: cgtDueDetail[p],
       div293: div293DueDetail[p],
       div296: div296DueDetail[p],
+      // Division 293/296 release-from-super (default) — how THIS year's
+      // due amount (div293 + div296 above) was actually funded: the
+      // person's election, the amount released from their nominated
+      // super account (0 if paid from cash, or if nothing was due), and
+      // any shortfall that fell back to household cash (either because
+      // the election is "cash", or because super).
+      divTaxPaidFrom: (p === "partner" ? state.plan.partner : state.plan.client)?.super?.divTaxPaidFrom === "cash"
+        ? "cash" : "super",
+      divTaxReleasedFromSuper: divReleaseFromSuper[p],
+      divTaxFromCash: divReleaseCash[p],
       frankingCredits: assessed[p].frankingCredits,
       // PAYG withholding, tax refund timing, and deductions — THIS FY's
       // own assessment (not a payment-year figure like cgt/div293/
@@ -1525,11 +1618,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       client: detail("client"),
       partner: detail("partner"),
       incomeTax: persons.reduce((s, p) => s + assessed[p].netIncomeTax, 0),
-      // cgtDue folds in div293Due, div296Due AND −refundDue for the
-      // actual cash outflow; each reported separately here.
-      cgt: cgtDue - div293Due - div296Due + refundDue,
+      // cgtDue folds in the CASH-funded portion of div293/div296 (any
+      // amount not released from super) AND −refundDue for the actual
+      // cash outflow; div293/div296 below report the FULL assessed
+      // amounts regardless of how they were paid.
+      cgt: cgtDue - divReleaseCash.client - divReleaseCash.partner + refundDue,
       div293: div293Due,
       div296: div296Due,
+      // Division 293/296 release from super — household totals (see
+      // detail(p) above for the per-person breakdown).
+      divTaxReleasedFromSuper: divReleaseFromSuper.client + divReleaseFromSuper.partner,
+      divTaxFromCash: divReleaseCash.client + divReleaseCash.partner,
       // The cash amount actually settling THIS year (last year's
       // paygWithheld − actualTaxPayable, per person) — positive = net
       // refund received, negative = net balancing payment owed. 0 in a

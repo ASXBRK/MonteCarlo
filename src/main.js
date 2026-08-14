@@ -815,6 +815,9 @@ function personSpansWorkTestAges(person) {
 
 function personBlockHTML(prefix, person, title) {
   const tp = person.taxProfile;
+  const owner = prefix === "client" ? "client" : "partner";
+  const ownerSuperAccounts = (state.plan.superAccounts ?? []).filter((s) => s.owner === owner && s.include);
+  const divTaxPaidFrom = person.super?.divTaxPaidFrom === "cash" ? "cash" : "super";
   return `
     <div class="person-block">
       <div class="cf-section-title">${escapeHTML(title)}</div>
@@ -877,6 +880,24 @@ function personBlockHTML(prefix, person, title) {
           <input type="number" min="0" step="1000" value="${tp.openingCapitalLosses}"
                  data-plan-field="${prefix}OpeningLosses" />
         </div>
+        <div class="cf-cell">
+          <label>Division 293 / 296 tax paid from
+            <span class="helper-inline">The taxpayer may elect either; release from super is the common election.</span>
+          </label>
+          <select data-plan-field="${prefix}DivTaxPaidFrom">
+            <option value="super"${divTaxPaidFrom === "super" ? " selected" : ""}>Super (release authority)</option>
+            <option value="cash"${divTaxPaidFrom === "cash" ? " selected" : ""}>Personal cash</option>
+          </select>
+        </div>
+        ${divTaxPaidFrom === "super" && ownerSuperAccounts.length > 1 ? `
+          <div class="cf-cell">
+            <label>Release from which account?</label>
+            <select data-plan-field="${prefix}DivTaxReleaseAccountId">
+              <option value=""${!person.super?.divTaxReleaseAccountId ? " selected" : ""}>Largest balance (default)</option>
+              ${ownerSuperAccounts.map((a) => `<option value="${escapeHTML(a.id)}"${person.super?.divTaxReleaseAccountId === a.id ? " selected" : ""}>${escapeHTML(a.name)}</option>`).join("")}
+            </select>
+          </div>
+        ` : ""}
         <div class="cf-cell">
           <label>Eligible for Centrelink benefits
             <span class="coming-soon-tag" title="No engine effect yet">Used when Centrelink modelling arrives</span>
@@ -1083,9 +1104,14 @@ wireDeferredDateCommit(els.planBar, (e) => {
     },
     // Super carry-forward ledger etc. (Tier 1.2) — carried through
     // untouched by every OTHER Setup field edit; the work-test toggle
-    // (Commit 2/4) is the only one that writes it here.
+    // (Commit 2/4) and the Division 293/296 release election are the
+    // only ones that write it here.
     super: field === `${prefix}WorkTestMet`
       ? { ...cur.super, workTestMet: e.target.checked }
+      : field === `${prefix}DivTaxPaidFrom`
+      ? { ...cur.super, divTaxPaidFrom: e.target.value }
+      : field === `${prefix}DivTaxReleaseAccountId`
+      ? { ...cur.super, divTaxReleaseAccountId: e.target.value || null }
       : cur.super,
   });
   let endBasis = { ...p.endBasis };
@@ -5120,6 +5146,11 @@ function superDetailRows(get) {
     { label: "Earnings", cell: (y) => get(y).earnings },
     { label: "Earnings tax", cell: (y) => -get(y).earningsTax },
     { label: "Withdrawals", cell: (y) => -get(y).withdrawals },
+    // Division 293/296 release-from-super default: a direct balance
+    // reduction, reported separately from an ordinary withdrawal since
+    // it's not a benefit payment (not assessable, not preservation-
+    // gated) — see the Division 293/296 release-from-super feature.
+    { label: "Releases (Division 293/296)", cell: (y) => -get(y).release },
   ];
 }
 
@@ -5162,7 +5193,7 @@ function buildSuperGroups(entity) {
   if (isCouple()) personGroups.push(superPersonGroup("partner", partnerName()));
 
   if (entity === "all") {
-    const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0 };
+    const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, release: 0, closing: 0 };
     const combined = superDetailRows((y) => included.reduce((s, a) => {
       const d = yl[y].superDetail[a.id] ?? zero;
       for (const k in s) s[k] += d[k] ?? 0;
@@ -5182,7 +5213,7 @@ function buildSuperGroups(entity) {
     ];
   }
 
-  const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, closing: 0, taxFreeClosing: 0 };
+  const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, release: 0, closing: 0, taxFreeClosing: 0 };
   const name = included.find((a) => a.id === entity)?.name ?? "Super account";
   const rows = superDetailRows((y) => yl[y].superDetail[entity] ?? zero);
   rows.push({ label: "Closing balance", cell: (y) => (yl[y].superDetail[entity] ?? zero).closing, always: true, cls: "tl-total" });
@@ -5272,6 +5303,20 @@ function renderLiabilitiesView() {
 function buildTaxGroups() {
   const yl = projection.yearly;
   const td = (y, p) => yl[y].taxDetail?.[p] ?? null;
+  // Division 293/296 "paid from" indication (release-from-super
+  // default): blank in a year nothing is payable; otherwise "Super",
+  // "Cash" (the personal-cash election), or a flagged shortfall when
+  // the super balance couldn't cover it in full.
+  const divPaidFromText = (y, p) => {
+    const d = td(y, p);
+    const due = (d?.div293 ?? 0) + (d?.div296 ?? 0);
+    if (due <= 0.005) return "";
+    const released = d.divTaxReleasedFromSuper ?? 0;
+    const fromCash = d.divTaxFromCash ?? 0;
+    if (fromCash <= 0.005) return "Super (release authority)";
+    if (released <= 0.005) return "Personal cash";
+    return `Super, $${Math.round(fromCash).toLocaleString()} shortfall to cash`;
+  };
   const personGroup = (p, title) => ({
     title,
     rows: [
@@ -5286,6 +5331,7 @@ function buildTaxGroups() {
       { label: "CGT payable", cell: (y) => -(td(y, p)?.cgt ?? 0) },
       { label: "Division 293 tax payable", cell: (y) => -(td(y, p)?.div293 ?? 0) },
       { label: "Division 296 tax payable", cell: (y) => -(td(y, p)?.div296 ?? 0) },
+      { label: "Division 293/296 — paid from", text: true, cell: (y) => divPaidFromText(y, p) },
       { label: "Quarantined rental losses (carried)", cell: (y) => td(y, p)?.quarantinedLossCarry ?? 0 },
     ],
   });

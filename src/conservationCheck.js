@@ -48,6 +48,11 @@
 //           to its minimum rather than left negative (convention 11), so
 //           this must be added back or the convention itself would read
 //           as a leak)
+//         − divReleaseFromSuper (Division 293/296 release-from-super
+//           default: a real tax payment funded by a direct super-balance
+//           reduction rather than cash, so it never shows up in
+//           `row.tax` — sumVals(row.superDetail, "release") is the only
+//           place it's recorded)
 //
 // Deliberately out of scope, so the invariant stays unambiguous rather
 // than merely thorough — each is its own already-tested subsystem:
@@ -90,6 +95,7 @@ export function checkYearConservation(out, y, ctx) {
   const contributionsTax = sumVals(row.superDetail, "contributionsTax");
   const sgInflow = sumVals(row.superDetail, "sg");
   const salarySacrificed = sumVals(row.superDetail, "salarySacrifice");
+  const divReleaseFromSuper = sumVals(row.superDetail, "release");
   const liabilityInterest = sumVals(row.liabilities, "interest");
   // A liability's nominal balance amortises independently of CPI, but
   // its REAL value (opening/closing, both deflated by that month's
@@ -119,7 +125,7 @@ export function checkYearConservation(out, y, ctx) {
   const expected =
     income + growth + sgInflow
     - row.expenses - row.tax - contributionsTax - liabilityInterest
-    - row.surplusSpent + row.unfundedCashflow;
+    - row.surplusSpent + row.unfundedCashflow - divReleaseFromSuper;
 
   const delta = closingN - openingN;
   const gap = delta - expected;

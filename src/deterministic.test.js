@@ -1684,7 +1684,12 @@ describe("Tier 1.2 — Super (Commit 3): preservation, withdrawals, proportionin
     // cpi:0 with a 0%/0% allocation gives an exact 0 real monthly rate
     // (no compounding drift), so every balance below is exact.
     const s = mkState({
-      plan: { client: { currentAge: 65, retirementAge: 65 }, superAccounts: [superAcct({ balance: 0 })] },
+      // divTaxPaidFrom: "cash" — this test's $1,000,000 salary triggers
+      // Division 293 (release-from-super is the DEFAULT), which would
+      // otherwise drain the very account this test is isolating the
+      // withdrawal-proportioning math on. Pinning to cash reproduces
+      // this test's pre-existing intent exactly.
+      plan: { client: { currentAge: 65, retirementAge: 65, super: { divTaxPaidFrom: "cash" } }, superAccounts: [superAcct({ balance: 0 })] },
       endAge: 68, // 3 plan years: ages 65, 66, 67
       cpi: 0,
       cashflows: {
@@ -2473,6 +2478,199 @@ describe("Division 296 — engine wiring", () => {
     expect(() => projectPlan(s)).not.toThrow();
     const out = projectPlan(s);
     for (const row of out.yearly) expect(row.taxDetail.div296).toBe(0);
+  });
+});
+
+// --- Division 293/296: release from super by default ------------------------
+//
+// A release authority (the default election) is a direct super-balance
+// reduction, not a benefit payment: not assessable, not lump-sum taxed,
+// and — critically — NOT gated by the preservation/condition-of-release
+// check ordinary withdrawals go through. "cash" reproduces the tool's
+// original (pre-feature) behaviour exactly.
+describe("Division 293/296: release from super by default", () => {
+  // $300,000 salary at age 40 assesses a Division 293 liability in year
+  // 0, paid (per the existing t+1 convention) in July of year 1 — same
+  // scenario as "Division 293 is assessed on high income..." above,
+  // just varying the divTaxPaidFrom election.
+  function highIncomeScenario(divTaxPaidFrom) {
+    return mkState({
+      endAge: 42,
+      cpi: 0,
+      plan: {
+        client: { currentAge: 40, super: divTaxPaidFrom ? { divTaxPaidFrom } : undefined },
+        superAccounts: [superAcct()],
+      },
+      cashflows: {
+        income: [employmentRow({ amount: 300000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+      },
+    });
+  }
+
+  it("defaults to release from super when divTaxPaidFrom is unset", () => {
+    const out = projectPlan(highIncomeScenario(undefined));
+    const due = out.yearly[1].taxDetail.client.div293;
+    expect(due).toBeGreaterThan(0);
+    expect(out.yearly[1].taxDetail.client.divTaxPaidFrom).toBe("super");
+    expect(out.yearly[1].taxDetail.client.divTaxReleasedFromSuper).toBeCloseTo(due, 2);
+    expect(out.yearly[1].taxDetail.client.divTaxFromCash).toBeCloseTo(0, 2);
+    expect(out.yearly[1].superDetail.su1.release).toBeCloseTo(due, 2);
+  });
+
+  it("a release reduces the super balance and leaves household cash untouched, vs. the cash-funded election", () => {
+    const outSuper = projectPlan(highIncomeScenario("super"));
+    const outCash = projectPlan(highIncomeScenario("cash"));
+    const due = outCash.yearly[1].taxDetail.client.div293;
+    expect(due).toBeGreaterThan(0);
+    // Same assessed liability either way — only the funding source
+    // differs.
+    expect(outSuper.yearly[1].taxDetail.client.div293).toBeCloseTo(due, 2);
+    // Super path: the balance closes `due` lower than it otherwise
+    // would have (the cash path's closing balance, identical up to
+    // this point since nothing else differs between the two runs).
+    expect(outSuper.yearly[1].superDetail.su1.closing)
+      .toBeCloseTo(outCash.yearly[1].superDetail.su1.closing - due, 2);
+    expect(outCash.yearly[1].superDetail.su1.release).toBe(0);
+    // Household cash: the ONLY difference in this FY's cash tax outflow
+    // between the two runs is `due` itself — proving the super path
+    // never touches household cash for it.
+    expect(outCash.yearly[1].tax - outSuper.yearly[1].tax).toBeCloseTo(due, 2);
+    expect(outSuper.yearly[1].unfundedCashflow).toBe(0);
+  });
+
+  it("components reduce proportionally, at the CURRENT (not fixed-at-commencement) tax-free fraction — same rule as an ordinary withdrawal", () => {
+    const s = mkState({
+      endAge: 42,
+      cpi: 0,
+      plan: {
+        client: { currentAge: 40 },
+        superAccounts: [superAcct({ balance: 400000, taxFreeComponent: 100000 })],
+      },
+      cashflows: {
+        income: [employmentRow({ amount: 300000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+      },
+    });
+    const out = projectPlan(s);
+    const due = out.yearly[1].taxDetail.client.div293;
+    expect(due).toBeGreaterThan(0);
+    const openingClosing = out.yearly[0].superDetail.su1.closing;
+    const openingTaxFree = out.yearly[0].superDetail.su1.taxFreeClosing;
+    const fraction = openingTaxFree / openingClosing;
+    const expectedTaxFreeAfter = openingTaxFree - due * fraction;
+    expect(out.yearly[1].superDetail.su1.release).toBeCloseTo(due, 2);
+    expect(out.yearly[1].superDetail.su1.taxFreeClosing).toBeCloseTo(expectedTaxFreeAfter, 6);
+    expect(out.yearly[1].superDetail.su1.closing).toBeCloseTo(openingClosing - due, 6);
+  });
+
+  it("a release authority bypasses the preservation/condition-of-release gate — a 45-year-old can still release, even though an ordinary withdrawal at the same age is blocked", () => {
+    const s = mkState({
+      plan: {
+        client: { currentAge: 45, retirementAge: 65 }, // condition of release never met within this projection
+        superAccounts: [superAcct({ balance: 500000 })],
+      },
+      endAge: 47,
+      cashflows: {
+        income: [employmentRow({ amount: 300000, from: { kind: "age", age: 45 }, to: { kind: "age", age: 45 } })],
+        // An ordinary withdrawal the SAME FY, same account — this one
+        // IS preservation-gated and must be blocked in full, proving
+        // the person really hasn't met a condition of release yet.
+        superWithdrawals: [swRow({ amount: 1000, from: { kind: "age", age: 46 }, to: { kind: "age", age: 46 } })],
+      },
+    });
+    const out = projectPlan(s);
+    const due = out.yearly[1].taxDetail.client.div293;
+    expect(due).toBeGreaterThan(0);
+    expect(out.yearly[1].superDetail.su1.release).toBeCloseTo(due, 2);
+    expect(out.yearly[1].superDetail.su1.withdrawals).toBe(0);
+    expect(out.superWarnings.some((w) => w.type === "withdrawal" && w.reason.includes("Blocked"))).toBe(true);
+  });
+
+  it("insufficient super balance releases what's there, falls back to cash for the remainder, then to unfunded cashflow — flagged", () => {
+    // su2 (listed first) is the SG default target and ends up well
+    // funded; su1 is explicitly nominated for the release and starts
+    // with far less than the Division 293 liability.
+    const s = mkState({
+      endAge: 42,
+      cpi: 0,
+      assets: [],
+      plan: {
+        client: { currentAge: 40, super: { divTaxReleaseAccountId: "su1" } },
+        superAccounts: [superAcct({ id: "su2" }), superAcct({ id: "su1", balance: 1000 })],
+      },
+      cashflows: {
+        income: [employmentRow({ amount: 300000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+      },
+    });
+    const out = projectPlan(s);
+    const due = out.yearly[1].taxDetail.client.div293;
+    expect(due).toBeGreaterThan(1000); // sanity: the liability really does exceed su1's balance
+    expect(out.yearly[1].superDetail.su1.release).toBeCloseTo(1000, 2); // capped at what's there
+    expect(out.yearly[1].superDetail.su1.closing).toBeCloseTo(0, 6);
+    expect(out.yearly[1].taxDetail.client.divTaxFromCash).toBeCloseTo(due - 1000, 2);
+    expect(out.yearly[1].unfundedCashflow).toBeGreaterThan(0); // no assets/cash left to cover the cash fallback
+    expect(out.superWarnings.some((w) => w.type === "divTaxRelease" && w.reason.includes("fell back to household cash"))).toBe(true);
+  });
+
+  it("the reduced super balance carries into the FOLLOWING year's TSB — both the $500,000 carry-forward gate and Division 296 proportioning see it", () => {
+    // Balance chosen so the release drags year 1's closing TSB from
+    // just above the $500,000 gate (cash path) to just below it (super
+    // path) — the gate is evaluated on year 2's OPENING TSB, i.e. year
+    // 1's closing, not year 1's own (unaffected) figure.
+    const base = (divTaxPaidFrom) => mkState({
+      endAge: 42,
+      cpi: 0,
+      plan: {
+        client: { currentAge: 40, super: { divTaxPaidFrom } },
+        superAccounts: [superAcct({ balance: 474375 })],
+      },
+      cashflows: {
+        income: [employmentRow({ amount: 300000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+      },
+    });
+    const outCash = projectPlan(base("cash"));
+    const outSuper = projectPlan(base("super"));
+    expect(outCash.yearly[1].superDetail.su1.closing).toBeGreaterThan(500000);
+    expect(outSuper.yearly[1].superDetail.su1.closing).toBeLessThan(500000);
+    // Carry-forward gate: blocked in the cash path (TSB ≥ $500,000),
+    // open in the super path (TSB now below it).
+    expect(outCash.yearly[2].superCapUsage.client.carryForwardAvailable).toBe(0);
+    expect(outSuper.yearly[2].superCapUsage.client.carryForwardAvailable).toBeGreaterThan(0);
+
+    // Division 296 proportioning: a separate, larger-balance scenario
+    // where the release lowers year 2's OPENING TSB (year 1's closing)
+    // enough to measurably shrink year 2's own Division 296 assessment
+    // — proving tsbOpening genuinely carries the reduced figure
+    // forward, not just the carry-forward gate above.
+    const div296Base = (divTaxPaidFrom) => mkState({
+      endAge: 43,
+      cpi: 0,
+      plan: {
+        client: { currentAge: 40, super: { divTaxPaidFrom } },
+        superAccounts: [superAcct({
+          balance: 3200000,
+          allocation: { mode: "custom", incomePct: 0, growthPct: 8, frankingPct: 0, volBasis: "Balanced" },
+        })],
+      },
+    });
+    const div296OutCash = projectPlan(div296Base("cash"));
+    const div296OutSuper = projectPlan(div296Base("super"));
+    expect(div296OutCash.yearly[1].taxDetail.client.div296).toBeGreaterThan(0); // sanity: something is due
+    expect(div296OutSuper.yearly[1].superDetail.su1.closing).toBeLessThan(div296OutCash.yearly[1].superDetail.su1.closing);
+    expect(div296OutSuper.yearly[2].taxDetail.client.div296).toBeLessThan(div296OutCash.yearly[2].taxDetail.client.div296);
+  });
+
+  it("regression gate: the personal-cash election reproduces the tool's original behaviour bit-identically — no releases, ever", () => {
+    const out = projectPlan(highIncomeScenario("cash"));
+    for (const row of out.yearly) {
+      expect(row.superDetail.su1.release).toBe(0);
+      expect(row.taxDetail.client.divTaxPaidFrom).toBe("cash");
+      expect(row.taxDetail.client.divTaxReleasedFromSuper).toBe(0);
+    }
+    // The full due amount lands in the ordinary cash tax outflow, same
+    // as before this feature existed.
+    const due = out.yearly[1].taxDetail.client.div293;
+    expect(due).toBeGreaterThan(0);
+    expect(out.yearly[1].taxDetail.client.divTaxFromCash).toBeCloseTo(due, 2);
   });
 });
 
