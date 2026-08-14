@@ -44,6 +44,12 @@
 // calls to get that. (Fixed defect: a `seed` option was documented but
 // never actually consumed — every run used Math.random regardless.)
 //
+// Percentile bands are 10/25/50/75/90 (not sim.js's legacy 05/25/50/
+// 75/95). Ruin has exactly one definition, used everywhere in this
+// module: out.shortfall !== null (any unfunded cashflow before
+// projection end) — ruinProbability is the fraction of paths meeting
+// it; nothing else (a "success" figure, say) computes it a second way.
+//
 // Shock and CPI generation are pre-computed for the WHOLE path,
 // sequentially, before projectPlan() sees a single month of it (see
 // deterministic.js's `mc` parameter header comment) — regime state is
@@ -62,10 +68,11 @@ export const MARKET_RHO = 0.85;
 export const DEFAULT_CPI_SIGMA = 0.01; // 1.0 percentage point, annual
 export const DEFAULT_CPI_FLOOR = -0.01; // −1%
 const SQRT12 = Math.sqrt(12);
-// [key, quantile] — key names match sim.js's p05/p25/p50/p75/p95
-// convention exactly, so UI code can treat either engine's percentile
-// bands the same way.
-const QUANTILES = [["p05", 0.05], ["p25", 0.25], ["p50", 0.50], ["p75", 0.75], ["p95", 0.95]];
+// [key, quantile] — 10/25/50/75/90, not sim.js's legacy 05/25/50/75/95:
+// the 5th/95th tails are wide enough, on a 40+ year tax-aware
+// projection, to read as more extreme than they are — 10/90 is the
+// firm's chosen band for advice-facing display.
+const QUANTILES = [["p10", 0.10], ["p25", 0.25], ["p50", 0.50], ["p75", 0.75], ["p90", 0.90]];
 
 // A small, solid seeded PRNG (mulberry32) — deterministic given the
 // same 32-bit integer seed, so options.seed fully determines a run's
@@ -121,6 +128,12 @@ function quantileSorted(sorted, q) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
+function median(values) {
+  if (values.length === 0) return null;
+  const sorted = Float64Array.from(values).sort();
+  return quantileSorted(sorted, 0.5);
+}
+
 // Every holding this plan can shock: included, non-lifestyle financial
 // assets and included super accounts, each resolved to the profile
 // that governs its σ/regime parameters (a custom allocation via its
@@ -140,6 +153,18 @@ export function holdingsFor(state, profiles = PROFILES) {
   return [...assets, ...supers]
     .map((h) => ({ ...h, profile: profileForAllocation(h.allocation, profiles) }))
     .filter((h) => h.profile); // a stale/unknown profile reference shocks nothing, same as allocation.js
+}
+
+// Holdings on a "custom" allocation — flagged (never blocking; the run
+// proceeds regardless), since a custom allocation's variability is
+// modelled on whatever profile its volatility basis happens to point
+// at, not on a separately-calibrated σ of its own. The UI's "N
+// asset(s) use custom returns" note (renderMonteCarloView) reads this
+// unconditionally, whether or not the run has happened yet.
+export function customAllocationHoldings(state, profiles = PROFILES) {
+  return holdingsFor(state, profiles)
+    .filter((h) => h.allocation?.mode === "custom")
+    .map((h) => ({ id: h.id, name: h.name, volBasis: h.allocation.volBasis }));
 }
 
 // One path's annual CPI draw: mean = the plan's assumed cpi, each
@@ -199,8 +224,19 @@ function generatePathShocks(holdings, months, rng, rho) {
 
 // runMonteCarlo(state, profiles, options) → {
 //   numPaths, years, elapsedMs,
-//   netAssets: { p05, p25, p50, p75, p95 }  — each an array of length years,
-//   successProbability,   — fraction of paths with NO shortfall (projection.shortfall === null)
+//   netAssets: { p10, p25, p50, p75, p90 }  — each an array of length years,
+//   ruinProbability,  — fraction of paths with ANY unfunded cashflow before
+//     projection end (out.shortfall !== null). This is the SINGLE, locked
+//     ruin definition (the tool's original design convention: one ruin
+//     definition, used everywhere) — nothing else in this module computes
+//     ruin or "success" independently of it. A "success" display should
+//     read 1 − ruinProbability rather than track its own counter.
+//   medianShortfallAge,  — median client age at FIRST shortfall, over ONLY
+//     the ruined paths (median(), not mean, so one catastrophically early
+//     outlier doesn't drag the headline figure) — null when no path ruined.
+//   customHoldings,  — customAllocationHoldings(state, profiles); the UI's
+//     "N asset(s) use custom returns" flag reads this, unconditionally
+//     (the run itself is never blocked by a custom allocation).
 //   samplePaths: [projectPlan() output, ...]  — sampleCount full path outputs, for
 //     spot-checking (e.g. the conservation invariant) or deeper inspection; NOT a
 //     representative percentile sample, just an unbiased random draw of raw outputs.
@@ -242,7 +278,8 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
   const years = base.yearly.length;
 
   const netAssetsAll = new Float64Array(numPaths * years); // [path*years + y]
-  let successes = 0;
+  let ruinCount = 0;
+  const shortfallAges = [];
   const sampleIdx = new Set();
   const targetSamples = Math.min(sampleCount, numPaths);
   while (sampleIdx.size < targetSamples) sampleIdx.add(Math.floor(rng() * numPaths));
@@ -254,7 +291,14 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
     const out = projectPlan(state, profiles, { shockFor, cpiForYear: (y) => cpiPath[y] });
     const rowBase = path * years;
     for (let y = 0; y < years; y++) netAssetsAll[rowBase + y] = out.yearly[y].netAssets;
-    if (!out.shortfall) successes++;
+    // The single, locked ruin definition (see the docblock above): ANY
+    // unfunded cashflow before projection end. out.shortfall is exactly
+    // that — deterministic.js sets it the first time recordUnfunded
+    // fires anywhere in the projection, non-null for the rest of the run.
+    if (out.shortfall) {
+      ruinCount++;
+      shortfallAges.push(out.shortfall.clientAge);
+    }
     if (sampleIdx.has(path)) samplePaths.push(out);
   }
 
@@ -270,7 +314,9 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
   return {
     numPaths, years, elapsedMs: now() - t0,
     netAssets,
-    successProbability: successes / numPaths,
+    ruinProbability: ruinCount / numPaths,
+    medianShortfallAge: median(shortfallAges),
+    customHoldings: customAllocationHoldings(state, profiles),
     samplePaths,
   };
 }

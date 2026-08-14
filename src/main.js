@@ -3982,14 +3982,14 @@ function renderMonteCarloChart() {
   const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const band = (key) => yearIdxs.map((y) => mcResult.netAssets[key][y] * factor(y));
-  const p05 = band("p05"), p25 = band("p25"), p50 = band("p50"), p75 = band("p75"), p95 = band("p95");
+  const p10 = band("p10"), p25 = band("p25"), p50 = band("p50"), p75 = band("p75"), p90 = band("p90");
 
   const outer = "rgba(28, 90, 180, 0.12)";
   const inner = "rgba(28, 90, 180, 0.28)";
   const traces = [
-    { x: ages, y: p05, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
-    { x: ages, y: p95, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: outer,
-      name: "5th–95th percentile", hovertemplate: "Age %{x}<br>P95 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: p10, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: p90, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: outer,
+      name: "10th–90th percentile", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
     { x: ages, y: p25, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
     { x: ages, y: p75, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: inner,
       name: "25th–75th percentile", hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
@@ -4011,39 +4011,63 @@ function renderMonteCarloChart() {
   }, { displayModeBar: false, responsive: true });
 }
 
+// Headline stats, in the locked order: ruin probability first (the
+// single ruin definition — see monteCarlo.js — never a second,
+// independently-computed "success" figure), then median/10th/90th
+// ending net assets, then median first-shortfall age (only shown when
+// at least one path was ruined — undefined for an ample plan).
 function renderMonteCarloStats() {
   const years = mcResult.years;
   const factor = displayFactor(endMonthOfYear(years - 1));
-  const pct = (mcResult.successProbability * 100).toFixed(0);
+  const ruinPct = (mcResult.ruinProbability * 100).toFixed(0);
+  const shortfallAgeStat = mcResult.medianShortfallAge != null ? `
+    <div class="stat">
+      <div class="stat-label">Median first-shortfall age</div>
+      <div class="stat-value">${Math.round(mcResult.medianShortfallAge)}</div>
+    </div>
+  ` : "";
   els.monteCarloStats.innerHTML = `
     <div class="stat stat-headline">
-      <div class="stat-label">No-shortfall probability</div>
-      <div class="stat-value">${pct}%</div>
+      <div class="stat-label">Ruin probability</div>
+      <div class="stat-value">${ruinPct}%</div>
     </div>
     <div class="stat">
       <div class="stat-label">Median ending net assets</div>
       <div class="stat-value">${fmtMoney(mcResult.netAssets.p50[years - 1] * factor)}</div>
     </div>
     <div class="stat">
-      <div class="stat-label">5th percentile ending</div>
-      <div class="stat-value">${fmtMoney(mcResult.netAssets.p05[years - 1] * factor)}</div>
+      <div class="stat-label">10th percentile ending</div>
+      <div class="stat-value">${fmtMoney(mcResult.netAssets.p10[years - 1] * factor)}</div>
     </div>
     <div class="stat">
-      <div class="stat-label">95th percentile ending</div>
-      <div class="stat-value">${fmtMoney(mcResult.netAssets.p95[years - 1] * factor)}</div>
+      <div class="stat-label">90th percentile ending</div>
+      <div class="stat-value">${fmtMoney(mcResult.netAssets.p90[years - 1] * factor)}</div>
     </div>
+    ${shortfallAgeStat}
   `;
+  // Custom-allocation flag (never blocks the run): lists exactly which
+  // included holdings borrowed a volatility-basis profile rather than
+  // having their own calibrated σ.
+  const customNote = $("monteCarloCustomNote");
+  if (mcResult.customHoldings.length > 0) {
+    const names = mcResult.customHoldings.map((h) => `${h.name} (${h.volBasis})`).join(", ");
+    customNote.textContent =
+      `${mcResult.customHoldings.length} asset(s) use custom returns; their variability is modelled on the ` +
+      `volatility basis profile selected for each — ${names}.`;
+  } else {
+    customNote.textContent = "";
+  }
 }
 
 function renderMonteCarloTable() {
   const groups = [{
     title: "Net assets — simulated percentiles",
     rows: [
-      { label: "5th percentile", cell: (y) => mcResult.netAssets.p05[y], always: true },
+      { label: "10th percentile", cell: (y) => mcResult.netAssets.p10[y], always: true },
       { label: "25th percentile", cell: (y) => mcResult.netAssets.p25[y], always: true },
       { label: "Median (50th)", cell: (y) => mcResult.netAssets.p50[y], always: true, cls: "tl-total" },
       { label: "75th percentile", cell: (y) => mcResult.netAssets.p75[y], always: true },
-      { label: "95th percentile", cell: (y) => mcResult.netAssets.p95[y], always: true },
+      { label: "90th percentile", cell: (y) => mcResult.netAssets.p90[y], always: true },
     ],
   }];
   renderTransposed($("monteCarloTable"), groups,

@@ -103,12 +103,12 @@ describe("runMonteCarlo", () => {
     });
     const result = runMonteCarlo(state, PROFILES, { numPaths: 10, sampleCount: 3, rng: createRng(1) });
     for (let y = 0; y < result.years; y++) {
-      expect(result.netAssets.p05[y]).toBeCloseTo(result.netAssets.p50[y], 6);
-      expect(result.netAssets.p50[y]).toBeCloseTo(result.netAssets.p95[y], 6);
+      expect(result.netAssets.p10[y]).toBeCloseTo(result.netAssets.p50[y], 6);
+      expect(result.netAssets.p50[y]).toBeCloseTo(result.netAssets.p90[y], 6);
     }
   });
 
-  it("percentiles are monotonic (p05 ≤ p25 ≤ p50 ≤ p75 ≤ p95) every year, for a genuinely shocked plan", () => {
+  it("percentiles are monotonic (p10 ≤ p25 ≤ p50 ≤ p75 ≤ p90) every year, for a genuinely shocked plan", () => {
     const state = mkState({
       endAge: 55,
       assets: [mkAsset({ id: "a1", balance: 200000, allocation: { mode: "profile", profile: "High Growth – Capital" } })],
@@ -117,11 +117,11 @@ describe("runMonteCarlo", () => {
     });
     const result = runMonteCarlo(state, PROFILES, { numPaths: 60, sampleCount: 5, rng: createRng(7) });
     for (let y = 0; y < result.years; y++) {
-      const { p05, p25, p50, p75, p95 } = result.netAssets;
-      expect(p05[y]).toBeLessThanOrEqual(p25[y]);
+      const { p10, p25, p50, p75, p90 } = result.netAssets;
+      expect(p10[y]).toBeLessThanOrEqual(p25[y]);
       expect(p25[y]).toBeLessThanOrEqual(p50[y]);
       expect(p50[y]).toBeLessThanOrEqual(p75[y]);
-      expect(p75[y]).toBeLessThanOrEqual(p95[y]);
+      expect(p75[y]).toBeLessThanOrEqual(p90[y]);
     }
   });
 
@@ -132,7 +132,7 @@ describe("runMonteCarlo", () => {
     const a = runMonteCarlo(state, PROFILES, { numPaths: 15, sampleCount: 4, rng: createRng(42) });
     const b = runMonteCarlo(state, PROFILES, { numPaths: 15, sampleCount: 4, rng: createRng(42) });
     expect(a.netAssets.p50).toEqual(b.netAssets.p50);
-    expect(a.successProbability).toBe(b.successProbability);
+    expect(a.ruinProbability).toBe(b.ruinProbability);
   });
 
   // Regression test for the exact reported defect: options.seed was
@@ -157,7 +157,7 @@ describe("runMonteCarlo", () => {
     const a = runMonteCarlo(state, PROFILES, { numPaths: 30, seed: 42 });
     const b = runMonteCarlo(state, PROFILES, { numPaths: 30, seed: 42 });
     expect(a.netAssets).toEqual(b.netAssets);
-    expect(a.successProbability).toBe(b.successProbability);
+    expect(a.ruinProbability).toBe(b.ruinProbability);
     expect(a.samplePaths.map((o) => o.yearly.map((r) => r.netAssets)))
       .toEqual(b.samplePaths.map((o) => o.yearly.map((r) => r.netAssets)));
     // And a different seed genuinely produces a different result —
@@ -203,8 +203,8 @@ describe("runMonteCarlo", () => {
     const deterministic = projectPlan(state, zeroSigmaProfiles);
     const result = runMonteCarlo(state, zeroSigmaProfiles, { numPaths: 12, sampleCount: 12, seed: 5, cpiSigma: 0 });
     for (let y = 0; y < result.years; y++) {
-      expect(result.netAssets.p05[y]).toBeCloseTo(deterministic.yearly[y].netAssets, 6);
-      expect(result.netAssets.p95[y]).toBeCloseTo(deterministic.yearly[y].netAssets, 6);
+      expect(result.netAssets.p10[y]).toBeCloseTo(deterministic.yearly[y].netAssets, 6);
+      expect(result.netAssets.p90[y]).toBeCloseTo(deterministic.yearly[y].netAssets, 6);
     }
     for (const out of result.samplePaths) {
       for (let y = 0; y < out.yearly.length; y++) {
@@ -250,6 +250,43 @@ describe("runMonteCarlo", () => {
     const state = mkState({ assets: [mkAsset({ allocation: { mode: "profile", profile: "Balanced" } })] });
     const result = runMonteCarlo(state, PROFILES, { numPaths: 5, rng: createRng(1) });
     expect(result.elapsedMs).toBeGreaterThan(0);
+  });
+
+  // Single ruin definition (item 5 of the CPI/seed follow-up): ANY
+  // unfunded cashflow before projection end, out.shortfall !== null —
+  // ruinProbability is the ONLY statistic this module derives from it;
+  // there is no separate "success" counter to disagree with it.
+  it("ruinProbability is exactly 0 for an ample plan and exactly 1 for a hopeless one — both directly from out.shortfall", () => {
+    const ample = mkState({
+      assets: [mkAsset({ id: "a1", balance: 2000000, allocation: { mode: "profile", profile: "Cash" } })],
+      cashflows: { expenses: [{ id: "e1", assetId: null, amount: 500, frequency: "monthly",
+        from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 }, indexed: true, owner: "client", label: "x" }] },
+    });
+    const ampleResult = runMonteCarlo(ample, PROFILES, { numPaths: 20, seed: 1, cpiSigma: 0 });
+    expect(ampleResult.ruinProbability).toBe(0);
+    expect(ampleResult.medianShortfallAge).toBeNull();
+
+    const hopeless = mkState({
+      assets: [mkAsset({ id: "a1", balance: 1000, allocation: { mode: "profile", profile: "Cash" } })],
+      cashflows: { expenses: [{ id: "e1", assetId: null, amount: 5000, frequency: "monthly",
+        from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 }, indexed: true, owner: "client", label: "x" }] },
+    });
+    const hopelessResult = runMonteCarlo(hopeless, PROFILES, { numPaths: 20, seed: 1, cpiSigma: 0 });
+    expect(hopelessResult.ruinProbability).toBe(1);
+    expect(hopelessResult.medianShortfallAge).not.toBeNull();
+    expect(hopelessResult.medianShortfallAge).toBeGreaterThanOrEqual(40);
+  });
+
+  it("customHoldings lists only the included, custom-allocation holdings, with their volatility-basis profile", () => {
+    const state = mkState({
+      assets: [
+        mkAsset({ id: "a1", name: "Direct shares", allocation: { mode: "profile", profile: "Balanced" } }),
+        mkAsset({ id: "a2", name: "Managed fund", allocation: { mode: "custom", incomePct: 3, growthPct: 4, frankingPct: 0, volBasis: "High Growth – Income" } }),
+      ],
+      plan: { superAccounts: [superAcct({ id: "su1", name: "My Super", allocation: { mode: "profile", profile: "Cash" } })] },
+    });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 3, seed: 1 });
+    expect(result.customHoldings).toEqual([{ id: "a2", name: "Managed fund", volBasis: "High Growth – Income" }]);
   });
 });
 
