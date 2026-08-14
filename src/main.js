@@ -130,6 +130,7 @@ const els = {
   viewAssetAllocation: $("viewAssetAllocation"),
   viewMonteCarlo: $("viewMonteCarlo"),
   runMonteCarloBtn: $("runMonteCarloBtn"),
+  cancelMonteCarloBtn: $("cancelMonteCarloBtn"),
   monteCarloStatus: $("monteCarloStatus"),
   monteCarloResults: $("monteCarloResults"),
   monteCarloStats: $("monteCarloStats"),
@@ -3419,12 +3420,23 @@ let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liab
 // 2,000 paths through the full tax-aware year loop is NOT sub-
 // millisecond (order of several seconds for a realistic plan — see
 // monteCarlo.js's own header and this session's measured benchmark),
-// so it never runs automatically. mcResult is invalidated on every
-// plan mutation (refreshOutputs, below) rather than silently going
-// stale — the Monte Carlo view shows "Run" again rather than an old
-// simulation's chart for a plan that's since changed.
+// so it never runs automatically and runs in a dedicated worker
+// (monteCarloWorker.js) rather than blocking the main thread. mcResult
+// is invalidated on every plan mutation (refreshOutputs, below) rather
+// than silently going stale — the Monte Carlo view shows "Run" again
+// rather than an old simulation's chart for a plan that's since
+// changed; an in-flight run is terminated outright for the same reason
+// (its result would be for a plan that no longer exists).
 let mcResult = null;
 let mcRunning = false;
+let mcProgress = null; // { done, total } while mcRunning; null otherwise
+let mcWorker = null;
+
+function stopMonteCarloWorker() {
+  if (mcWorker) { mcWorker.terminate(); mcWorker = null; }
+  mcRunning = false;
+  mcProgress = null;
+}
 
 function recomputeProjection() {
   projection = projectPlan(state);
@@ -3435,6 +3447,7 @@ function recomputeProjection() {
 function refreshOutputs() {
   recomputeProjection();
   mcResult = null;
+  stopMonteCarloWorker();
   renderPeriodSelector();
   renderSummaryStrip();
   renderActiveView();
@@ -3949,18 +3962,23 @@ function renderAssetAllocationChart() {
 // behind LEGACY_INSIGHTS_ENABLED) with randomised, correlated monthly
 // returns per included financial asset and super account. This is
 // order-of-seconds, not sub-millisecond like the deterministic engine
-// above — never auto-run on a mutation; only the explicit button below
-// triggers it, and any plan edit invalidates the cached result
-// (refreshOutputs) rather than leaving a stale chart on screen.
+// above — never auto-run on a mutation, and run inside a dedicated
+// worker (monteCarloWorker.js) rather than blocking the main thread, so
+// the rest of the UI stays responsive and a run can be cancelled
+// outright. Any plan edit invalidates the cached result and terminates
+// an in-flight run (refreshOutputs) rather than leaving a stale chart
+// or finishing a run for a plan that no longer exists.
 
 function renderMonteCarloView() {
   els.monteCarloResults.hidden = !mcResult;
-  els.runMonteCarloBtn.disabled = mcRunning;
-  els.runMonteCarloBtn.textContent = mcRunning
-    ? "Running…"
-    : `Run Monte Carlo (${DEFAULT_NUM_PATHS.toLocaleString()} paths)`;
+  els.runMonteCarloBtn.hidden = mcRunning;
+  els.cancelMonteCarloBtn.hidden = !mcRunning;
+  els.runMonteCarloBtn.textContent = `Run Monte Carlo (${DEFAULT_NUM_PATHS.toLocaleString()} paths)`;
   if (mcRunning) {
-    els.monteCarloStatus.textContent = "Simulating — this can take several seconds for a complex plan.";
+    const pct = mcProgress && mcProgress.total > 0 ? Math.round((mcProgress.done / mcProgress.total) * 100) : 0;
+    els.monteCarloStatus.textContent = mcProgress
+      ? `Simulating — ${mcProgress.done.toLocaleString()} / ${mcProgress.total.toLocaleString()} paths (${pct}%).`
+      : "Simulating…";
     return;
   }
   if (!mcResult) {
@@ -4077,19 +4095,39 @@ function renderMonteCarloTable() {
 els.runMonteCarloBtn.addEventListener("click", () => {
   if (mcRunning) return;
   mcRunning = true;
+  mcProgress = { done: 0, total: DEFAULT_NUM_PATHS };
   renderMonteCarloView();
-  // Defer the actual (blocking, multi-second) run one tick so the
-  // "Running…" state above actually paints first — a synchronous
-  // multi-second call here would freeze the UI before it could show
-  // anything changed.
-  setTimeout(() => {
-    try {
-      mcResult = runMonteCarlo(state, PROFILES);
-    } finally {
-      mcRunning = false;
+
+  mcWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
+  mcWorker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === "progress") {
+      mcProgress = { done: msg.done, total: msg.total };
+      renderMonteCarloView();
+    } else if (msg.type === "done") {
+      mcResult = msg.result;
+      stopMonteCarloWorker();
+      renderMonteCarloView();
+    } else if (msg.type === "error") {
+      stopMonteCarloWorker();
+      els.monteCarloStatus.textContent = `Monte Carlo run failed: ${msg.message}`;
       renderMonteCarloView();
     }
-  }, 0);
+  };
+  mcWorker.onerror = (e) => {
+    stopMonteCarloWorker();
+    els.monteCarloStatus.textContent = `Monte Carlo run failed: ${e.message}`;
+    renderMonteCarloView();
+  };
+  // state/PROFILES are plain data (no functions, no DOM) — structured-
+  // clone across the worker boundary without loss.
+  mcWorker.postMessage({ state, profiles: PROFILES, options: {} });
+});
+
+els.cancelMonteCarloBtn.addEventListener("click", () => {
+  stopMonteCarloWorker();
+  renderMonteCarloView(); // resets button visibility; clears status since mcResult is still null
+  els.monteCarloStatus.textContent = "Cancelled.";
 });
 
 // --- View: Super balances chart (Tier 1.2, Commit 4) ------------------------

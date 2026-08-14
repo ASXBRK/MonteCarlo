@@ -252,6 +252,16 @@ describe("runMonteCarlo", () => {
     expect(result.elapsedMs).toBeGreaterThan(0);
   });
 
+  it("onProgress is called periodically, ending exactly at numPaths — the worker's progress bar depends on this", () => {
+    const state = mkState({ assets: [mkAsset({ allocation: { mode: "profile", profile: "Balanced" } })] });
+    const calls = [];
+    runMonteCarlo(state, PROFILES, { numPaths: 250, rng: createRng(1), onProgress: (done, total) => calls.push([done, total]) });
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every(([, total]) => total === 250)).toBe(true);
+    expect(calls.every(([done], i) => i === 0 || done > calls[i - 1][0])).toBe(true); // strictly increasing
+    expect(calls[calls.length - 1][0]).toBe(250); // always fires on the final path, regardless of throttling
+  });
+
   // Single ruin definition (item 5 of the CPI/seed follow-up): ANY
   // unfunded cashflow before projection end, out.shortfall !== null —
   // ruinProbability is the ONLY statistic this module derives from it;

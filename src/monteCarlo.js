@@ -254,6 +254,13 @@ function generatePathShocks(holdings, months, rng, rho) {
 //   rho         — market-factor correlation (default MARKET_RHO, 0.85)
 //   cpiSigma    — annual CPI draw's σ (default DEFAULT_CPI_SIGMA, 1.0%)
 //   cpiFloor    — annual CPI draw's floor (default DEFAULT_CPI_FLOOR, −1%)
+//   onProgress(pathsDone, numPaths) — called periodically (throttled to
+//     roughly every 1% of numPaths, never more than once per path) as
+//     paths complete. The worker (monteCarloWorker.js) forwards this to
+//     the main thread via postMessage — a synchronous call here still
+//     reaches the main thread immediately, since postMessage queues
+//     rather than blocks, which is what lets a long run report progress
+//     without needing to chunk the loop itself.
 export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
   const {
     numPaths = DEFAULT_NUM_PATHS,
@@ -263,7 +270,9 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
     rho = MARKET_RHO,
     cpiSigma = DEFAULT_CPI_SIGMA,
     cpiFloor = DEFAULT_CPI_FLOOR,
+    onProgress = null,
   } = options;
+  const progressEvery = Math.max(1, Math.floor(numPaths / 100));
   const rng = rngOverride ?? (seed != null ? createRng(seed) : Math.random);
   const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
   const t0 = now();
@@ -300,6 +309,9 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
       shortfallAges.push(out.shortfall.clientAge);
     }
     if (sampleIdx.has(path)) samplePaths.push(out);
+    if (onProgress && ((path + 1) % progressEvery === 0 || path + 1 === numPaths)) {
+      onProgress(path + 1, numPaths);
+    }
   }
 
   const col = new Float64Array(numPaths);
