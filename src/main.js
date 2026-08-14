@@ -2567,15 +2567,46 @@ els.addAssetBtn.addEventListener("click", () => {
 
 // "Projected price at purchase (age 34, FY2032–33): $978,000 · duty ≈
 // $36,000 · cash required ≈ $141,000"
+// Returns { text, warn } — warn:true renders in the amber warning
+// style instead of the plain italic helper style.
+//
+// The "owned + future acquisition date" branch below is a reported-bug
+// fix (rent appearing from the projection's start for a property
+// meant to be a future purchase): acquisitionDate on an OWNED property
+// is cosmetic/CGT-only (deterministic.js's grandfathering check is its
+// only consumer) — it does NOT gate when the property, or its rent,
+// becomes active. An owned property is live from month one regardless
+// of acquisition date; only "Planned purchase" + "Purchase at" defers
+// anything. Setting a future acquisition date while leaving status on
+// the default "Owned" is an easy, silent way to end up with rent (and
+// the property's value) counted from day one when a future purchase
+// was intended — verified live: this reproduces the reported symptom
+// exactly, while the engine's own purchase-gating (propVal stays 0
+// until settlement for a genuinely "planned" property) is correct.
+// This is a validation warning, not an engine change — the engine is
+// doing exactly what "Owned" means.
 function propertyHelperText(p) {
-  if (p.status !== "planned" || !(p.priceToday > 0)) return "";
+  if (p.status === "owned") {
+    if (p.acquisitionDate) {
+      const planStart = new Date(state.plan.start.year, state.plan.start.month - 1, 1);
+      const acq = new Date(p.acquisitionDate);
+      if (!Number.isNaN(acq.getTime()) && acq > planStart) {
+        return {
+          warn: true,
+          text: `Acquisition date is in the future, but status is "Owned" — an owned property (and its rent, if any) is included in the projection from the very first month regardless of acquisition date; the date only affects CGT grandfathering. To model a future purchase, switch status to "Planned purchase" and set "Purchase at" instead.`,
+        };
+      }
+    }
+    return { warn: false, text: "" };
+  }
+  if (!(p.priceToday > 0)) return { warn: false, text: "" };
   const resolved = resolveRef(p.purchaseAt, state.plan, projection.schedule, "client");
   const y = resolved.planYear;
   if (resolved.outOfRange) {
-    return `Falls outside the projection window — clamped to age ${resolved.age}.`;
+    return { warn: false, text: `Falls outside the projection window — clamped to age ${resolved.age}.` };
   }
   if (y === 0 && state.plan.start.month !== 7) {
-    return "A purchase in the partial first year (which has no firing July) is skipped — pick a later date.";
+    return { warn: false, text: "A purchase in the partial first year (which has no firing July) is skipped — pick a later date." };
   }
   const first = 12 - ((state.plan.start.month - 7 + 12) % 12);
   const m = y === 0 ? 0 : first + 12 * (y - 1);
@@ -2585,8 +2616,11 @@ function propertyHelperText(p) {
     : dutyWithConcessions(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
   const fhog = fhogAmount(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
   const cash = nominalPrice * (1 - p.lvrPct / 100) + duty + (p.purchaseCostsPct / 100) * nominalPrice - fhog;
-  return `Projected price at purchase (age ${resolved.age}, ${resolved.fyLabel}): ` +
-    `${fmtMoney(nominalPrice)} · duty ≈ ${fmtMoney(duty)}${fhog ? ` · FHOG ${fmtMoney(fhog)}` : ""} · cash required ≈ ${fmtMoney(cash)}`;
+  return {
+    warn: false,
+    text: `Projected price at purchase (age ${resolved.age}, ${resolved.fyLabel}): ` +
+      `${fmtMoney(nominalPrice)} · duty ≈ ${fmtMoney(duty)}${fhog ? ` · FHOG ${fmtMoney(fhog)}` : ""} · cash required ≈ ${fmtMoney(cash)}`,
+  };
 }
 
 function propertyCardHTML(p) {
@@ -2649,7 +2683,7 @@ function propertyCardHTML(p) {
             ${num("Depreciation ($ p.a., deductible)", "depreciation", p.depreciation ?? 0)}
           ` : ""}
         </div>
-        ${helper ? `<p class="helper-text">${escapeHTML(helper)}</p>` : ""}
+        ${helper.text ? `<p class="${helper.warn ? "helper-warning" : "helper-text"}">${escapeHTML(helper.text)}</p>` : ""}
       </div>
     </div>
   `;
