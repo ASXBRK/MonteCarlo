@@ -18,6 +18,14 @@ spec wins and says so explicitly.**
   narration of the coding process.
 - Never modify: locked conventions below, `dutyOverride`/as-at patterns,
   the non-prescriptive output voice (no advice language, no winner-labels).
+- Specs live in `docs/specs/`, reference material in `docs/reference/`.
+- If a task references a spec, READ IT FROM DISK before starting. Never
+  work from a summary or paraphrase of a spec — if context has been
+  compacted and only a summary remains, re-read the file.
+- If a task references a spec you cannot find on disk, stop and say so
+  rather than reconstructing it.
+- Keep `docs/reference/build-log.md` current: move completed items to
+  DONE with their commit hashes as they land.
 
 ## Architecture map
 - `src/planState.js` — schema (v5+), migrations, factories. localStorage via
