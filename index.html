@@ -165,6 +165,18 @@
                 <div id="liabilitiesEntity" class="seg-toggle entity-select" role="tablist" aria-label="Loan"></div>
                 <div id="liabilitiesTable"></div>
               </div>
+              <div id="viewMonteCarloTable" hidden>
+                <div class="mc-controls">
+                  <button id="runMonteCarloTableBtn" class="btn-text" type="button">Run Monte Carlo (2,000 paths)</button>
+                  <button id="cancelMonteCarloTableBtn" class="btn-text" type="button" hidden>Cancel</button>
+                  <span id="monteCarloTableStatus" class="mc-status"></span>
+                </div>
+                <div id="monteCarloTableResults" hidden>
+                  <div id="monteCarloPercentileTable"></div>
+                  <h3 class="mc-subheading">Distribution summary — ending net assets</h3>
+                  <div id="monteCarloDistributionTable"></div>
+                </div>
+              </div>
               <div id="viewAssumptions" hidden></div>
             </div>
             <div class="chart-note" data-role="chartNote"></div>

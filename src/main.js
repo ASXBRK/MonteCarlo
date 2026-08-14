@@ -134,6 +134,11 @@ const els = {
   monteCarloStatus: $("monteCarloStatus"),
   monteCarloResults: $("monteCarloResults"),
   monteCarloStats: $("monteCarloStats"),
+  viewMonteCarloTable: $("viewMonteCarloTable"),
+  runMonteCarloTableBtn: $("runMonteCarloTableBtn"),
+  cancelMonteCarloTableBtn: $("cancelMonteCarloTableBtn"),
+  monteCarloTableStatus: $("monteCarloTableStatus"),
+  monteCarloTableResults: $("monteCarloTableResults"),
   chartTreatmentSelects: document.querySelectorAll("[data-treatment]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
@@ -338,6 +343,7 @@ const OUTPUT_NAV = {
     { id: "tax", label: "Tax" },
     { id: "super", label: "Super" },
     { id: "liabilities", label: "Liabilities" },
+    { id: "monte-carlo-table", label: "Monte Carlo" },
     { id: "assumptions", label: "Assumptions" },
   ],
 };
@@ -3469,6 +3475,7 @@ const VIEW_MOUNTS = {
   tax: () => els.viewTax,
   super: () => els.viewSuper,
   liabilities: () => els.viewLiabilities,
+  "monte-carlo-table": () => els.viewMonteCarloTable,
   assumptions: () => els.viewAssumptions,
 };
 const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
@@ -3500,6 +3507,7 @@ function renderActiveView() {
   else if (activeView === "tax") renderTaxView();
   else if (activeView === "super") renderSuperTableView();
   else if (activeView === "liabilities") renderLiabilitiesView();
+  else if (activeView === "monte-carlo-table") renderMonteCarloTableView();
   else if (activeView === "assumptions") renderAssumptionsView();
 }
 
@@ -3969,25 +3977,43 @@ function renderAssetAllocationChart() {
 // an in-flight run (refreshOutputs) rather than leaving a stale chart
 // or finishing a run for a plan that no longer exists.
 
-function renderMonteCarloView() {
-  els.monteCarloResults.hidden = !mcResult;
-  els.runMonteCarloBtn.hidden = mcRunning;
-  els.cancelMonteCarloBtn.hidden = !mcRunning;
-  els.runMonteCarloBtn.textContent = `Run Monte Carlo (${DEFAULT_NUM_PATHS.toLocaleString()} paths)`;
+// Shared Run/Cancel/status control triple — the Graphs view and the
+// Tables view each have their own set of these three elements (ids
+// must be unique in the document), both driven by the SAME mcResult/
+// mcRunning/mcProgress/mcWorker state, so either view can start a run,
+// and a run started from one is visible (progress included) from the
+// other if the user switches mid-run.
+function renderMonteCarloControls(runBtn, cancelBtn, statusEl) {
+  runBtn.hidden = mcRunning;
+  cancelBtn.hidden = !mcRunning;
+  runBtn.textContent = `Run Monte Carlo (${DEFAULT_NUM_PATHS.toLocaleString()} paths)`;
   if (mcRunning) {
     const pct = mcProgress && mcProgress.total > 0 ? Math.round((mcProgress.done / mcProgress.total) * 100) : 0;
-    els.monteCarloStatus.textContent = mcProgress
+    statusEl.textContent = mcProgress
       ? `Simulating — ${mcProgress.done.toLocaleString()} / ${mcProgress.total.toLocaleString()} paths (${pct}%).`
       : "Simulating…";
-    return;
+  } else if (!mcResult) {
+    statusEl.textContent = "";
+  } else {
+    statusEl.textContent =
+      `${mcResult.numPaths.toLocaleString()} paths in ${(mcResult.elapsedMs / 1000).toFixed(1)}s. ` +
+      "Re-run after changing the plan — this result is a snapshot, not live.";
   }
-  if (!mcResult) {
-    els.monteCarloStatus.textContent = "";
-    return;
-  }
-  els.monteCarloStatus.textContent =
-    `${mcResult.numPaths.toLocaleString()} paths in ${(mcResult.elapsedMs / 1000).toFixed(1)}s. ` +
-    "Re-run after changing the plan — this result is a snapshot, not live.";
+}
+
+// Re-renders BOTH Monte Carlo views' controls (and results, once
+// mcResult exists) regardless of which is currently on screen — cheap,
+// and means a run started from either view stays correct if the user
+// navigates to the other one mid-run or after it finishes.
+function refreshMonteCarloViews() {
+  renderMonteCarloView();
+  renderMonteCarloTableView();
+}
+
+function renderMonteCarloView() {
+  renderMonteCarloControls(els.runMonteCarloBtn, els.cancelMonteCarloBtn, els.monteCarloStatus);
+  els.monteCarloResults.hidden = !mcResult;
+  if (!mcResult) return;
   renderMonteCarloChart();
   renderMonteCarloStats();
   renderMonteCarloTable();
@@ -4077,8 +4103,11 @@ function renderMonteCarloStats() {
   }
 }
 
-function renderMonteCarloTable() {
-  const groups = [{
+// Shared by both the Graphs view's under-chart table and the Tables
+// view's percentile table (and its CSV export) — one row/column
+// definition, so the two can never drift apart.
+function monteCarloPercentileGroups() {
+  return [{
     title: "Net assets — simulated percentiles",
     rows: [
       { label: "10th percentile", cell: (y) => mcResult.netAssets.p10[y], always: true },
@@ -4088,47 +4117,128 @@ function renderMonteCarloTable() {
       { label: "90th percentile", cell: (y) => mcResult.netAssets.p90[y], always: true },
     ],
   }];
-  renderTransposed($("monteCarloTable"), groups,
-    `<p class="chart-note-inline">Single shared market factor (ρ = 0.85) plus each holding's own profile-based regime switching — not a per-asset-class correlation matrix (would need per-class σ calibrated to reproduce each profile's firm-set σ; a future refinement, see Parameters). Lifestyle assets and property carry no profile and are not randomised.</p>`);
+}
+const MC_CORRELATION_NOTE = `<p class="chart-note-inline">Single shared market factor (ρ = 0.85) plus each holding's own profile-based regime switching — not a per-asset-class correlation matrix (would need per-class σ calibrated to reproduce each profile's firm-set σ; a future refinement, see Parameters). Lifestyle assets and property carry no profile and are not randomised.</p>`;
+
+function renderMonteCarloTable() {
+  renderTransposed($("monteCarloTable"), monteCarloPercentileGroups(), MC_CORRELATION_NOTE);
 }
 
-els.runMonteCarloBtn.addEventListener("click", () => {
+// --- View: Monte Carlo (Tables) -----------------------------------------------
+//
+// The percentile-by-FY table above plus a distribution summary of the
+// FINAL year's net assets (min/percentiles/max/mean, from mcResult.
+// endDistribution) — the detailed, exportable companion to the Graphs
+// view's fan chart. Shares mcResult/mcRunning with it (see
+// renderMonteCarloControls); shows the same Run prompt when no result
+// exists yet.
+
+function renderMonteCarloTableView() {
+  renderMonteCarloControls(els.runMonteCarloTableBtn, els.cancelMonteCarloTableBtn, els.monteCarloTableStatus);
+  els.monteCarloTableResults.hidden = !mcResult;
+  if (!mcResult) return;
+  renderTransposed($("monteCarloPercentileTable"), monteCarloPercentileGroups(), MC_CORRELATION_NOTE);
+  renderMonteCarloDistributionTable();
+}
+
+function renderMonteCarloDistributionTable() {
+  const d = mcResult.endDistribution;
+  const factor = displayFactor(endMonthOfYear(mcResult.years - 1));
+  const rows = [
+    ["Minimum", d.min], ["10th percentile", d.p10], ["25th percentile", d.p25],
+    ["Median", d.p50], ["75th percentile", d.p75], ["90th percentile", d.p90],
+    ["Maximum", d.max], ["Mean", d.mean],
+  ];
+  $("monteCarloDistributionTable").innerHTML = `
+    <table class="param-table">
+      <thead><tr><th>Statistic</th><th>Ending net assets</th></tr></thead>
+      <tbody>
+        ${rows.map(([label, val]) => `<tr><td>${escapeHTML(label)}</td><td>${fmtMoney(val * factor)}</td></tr>`).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function exportMonteCarloCSV() {
+  if (!mcResult) return;
+  const esc = (s) => `"${String(s).replaceAll('"', '""')}"`;
+  const yearIdxs = selectedYearIndices();
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lines = [];
+  lines.push(["Net assets — simulated percentiles", ...yearIdxs.map((y) => yearHeaderText(y))].map(esc).join(","));
+  for (const g of monteCarloPercentileGroups()) {
+    for (const r of g.rows) {
+      lines.push([esc(r.label), ...yearIdxs.map((y) => (r.cell(y) * factor(y)).toFixed(2))].join(","));
+    }
+  }
+  lines.push("");
+  lines.push(esc("Distribution summary — ending net assets"));
+  const endFactor = displayFactor(endMonthOfYear(mcResult.years - 1));
+  const d = mcResult.endDistribution;
+  for (const [label, val] of [
+    ["Minimum", d.min], ["10th percentile", d.p10], ["25th percentile", d.p25], ["Median", d.p50],
+    ["75th percentile", d.p75], ["90th percentile", d.p90], ["Maximum", d.max], ["Mean", d.mean],
+  ]) {
+    lines.push([esc(label), (val * endFactor).toFixed(2)].join(","));
+  }
+  lines.push("");
+  lines.push([esc("Ruin probability (%)"), (mcResult.ruinProbability * 100).toFixed(1)].join(","));
+  if (mcResult.medianShortfallAge != null) {
+    lines.push([esc("Median first-shortfall age"), mcResult.medianShortfallAge].join(","));
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${exportNameBase()}-monte-carlo.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function startMonteCarloRun() {
   if (mcRunning) return;
   mcRunning = true;
   mcProgress = { done: 0, total: DEFAULT_NUM_PATHS };
-  renderMonteCarloView();
+  refreshMonteCarloViews();
 
   mcWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
   mcWorker.onmessage = (e) => {
     const msg = e.data;
     if (msg.type === "progress") {
       mcProgress = { done: msg.done, total: msg.total };
-      renderMonteCarloView();
+      refreshMonteCarloViews();
     } else if (msg.type === "done") {
       mcResult = msg.result;
       stopMonteCarloWorker();
-      renderMonteCarloView();
+      refreshMonteCarloViews();
     } else if (msg.type === "error") {
       stopMonteCarloWorker();
+      refreshMonteCarloViews();
       els.monteCarloStatus.textContent = `Monte Carlo run failed: ${msg.message}`;
-      renderMonteCarloView();
+      els.monteCarloTableStatus.textContent = `Monte Carlo run failed: ${msg.message}`;
     }
   };
   mcWorker.onerror = (e) => {
     stopMonteCarloWorker();
+    refreshMonteCarloViews();
     els.monteCarloStatus.textContent = `Monte Carlo run failed: ${e.message}`;
-    renderMonteCarloView();
+    els.monteCarloTableStatus.textContent = `Monte Carlo run failed: ${e.message}`;
   };
   // state/PROFILES are plain data (no functions, no DOM) — structured-
   // clone across the worker boundary without loss.
   mcWorker.postMessage({ state, profiles: PROFILES, options: {} });
-});
+}
 
-els.cancelMonteCarloBtn.addEventListener("click", () => {
+function cancelMonteCarloRun() {
   stopMonteCarloWorker();
-  renderMonteCarloView(); // resets button visibility; clears status since mcResult is still null
+  refreshMonteCarloViews(); // resets button visibility; clears status since mcResult is still null
   els.monteCarloStatus.textContent = "Cancelled.";
-});
+  els.monteCarloTableStatus.textContent = "Cancelled.";
+}
+
+els.runMonteCarloBtn.addEventListener("click", startMonteCarloRun);
+els.cancelMonteCarloBtn.addEventListener("click", cancelMonteCarloRun);
+els.runMonteCarloTableBtn.addEventListener("click", startMonteCarloRun);
+els.cancelMonteCarloTableBtn.addEventListener("click", cancelMonteCarloRun);
 
 // --- View: Super balances chart (Tier 1.2, Commit 4) ------------------------
 //
@@ -5296,6 +5406,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());
   else if (activeView === "super") exportTransposedCSV("super", buildSuperGroups(superEntity));
   else if (activeView === "liabilities") exportTransposedCSV("liabilities", buildLiabilitiesGroups(liabilitiesEntity));
+  else if (activeView === "monte-carlo-table") exportMonteCarloCSV();
   else if (activeView === "assumptions") exportTransposedCSV("assumptions", buildAssumptionsGroups());
 });
 

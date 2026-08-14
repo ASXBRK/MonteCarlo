@@ -225,6 +225,9 @@ function generatePathShocks(holdings, months, rng, rho) {
 // runMonteCarlo(state, profiles, options) → {
 //   numPaths, years, elapsedMs,
 //   netAssets: { p10, p25, p50, p75, p90 }  — each an array of length years,
+//   endDistribution: { min, p10, p25, p50, p75, p90, max, mean }  — the FINAL
+//     year's netAssets distribution across all paths (Tables view's
+//     "distribution summary of end net assets").
 //   ruinProbability,  — fraction of paths with ANY unfunded cashflow before
 //     projection end (out.shortfall !== null). This is the SINGLE, locked
 //     ruin definition (the tool's original design convention: one ruin
@@ -317,15 +320,30 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
   const col = new Float64Array(numPaths);
   const netAssets = {};
   for (const [key] of QUANTILES) netAssets[key] = new Array(years);
+  let endDistribution = null;
   for (let y = 0; y < years; y++) {
     for (let path = 0; path < numPaths; path++) col[path] = netAssetsAll[path * years + y];
     col.sort(); // Float64Array.sort defaults to ascending numeric order (unlike Array.sort's string default)
     for (const [key, q] of QUANTILES) netAssets[key][y] = quantileSorted(col, q);
+    if (y === years - 1) {
+      // The Tables view's "distribution summary of end net assets"
+      // (min/max/mean alongside the percentile bands already computed
+      // above) — captured here rather than re-sorting a second time,
+      // since `col` already holds the final year's full sorted set.
+      let sum = 0;
+      for (let path = 0; path < numPaths; path++) sum += col[path];
+      endDistribution = {
+        min: col[0], max: col[numPaths - 1], mean: sum / numPaths,
+        p10: netAssets.p10[y], p25: netAssets.p25[y], p50: netAssets.p50[y],
+        p75: netAssets.p75[y], p90: netAssets.p90[y],
+      };
+    }
   }
 
   return {
     numPaths, years, elapsedMs: now() - t0,
     netAssets,
+    endDistribution,
     ruinProbability: ruinCount / numPaths,
     medianShortfallAge: median(shortfallAges),
     customHoldings: customAllocationHoldings(state, profiles),

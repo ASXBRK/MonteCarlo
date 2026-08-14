@@ -125,6 +125,24 @@ describe("runMonteCarlo", () => {
     }
   });
 
+  it("endDistribution matches the final year's netAssets bands, and min ≤ p10 ≤ ... ≤ p90 ≤ max, mean inside the range", () => {
+    const state = mkState({
+      endAge: 45,
+      assets: [mkAsset({ id: "a1", balance: 200000, allocation: { mode: "profile", profile: "High Growth – Capital" } })],
+    });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 60, rng: createRng(9) });
+    const d = result.endDistribution;
+    const lastY = result.years - 1;
+    expect(d.p10).toBe(result.netAssets.p10[lastY]);
+    expect(d.p50).toBe(result.netAssets.p50[lastY]);
+    expect(d.p90).toBe(result.netAssets.p90[lastY]);
+    expect(d.min).toBeLessThanOrEqual(d.p10);
+    expect(d.p10).toBeLessThanOrEqual(d.p25);
+    expect(d.p90).toBeLessThanOrEqual(d.max);
+    expect(d.mean).toBeGreaterThanOrEqual(d.min);
+    expect(d.mean).toBeLessThanOrEqual(d.max);
+  });
+
   it("is reproducible given the same seeded rng", () => {
     const state = mkState({
       assets: [mkAsset({ allocation: { mode: "profile", profile: "Balanced" } })],
