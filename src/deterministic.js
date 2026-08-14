@@ -102,18 +102,34 @@ function ownerShares(asset, couple) {
 //   shortfall: { firstMonth, planYear, fyLabel, clientAge, total } | null,
 //   accruedCgtAtEnd,   // final FY's CGT, unpayable inside the projection
 // }
-// mc (Monte Carlo overlay, Session B): optional { shockFor(holdingId, m) }
-// returning a REAL monthly return shock (zero-mean; mu stays exactly
-// the deterministic rate below) for a financial asset or super
-// account id, at absolute month index m. Read at the single point
-// each holding's monthly return is realised (the "a. Growth" step for
-// assets, "a-super-credit" for super) so the SAME value is seen by
-// both the measurement and real passes of a plan year — critical,
-// since those two passes must replay identical balances for the tax
-// timing split to mean anything (see the module header). monteCarlo.js
-// pre-generates the whole path's shocks before either pass runs, for
-// exactly this reason; it is never drawn from inline. Omitted (the
-// default), every holding's return is the plan's normal deterministic
+// mc (Monte Carlo overlay, Session B): optional {
+//   shockFor(holdingId, m)  — REAL monthly return shock (zero-mean; mu
+//     stays exactly the deterministic rate below) for a financial
+//     asset or super account id, at absolute month index m. Read at
+//     the single point each holding's monthly return is realised (the
+//     "a. Growth" step for assets, "a-super-credit" for super) so the
+//     SAME value is seen by both the measurement and real passes of a
+//     plan year — critical, since those two passes must replay
+//     identical balances for the tax timing split to mean anything
+//     (see the module header).
+//   cpiForYear(y)  — the ACTUAL (possibly stochastic) inflation rate
+//     realised in plan year y, replacing the single assumed
+//     state.assumptions.cpi for inflAt(m) (below) only. Deliberately
+//     scoped to the two things inflAt actually feeds — a fixed-nominal
+//     liability's real burden and a planned property purchase's real
+//     price — NOT to asset/super/WCA expected returns (meta[id].rate
+//     etc., computed once, below, from the plan's single assumed cpi):
+//     those are modelled as holding a constant REAL return regardless
+//     of the inflation path (the same assumption the deterministic
+//     engine already makes everywhere), whereas a fixed-nominal
+//     instrument's real value genuinely does depend on which inflation
+//     path is realised. This is why a high-inflation path makes a
+//     geared client's debt burden lighter in real terms without also
+//     silently changing their portfolio's expected real return.
+// Both pre-generated for the whole path before either pass of any year
+// runs (monteCarlo.js) — never drawn from inline, for the same
+// measurement/real-pass replay reason as shockFor. Omitted (the
+// default), both are exactly the plan's normal deterministic
 // expectation — bit-identical to every existing regression gate.
 export function projectPlan(state, profiles = PROFILES, mc = null) {
   const shockFor = mc?.shockFor ?? (() => 0);
@@ -370,7 +386,6 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     liabSeries[l.id][0] = loanBal[l.id]; // real == nominal at month 0
     if (offsetId) (offsetLoansByAsset[offsetId] ??= []).push(l.id);
   }
-  const inflAt = (m) => Math.pow(1 + cpi, m / 12);
 
   // Lifestyle assets are illiquid to the engine: never funding
   // sources, never surplus targets (defensive — settings invariants
@@ -412,6 +427,28 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
 
   const yearStart = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
   const yearEnd = (y) => schedule.monthsInFirstYear + 12 * y;
+
+  // inflAt(m): cumulative nominal-to-real deflation factor at absolute
+  // month m. Every existing call site (liability interest/deflation,
+  // planned-property purchase pricing — see the module's mc parameter
+  // header comment for why it's scoped to exactly these) is unchanged;
+  // only what feeds it differs. Default: the closed-form (1+cpi)^(m/12)
+  // this has always been. Monte Carlo's stochastic CPI (mc.cpiForYear)
+  // replaces the exponent with the CUMULATIVE PRODUCT of each plan
+  // year's own realised rate, built once up front since every month
+  // needs the same path regardless of which pass or which later month
+  // reads it.
+  const inflAt = mc?.cpiForYear
+    ? (() => {
+        const cum = new Float64Array(months + 1);
+        cum[0] = 1;
+        for (let y = 0; y < years; y++) {
+          const monthlyFactor = Math.pow(1 + mc.cpiForYear(y), 1 / 12);
+          for (let m = yearStart(y); m < yearEnd(y); m++) cum[m + 1] = cum[m] * monthlyFactor;
+        }
+        return (m) => cum[m];
+      })()
+    : (m) => Math.pow(1 + cpi, m / 12);
 
   // Deemed reacquisition (1 July 2027): the first month of the plan
   // year whose FY starts in 2027 — but only when the projection

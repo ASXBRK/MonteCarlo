@@ -972,6 +972,79 @@ describe("D3 — liabilities", () => {
   });
 });
 
+// --- Monte Carlo's stochastic CPI (mc.cpiForYear) — engine wiring --------------
+//
+// deterministic.js's own header comment on the `mc` parameter explains
+// the scope: cpiForYear replaces the plan's single assumed cpi in
+// inflAt(m) ONLY, which liabilities (and planned-property pricing) are
+// the sole consumers of. These tests exercise exactly that mechanism
+// directly, isolating it from Monte Carlo's own randomness — see
+// monteCarlo.test.js for the integration-level (seeded, stochastic)
+// version.
+describe("mc.cpiForYear — stochastic CPI feeds inflAt only (Monte Carlo)", () => {
+  const bigAsset = () => mkAsset({ allocation: zeroRealAlloc(), balance: 2000000 });
+  const loan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 100000, interestRatePct: 6, termYears: 10, repayment: "pi",
+    ioYears: 5, deductible: false, linkedAssetId: null, offsetAssetId: null,
+    ...over,
+  });
+  // Interest-only: the NOMINAL balance stays perfectly flat at
+  // 100,000, so its REAL closing value is purely 100,000 / inflAt(m) —
+  // the cleanest possible isolation of the deflation mechanism from
+  // amortisation.
+  const ioState = (years = 6) => ({
+    ...mkState({ endAge: 40 + years, assets: [bigAsset()] }),
+    liabilities: [loan({ repayment: "io", ioYears: 20, termYears: 25 })],
+  });
+
+  it("omitted mc (or cpiForYear absent) is bit-identical to today — no regression", () => {
+    const s = ioState();
+    const withoutMc = projectPlan(s);
+    const withMc = projectPlan(s, PROFILES, {});
+    for (let y = 0; y < withoutMc.yearly.length; y++) {
+      expect(withMc.yearly[y].liabilities.lb1.closing).toBe(withoutMc.yearly[y].liabilities.lb1.closing);
+    }
+  });
+
+  it("a cpiForYear returning the plan's own assumed cpi every year reproduces the assumed-cpi result exactly", () => {
+    const s = ioState();
+    const withoutMc = projectPlan(s);
+    const withMc = projectPlan(s, PROFILES, { cpiForYear: () => 0.025 }); // ioState's cpi default is 0.025
+    for (let y = 0; y < withoutMc.yearly.length; y++) {
+      expect(withMc.yearly[y].liabilities.lb1.closing).toBeCloseTo(withoutMc.yearly[y].liabilities.lb1.closing, 8);
+    }
+  });
+
+  it("higher realised inflation makes the fixed-nominal loan's REAL closing balance lower, and lower inflation makes it higher — the expected direction, both ways", () => {
+    const s = ioState();
+    const assumed = projectPlan(s, PROFILES, { cpiForYear: () => 0.025 }).yearly[5].liabilities.lb1.closing;
+    const highInflation = projectPlan(s, PROFILES, { cpiForYear: () => 0.06 }).yearly[5].liabilities.lb1.closing;
+    const lowInflation = projectPlan(s, PROFILES, { cpiForYear: () => 0.00 }).yearly[5].liabilities.lb1.closing;
+    // Same nominal balance every path (IO, untouched by cpi) — only the
+    // deflator differs, so this isolates the direction unambiguously.
+    expect(highInflation).toBeLessThan(assumed);
+    expect(lowInflation).toBeGreaterThan(assumed);
+    // Exact figure: yearly[5] is the END of the 6th plan year (a July
+    // start has no partial first year), so 6 full years have elapsed —
+    // real closing = 100,000 / (1+cpi)^6.
+    expect(highInflation).toBeCloseTo(100000 / Math.pow(1.06, 6), 4);
+    expect(lowInflation).toBeCloseTo(100000 / Math.pow(1.00, 6), 4);
+  });
+
+  it("a per-year cpi path compounds cumulatively, not as a flat average", () => {
+    const s = ioState(2); // 3 plan years (0,1,2) — matches path.length exactly
+    // Year 0 at 2%, year 1 at 8%, year 2 at 2% — cumulative product,
+    // not (2%+8%+2%)/3 = 4% flat, must drive the deflator.
+    const path = [0.02, 0.08, 0.02];
+    const out = projectPlan(s, PROFILES, { cpiForYear: (y) => path[y] });
+    const cumulativeAt = (y) => path.slice(0, y + 1).reduce((acc, r) => acc * (1 + r), 1);
+    for (let y = 0; y < 3; y++) {
+      expect(out.yearly[y].liabilities.lb1.closing).toBeCloseTo(100000 / cumulativeAt(y), 3);
+    }
+  });
+});
+
 // --- Phase D4: property, purchase events, gearing ------------------------------
 
 describe("D4 — property", () => {

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { runMonteCarlo, holdingsFor, MARKET_RHO } from "./monteCarlo.js";
+import { runMonteCarlo, holdingsFor, createRng, MARKET_RHO } from "./monteCarlo.js";
 import { checkYearConservation } from "./conservationCheck.js";
+import { projectPlan } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
 
 // Minimal v3-shaped state factory — mirrors deterministic.test.js's
@@ -56,18 +57,6 @@ function employmentRow(over = {}) {
   };
 }
 
-// A tiny, seedable PRNG (mulberry32) — deterministic across runs, so
-// tests that need reproducibility don't depend on Math.random.
-function mulberry32(seed) {
-  let a = seed;
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 describe("holdingsFor", () => {
   it("includes profile-mode financial assets and super accounts, resolved to their profile", () => {
     const state = mkState({
@@ -112,7 +101,7 @@ describe("runMonteCarlo", () => {
     const state = mkState({
       assets: [mkAsset({ id: "a1", class: "lifestyle", growthPct: 3, allocation: undefined })],
     });
-    const result = runMonteCarlo(state, PROFILES, { numPaths: 10, sampleCount: 3, rng: mulberry32(1) });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 10, sampleCount: 3, rng: createRng(1) });
     for (let y = 0; y < result.years; y++) {
       expect(result.netAssets.p05[y]).toBeCloseTo(result.netAssets.p50[y], 6);
       expect(result.netAssets.p50[y]).toBeCloseTo(result.netAssets.p95[y], 6);
@@ -126,7 +115,7 @@ describe("runMonteCarlo", () => {
       cashflows: { income: [employmentRow({ amount: 80000 })] },
       plan: { superAccounts: [superAcct({ id: "su1", balance: 50000 })] },
     });
-    const result = runMonteCarlo(state, PROFILES, { numPaths: 60, sampleCount: 5, rng: mulberry32(7) });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 60, sampleCount: 5, rng: createRng(7) });
     for (let y = 0; y < result.years; y++) {
       const { p05, p25, p50, p75, p95 } = result.netAssets;
       expect(p05[y]).toBeLessThanOrEqual(p25[y]);
@@ -140,10 +129,88 @@ describe("runMonteCarlo", () => {
     const state = mkState({
       assets: [mkAsset({ allocation: { mode: "profile", profile: "Balanced" } })],
     });
-    const a = runMonteCarlo(state, PROFILES, { numPaths: 15, sampleCount: 4, rng: mulberry32(42) });
-    const b = runMonteCarlo(state, PROFILES, { numPaths: 15, sampleCount: 4, rng: mulberry32(42) });
+    const a = runMonteCarlo(state, PROFILES, { numPaths: 15, sampleCount: 4, rng: createRng(42) });
+    const b = runMonteCarlo(state, PROFILES, { numPaths: 15, sampleCount: 4, rng: createRng(42) });
     expect(a.netAssets.p50).toEqual(b.netAssets.p50);
     expect(a.successProbability).toBe(b.successProbability);
+  });
+
+  // Regression test for the exact reported defect: options.seed was
+  // documented but never actually consumed, so every run used
+  // Math.random regardless — two calls with the same seed produced
+  // different netAssets. Fixed via createRng(seed); this asserts the
+  // fix at the exact call shape the defect was reported with.
+  it("options.seed alone (no rng override) makes two runs byte-identical — the reported defect", () => {
+    const state = {
+      ...mkState({
+        endAge: 46,
+        assets: [mkAsset({ id: "a1", balance: 200000, allocation: { mode: "profile", profile: "High Growth – Capital" } })],
+        cashflows: { income: [employmentRow({ amount: 90000 })] },
+        plan: { superAccounts: [superAcct({ id: "su1", balance: 50000 })] },
+      }),
+      liabilities: [{
+        id: "lb1", name: "Loan", type: "mortgage", owner: "client",
+        balance: 200000, interestRatePct: 6, termYears: 20, repayment: "pi",
+        ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+      }],
+    };
+    const a = runMonteCarlo(state, PROFILES, { numPaths: 30, seed: 42 });
+    const b = runMonteCarlo(state, PROFILES, { numPaths: 30, seed: 42 });
+    expect(a.netAssets).toEqual(b.netAssets);
+    expect(a.successProbability).toBe(b.successProbability);
+    expect(a.samplePaths.map((o) => o.yearly.map((r) => r.netAssets)))
+      .toEqual(b.samplePaths.map((o) => o.yearly.map((r) => r.netAssets)));
+    // And a different seed genuinely produces a different result —
+    // otherwise "byte-identical" above would trivially hold because
+    // nothing is actually random.
+    const c = runMonteCarlo(state, PROFILES, { numPaths: 30, seed: 43 });
+    expect(c.netAssets.p50).not.toEqual(a.netAssets.p50);
+  });
+
+  it("ρ = 1 makes two identical-profile assets' returns perfectly correlated; ρ = 0 makes them independent", () => {
+    const stateFor = () => mkState({
+      assets: [
+        mkAsset({ id: "a1", balance: 100000, allocation: { mode: "profile", profile: "High Growth – Capital" } }),
+        mkAsset({ id: "a2", balance: 100000, allocation: { mode: "profile", profile: "High Growth – Capital" } }),
+      ],
+      endAge: 41,
+    });
+    const correlationOf = (rho, seed) => {
+      const result = runMonteCarlo(stateFor(), PROFILES, { numPaths: 300, sampleCount: 300, rho, seed });
+      const r1 = result.samplePaths.map((out) => out.yearly[0].perAssetClosing.a1);
+      const r2 = result.samplePaths.map((out) => out.yearly[0].perAssetClosing.a2);
+      const mean = (arr) => arr.reduce((s, v) => s + v, 0) / arr.length;
+      const m1 = mean(r1), m2 = mean(r2);
+      const cov = mean(r1.map((v, i) => (v - m1) * (r2[i] - m2)));
+      const sd1 = Math.sqrt(mean(r1.map((v) => (v - m1) ** 2)));
+      const sd2 = Math.sqrt(mean(r2.map((v) => (v - m2) ** 2)));
+      return cov / (sd1 * sd2);
+    };
+    expect(correlationOf(1, 1)).toBeCloseTo(1, 6);
+    expect(Math.abs(correlationOf(0, 2))).toBeLessThan(0.15); // sampling noise band at N=300, not exactly 0
+  });
+
+  it("zero σ on every profile (and zero CPI variation) reproduces the deterministic projection exactly on every path", () => {
+    const zeroSigmaProfiles = Object.fromEntries(
+      Object.entries(PROFILES).map(([name, p]) => [name, { ...p, sigma_normal: 0, sigma_stress: 0 }])
+    );
+    const state = mkState({
+      endAge: 50,
+      assets: [mkAsset({ id: "a1", balance: 150000, allocation: { mode: "profile", profile: "High Growth – Capital" } })],
+      cashflows: { income: [employmentRow({ amount: 90000 })] },
+      plan: { superAccounts: [superAcct({ id: "su1", balance: 60000 })] },
+    });
+    const deterministic = projectPlan(state, zeroSigmaProfiles);
+    const result = runMonteCarlo(state, zeroSigmaProfiles, { numPaths: 12, sampleCount: 12, seed: 5, cpiSigma: 0 });
+    for (let y = 0; y < result.years; y++) {
+      expect(result.netAssets.p05[y]).toBeCloseTo(deterministic.yearly[y].netAssets, 6);
+      expect(result.netAssets.p95[y]).toBeCloseTo(deterministic.yearly[y].netAssets, 6);
+    }
+    for (const out of result.samplePaths) {
+      for (let y = 0; y < out.yearly.length; y++) {
+        expect(out.yearly[y].netAssets).toBeCloseTo(deterministic.yearly[y].netAssets, 6);
+      }
+    }
   });
 
   it("a shared market factor at ρ 0.85 makes two assets' realised returns strongly, but not perfectly, correlated", () => {
@@ -161,7 +228,7 @@ describe("runMonteCarlo", () => {
       endAge: 41,
     });
     const N = 200;
-    const result = runMonteCarlo(state, PROFILES, { numPaths: N, sampleCount: N, rng: mulberry32(3) });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: N, sampleCount: N, rng: createRng(3) });
     const r1 = result.samplePaths.map((out) => out.yearly[0].perAssetClosing.a1);
     const r2 = result.samplePaths.map((out) => out.yearly[0].perAssetClosing.a2);
     const mean = (arr) => arr.reduce((s, v) => s + v, 0) / arr.length;
@@ -181,7 +248,7 @@ describe("runMonteCarlo", () => {
 
   it("elapsedMs is reported and positive", () => {
     const state = mkState({ assets: [mkAsset({ allocation: { mode: "profile", profile: "Balanced" } })] });
-    const result = runMonteCarlo(state, PROFILES, { numPaths: 5, rng: mulberry32(1) });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 5, rng: createRng(1) });
     expect(result.elapsedMs).toBeGreaterThan(0);
   });
 });
@@ -220,7 +287,7 @@ describe("Monte Carlo paths satisfy the conservation invariant", () => {
         ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
       }],
     };
-    const result = runMonteCarlo(state, PROFILES, { numPaths: 80, sampleCount: 20, rng: mulberry32(11) });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 80, sampleCount: 20, rng: createRng(11) });
     expect(result.samplePaths.length).toBe(20);
     for (let i = 0; i < result.samplePaths.length; i++) {
       const out = result.samplePaths[i];
