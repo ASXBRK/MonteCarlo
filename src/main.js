@@ -23,6 +23,7 @@ import {
   createLiability, LIABILITY_TYPES, normaliseLiabilities,
   createExtraRepayment, createOneOffRepayment,
   createGoal, normaliseGoals,
+  clampSnapshotYears, MAX_SNAPSHOT_YEARS,
   createProperty, normaliseProperties, PROPERTY_STATES, PROPERTY_TYPES,
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
   createKeyDate, removeKeyDate, referencesToAnchor, convertAnchorReferences,
@@ -45,6 +46,7 @@ import { nominalFactor, firstFyStartYear } from "./schedule.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
+import { buildSnapshotColumns, buildSnapshotTable, snapshotToHTML, snapshotToCSV } from "./snapshot.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -115,6 +117,9 @@ const els = {
   superTable: $("superTable"),
   liabilitiesEntity: $("liabilitiesEntity"),
   liabilitiesTable: $("liabilitiesTable"),
+  viewSnapshot: $("viewSnapshot"),
+  snapshotYearPicker: $("snapshotYearPicker"),
+  snapshotTable: $("snapshotTable"),
   viewSuperBalances: $("viewSuperBalances"),
   viewLiabilitiesBalances: $("viewLiabilitiesBalances"),
   viewCashflowBars: $("viewCashflowBars"),
@@ -152,6 +157,7 @@ const els = {
   paramAssetTable: $("paramAssetTable"),
   inflationInput: $("inflationInput"),
   unitsToggle: document.querySelector(".display-toggle"),
+  periodSelect: $("periodSelect"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -352,6 +358,7 @@ const OUTPUT_NAV = {
     { id: "tax", label: "Tax" },
     { id: "super", label: "Super" },
     { id: "liabilities", label: "Liabilities" },
+    { id: "snapshot", label: "Snapshot" },
     { id: "monte-carlo-table", label: "Monte Carlo" },
     { id: "assumptions", label: "Assumptions" },
   ],
@@ -426,7 +433,7 @@ function unmountWorkspace() {
                     els.lifestyleSection, els.liabilitiesSection, els.goalsSection, els.propertySection,
                     els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
-                    els.viewTax, els.viewAssumptions]) {
+                    els.viewTax, els.viewAssumptions, els.snapshotYearPicker, els.snapshotTable]) {
     el.innerHTML = "";
   }
   els.shortfallNote.hidden = true;
@@ -4060,6 +4067,7 @@ const VIEW_MOUNTS = {
   tax: () => els.viewTax,
   super: () => els.viewSuper,
   liabilities: () => els.viewLiabilities,
+  snapshot: () => els.viewSnapshot,
   "monte-carlo-table": () => els.viewMonteCarloTable,
   assumptions: () => els.viewAssumptions,
 };
@@ -4077,6 +4085,11 @@ function renderActiveView() {
   // units toggle is suppressed here rather than left showing a control
   // with no effect (Asset class allocations commit).
   els.unitsToggle.hidden = activeView === "asset-allocation";
+  // The Snapshot view picks its own years (up to six DateRef
+  // selectors) rather than the thinned report-period range every other
+  // table/chart uses, so the shared period-select controls are
+  // meaningless here and would just be confusing clutter.
+  els.periodSelect.hidden = activeView === "snapshot";
   if (activeView === "projection") renderProjectionChart();
   else if (activeView === "composite") renderCompositeChart();
   else if (activeView === "net-assets") renderNetAssetsChart();
@@ -4092,6 +4105,7 @@ function renderActiveView() {
   else if (activeView === "tax") renderTaxView();
   else if (activeView === "super") renderSuperTableView();
   else if (activeView === "liabilities") renderLiabilitiesView();
+  else if (activeView === "snapshot") renderSnapshotView();
   else if (activeView === "monte-carlo-table") renderMonteCarloTableView();
   else if (activeView === "assumptions") renderAssumptionsView();
 }
@@ -5887,6 +5901,197 @@ function renderLiabilitiesView() {
   renderTransposed(els.liabilitiesTable, buildLiabilitiesGroups(liabilitiesEntity), liabilitiesPayoffFooter(liabIds));
 }
 
+// --- View: Snapshot (Document Set Commit 7) -------------------------------
+//
+// The firm's Cash Flow SOA sheet reproduced for a handful of chosen
+// years — one column per selected year, Client/Partner/Total
+// sub-columns, reusing cashflowStatement.js's per-owner breakdown so
+// every figure here reconciles to the Cashflow table for that year by
+// construction (buildSnapshotColumns/buildSnapshotTable in
+// snapshot.js). Year selections persist per scenario (state.display.
+// snapshotYears); export is HTML (clipboard, retains table structure
+// when pasted into Word) and CSV — explicitly not .docx generation,
+// per the spec.
+
+// Smart default: current year, retirement, and up to four more spread
+// evenly across the projection — deduplicated against those two and
+// against each other by buildSnapshotColumns itself.
+function defaultSnapshotYears() {
+  const n = projection.schedule.planYears;
+  const retirementY = resolveRef({ kind: "anchor", anchorId: "retirement-client" }, state.plan, projection.schedule, "client").planYear;
+  const picks = new Set([0, Math.max(0, Math.min(n - 1, retirementY))]);
+  for (let i = 1; i <= 4; i++) picks.add(Math.round((i * (n - 1)) / 5));
+  return [...picks].filter((y) => y >= 0 && y < n).sort((a, b) => a - b).slice(0, MAX_SNAPSHOT_YEARS)
+    .map((y) => ({ kind: "age", age: projection.schedule.clientAges[y] }));
+}
+
+function ensureSnapshotYears() {
+  if (!(state.display.snapshotYears?.length > 0)) {
+    state.display.snapshotYears = defaultSnapshotYears();
+    saveState();
+  }
+}
+
+function snapshotCtxFor(y) {
+  const rt = projection.schedule.rowTotals;
+  return {
+    incomeRows: state.cashflows.income, rowTotalsIncome: rt.income,
+    expenseRows: state.cashflows.expenses, rowTotalsExpenses: rt.expenses,
+    deductionRows: state.cashflows.deductions ?? [], rowTotalsDeductions: rt.deductions,
+    properties: state.properties ?? [], liabilities: state.liabilities ?? [],
+    superAccounts: state.plan.superAccounts ?? [], y,
+  };
+}
+
+function snapshotResolvedPlanYears() {
+  return (state.display.snapshotYears ?? [])
+    .map((ref) => resolveRef(ref, state.plan, projection.schedule, "client").planYear);
+}
+
+function renderSnapshotYearPicker() {
+  const years = state.display.snapshotYears ?? [];
+  const rows = years.map((ref, i) => `
+    <div class="cf-cell">
+      <label>Year ${i + 1}</label>
+      <div class="snap-year-row">
+        ${dateRefControlHTML(ref, "client", `data-snap-idx="${i}"`, state.plan.client.currentAge, state.plan.endAge)}
+        <button class="cf-remove" type="button" aria-label="Remove year" data-snap-action="remove" data-snap-idx="${i}">×</button>
+      </div>
+    </div>
+  `).join("");
+  const addBtn = years.length < MAX_SNAPSHOT_YEARS
+    ? `<button class="add-row-btn" type="button" data-snap-action="add">+ Add year</button>` : "";
+  els.snapshotYearPicker.innerHTML = `
+    <div class="person-grid">${rows}</div>
+    ${addBtn}
+    <div class="output-actions">
+      <button class="btn-text" type="button" id="snapshotCopyBtn">Copy for Word</button>
+    </div>
+  `;
+}
+
+function renderSnapshotView() {
+  ensureSnapshotYears();
+  renderSnapshotYearPicker();
+  const planYears = snapshotResolvedPlanYears();
+  const couple = isCouple();
+  const columns = buildSnapshotColumns(projection.yearly, snapshotCtxFor, planYears, couple);
+  if (columns.length === 0) {
+    els.snapshotTable.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Add at least one year above to see the snapshot.</p>`;
+    return;
+  }
+  const table = buildSnapshotTable(columns, { hideEmptyRows: state.display.hideEmptyRows !== false });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const headCols = columns.flatMap((c) => {
+    const label = projection.schedule.fyLabels[c.y];
+    return couple ? [`${label} — ${clientName()}`, `${label} — ${partnerName()}`, `${label} — Total`] : [label];
+  });
+  const head = `<tr><th class="tl-corner"></th>${headCols.map((h) => `<th class="tl-year">${escapeHTML(h)}</th>`).join("")}</tr>`;
+  let lastSection = null;
+  const body = table.rows.map((r) => {
+    const sectionRow = r.section !== lastSection
+      ? `<tr class="tl-group"><th colspan="${headCols.length + 1}">${escapeHTML(r.section)}</th></tr>` : "";
+    lastSection = r.section;
+    const cells = table.rows.length && columns.map((c, i) => {
+      const cell = r.cells[i];
+      const f = factor(c.y);
+      return couple
+        ? `<td class="tl-num">${fmtLedgerCell(cell.client * f)}</td><td class="tl-num">${fmtLedgerCell(cell.partner * f)}</td><td class="tl-num">${fmtLedgerCell(cell.total * f)}</td>`
+        : `<td class="tl-num">${fmtLedgerCell(cell.total * f)}</td>`;
+    }).join("");
+    return sectionRow + `<tr class="${r.total ? "tl-total" : ""}"><th class="tl-label">${escapeHTML(r.label)}</th>${cells}</tr>`;
+  }).join("");
+  els.snapshotTable.innerHTML = `<div class="tl-wrap"><table class="tl"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+}
+
+function snapshotColumnLabels() {
+  return snapshotResolvedPlanYears()
+    .filter((y, i, arr) => y >= 0 && y < projection.yearly.length && arr.indexOf(y) === i)
+    .map((y) => projection.schedule.fyLabels[y]);
+}
+
+// Real → nominal scaling applied at export time too, matching what's
+// on screen — the export must show exactly what the visible table shows.
+function snapshotExportTable() {
+  const planYears = snapshotResolvedPlanYears();
+  const couple = isCouple();
+  const columns = buildSnapshotColumns(projection.yearly, snapshotCtxFor, planYears, couple);
+  const scaled = columns.map((c) => {
+    const f = factorFor(c.y);
+    const scaleStmt = (s) => s && JSON.parse(JSON.stringify(s), (k, v) => typeof v === "number" ? v * f : v);
+    return { y: c.y, client: scaleStmt(c.client), partner: scaleStmt(c.partner), total: scaleStmt(c.total) };
+  });
+  return { table: buildSnapshotTable(scaled, { hideEmptyRows: state.display.hideEmptyRows !== false }), couple };
+}
+function factorFor(y) { return displayFactor(endMonthOfYear(y)); }
+
+els.snapshotYearPicker?.addEventListener("change", (e) => {
+  const idx = Number(e.target.dataset.snapIdx);
+  if (Number.isNaN(idx)) return;
+  const years = [...(state.display.snapshotYears ?? [])];
+  const ref = years[idx];
+  if (!ref) return;
+  if (e.target.dataset.drRole === "anchor") {
+    years[idx] = e.target.value === "__age__"
+      ? { kind: "age", age: resolveRef(ref, state.plan, projection.schedule, "client").age }
+      : { kind: "anchor", anchorId: e.target.value };
+  } else {
+    const age = clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge);
+    years[idx] = { kind: "age", age };
+    flagIfClamped(e.target, age);
+  }
+  state.display.snapshotYears = clampSnapshotYears(years, state.plan);
+  saveState();
+  renderSnapshotView();
+});
+
+els.snapshotYearPicker?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-snap-action]");
+  if (btn) {
+    const years = [...(state.display.snapshotYears ?? [])];
+    if (btn.dataset.snapAction === "add" && years.length < MAX_SNAPSHOT_YEARS) {
+      years.push({ kind: "age", age: state.plan.endAge });
+    } else if (btn.dataset.snapAction === "remove") {
+      years.splice(Number(btn.dataset.snapIdx), 1);
+    } else {
+      return;
+    }
+    state.display.snapshotYears = clampSnapshotYears(years, state.plan);
+    saveState();
+    renderSnapshotView();
+    return;
+  }
+  if (e.target.id === "snapshotCopyBtn") {
+    const { table, couple } = snapshotExportTable();
+    const html = snapshotToHTML(table, snapshotColumnLabels(), couple);
+    const plain = table.rows.map((r) => r.label).join("\n");
+    if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+      navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([plain], { type: "text/plain" }),
+        }),
+      ]).then(() => {
+        e.target.textContent = "Copied!";
+        setTimeout(() => { e.target.textContent = "Copy for Word"; }, 1500);
+      }).catch(() => window.alert("Couldn't access the clipboard — try again, or use Export CSV instead."));
+    } else {
+      window.alert("Clipboard access isn't available in this browser — use Export CSV instead.");
+    }
+  }
+});
+
+function exportSnapshotCSV() {
+  const { table, couple } = snapshotExportTable();
+  const csv = snapshotToCSV(table, snapshotColumnLabels(), couple);
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${exportNameBase()}-snapshot.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 // --- View: Tax (C4) -----------------------------------------------------------
 
 function buildTaxGroups() {
@@ -6093,6 +6298,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());
   else if (activeView === "super") exportTransposedCSV("super", buildSuperGroups(superEntity));
   else if (activeView === "liabilities") exportTransposedCSV("liabilities", buildLiabilitiesGroups(liabilitiesEntity));
+  else if (activeView === "snapshot") exportSnapshotCSV();
   else if (activeView === "monte-carlo-table") exportMonteCarloCSV();
   else if (activeView === "assumptions") exportTransposedCSV("assumptions", buildAssumptionsGroups());
 });

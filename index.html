@@ -61,7 +61,7 @@
             <section id="summaryStrip" class="summary-strip" aria-live="polite"></section>
 
             <div class="output-head">
-              <div class="period-select" aria-label="Report period">
+              <div class="period-select" id="periodSelect" aria-label="Report period">
                 <label>From age <select id="periodFromAge"></select></label>
                 <label>To age <select id="periodToAge"></select></label>
                 <label>Then every
@@ -179,6 +179,10 @@
                   <h3 class="mc-subheading">Distribution summary — ending net assets</h3>
                   <div id="monteCarloDistributionTable"></div>
                 </div>
+              </div>
+              <div id="viewSnapshot" hidden>
+                <div id="snapshotYearPicker"></div>
+                <div id="snapshotTable"></div>
               </div>
               <div id="viewAssumptions" hidden></div>
             </div>
@@ -344,6 +348,11 @@
         <section id="goals-assumptions">
           <h3>Goals</h3>
           <p>A goal tracks a named savings target (a car, a wedding, a deposit) separately from ordinary living expenses, funded either from a nominated financial asset or from household surplus. It accrues straight-line from the start of the projection to its (indexed) target date — the (indexed) target amount divided evenly across every month from now until then — modelling "spent at the target date" as the accrual itself: the money progressively leaves its funding source exactly as it's earmarked, so by the target date the target amount has already left the model. There is no separate goal-balance ledger holding money in limbo between accrual and spend, and a goal balance earns no return of its own (it is a pure sinking-fund accumulator, not an investment). An asset-funded goal draws down that asset like a scheduled withdrawal, naturally capped at its balance — if the asset runs low, the goal simply accrues more slowly. A surplus-funded goal is capped at whatever's actually left over in household cashflow each month; unlike an instructed transaction (a loan repayment, a property purchase), a discretionary savings contribution can't manufacture cash that isn't there, so a shortfall here reduces the goal's own accrual rather than becoming unfunded household cashflow. When several surplus-funded goals compete for the same month's surplus, they draw from it in the order they're listed — a disclosed simplification, not a priority system. A goal that falls short by its target date reports the shortfall and an alternative date it would be reached instead, assuming its own average funding rate so far continues unchanged. Goals appear in their own group in the Cashflow table (kept apart from ordinary Expenses, matching the workbook's separate Goals block) and as dated markers on the composite chart (green once reached, red if short).</p>
+        </section>
+
+        <section id="snapshot-assumptions">
+          <h3>Snapshot</h3>
+          <p>The Snapshot table (Tables) reproduces the firm's Cash Flow SOA document for up to six chosen plan years, one column per year with Client / Partner / Total sub-columns for a couple. Every figure reuses the SAME per-owner breakdown the Cashflow table's own row vocabulary already computes for the household total, so a Snapshot column always reconciles to the Cashflow table for that year, and Client + Partner always reconciles to Total. A jointly-owned property or liability splits 50/50 between Client and Partner; income, expense, and deduction rows are never joint, so they attribute exactly to their own owner. Two figures have no per-person attribution anywhere in the underlying ledger at all — Working Cash Account interest (a joint cash buffer) and pooled asset cash distributions (summed across every asset regardless of owner) — both also split 50/50 between Client and Partner, a disclosed simplification specific to this per-person view. Year selections default to the current year, retirement, and four more spread across the projection, and persist per scenario. "Copy for Word" copies a plain HTML table to the clipboard — pasting into Word keeps the row/column structure, though this tool does not generate a native .docx file or align to the firm's own document template; Export CSV produces the same rows as a spreadsheet file. Both exports contain exactly the rows visible on screen (Hide empty rows applies to the export too).</p>
         </section>
 
         <section>

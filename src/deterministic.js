@@ -1949,6 +1949,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // here would be a number that never corresponds to any real cash
       // event).
       refundOrBalancing: newPendingRefund[p],
+      // The cash amount actually settling THIS year, per person (last
+      // year's refundOrBalancing) — Document Set Commit 7's Snapshot
+      // view needs a per-person "Anticipated tax return" figure;
+      // row.taxDetail.refundSettled (household) already summed this.
+      refundSettled: pendingRefund[p],
       // Document Set Commit 1 — this FY's compulsory HELP repayment
       // (already capped at the opening balance) and the balance as it
       // stands after it, for the Tax view's HELP row + closing balance

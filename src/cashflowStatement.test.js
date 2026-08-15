@@ -322,3 +322,140 @@ describe("cashflowStatement — the four running subtotals", () => {
     expect(s.surplusIncome).toBe(0);
   });
 });
+
+describe("per-owner breakdown (Document Set Commit 7 — Snapshot view)", () => {
+  it("Client + Partner reconciles to Total on assessableIncome: owned income rows, a joint property, and the household-only WCA/distribution split", () => {
+    const row = mkRow({
+      wcaDetail: { interest: 100 }, // no per-person attribution — 50/50
+      cashDistributions: 400, // pooled across assets — 50/50
+      properties: { p1: { rent: 6000 } }, // joint property — 50/50
+      taxDetail: {
+        client: { frankingCredits: 120, netCapitalGain: 500 },
+        partner: { frankingCredits: 80, netCapitalGain: 300 },
+        frankingCredits: 200, netCapitalGain: 800,
+      },
+    });
+    const incomeRows = [
+      { id: "i1", category: "salary", owner: "client" },
+      { id: "i2", category: "salary", owner: "partner" },
+    ];
+    const rowTotalsIncome = { i1: [90000], i2: [60000] };
+    const properties = [{ id: "p1", propertyType: "investment", owner: "joint" }];
+    const ctx = { incomeRows, rowTotalsIncome, properties, y: 0 };
+    const client = assessableIncome(row, ctx, "client");
+    const partner = assessableIncome(row, ctx, "partner");
+    const total = assessableIncome(row, ctx, null);
+    expect(client.salary).toBe(90000);
+    expect(partner.salary).toBe(60000);
+    expect(client.propertyIncomeGross).toBeCloseTo(3000, 6); // 50% of the joint property's rent
+    expect(partner.propertyIncomeGross).toBeCloseTo(3000, 6);
+    expect(client.interestIncome + partner.interestIncome).toBeCloseTo(total.interestIncome, 6);
+    expect(client.dividendIncome + partner.dividendIncome).toBeCloseTo(total.dividendIncome, 6);
+    expect(client.total + partner.total).toBeCloseTo(total.total, 6);
+  });
+
+  it("Client + Partner reconciles to Total on taxSums, reading the per-person taxDetail already computed by the engine", () => {
+    const row = mkRow({
+      taxDetail: {
+        client: { grossTax: 15000, medicare: 500, lito: 200, helpRepayment: 1000, medicareLevySurcharge: 0, div293: 0, div296: 0 },
+        partner: { grossTax: 8000, medicare: 300, lito: 0, helpRepayment: 0, medicareLevySurcharge: 400, div293: 100, div296: 0 },
+        frankingCredits: 0, helpRepayment: 1000, medicareLevySurcharge: 400, div293: 100, div296: 0,
+      },
+    });
+    const client = taxSums(row, "client");
+    const partner = taxSums(row, "partner");
+    const total = taxSums(row, null);
+    expect(client.total + partner.total).toBeCloseTo(total.total, 6);
+    expect(client.helpRepayment).toBe(1000);
+    expect(partner.medicareLevySurcharge).toBe(400);
+  });
+
+  it("Client + Partner reconciles to Total on deductionSums and expenseSums for a joint liability", () => {
+    const row = mkRow({ liabilities: { lb1: { interest: 4000, principal: 2000 } } });
+    const liabilities = [{ id: "lb1", owner: "joint", deductible: true }];
+    const deductionRows = [];
+    const rowTotalsDeductions = {};
+    const expenseRows = [{ id: "e1", category: "discretionary", owner: "client" }];
+    const rowTotalsExpenses = { e1: [5000] };
+    const dCtx = { deductionRows, rowTotalsDeductions, liabilities, y: 0 };
+    const eCtx = { expenseRows, rowTotalsExpenses, liabilities, y: 0 };
+    const dClient = deductionSums(row, dCtx, "client");
+    const dPartner = deductionSums(row, dCtx, "partner");
+    const dTotal = deductionSums(row, dCtx, null);
+    expect(dClient.investmentPortfolioInterest).toBeCloseTo(2000, 6); // 50% of the joint loan's interest
+    expect(dClient.total + dPartner.total).toBeCloseTo(dTotal.total, 6);
+    const eClient = expenseSums(row, eCtx, "client");
+    const ePartner = expenseSums(row, eCtx, "partner");
+    const eTotal = expenseSums(row, eCtx, null);
+    expect(eClient.discretionary).toBe(5000);
+    expect(ePartner.discretionary).toBe(0);
+    expect(eClient.total + ePartner.total).toBeCloseTo(eTotal.total, 6);
+  });
+
+  it("Client + Partner reconciles to Total on cashReceivedSums", () => {
+    const row = mkRow({
+      taxDetail: {
+        client: { paygWithheld: 10000, refundSettled: 500 },
+        partner: { paygWithheld: 4000, refundSettled: -200 },
+        refundSettled: 300,
+      },
+    });
+    const incomeRows = [
+      { id: "i1", category: "salary", owner: "client" },
+      { id: "i2", category: "salary", owner: "partner" },
+    ];
+    const rowTotalsIncome = { i1: [90000], i2: [50000] };
+    const ctx = { incomeRows, rowTotalsIncome, y: 0 };
+    const client = cashReceivedSums(row, ctx, "client");
+    const partner = cashReceivedSums(row, ctx, "partner");
+    const total = cashReceivedSums(row, ctx, null);
+    expect(client.total + partner.total).toBeCloseTo(total.total, 6);
+  });
+
+  it("the full cashflowStatement() per-owner breakdown reconciles Client + Partner = Total, end to end", () => {
+    const row = mkRow({
+      wcaDetail: { interest: 50 },
+      cashDistributions: 100,
+      properties: { p1: { rent: 4000, expenses: 500, depreciation: 200 } },
+      liabilities: { lb1: { interest: 1000, principal: 500 } },
+      taxDetail: {
+        client: { grossTax: 12000, medicare: 400, lito: 0, paygWithheld: 9000, refundSettled: 100, frankingCredits: 50, netCapitalGain: 0 },
+        partner: { grossTax: 5000, medicare: 200, lito: 0, paygWithheld: 3000, refundSettled: 0, frankingCredits: 30, netCapitalGain: 0 },
+        frankingCredits: 80, netCapitalGain: 0, refundSettled: 100,
+      },
+    });
+    const incomeRows = [
+      { id: "i1", category: "salary", owner: "client" },
+      { id: "i2", category: "salary", owner: "partner" },
+    ];
+    const rowTotalsIncome = { i1: [80000], i2: [40000] };
+    const expenseRows = [{ id: "e1", category: "discretionary", owner: "partner" }];
+    const rowTotalsExpenses = { e1: [2000] };
+    const properties = [{ id: "p1", propertyType: "investment", owner: "joint" }];
+    const liabilities = [{ id: "lb1", owner: "client", deductible: false }];
+    const ctx = { incomeRows, rowTotalsIncome, expenseRows, rowTotalsExpenses, properties, liabilities, y: 0 };
+    const client = cashflowStatement(row, ctx, "client");
+    const partner = cashflowStatement(row, ctx, "partner");
+    const total = cashflowStatement(row, ctx, null);
+    expect(client.assessable.total + partner.assessable.total).toBeCloseTo(total.assessable.total, 6);
+    expect(client.deductions.total + partner.deductions.total).toBeCloseTo(total.deductions.total, 6);
+    expect(client.tax.total + partner.tax.total).toBeCloseTo(total.tax.total, 6);
+    expect(client.cashReceived.total + partner.cashReceived.total).toBeCloseTo(total.cashReceived.total, 6);
+    expect(client.expenses.total + partner.expenses.total).toBeCloseTo(total.expenses.total, 6);
+    expect(client.netIncome + partner.netIncome).toBeCloseTo(total.netIncome, 6);
+    expect(client.surplusIncome + partner.surplusIncome).toBeCloseTo(total.surplusIncome, 6);
+  });
+
+  it("regression gate: omitting forOwner (every pre-Commit-7 call site) is identical to explicit null", () => {
+    const row = mkRow({
+      properties: { p1: { rent: 1000 } },
+      liabilities: { lb1: { interest: 100, principal: 50 } },
+    });
+    const properties = [{ id: "p1", propertyType: "investment", owner: "joint" }];
+    const liabilities = [{ id: "lb1", owner: "joint", deductible: true }];
+    const incomeRows = [{ id: "i1", category: "salary", owner: "client" }];
+    const rowTotalsIncome = { i1: [50000] };
+    const ctx = { incomeRows, rowTotalsIncome, properties, liabilities, y: 0 };
+    expect(cashflowStatement(row, ctx)).toEqual(cashflowStatement(row, ctx, null));
+  });
+});

@@ -23,6 +23,7 @@ import {
   clampWorkingCash,
   createDeductionRow, clampDeductionRow, DEDUCTION_CATEGORIES, DEDUCTION_CATEGORY_LABELS,
   createGoal, clampGoal, normaliseGoals,
+  clampSnapshotYears, MAX_SNAPSHOT_YEARS,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -1386,6 +1387,21 @@ describe("Input integrity — unenterable states (audit Part C)", () => {
       s.plan, s.assets
     );
     expect(clamped.fundedFrom).toBe("surplus");
+  });
+
+  it("clampSnapshotYears caps at MAX_SNAPSHOT_YEARS and clamps each DateRef into the plan window", () => {
+    const s = defaultState(PROFILES, NOW);
+    const many = Array.from({ length: 10 }, (_, i) => ({ kind: "age", age: s.plan.client.currentAge + i }));
+    const clamped = clampSnapshotYears(many, s.plan);
+    expect(clamped.length).toBe(MAX_SNAPSHOT_YEARS);
+    const outOfRange = clampSnapshotYears([{ kind: "age", age: s.plan.endAge + 50 }], s.plan);
+    expect(outOfRange[0].age).toBeLessThanOrEqual(s.plan.endAge);
+  });
+
+  it("clampSnapshotYears defaults to empty for anything that isn't an array", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(clampSnapshotYears(undefined, s.plan)).toEqual([]);
+    expect(clampSnapshotYears(null, s.plan)).toEqual([]);
   });
 
   it("clampGoal keeps a valid fundedFrom asset reference", () => {

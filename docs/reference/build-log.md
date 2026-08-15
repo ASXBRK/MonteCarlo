@@ -93,8 +93,20 @@ by the workbook document-sense-check:
   goal-balance ledger. Reports achieved/shortfall + an extrapolated
   alternative date; own group in the Cashflow table; dated markers on
   the composite chart.
+- Commit 7, **Snapshot view and Word-ready export** — `cashflowStatement.js`
+  gained a per-owner `forOwner` breakdown (Client/Partner/Total; jointly-owned
+  items split 50/50, income/expense/deduction rows attribute exactly since
+  they're never joint) alongside the existing household total, so a new
+  `src/snapshot.js` (`buildSnapshotColumns`/`buildSnapshotTable`) reuses it
+  directly — a Snapshot column reconciles to the Cashflow table by
+  construction, not a second computation. New Snapshot table (Tables), up to
+  six DateRef-selected years (default: current, retirement, four spread),
+  persisted per scenario (`display.snapshotYears`). "Copy for Word" (HTML
+  clipboard) and Export CSV both reuse the same hideEmptyRows-filtered table
+  — explicitly no .docx generation, per the spec.
 
-Roughly 635 tests, clean build.
+Roughly 653 tests, clean build. **All seven Document Set commits
+(docs/specs/11-document-set.md) are now landed.**
 
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with nominal

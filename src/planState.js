@@ -1103,6 +1103,22 @@ export function clampChartTreatment(raw) {
   };
 }
 
+// --- Snapshot view (Document Set Commit 7) ----------------------------
+//
+// Up to six DateRef year selections, persisted per scenario like every
+// other display-state field above. Smart defaults (current year,
+// retirement, four spread between) need a resolved schedule/anchors
+// list this pure module doesn't have, so they're computed lazily by
+// the caller (main.js) the first time the view renders with none
+// selected — an empty array here is a valid, meaningful state (not yet
+// chosen), not an error.
+export const MAX_SNAPSHOT_YEARS = 6;
+
+export function clampSnapshotYears(raw, plan) {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, MAX_SNAPSHOT_YEARS).map((ref) => clampDateRef(ref, plan.client.currentAge, plan.endAge, plan));
+}
+
 // --- sidebar navigation (page-per-section) -------------------------------
 //
 // Display state only — which page a scenario last showed, so reopening
@@ -1728,6 +1744,7 @@ export function hydrate(json, profiles = {}) {
         chartTreatment: clampChartTreatment(raw.display?.chartTreatment),
         hideEmptyRows: raw.display?.hideEmptyRows !== false,
         showIndividualCashflowItems: raw.display?.showIndividualCashflowItems === true,
+        snapshotYears: clampSnapshotYears(raw.display?.snapshotYears, plan),
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,
