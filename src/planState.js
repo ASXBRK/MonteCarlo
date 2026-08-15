@@ -658,6 +658,52 @@ export function createLiability(plan, existing = []) {
     deductible: false,    // interest deducts against the owner's income
     linkedAssetId: null,  // informational; used by D4 purchases
     offsetAssetId: null,  // financial asset whose balance offsets interest
+    extraRepayments: [],  // Document Set Commit 5
+    oneOffRepayments: [], // Document Set Commit 5
+  };
+}
+
+// --- extra and one-off loan repayments (Document Set Commit 5) -------------
+//
+// Client-anchored like every other non-income cashflow-shaped row
+// (super contributions, one-offs) — never owner-anchored, regardless
+// of the liability's own owner.
+
+export function createExtraRepayment(plan, existing = []) {
+  return {
+    id: uid("er"),
+    label: `Extra repayment ${existing.length + 1}`,
+    amount: 0,
+    frequency: "monthly",
+    from: anchorRef("start"),
+    to: anchorRef("end"),
+    indexBasis: "none",
+    indexExtraPct: 0,
+  };
+}
+
+export function clampExtraRepayment(er, plan) {
+  const { from, to } = clampFromTo(er, plan.client.currentAge, plan.endAge, plan);
+  return {
+    id: typeof er.id === "string" && er.id ? er.id : uid("er"),
+    label: typeof er.label === "string" && er.label.trim() ? er.label : "Extra repayment",
+    amount: clampNumber(er.amount, 0),
+    frequency: er.frequency === "annual" ? "annual" : "monthly",
+    from, to,
+    ...clampIndexation(er),
+  };
+}
+
+export function createOneOffRepayment(plan) {
+  return { id: uid("or"), label: "Lump-sum repayment", amount: 0, at: anchorRef("start") };
+}
+
+export function clampOneOffRepayment(or, plan) {
+  return {
+    id: typeof or.id === "string" && or.id ? or.id : uid("or"),
+    label: typeof or.label === "string" && or.label.trim() ? or.label : "Lump-sum repayment",
+    amount: clampNumber(or.amount, 0),
+    at: clampDateRef(or.at ?? anchorRef("start"), plan.client.currentAge, plan.endAge, plan),
   };
 }
 
@@ -690,6 +736,8 @@ export function clampLiability(l, plan, assets, properties = []) {
     deductible: l.deductible === true,
     linkedAssetId: allIds.has(l.linkedAssetId) ? l.linkedAssetId : null,
     offsetAssetId: financialIds.has(l.offsetAssetId) ? l.offsetAssetId : null,
+    extraRepayments: Array.isArray(l.extraRepayments) ? l.extraRepayments.map((er) => clampExtraRepayment(er, plan)) : [],
+    oneOffRepayments: Array.isArray(l.oneOffRepayments) ? l.oneOffRepayments.map((or) => clampOneOffRepayment(or, plan)) : [],
   };
 }
 

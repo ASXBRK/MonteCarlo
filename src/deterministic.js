@@ -50,7 +50,7 @@ import { lmiPremium } from "./data/lmiRates.js";
 import {
   processConcessionalCap, processNonConcessionalCap, div293Tax, availableCarryForward,
 } from "./Tax/superContributions.js";
-import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
+import { levelPayment, monthlyRate, termMonths, ioMonths, scheduledAmortisation } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
 import { assessPerson } from "./Tax/annual.js";
@@ -574,7 +574,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // projection). offsetApplied is a year-end snapshot (like closing,
     // not a sum) of how much of the balance is currently offset.
     liabilities: Object.fromEntries(liabs.map((l) => [l.id, {
-      opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0,
+      opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0,
     }])),
     liabilitiesClosing: 0,
     // Per-property detail (D4), real dollars.
@@ -1103,11 +1103,25 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const interest = (b0 - offsetNom) * md.i;
         const contractual = mRel < md.ioM ? interest : md.pmtPI;
         const payment = Math.min(Math.max(contractual, 0), b0 + interest);
-        let b1 = b0 + interest - payment;
+        // Extra/lump-sum repayments (Document Set Commit 5): a
+        // household cash outflow through the WCA exactly like the
+        // contractual payment above — an unaffordable amount still
+        // reduces the balance (same "the event happens regardless of
+        // funding" convention property settlement already uses), while
+        // the CASH side flows into `net` below and hits the EXISTING
+        // deficit-funding/unfunded cascade, which is where
+        // unaffordability actually surfaces. Capped at whatever
+        // balance remains after the contractual payment — never
+        // overpays, and stops contributing once the loan reaches zero
+        // (the b0 <= 0 guard above).
+        const extraReal = schedule.liabilityExtraFlows?.[l.id]?.[m] ?? 0;
+        const extraNominal = extraReal * infl;
+        const extraApplied = Math.min(Math.max(0, extraNominal), Math.max(0, b0 + interest - payment));
+        let b1 = b0 + interest - payment - extraApplied;
         if (b1 < 1e-9) b1 = 0;
         loanBal[l.id] = b1;
         const defl = 1 / infl;
-        loanPayReal += payment * defl;
+        loanPayReal += (payment + extraApplied) * defl;
         const interestReal = interest * defl;
         if (md.deductible && interestReal > 0) {
           for (const p of persons) {
@@ -1124,6 +1138,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         if (row) {
           row.liabilities[l.id].interest += interestReal;
           row.liabilities[l.id].principal += (payment - interest) * defl;
+          row.liabilities[l.id].extraRepayment += extraApplied * defl;
           // Snapshot, not a sum — overwritten every month so it holds
           // the year-end value, same convention as closing.
           row.liabilities[l.id].offsetApplied = offsetNom * defl;
@@ -1908,6 +1923,42 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     pendingRefund = newPendingRefund;
   }
 
+  // Document Set Commit 5 — interest saved / time saved versus the
+  // SCHEDULED (no-extras) path, for every liability with at least one
+  // extra or one-off repayment configured. Only reported once the
+  // ACTUAL loan reaches zero WITHIN the projection: if it doesn't, the
+  // comparison would understate the true lifetime interest (the loan
+  // keeps accruing beyond the horizon, unobserved), so it's left
+  // undetermined (null) rather than shown as a misleadingly generous
+  // saving. liabMeta/liabSeries are still in scope here (declared
+  // above the year loop, at function level) — this is a pure
+  // post-processing read, no engine state is mutated.
+  const liabilityRepaymentStats = {};
+  for (const l of state.liabilities ?? []) {
+    const hasExtras = (l.extraRepayments?.length ?? 0) > 0 || (l.oneOffRepayments?.length ?? 0) > 0;
+    if (!hasExtras) continue;
+    const md = liabMeta[l.id];
+    if (!md) continue;
+    const scheduled = scheduledAmortisation({
+      balance: l.balance, i: md.i, ioM: md.ioM, termM: md.termM, pmtPI: md.pmtPI,
+      startMonth: md.startMonth, inflAt,
+    });
+    let actualPayoffMonth = null;
+    const series = liabSeries[l.id];
+    for (let m = md.startMonth + 1; m <= schedule.months; m++) {
+      if (series[m] <= 1e-6) { actualPayoffMonth = m - md.startMonth; break; }
+    }
+    const actualTotalInterest = yearly.reduce((s, row) => s + (row.liabilities[l.id]?.interest ?? 0), 0);
+    liabilityRepaymentStats[l.id] = actualPayoffMonth == null
+      ? { scheduledPayoffMonth: scheduled.payoffMonth, actualPayoffMonth: null, interestSaved: null, timeSavedMonths: null }
+      : {
+          scheduledPayoffMonth: scheduled.payoffMonth,
+          actualPayoffMonth,
+          interestSaved: scheduled.totalInterestReal - actualTotalInterest,
+          timeSavedMonths: scheduled.payoffMonth - actualPayoffMonth,
+        };
+  }
+
   let shortfall = null;
   if (firstUnfundedMonth >= 0) {
     const y = schedule.yearOfMonth[firstUnfundedMonth];
@@ -1939,5 +1990,6 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     accruedRefundAtEnd: pendingRefund.client + pendingRefund.partner,
     superWarnings,
     propertyWarnings,
+    liabilityRepaymentStats,
   };
 }

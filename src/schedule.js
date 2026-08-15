@@ -580,6 +580,28 @@ export function buildSchedules(state) {
     for (let m = 0; m < months; m++) flows.withdrawals[m] += temp[m];
   }
 
+  // Extra and one-off loan repayments (Document Set Commit 5) — one
+  // combined REQUESTED-amount array per liability, client-anchored
+  // like every other non-income row here. deterministic.js applies
+  // this against the liability's live balance (capped there, since
+  // this module has no balance state) and folds it into household
+  // cash the same way the loan's contractual payment already is —
+  // "if cash is short, deficit-funded then unfunded" is the EXISTING
+  // WCA/funding-order mechanism, not something this module decides.
+  const liabilityExtraFlows = {};
+  for (const l of state.liabilities ?? []) {
+    const target = new Float64Array(months);
+    for (const er of l.extraRepayments ?? []) applyRegular(er, "client", target);
+    for (const oo of l.oneOffRepayments ?? []) {
+      if (!(oo.amount > 0)) continue;
+      const y = resolveRef(oo.at, plan, dateSchedule, "client").planYear;
+      const jm = julyMonthIndex(plan, y);
+      if (jm == null) continue; // partial first year without a firing July — convention 5
+      target[jm] += oo.amount;
+    }
+    liabilityExtraFlows[l.id] = target;
+  }
+
   return {
     months,
     planYears,
@@ -600,5 +622,6 @@ export function buildSchedules(state) {
     superWarnings,
     rowTotals,
     oneOffsByAssetYear,
+    liabilityExtraFlows,
   };
 }

@@ -72,8 +72,17 @@ by the workbook document-sense-check:
   `lmiPayAtSettlement` (default false = capitalised into the loan
   drawdown), and `firstHomeGuarantee` (waives LMI; forced off unless
   `firstHomeBuyer` and a planned purchase).
+- Commit 5, **Extra and one-off loan repayments** — per liability, a
+  repeatable `extraRepayments` list (amount/frequency/DateRef/indexation)
+  and a `oneOffRepayments` list (amount/DateRef); both reduce principal the
+  same month, through the same WCA/deficit-funding/unfunded cascade the
+  scheduled repayment already uses (an unaffordable plan surfaces as
+  unfunded, not silently skipped). New `scheduledAmortisation` in
+  `liabilities.js` computes the no-extras baseline; the Liabilities table
+  reports interest/time saved once a loan with extras is fully repaid
+  within the projection.
 
-Roughly 616 tests, clean build.
+Roughly 628 tests, clean build.
 
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with nominal

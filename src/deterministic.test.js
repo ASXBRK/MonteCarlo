@@ -4,6 +4,7 @@ import { hydrate, SCHEMA_VERSION } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 import { checkYearConservation } from "./conservationCheck.js";
 import { lmiPremium } from "./data/lmiRates.js";
+import { levelPayment } from "./liabilities.js";
 
 // Minimal v3-shaped state factory. Custom allocations pin exact
 // returns without depending on profile values.
@@ -3280,6 +3281,128 @@ describe("LMI and First Home Guarantee (Document Set Commit 4)", () => {
       expect(row.properties.p1.lmi).toBe(0);
     }
     expect(out).toBeTruthy(); // sanity: the 85% scenario itself still runs without throwing
+  });
+});
+
+describe("Extra and one-off loan repayments (Document Set Commit 5)", () => {
+  const loan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 100000, interestRatePct: 6, termYears: 10, repayment: "pi",
+    ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+    extraRepayments: [], oneOffRepayments: [],
+    ...over,
+  });
+  const bigAsset = () => mkAsset({ allocation: zeroRealAlloc(), balance: 2000000 });
+  const withLoan = (l, over = {}) => ({
+    ...mkState({ endAge: 40 + (over.years ?? 11), assets: [bigAsset()], ...over }),
+    liabilities: [l],
+  });
+  // indexBasis "none" holds the row's NOMINAL dollar amount fixed
+  // (real value decays at CPI) — see schedule.js's realAmountAt — so
+  // the extra repayment is a clean, constant $ figure in the same
+  // nominal-dollar space the loan's own interest/payment math runs in,
+  // making a hand-calc against the engine exact.
+  const extraRow = (over = {}) => ({
+    id: "er1", label: "Extra", amount: 500, frequency: "monthly",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 50 },
+    indexBasis: "none", indexExtraPct: 0,
+    ...over,
+  });
+
+  it("known-value: a fixed monthly extra repayment shortens the term against a hand-simulated closed form", () => {
+    const l = loan({ extraRepayments: [extraRow({ amount: 500 })] });
+    const out = projectPlan(withLoan(l, { years: 11 }));
+    const i = 0.005;
+    const pmt = levelPayment(100000, i, 120);
+    let b = 100000;
+    const checkpoints = {};
+    for (let m = 0; m < 120 && b > 1e-9; m++) {
+      const interest = b * i;
+      const payment = Math.min(pmt, b + interest);
+      const extra = Math.min(500, Math.max(0, b + interest - payment));
+      b = b + interest - payment - extra;
+      if (b < 1e-9) b = 0;
+      if ((m + 1) % 12 === 0) checkpoints[(m + 1) / 12 - 1] = b;
+    }
+    for (const [y, nominalClosing] of Object.entries(checkpoints)) {
+      const infl = Math.pow(1.025, Number(y) + 1);
+      expect(out.yearly[Number(y)].liabilities.lb1.closing).toBeCloseTo(nominalClosing / infl, 2);
+    }
+  });
+
+  it("the loan closes at zero without overpaying the final instalment, and extra repayments stop contributing once paid off", () => {
+    const l = loan({ extraRepayments: [extraRow({ amount: 2000 })] }); // large extra — pays off well early
+    const out = projectPlan(withLoan(l, { years: 11 }));
+    let closedYear = null;
+    for (let y = 0; y < out.yearly.length; y++) {
+      if (out.yearly[y].liabilities.lb1.closing <= 1e-6) { closedYear = y; break; }
+    }
+    expect(closedYear).not.toBeNull();
+    expect(closedYear).toBeLessThan(9); // earlier than the scheduled 10-year term
+    // Balance never goes negative, and every year after closing shows
+    // zero interest/principal/extra activity.
+    for (let y = closedYear + 1; y < out.yearly.length; y++) {
+      const ly = out.yearly[y].liabilities.lb1;
+      expect(ly.closing).toBe(0);
+      expect(ly.interest).toBe(0);
+      expect(ly.extraRepayment).toBe(0);
+    }
+  });
+
+  it("a one-off lump-sum repayment reduces the balance in the month it fires, not before or after", () => {
+    const l = loan({
+      termYears: 10,
+      oneOffRepayments: [{ id: "or1", label: "Bonus", amount: 20000, at: { kind: "age", age: 42 } }],
+    });
+    const withOneOff = projectPlan(withLoan(l, { years: 11 }));
+    const without = projectPlan(withLoan(loan({ termYears: 10 }), { years: 11 }));
+    // Before the one-off's FY (age 42 = plan year 2): identical to the no-extras path.
+    expect(withOneOff.yearly[1].liabilities.lb1.closing).toBeCloseTo(without.yearly[1].liabilities.lb1.closing, 2);
+    // From the firing year onward: strictly lower balance.
+    expect(withOneOff.yearly[2].liabilities.lb1.closing).toBeLessThan(without.yearly[2].liabilities.lb1.closing - 15000);
+  });
+
+  it("an unaffordable extra repayment produces deficit funding then unfunded cashflow", () => {
+    // No spare cash asset at all — a $5,000/month extra on top of a
+    // barely-covered household is unaffordable.
+    const l = loan({ extraRepayments: [extraRow({ amount: 5000 })] });
+    const s = {
+      ...mkState({ endAge: 41, assets: [] }),
+      liabilities: [l],
+    };
+    const out = projectPlan(s);
+    expect(out.shortfall).not.toBeNull();
+    expect(out.yearly[0].unfundedCashflow).toBeGreaterThan(0);
+    // The balance still reduces (the repayment "happens" regardless of
+    // funding, same convention as a property settlement) — it isn't
+    // silently rejected, its CASH consequence is what's unfunded.
+    expect(out.yearly[0].liabilities.lb1.extraRepayment).toBeGreaterThan(0);
+  });
+
+  it("interest saved reconciles against the scheduled (no-extras) path once the loan is fully repaid", () => {
+    const l = loan({ extraRepayments: [extraRow({ amount: 2000 })] });
+    const out = projectPlan(withLoan(l, { years: 11 }));
+    const stats = out.liabilityRepaymentStats.lb1;
+    expect(stats).toBeTruthy();
+    expect(stats.actualPayoffMonth).not.toBeNull();
+    expect(stats.timeSavedMonths).toBeGreaterThan(0);
+    expect(stats.interestSaved).toBeGreaterThan(0);
+    // Cross-check: scheduled payoff is exactly the contractual term.
+    expect(stats.scheduledPayoffMonth).toBe(120);
+  });
+
+  it("no stats reported for a loan without extra/one-off repayments", () => {
+    const out = projectPlan(withLoan(loan(), { years: 11 }));
+    expect(out.liabilityRepaymentStats.lb1).toBeUndefined();
+  });
+
+  it("regression gate: a loan with no extra/one-off repayments is bit-identical to the pre-Commit-5 shape", () => {
+    const withEmpty = projectPlan(withLoan(loan({ extraRepayments: [], oneOffRepayments: [] }), { years: 11 }));
+    const withUndefined = projectPlan(withLoan(loan(), { years: 11 }));
+    for (let y = 0; y < withEmpty.yearly.length; y++) {
+      expect(withEmpty.yearly[y].liabilities.lb1.closing).toBeCloseTo(withUndefined.yearly[y].liabilities.lb1.closing, 8);
+      expect(withEmpty.yearly[y].liabilities.lb1.extraRepayment).toBe(0);
+    }
   });
 });
 

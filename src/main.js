@@ -21,6 +21,7 @@ import {
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
   personDisplayName, resolveEndBasis,
   createLiability, LIABILITY_TYPES, normaliseLiabilities,
+  createExtraRepayment, createOneOffRepayment,
   createProperty, normaliseProperties, PROPERTY_STATES, PROPERTY_TYPES,
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
   createKeyDate, removeKeyDate, referencesToAnchor, convertAnchorReferences,
@@ -3536,6 +3537,68 @@ function liabilityDerivedText(l) {
   return `${ioPart}≈ ${fmtMoney(pmt)}/mo · paid off ${payoff}`;
 }
 
+// Document Set Commit 5 — extra (repeatable) and one-off (lump-sum)
+// loan repayments. Client-anchored, plain-age date fields (not the
+// full anchor-dropdown DateRef control every cashflow row gets) — a
+// deliberate scope reduction for this nested, per-liability sub-list;
+// a DateRef of {kind:"age", age} is still a fully valid, fully
+// supported DateRef, just without the "Retirement" etc. shortcuts.
+function extraRepaymentRowHTML(lid, er) {
+  const age = (ref) => resolveRef(ref, state.plan, projection.schedule, "client").age;
+  return `
+    <tr class="cf-tr">
+      <td class="cf-td-label">
+        <input type="text" value="${escapeHTML(er.label)}" maxlength="40" data-lid="${lid}" data-erid="${er.id}" data-erfield="label" />
+      </td>
+      <td class="cf-td-amount">
+        <input type="text" inputmode="decimal" class="cf-amount-input" value="${fmtAmountValue(er.amount)}"
+               data-lid="${lid}" data-erid="${er.id}" data-erfield="amount" />
+      </td>
+      <td class="cf-td-freq">
+        <select data-lid="${lid}" data-erid="${er.id}" data-erfield="frequency">
+          <option value="monthly"${er.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${er.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </td>
+      <td class="cf-td-date">
+        <input type="number" min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1"
+               value="${age(er.from)}" aria-label="From age" data-lid="${lid}" data-erid="${er.id}" data-erfield="fromAge" />
+      </td>
+      <td class="cf-td-date">
+        <input type="number" min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1"
+               value="${age(er.to)}" aria-label="To age" data-lid="${lid}" data-erid="${er.id}" data-erfield="toAge" />
+      </td>
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-liab-action="remove-extra" data-lid="${lid}" data-erid="${er.id}">×</button>
+      </td>
+    </tr>
+  `;
+}
+
+function oneOffRepaymentRowHTML(lid, or) {
+  const age = resolveRef(or.at, state.plan, projection.schedule, "client").age;
+  return `
+    <tr class="cf-tr">
+      <td class="cf-td-label">
+        <input type="text" value="${escapeHTML(or.label)}" maxlength="40" data-lid="${lid}" data-orid="${or.id}" data-orfield="label" />
+      </td>
+      <td class="cf-td-amount">
+        <input type="text" inputmode="decimal" class="cf-amount-input" value="${fmtAmountValue(or.amount)}"
+               data-lid="${lid}" data-orid="${or.id}" data-orfield="amount" />
+      </td>
+      <td class="cf-td-date">
+        <input type="number" min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1"
+               value="${age}" aria-label="At age" data-lid="${lid}" data-orid="${or.id}" data-orfield="atAge" />
+      </td>
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-liab-action="remove-oneoff" data-lid="${lid}" data-orid="${or.id}">×</button>
+      </td>
+    </tr>
+  `;
+}
+
 function liabilityCardHTML(l) {
   const financialAssets = state.assets.filter((a) => a.class !== "lifestyle");
   const opt = (list, sel) => `<option value=""${!sel ? " selected" : ""}>None</option>` +
@@ -3608,7 +3671,44 @@ function liabilityCardHTML(l) {
             <select data-lid="${l.id}" data-lfield="offsetAssetId">${opt(financialAssets, l.offsetAssetId)}</select>
           </div>
         </div>
+        ${liabilityRepaymentPlansHTML(l)}
       </div>
+    </div>
+  `;
+}
+
+// Document Set Commit 5 — the repeatable extra-repayments list, the
+// one-off (lump-sum) repayments list, and (once at least one exists) a
+// summary of interest and time saved against the scheduled path.
+function liabilityRepaymentPlansHTML(l) {
+  const stats = projection?.liabilityRepaymentStats?.[l.id];
+  const summary = stats
+    ? stats.actualPayoffMonth == null
+      ? `<p class="helper-text">Still repaying at the end of the projection — interest/time saved isn't shown until the loan is fully repaid within the projection window.</p>`
+      // A lifetime total summed across many years has no single "nominal
+      // equivalent" (each year's dollar scales differently) — shown in
+      // today's (real) dollars regardless of the Today's/Future toggle.
+      : `<p class="helper-text">Repaid ${Math.round(stats.timeSavedMonths / 12 * 10) / 10} years early vs the scheduled path, saving ${fmtMoney(stats.interestSaved)} in interest (today's dollars).</p>`
+    : "";
+  return `
+    <div class="cf-subsection">
+      <div class="cf-section-title">Extra repayments</div>
+      ${(l.extraRepayments ?? []).length === 0 ? "" : `
+        <table class="cf-table">
+          <thead><tr><th>Label</th><th>Amount / detail</th><th>Freq</th><th>From (age)</th><th>To (age)</th><th></th></tr></thead>
+          <tbody>${l.extraRepayments.map((er) => extraRepaymentRowHTML(l.id, er)).join("")}</tbody>
+        </table>
+      `}
+      <button class="add-row-btn" type="button" data-liab-action="add-extra" data-lid="${l.id}">+ Add extra repayment</button>
+      <div class="cf-section-title">One-off (lump-sum) repayments</div>
+      ${(l.oneOffRepayments ?? []).length === 0 ? "" : `
+        <table class="cf-table">
+          <thead><tr><th>Label</th><th>Amount</th><th>At (age)</th><th></th></tr></thead>
+          <tbody>${l.oneOffRepayments.map((or) => oneOffRepaymentRowHTML(l.id, or)).join("")}</tbody>
+        </table>
+      `}
+      <button class="add-row-btn" type="button" data-liab-action="add-oneoff" data-lid="${l.id}">+ Add one-off repayment</button>
+      ${summary}
     </div>
   `;
 }
@@ -3637,19 +3737,41 @@ function findLiability(lid) {
 }
 
 els.liabilitiesSection.addEventListener("change", (e) => {
-  const field = e.target.dataset.lfield;
   const l = findLiability(e.target.dataset.lid);
-  if (!field || !l) return;
-  if (field === "name") l.name = e.target.value.trim() || l.name;
-  else if (field === "type") l.type = e.target.value;
-  else if (field === "owner") l.owner = e.target.value;
-  else if (field === "balance") l.balance = clampNumber(e.target.value, 0);
-  else if (field === "interestRatePct") l.interestRatePct = clampNumber(e.target.value, 0, 30);
-  else if (field === "termYears") l.termYears = clampInt(e.target.value, 1, 50);
-  else if (field === "ioYears") l.ioYears = clampInt(e.target.value, 1, l.termYears); // never longer than the loan's own term
-  else if (field === "deductible") l.deductible = e.target.checked;
-  else if (field === "linkedAssetId") l.linkedAssetId = e.target.value || null;
-  else if (field === "offsetAssetId") l.offsetAssetId = e.target.value || null;
+  if (!l) return;
+  const field = e.target.dataset.lfield;
+  const erField = e.target.dataset.erfield;
+  const orField = e.target.dataset.orfield;
+  if (field) {
+    if (field === "name") l.name = e.target.value.trim() || l.name;
+    else if (field === "type") l.type = e.target.value;
+    else if (field === "owner") l.owner = e.target.value;
+    else if (field === "balance") l.balance = clampNumber(e.target.value, 0);
+    else if (field === "interestRatePct") l.interestRatePct = clampNumber(e.target.value, 0, 30);
+    else if (field === "termYears") l.termYears = clampInt(e.target.value, 1, 50);
+    else if (field === "ioYears") l.ioYears = clampInt(e.target.value, 1, l.termYears); // never longer than the loan's own term
+    else if (field === "deductible") l.deductible = e.target.checked;
+    else if (field === "linkedAssetId") l.linkedAssetId = e.target.value || null;
+    else if (field === "offsetAssetId") l.offsetAssetId = e.target.value || null;
+  } else if (erField) {
+    // Document Set Commit 5 — extra repayment sub-row.
+    const er = (l.extraRepayments ?? []).find((x) => x.id === e.target.dataset.erid);
+    if (!er) return;
+    if (erField === "label") er.label = e.target.value.trim() || er.label;
+    else if (erField === "amount") er.amount = clampNumber(e.target.value, 0);
+    else if (erField === "frequency") er.frequency = e.target.value === "annual" ? "annual" : "monthly";
+    else if (erField === "fromAge") er.from = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
+    else if (erField === "toAge") er.to = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
+  } else if (orField) {
+    // Document Set Commit 5 — one-off (lump-sum) repayment sub-row.
+    const or = (l.oneOffRepayments ?? []).find((x) => x.id === e.target.dataset.orid);
+    if (!or) return;
+    if (orField === "label") or.label = e.target.value.trim() || or.label;
+    else if (orField === "amount") or.amount = clampNumber(e.target.value, 0);
+    else if (orField === "atAge") or.at = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
+  } else {
+    return;
+  }
   state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets);
   saveState();
   refreshOutputs();
@@ -3673,7 +3795,16 @@ els.liabilitiesSection.addEventListener("click", (e) => {
     state.liabilities = state.liabilities.filter((x) => x.id !== l.id);
   } else if (btn.dataset.liabAction === "repayment") {
     l.repayment = btn.dataset.value === "io" ? "io" : "pi";
+  } else if (btn.dataset.liabAction === "add-extra") {
+    l.extraRepayments = [...(l.extraRepayments ?? []), createExtraRepayment(state.plan, l.extraRepayments ?? [])];
+  } else if (btn.dataset.liabAction === "remove-extra") {
+    l.extraRepayments = (l.extraRepayments ?? []).filter((x) => x.id !== btn.dataset.erid);
+  } else if (btn.dataset.liabAction === "add-oneoff") {
+    l.oneOffRepayments = [...(l.oneOffRepayments ?? []), createOneOffRepayment(state.plan)];
+  } else if (btn.dataset.liabAction === "remove-oneoff") {
+    l.oneOffRepayments = (l.oneOffRepayments ?? []).filter((x) => x.id !== btn.dataset.orid);
   }
+  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets);
   saveState();
   refreshOutputs();
   renderLiabilities();
@@ -5511,10 +5642,11 @@ function liabilityDetailRows(get) {
     { label: "Drawdowns", cell: (y) => get(y).drawdown },
     { label: "Interest", cell: (y) => -get(y).interest },
     { label: "Principal repaid", cell: (y) => -get(y).principal },
-    // Extra repayments are not modelled (v1 limitation, disclosed) —
-    // always zero, so the all-zero-rows convention hides it rather
-    // than needing a separate disclosure line here.
-    { label: "Extra repayments", cell: () => 0 },
+    // Document Set Commit 5 — extra and one-off (lump-sum) repayments,
+    // combined into the same figure the engine already applies against
+    // the balance each month. Zero (and so hidden by the all-zero-rows
+    // convention) for a loan with no extra/one-off repayments configured.
+    { label: "Extra repayments", cell: (y) => -get(y).extraRepayment },
     { label: "Offset balance applied", cell: (y) => get(y).offsetApplied },
   ];
 }
@@ -5522,13 +5654,24 @@ function liabilityDetailRows(get) {
 function liabilitiesPayoffFooter(liabIds) {
   if (liabIds.length === 0) return "";
   const lines = liabIds.map((lid) => `${escapeHTML(loanName(lid))}: paid off ${liabilityPayoffLabel(lid)}`);
-  return `<div class="ledger-foot">${lines.join(" · ")}</div>`;
+  // Document Set Commit 5 — interest/time saved vs the scheduled
+  // (no-extras) path, for every liability with a repayment plan that
+  // actually retired the loan within the projection.
+  const savedLines = liabIds
+    .map((lid) => ({ lid, stats: projection.liabilityRepaymentStats?.[lid] }))
+    .filter(({ stats }) => stats && stats.actualPayoffMonth != null)
+    .map(({ lid, stats }) =>
+      `${escapeHTML(loanName(lid))}: ${Math.round(stats.timeSavedMonths / 12 * 10) / 10} years early, ` +
+      `${fmtMoney(stats.interestSaved)} interest saved (today's dollars) vs the scheduled path`
+    );
+  return `<div class="ledger-foot">${lines.join(" · ")}</div>` +
+    (savedLines.length ? `<div class="ledger-foot">${savedLines.join(" · ")}</div>` : "");
 }
 
 function buildLiabilitiesGroups(entity) {
   const yl = projection.yearly;
   const liabIds = Object.keys(yl[0]?.liabilities ?? {});
-  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0 };
+  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0 };
 
   if (entity === "all") {
     const combined = liabilityDetailRows((y) => liabIds.reduce((s, lid) => {
