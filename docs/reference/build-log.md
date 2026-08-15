@@ -396,11 +396,47 @@ shortfall, not as a shortfall-by-date the client just hasn't reached yet.
   to destinations plus residual; HELP is never a destination; loan/
   super/goal rows each surface correctly; the initial transfer column
   is read straight from `plan.implementation`, never re-derived.
+- Commit 6, **Scenario comparison** — new `src/scenarioComparison.js`,
+  pure (`planWindowsMatch`, `keyFigureValuesAtYear`,
+  `keyFigureComparisonRows`). "Current is simply another scenario — no
+  new data model": every compared scenario is a full, independent
+  `projectPlan()` run — the active one reuses the SAME `state`/
+  `projection` every other view already reads, every other scenario is
+  loaded straight from storage via the same `hydrate()` path
+  `loadActiveState()` itself uses. `buildKeyFiguresGroups`/
+  `incomeCategorySums`/`expenseCategorySums` (main.js) all gained an
+  optional `{state, projection}` ctx, defaulting to the active
+  workspace's own globals — backward compatible with every existing
+  call site — specifically so a comparison column reuses the EXACT SAME
+  row definitions the Key figures table itself uses, never a second,
+  driftable copy. New Focus view (**Compare scenarios**): pick 2-3 of
+  the active client's own scenarios (checkboxes, order = delta base
+  order); mismatched plan windows (current age, start date, or end age)
+  are refused with a clear message naming which scenarios differ,
+  never approximated to fit; matching windows show Net assets over time
+  (one line per scenario, age axis, each scenario's OWN CPI driving its
+  own nominal conversion), Key figures side by side + a delta column
+  per non-base scenario against the first-listed, and Snapshot rows
+  side by side at a selected year (household total only — a disclosed
+  simplification, since scenarios can differ in household composition
+  and each scenario's own Snapshot view still has the full Client/
+  Partner split). CSV and "Copy for Word" export (the Snapshot half
+  reuses `snapshot.js`'s own `snapshotToHTML`/`snapshotToCSV`
+  unchanged, columns relabelled scenario names instead of years). No
+  new money flow, so no conservation-invariant change. Tested: each
+  scenario's own values pass through unchanged; deltas compute against
+  the first-listed scenario specifically (never adjacent pairs); a row
+  present in only some scenarios (e.g. HELP balance) never misaligns,
+  matched by label not index; mismatched windows refused; cross-client
+  scenario ids are structurally impossible to select (the picker only
+  ever lists the active client's own scenarios).
+
+This closes all six commits of docs/specs/13-implementation-rates-equity-comparison.md.
 
 ### In flight
-Spec 13 Commit 6 (scenario comparison); super threshold
-indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
-then Division 296, then Monte Carlo over the full scenario.
+Super threshold indexation per figure (AWOTE / CPI / unindexed, with
+nominal rounding), then Division 296, then Monte Carlo over the full
+scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary
