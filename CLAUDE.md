@@ -31,6 +31,15 @@ spec wins and says so explicitly.**
   The property acquisition-date bug and the super-contribution
   money-creation bug each needed two rounds because the first fix
   addressed only the one case that was reported.
+- Any commit that introduces a new money flow (a new leak, external
+  inflow, or transfer between two pockets of net worth) must extend
+  `randomScenario()` (`src/deterministic.test.js`) to generate it AND
+  extend the conservation invariant (`src/conservationCheck.js`) to name
+  and account for it, in the SAME commit. The invariant caught nothing
+  when the Document Set landed because `randomScenario()` never
+  generated goals, FHSSS, extra/one-off loan repayments, LMI, or
+  HELP/MLS-triggering incomes — a guard that doesn't grow with the
+  engine silently stops guarding.
 
 ## Architecture map
 - `src/planState.js` — schema (v5+), migrations, factories. localStorage via

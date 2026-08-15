@@ -660,6 +660,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // it's not assessable and not preservation-gated. See the Division
       // 293/296 release-from-super feature.
       release: 0,
+      // Document Set Commit 3 (FHSSS) — the amount ACTUALLY debited
+      // from this account for a release, independent of
+      // row.properties[pid].fhsssRelease (the amount credited against
+      // settlement cash): the two are computed from different places
+      // and must agree — see conservationCheck.js's explicit transfer
+      // assertion, added after this being asymmetric (settlement
+      // credited the full requested amount; the account paid only what
+      // it had) was found to silently create money.
+      fhsssRelease: 0,
       closing: 0, taxFreeClosing: 0,
     }])),
     superClosing: 0,
@@ -1022,8 +1031,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             fhsssReleasedHere += rel.grossRelease;
             acc[per].fhsssTaxableRelease += rel.taxableComponent;
             if (row) {
+              // rel.grossRelease is already capped at the account's
+              // available balance (see the outer per-year loop above),
+              // so this should always pay the full amount — captured
+              // and reported (row.superDetail[accountId].fhsssRelease)
+              // rather than discarded, so the settlement-side credit
+              // and the super-side debit are independently verifiable
+              // as the same figure (conservationCheck.js's explicit
+              // transfer assertion), not just assumed to match.
               const accountId = superAccountsByOwner[per]?.[0];
-              if (accountId) withdrawFromSuper(accountId, rel.grossRelease);
+              if (accountId) {
+                const paidFromSuper = withdrawFromSuper(accountId, rel.grossRelease);
+                row.superDetail[accountId].fhsssRelease += paidFromSuper;
+              }
             }
           }
           const lmiCash = pm.lmiCapitalised ? 0 : lmiReal;
@@ -1592,7 +1612,30 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           concessionalBalance: fb.concessional, nonConcessionalBalance: fb.nonConcessional, earnings: fb.earnings,
         });
         if (amounts.grossRelease <= 0) continue;
-        fhsssRelease[per] = { ...amounts, propertyId: p.id };
+        // Cap at what's actually in the account: the FHSSS notional
+        // balance is a running subset of real contributions credited
+        // to the real account, but something else touching the SAME
+        // account first this FY (a Division 293/296 release, an
+        // explicit withdrawal) could have drained it below the
+        // notional figure. Capping here — before either pass runs, so
+        // both see the identical, already-capped amount — keeps the
+        // settlement-cash credit and the super debit exactly in sync;
+        // requesting more than the account holds and crediting the
+        // settlement with the uncapped figure anyway is the same class
+        // of money-creation bug the conservation invariant exists to
+        // catch (found via this exact check — see conservationCheck.js).
+        const accountId = superAccountsByOwner[per]?.[0];
+        const available = accountId ? superBal[accountId] : 0;
+        const scale = amounts.grossRelease > available
+          ? (amounts.grossRelease > 0 ? Math.max(0, available) / amounts.grossRelease : 1)
+          : 1;
+        const capped = scale === 1 ? amounts : {
+          taxableComponent: amounts.taxableComponent * scale,
+          taxFreeComponent: amounts.taxFreeComponent * scale,
+          grossRelease: amounts.grossRelease * scale,
+        };
+        if (capped.grossRelease <= 0) continue;
+        fhsssRelease[per] = { ...capped, propertyId: p.id };
         fb.concessional = 0; fb.nonConcessional = 0; fb.earnings = 0; fb.released = true;
       }
     }

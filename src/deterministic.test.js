@@ -61,6 +61,15 @@ const cf = (over = {}) => {
 const zeroRealAlloc = (cpi = 0.025) =>
   ({ mode: "custom", incomePct: cpi * 100, growthPct: 0, frankingPct: 0, volBasis: "Balanced" });
 
+// Same "real return exactly 0" idea, but for a SUPER account: the fund's
+// income component is also taxed at earningsTaxRate (15%, superRates.js)
+// before it compounds, so a super allocation needs a grossed-up
+// incomePct — zeroRealAlloc's plain cpi*100 would tax down to a small
+// NEGATIVE real return, contaminating an exact FHSSS hand-calc that
+// expects the account to neither grow nor shrink in real terms.
+const zeroRealSuperAlloc = (cpi = 0.025, earningsTaxRate = 0.15) =>
+  ({ mode: "custom", incomePct: (cpi / (1 - earningsTaxRate)) * 100, growthPct: 0, frankingPct: 0, volBasis: "Balanced" });
+
 describe("assetMonthlyRate (convention 7)", () => {
   it("Fisher + geometric monthly compounding", () => {
     const asset = mkAsset({ allocation: { mode: "custom", incomePct: 4, growthPct: 2, frankingPct: 0, volBasis: "Balanced" }, icrPct: 0.5 });
@@ -2300,11 +2309,22 @@ describe("toConcessionalCap contribution cash flow (engine-correctness fix)", ()
 // money-creation bugs found so far (the original WCA-debit gap e1eb61a
 // fixed, and the toConcessionalCap gap 2867768 closed) would have
 // failed this invariant, and nothing in the suite checked it before
-// now. checkYearConservation itself (the equation, its scope, and why
-// each excluded case is excluded) lives in conservationCheck.js, so
-// Monte Carlo's per-path spot check (monteCarlo.test.js) runs the
-// exact same check rather than a second, driftable copy of it — this
-// describe block only supplies the random-scenario generator.
+// now. A THIRD (an FHSSS release crediting settlement cash with the
+// full requested amount regardless of whether the super account
+// actually held that much) was found and fixed while extending this
+// generator to cover the Document Set's money flows — the invariant
+// caught nothing there for months because this generator never
+// produced a goal, an FHSSS release, an extra/one-off loan repayment,
+// LMI, or a HELP/MLS-triggering income. A guard that doesn't grow with
+// the engine silently stops guarding — see CLAUDE.md's rule that any
+// commit introducing a new money flow must extend both this generator
+// and checkYearConservation in the same commit.
+//
+// checkYearConservation itself (the equation, its scope, and why each
+// excluded case is excluded) lives in conservationCheck.js, so Monte
+// Carlo's per-path spot check (monteCarlo.test.js) runs the exact same
+// check rather than a second, driftable copy of it — this describe
+// block only supplies the random-scenario generator.
 describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   const rand = (min, max) => min + Math.random() * (max - min);
   const randInt = (min, max) => Math.floor(rand(min, max + 1));
@@ -2327,6 +2347,18 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     });
   };
 
+  // Stratified, not uniform: a plain rand(60000,200000) rarely lands
+  // below HELP's $69,528 floor or above its $186,052 cliff, and rarely
+  // crosses MLS's $105,000 single / $210,000 family thresholds either
+  // — exactly the gap that let a whole Document Set of money flows go
+  // unexercised. One band per HELP/MLS regime, picked uniformly.
+  const randomIncome = () => pick([
+    rand(20000, 69000),    // below HELP's floor, below MLS
+    rand(70000, 104000),   // HELP marginal, below MLS (singles)
+    rand(106000, 186000),  // HELP marginal, above MLS (singles)
+    rand(187000, 320000),  // above HELP's cliff, well above MLS (and family MLS)
+  ]);
+
   function randomScenario() {
     const couple = Math.random() < 0.4;
     const persons = couple ? ["client", "partner"] : ["client"];
@@ -2336,11 +2368,13 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const assets = Array.from({ length: randInt(1, 3) }, (_, i) => randomAsset(`a${i}`));
 
     const superAccounts = persons.map((p) => superAcct({
-      id: `su_${p}`, owner: p, balance: rand(0, 200000), allocation: randomAllocation(),
+      // half zero-balance — exercises the FHSSS release cap / withdrawFromSuper
+      // shortfall path, which a uniform draw over (0, 200000) rarely hits exactly.
+      id: `su_${p}`, owner: p, balance: pick([0, rand(0, 200000)]), allocation: randomAllocation(),
     }));
 
     const income = persons.map((p) => employmentRow({
-      id: `sal_${p}`, owner: p, amount: rand(60000, 200000),
+      id: `sal_${p}`, owner: p, amount: randomIncome(),
       frequency: pick(["monthly", "annual"]),
       from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
       sgApplies: Math.random() < 0.9,
@@ -2351,6 +2385,11 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
     })];
 
+    // FHSSS (Document Set Commit 3): a voluntary contribution flagged
+    // eligible half the time — paired below with a planned property's
+    // releaseFhsssAtPurchase toggle, itself independently randomised,
+    // so both "eligible contributions with no release" and "a release
+    // toggle with nothing to release" get exercised too.
     const superContributions = [];
     for (const p of persons) {
       if (Math.random() < 0.5) {
@@ -2359,6 +2398,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           type: pick(["salarySacrifice", "personalDeductible"]),
           basis: "amount", amount: rand(1000, 15000), frequency: "annual",
           from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+          fhsssEligible: Math.random() < 0.5,
         }));
       }
       if (Math.random() < 0.5) {
@@ -2370,15 +2410,97 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
     }
 
+    // Extra and one-off loan repayments (Document Set Commit 5) — some
+    // amounts deliberately large relative to a modest income/expense
+    // gap, so the deficit-funding/unfunded path (already a named term
+    // in the invariant) actually gets exercised, not just the
+    // comfortably-affordable case.
     const liabilities = [];
     if (Math.random() < 0.5) {
-      liabilities.push({
+      const liab = {
         id: "lb1", name: "Loan", type: "mortgage", owner: couple ? "joint" : "client",
         balance: rand(50000, 300000), interestRatePct: rand(4, 8),
         termYears: randInt(10, 25), repayment: pick(["io", "pi"]), ioYears: 3,
         deductible: Math.random() < 0.5, linkedAssetId: null, offsetAssetId: null,
+        extraRepayments: [], oneOffRepayments: [],
+      };
+      if (Math.random() < 0.6) {
+        liab.extraRepayments = [{
+          id: "er1", label: "Extra", amount: rand(200, 40000), // sometimes far beyond affordable
+          frequency: pick(["monthly", "annual"]),
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: randInt(41, endAge) },
+          indexBasis: pick(["none", "cpi"]), indexExtraPct: 0,
+        }];
+      }
+      if (Math.random() < 0.5) {
+        liab.oneOffRepayments = [{
+          id: "or1", label: "Lump sum", amount: rand(1000, 80000),
+          at: { kind: "age", age: randInt(40, endAge) },
+        }];
+      }
+      liabilities.push(liab);
+    }
+
+    // Goals (Document Set Commit 6) — funded from an asset (naturally
+    // capped at its balance) or from surplus (capped at what's
+    // actually left each month); target amounts range from trivially
+    // affordable to deliberately unfundable relative to a short
+    // timeframe and modest income, exercising both the ordinary
+    // accrual path and the capped-short path.
+    const goals = [];
+    for (let i = 0; i < randInt(0, 2); i++) {
+      const fundFromAsset = Math.random() < 0.5;
+      goals.push({
+        id: `gl${i}`, label: `Goal ${i}`,
+        targetAmount: rand(2000, 90000),
+        targetAt: { kind: "age", age: randInt(40, endAge) },
+        fundedFrom: fundFromAsset ? pick(assets).id : "surplus",
+        indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: 0,
       });
     }
+
+    // A planned property (Document Set Commits 3/4) — the only place
+    // FHSSS release and LMI ever fire. lvrPct spans both sides of the
+    // 80% LMI threshold; firstHomeGuarantee only ever applies when
+    // firstHomeBuyer is also set (mirroring planState.js's own
+    // input-integrity rule, even though this raw state bypasses the
+    // clamp); releaseFhsssAtPurchase and lmiPayAtSettlement are each
+    // independently randomised so every combination gets exercised
+    // over enough runs. propertyType is always "ppr" and status always
+    // "planned" — an "owned" property from day one is NOT safe here
+    // (see conservationCheck.js's header caveat on y=0).
+    const properties = [];
+    if (Math.random() < 0.5) {
+      const firstHomeBuyer = Math.random() < 0.5;
+      properties.push({
+        id: "p1", name: "Home", owner: couple ? "joint" : "client",
+        state: pick(["NSW", "VIC", "QLD", "WA", "SA", "TAS", "ACT", "NT"]),
+        propertyType: "ppr", status: "planned",
+        currentValue: 0, acquisitionDate: null, costBase: 0,
+        priceToday: rand(300000, 900000),
+        purchaseAt: { kind: "age", age: randInt(40, endAge) },
+        lvrPct: pick([60, 70, 80, 85, 90, 95]),
+        firstHomeBuyer, newBuild: Math.random() < 0.3,
+        purchaseCostsPct: rand(0, 3), dutyOverride: null, growthPct: rand(0, 6),
+        rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+        expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+        expensesDeductible: true, depreciation: 0,
+        releaseFhsssAtPurchase: Math.random() < 0.6,
+        firstHomeGuarantee: firstHomeBuyer && Math.random() < 0.5,
+        lmiOverride: null,
+        lmiPayAtSettlement: Math.random() < 0.5,
+      });
+    }
+
+    // HELP (Document Set Commit 1) — a balance below, at, and above a
+    // typical single year's repayment, so some scenarios show the
+    // balance fully retiring mid-projection (Commit 1's own "stops
+    // once it hits zero" behaviour) and others don't. MLS (Commit 2) —
+    // cover held or not, per person, plus a household with dependent
+    // children shifting the family threshold.
+    const client = { currentAge: 40, helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5 };
+    const partner = couple ? { currentAge: 40, helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5 } : null;
+    const dependentChildren = couple ? randInt(0, 3) : 0;
 
     const surplusMode = pick(["accumulate", "invest", "spend"]);
     const surplus = { mode: surplusMode, assetId: surplusMode === "invest" ? assets[0].id : null };
@@ -2388,7 +2510,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         endAge, cpi: rand(0.02, 0.04), assets,
         plan: {
           household: couple ? "couple" : "single",
-          client: { currentAge: 40 }, partner: couple ? { currentAge: 40 } : null,
+          client, partner, dependentChildren,
           superAccounts, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
         },
         cashflows: { income, expenses, superContributions },
@@ -2396,6 +2518,8 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         fundingOrder: assets.map((a) => a.id),
       }),
       liabilities,
+      goals,
+      properties,
     };
   }
 
@@ -3043,7 +3167,14 @@ describe("FHSSS (Document Set Commit 3)", () => {
     ...mkState({
       endAge: 45,
       assets: [],
-      plan: { superAccounts: [superAcct()] },
+      // Real-zero fund return (see zeroRealSuperAlloc's own header) —
+      // a literal 0/0 allocation still decays slightly in REAL terms
+      // via Fisher deflation (and zeroRealAlloc's plain cpi*100 decays
+      // too, once the fund's own 15% earnings tax bites), which would
+      // make the real account balance drift below the FHSSS notional
+      // balance's own hand-calc for reasons unrelated to what these
+      // tests exercise.
+      plan: { superAccounts: [superAcct({ allocation: zeroRealSuperAlloc() })] },
       cashflows: {
         income: [employmentRow({ amount: 150000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 44 } })],
         superContributions: [scRow({
@@ -3053,7 +3184,7 @@ describe("FHSSS (Document Set Commit 3)", () => {
         })],
       },
     }),
-    assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0 },
+    assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0.025 },
     properties: [fhsssProp()],
     liabilities: [],
     ...extra,
@@ -3085,7 +3216,7 @@ describe("FHSSS (Document Set Commit 3)", () => {
           income: [employmentRow({ amount: 200000, sgApplies: true, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
         },
       }),
-      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0 },
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0.025 },
       properties: [fhsssProp({ purchaseAt: { kind: "age", age: 42 } })],
       liabilities: [],
     };
@@ -3096,7 +3227,7 @@ describe("FHSSS (Document Set Commit 3)", () => {
   it("the combined $15,000/year cap binds across concessional and non-concessional together, split proportionally", () => {
     const s = {
       ...mkState({
-        endAge: 43, assets: [], plan: { superAccounts: [superAcct()] },
+        endAge: 43, assets: [], plan: { superAccounts: [superAcct({ allocation: zeroRealSuperAlloc() })] },
         cashflows: {
           income: [employmentRow({ amount: 200000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
           superContributions: [
@@ -3105,7 +3236,7 @@ describe("FHSSS (Document Set Commit 3)", () => {
           ],
         },
       }),
-      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0 },
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0.025 },
       properties: [fhsssProp({ purchaseAt: { kind: "age", age: 41 } })],
       liabilities: [],
     };
@@ -3120,7 +3251,7 @@ describe("FHSSS (Document Set Commit 3)", () => {
   it("the $50,000 lifetime cap binds even when each individual year is under the annual cap", () => {
     const s = {
       ...mkState({
-        endAge: 47, assets: [], plan: { superAccounts: [superAcct()] },
+        endAge: 47, assets: [], plan: { superAccounts: [superAcct({ allocation: zeroRealSuperAlloc() })] },
         cashflows: {
           income: [employmentRow({ amount: 200000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } })],
           superContributions: [scRow({
@@ -3129,7 +3260,7 @@ describe("FHSSS (Document Set Commit 3)", () => {
           })],
         },
       }),
-      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0 },
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0.025 },
       properties: [fhsssProp({ purchaseAt: { kind: "age", age: 44 } })],
       liabilities: [],
     };
@@ -3138,8 +3269,39 @@ describe("FHSSS (Document Set Commit 3)", () => {
   });
 
   it("associated earnings accrue on the balance before release", () => {
-    const withEarnings = projectPlan(baseState({ assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0.0794 } }));
-    const withoutEarnings = projectPlan(baseState());
+    // The real fund needs enough of its OWN growth to actually hold
+    // the larger, earnings-inflated release — otherwise the account-
+    // balance cap (see deterministic.js's FHSSS release block) would
+    // silently clip it straight back down to what a real-zero fund
+    // holds, masking the very effect this test wants to see. A
+    // generous 15% nominal (~10% real after the fund's 15% earnings
+    // tax) comfortably covers the ~5.3% real FHSSS deemed rate below.
+    // Built directly (not via baseState — its `plan` merges at the
+    // outer level, which would replace rather than extend baseState's
+    // own super account).
+    const growingSuperState = (fhsssEarningsRate) => ({
+      ...mkState({
+        endAge: 45,
+        assets: [],
+        plan: {
+          superAccounts: [superAcct({
+            allocation: { mode: "custom", incomePct: 15, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+          })],
+        },
+        cashflows: {
+          income: [employmentRow({ amount: 150000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 44 } })],
+          superContributions: [scRow({
+            type: "salarySacrifice", amount: 10000, frequency: "annual", fhsssEligible: true,
+            indexBasis: "cpi", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 },
+          })],
+        },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate },
+      properties: [fhsssProp()],
+      liabilities: [],
+    });
+    const withEarnings = projectPlan(growingSuperState(0.0794));
+    const withoutEarnings = projectPlan(growingSuperState(0.025)); // real-zero baseline
     expect(withEarnings.yearly[2].properties.p1.fhsssRelease)
       .toBeGreaterThan(withoutEarnings.yearly[2].properties.p1.fhsssRelease);
   });

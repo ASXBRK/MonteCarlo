@@ -6,14 +6,27 @@
 // drifts itself). Both money-creation bugs found so far (the original
 // WCA-debit gap e1eb61a fixed, and the toConcessionalCap gap
 // 2867768 closed) would have failed this invariant, and nothing in the
-// suite checked it before deterministic.test.js added it.
+// suite checked it before deterministic.test.js added it. A THIRD —
+// an FHSSS release crediting settlement cash with the full requested
+// amount regardless of whether the super account actually held that
+// much — was found and fixed while extending this invariant to cover
+// the Document Set's new money flows (see the FHSSS section below).
+//
+// IMPORTANT — any commit that introduces a new money flow (a new leak,
+// external inflow, or transfer between two pockets of net worth) MUST
+// extend randomScenario() (deterministic.test.js) to generate it AND
+// extend this file to name and account for it, in the SAME commit. A
+// guard that doesn't grow with the engine silently stops guarding —
+// this invariant caught nothing when the Document Set landed because
+// randomScenario() never generated goals, FHSSS, extra/one-off loan
+// repayments, LMI, or HELP/MLS-triggering incomes. See CLAUDE.md.
 //
 // For every plan year (excluding the projection's final year — see
 // below), the change in total net position must equal the sum of
 // every NAMED source of cash entering or leaving the household —
 // nothing left unaccounted:
 //
-//   N(y) = financial assets + super + working cash − liabilities
+//   N(y) = financial assets + super + working cash + property − liabilities
 //        = out.yearly[y].netAssets (the engine's own figure)
 //
 //   ΔN(y) = income (incl. WCA interest — real household income — and any
@@ -27,16 +40,20 @@
 //         + externalInflows (employer SG — money the household never
 //           had to forgo, entering only through super)
 //         − expenses
-//         − tax (income tax, CGT, Div293/296 — whatever `row.tax` is
-//           this FY)
+//         − tax (income tax, CGT, Div293/296, AND HELP/MLS repayments —
+//           whatever `row.tax` is this FY; HELP/MLS are folded into the
+//           exact same PAYG-withheld/settled cash mechanism as ordinary
+//           income tax, so they need no separate subtraction — see the
+//           "HELP repayment" section below for why it's still named)
 //         − contributionsTax (the 15%/30% skimmed off a contribution on
 //           the way into super — the one place a contribution's gross
 //           cash debit and net super credit are legitimately allowed to
 //           differ)
-//         − liabilityInterest (the real cost of debt; principal
-//           repayment is conservation-neutral — the WCA falls by the
-//           payment, the liability falls by the same principal, and the
-//           two mostly cancel in N)
+//         − liabilityInterest (the real cost of debt; ordinary principal
+//           repayment, an extra/one-off repayment (Document Set Commit
+//           5), and a purchase loan's drawdown are all conservation-
+//           neutral the same way — see "liabilityRevaluation" below for
+//           why each has to be pulled OUT of that term specifically)
 //         + liabilityRevaluation (a fixed nominal debt's REAL value
 //           erodes with inflation faster than cash principal repayment
 //           alone explains — a real gain to net worth with no cash flow
@@ -53,10 +70,57 @@
 //           reduction rather than cash, so it never shows up in
 //           `row.tax` — sumVals(row.superDetail, "release") is the only
 //           place it's recorded)
+//         + propertyAcquisitionCosts (Document Set Commits 3/4 brought
+//           properties into scope — see "Properties" below — duty and
+//           purchase costs are a leak, an FHOG grant is an external
+//           inflow; bundled into one term since neither is separately
+//           reported on the row, unlike the two Document Set flows
+//           extracted below)
+//         + fhsssRelease − fhsssSuperDebit (Document Set Commit 3: a
+//           TRANSFER, not a leak — money moves from a super account to
+//           reduce a property purchase's settlement cash requirement.
+//           The two sides are sourced independently (one from
+//           row.properties, one from row.superDetail) and must be
+//           EQUAL — asserted explicitly, not just assumed, since they
+//           nets to zero here only because they're forced equal below)
+//         − lmiPremium (Document Set Commit 4: a leak either way a
+//           premium is financed — capitalised, it's already inside a
+//           bigger loan drawdown (liabilityRevaluation's own
+//           adjustment handles that side); paid at settlement, it's
+//           inside settlementCash — either way the SAME −lmiPremium
+//           residual falls out of the property derivation, so one term
+//           covers both payment methods without an if/else)
+//         − goalSpend (Document Set Commit 6: "spent at the target
+//           date" is modelled as the accrual itself — every dollar
+//           reported in row.goals[...].contribution has already left
+//           the model, whether pulled from an asset via sell() or
+//           diverted from surplus before it reaches the WCA — a leak,
+//           the same shape as an ordinary expense)
+//
+// Properties (Document Set Commits 3/4): brought into scope
+// specifically to test FHSSS release and LMI, which only ever fire
+// inside a property purchase event — not because general property
+// economics (growth, duty, FHOG, rent, depreciation, loan drawdown)
+// are newly a target of this invariant. row.propertyClosing's
+// year-over-year delta covers both a purchase-year's value injection
+// and ordinary capital growth of an already-purchased property
+// uniformly; subtracting the financed portion (the new loan's
+// drawdown) and the household's own cash contribution (settlement)
+// leaves exactly "duty + costs − FHOG − FHSSS release + LMI" as a
+// residual (derivable algebraically from how settlementOut itself is
+// computed in deterministic.js's purchase-event block). FHSSS release
+// and LMI are separately reported on the row and extracted as their
+// own named terms; duty/costs/FHOG are not separately reported, so
+// they stay bundled as one "propertyAcquisitionCosts" scaffolding term.
+//
+// CAVEAT: this only works for a PLANNED (not-yet-purchased) property,
+// whose opening value is genuinely zero — an ALREADY-OWNED property
+// present from day one would need its opening value subtracted in
+// openingN too (below), which this formula does not do. randomScenario()
+// must never generate an "owned" property for this reason.
 //
 // Deliberately out of scope, so the invariant stays unambiguous rather
 // than merely thorough — each is its own already-tested subsystem:
-//  - properties (their own duty/FHOG/settlement cost accounting, D4)
 //  - explicit asset/super withdrawal rows (a shortfall there is cash the
 //    household simply didn't receive, not a leak — mixing it into the
 //    same `unfundedCashflow` figure as the WCA top-up's shortfall would
@@ -84,6 +148,7 @@ export function checkYearConservation(out, y, ctx) {
   const row = out.yearly[y];
   const prev = y > 0 ? out.yearly[y - 1] : null;
   const sumVals = (obj, key) => Object.values(obj).reduce((s, v) => s + v[key], 0);
+  const sumProps = (key) => Object.values(row.properties ?? {}).reduce((s, p) => s + (p[key] ?? 0), 0);
 
   const openingN = prev
     ? prev.netAssets
@@ -106,9 +171,15 @@ export function checkYearConservation(out, y, ctx) {
   // of an offset asset's cpiDecayMonthly in deterministic.js's growth
   // step). Deriving it from the engine's own opening/closing/principal
   // figures (rather than reconstructing month-by-month deflation)
-  // keeps this exact regardless of the rate path.
+  // keeps this exact regardless of the rate path. extraRepayment
+  // (Document Set Commit 5) is cash-funded-vs-balance-shrinks the same
+  // way ordinary principal is, so it's pulled out here too; drawdown
+  // (a purchase loan settling this FY, Document Set Commits 3/4) is a
+  // BRAND NEW liability appearing — not revaluation at all — added
+  // back so it doesn't get misread as a free CPI gain.
   const liabilityRevaluation = sumVals(row.liabilities, "opening") - sumVals(row.liabilities, "closing")
-    - sumVals(row.liabilities, "principal");
+    - sumVals(row.liabilities, "principal") - sumVals(row.liabilities, "extraRepayment")
+    + sumVals(row.liabilities, "drawdown");
 
   // A salary-sacrifice contribution (explicit or a toConcessionalCap
   // fill of that type) never touches `row.income` — schedule.js/
@@ -122,10 +193,46 @@ export function checkYearConservation(out, y, ctx) {
   const income = row.income + row.wcaDetail.interest + salarySacrificed;
   const growth = row.growth + superEarningsNet + liabilityRevaluation;
 
+  // --- Properties (Document Set Commits 3/4) — see the header derivation.
+  const propertyValueDelta = row.propertyClosing - (prev ? prev.propertyClosing : 0);
+  const drawdown = sumVals(row.liabilities, "drawdown");
+  const settlementCash = sumProps("settlement");
+  const fhsssRelease = sumProps("fhsssRelease");
+  const lmiPremium = sumProps("lmi");
+  // = -duty -costs +fhog +fhsssRelease -lmiPremium, algebraically (see
+  // header) — isolate the bundled duty/costs/FHOG scaffolding term by
+  // removing the two Document Set flows this task specifically names.
+  const propertyResidual = propertyValueDelta - drawdown - settlementCash;
+  const propertyAcquisitionCosts = propertyResidual - fhsssRelease + lmiPremium;
+
+  // --- FHSSS release (Document Set Commit 3) — a TRANSFER, asserted
+  // explicitly to net to zero across its two pockets, not just assumed.
+  const fhsssSuperDebit = sumVals(row.superDetail, "fhsssRelease");
+  const fhsssGap = Math.abs(fhsssRelease - fhsssSuperDebit);
+  const fhsssTol = Math.max(0.05, Math.abs(fhsssRelease) * 1e-6);
+  if (fhsssGap > fhsssTol) {
+    throw new Error(
+      `FHSSS release doesn't net to zero across super and settlement cash — gap ${fhsssGap.toFixed(4)} ` +
+      `(tol ${fhsssTol.toFixed(4)}) at ${ctx}: settlement was credited ${fhsssRelease.toFixed(2)}, ` +
+      `super was debited ${fhsssSuperDebit.toFixed(2)}. A transfer must move the SAME amount both ways — ` +
+      `if the super account couldn't cover the full release, the settlement credit must be capped to match.`
+    );
+  }
+
+  // --- Goals (Document Set Commit 6) — a leak; see header.
+  const goalSpend = Object.values(row.goals ?? {}).reduce((s, g) => s + (g.contribution ?? 0), 0);
+
+  // --- HELP repayment (Document Set Commit 1) — named for the record;
+  // already inside row.tax (see header), so NOT added again below.
+  // eslint-disable-next-line no-unused-vars
+  const helpRepayment = row.taxDetail?.helpRepayment ?? 0;
+
   const expected =
     income + growth + sgInflow
     - row.expenses - row.tax - contributionsTax - liabilityInterest
-    - row.surplusSpent + row.unfundedCashflow - divReleaseFromSuper;
+    - row.surplusSpent + row.unfundedCashflow - divReleaseFromSuper
+    + propertyAcquisitionCosts + fhsssRelease - fhsssSuperDebit - lmiPremium
+    - goalSpend;
 
   const delta = closingN - openingN;
   const gap = delta - expected;
