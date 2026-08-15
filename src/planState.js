@@ -136,6 +136,10 @@ function clampPerson(raw, start) {
     retirementAge: clampInt(raw?.retirementAge ?? DEFAULT_RETIREMENT_AGE, 18, 120),
     taxProfile: clampTaxProfile(raw?.taxProfile),
     super: clampPersonSuper(raw?.super),
+    // Document Set Commit 1 — HELP/HECS outstanding balance, real $.
+    // Held constant in real terms (see src/data/helpRates.js's header);
+    // reduced only by actual dollar repayments in deterministic.js.
+    helpBalance: clampNumber(raw?.helpBalance, 0),
   };
 }
 

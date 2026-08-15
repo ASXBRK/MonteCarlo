@@ -889,6 +889,13 @@ function personBlockHTML(prefix, person, title) {
                  data-plan-field="${prefix}OpeningLosses" />
         </div>
         <div class="cf-cell">
+          <label>HELP/HECS balance ($)
+            <span class="helper-inline">Compulsory repayments come out of take-home pay via PAYG and reduce this each year.</span>
+          </label>
+          <input type="number" min="0" step="1000" value="${person.helpBalance}"
+                 data-plan-field="${prefix}HelpBalance" />
+        </div>
+        <div class="cf-cell">
           <label>Division 293 / 296 tax paid from
             <span class="helper-inline">The taxpayer may elect either; release from super is the common election.</span>
           </label>
@@ -1104,6 +1111,7 @@ wireDeferredDateCommit(els.planBar, (e) => {
     sex: field === `${prefix}Sex` ? e.target.value : cur.sex,
     currentAge: cur.currentAge, // fallback if the new DOB is invalid
     retirementAge: field === `${prefix}RetirementAge` ? e.target.value : cur.retirementAge,
+    helpBalance: field === `${prefix}HelpBalance` ? e.target.value : cur.helpBalance,
     taxProfile: {
       residency: field === `${prefix}Residency` ? e.target.value : cur.taxProfile.residency,
       medicareExempt: field === `${prefix}Medicare` ? e.target.value === "exempt" : cur.taxProfile.medicareExempt,
@@ -4922,6 +4930,13 @@ function buildKeyFiguresGroups() {
     { label: "Surplus / (deficit)", cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
     { label: "Super balance", cell: (y) => yl[y].superClosing, always: true },
     { label: "Working cash balance", cell: (y) => yl[y].wcaClosing, always: true },
+    // Document Set Commit 1 — joins the table only while any HELP debt
+    // exists (no `always: true`, unlike every row above): a client
+    // with no HELP balance never sees this row at all.
+    {
+      label: "HELP balance",
+      cell: (y) => (yl[y].taxDetail.client?.helpBalanceClosing ?? 0) + (yl[y].taxDetail.partner?.helpBalanceClosing ?? 0),
+    },
   ];
   return [{ title: null, rows }];
 }
@@ -5523,6 +5538,8 @@ function buildTaxGroups() {
       { label: "Division 296 tax payable", cell: (y) => -(td(y, p)?.div296 ?? 0) },
       { label: "Division 293/296 — paid from", text: true, cell: (y) => divPaidFromText(y, p) },
       { label: "Quarantined rental losses (carried)", cell: (y) => td(y, p)?.quarantinedLossCarry ?? 0 },
+      { label: "HELP repayment", cell: (y) => -(td(y, p)?.helpRepayment ?? 0) },
+      { label: "HELP balance (closing)", cell: (y) => td(y, p)?.helpBalanceClosing ?? 0 },
     ],
   });
   const groups = [personGroup("client", clientName())];
@@ -5532,6 +5549,7 @@ function buildTaxGroups() {
     rows: [
       { label: "Division 293 tax payable", cell: (y) => -yl[y].taxDetail.div293 },
       { label: "Division 296 tax payable", cell: (y) => -yl[y].taxDetail.div296 },
+      { label: "HELP repayment", cell: (y) => -(yl[y].taxDetail.helpRepayment ?? 0) },
       { label: "Total tax", cell: (y) => -yl[y].tax, cls: "tl-total" },
     ],
   });

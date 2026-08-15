@@ -43,6 +43,7 @@ import { PROFILES, DEFENSIVE_PROFILE, impliedFrankingPct } from "./profiles.js";
 import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
+import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import {
   processConcessionalCap, processNonConcessionalCap, div293Tax, availableCarryForward,
 } from "./Tax/superContributions.js";
@@ -473,6 +474,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   };
   let pendingCgt = { client: 0, partner: 0 }; // assessed in FY t, payable July t+1
   const quarantineCarry = { client: 0, partner: 0 }; // D4 quarantined rental losses
+  // Document Set Commit 1 — HELP/HECS outstanding balance, real $. Held
+  // constant in real terms except for actual dollar repayments below
+  // (see src/data/helpRates.js's header for why); the loan ends when
+  // this reaches zero.
+  const helpBal = {
+    client: Math.max(0, state.plan.client?.helpBalance ?? 0),
+    partner: Math.max(0, state.plan.partner?.helpBalance ?? 0),
+  };
 
   const propsById = Object.fromEntries(props.map((p) => [p.id, p]));
   const liabsById = Object.fromEntries(liabs.map((l) => [l.id, l]));
@@ -1265,6 +1274,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // "toConcessionalCap" fills, excess CC, and the Div293 inputs) is
     // handed to runYear for crediting in the real pass only.
     const superRatesY = superRatesFor(fyStart, bracketMode, cpi, awoteAssum);
+    const helpRatesY = helpRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     const superOutcome = { client: null, partner: null };
     // Cap headroom snapshot (Tier 1.2, Commit 4 UI): the cap and
     // carry-forward available BEFORE this FY's toConcessionalCap fills
@@ -1387,6 +1397,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // capital gains. Property flows are balance-independent, so the
     // measured components are exact for both passes.
     const newQuarantine = { client: 0, partner: 0 };
+    // HELP/MLS repayment-income add-back (Document Set Commit 1/2): the
+    // property's net LOSS itself, before the quarantine decision above
+    // — a net investment loss adds back to repayment/surcharge income
+    // whether or not it's currently allowed to offset other income.
+    // Disclosed narrower than the full ATO definition: a leveraged
+    // financial-asset portfolio's loss (deductible interest exceeding
+    // its distributions) is not tracked as a discrete loss figure
+    // anywhere in this engine and so isn't added back here — only
+    // property negative gearing is, since that's the only investment-
+    // loss concept this tool actually models end to end.
+    const netInvestmentLoss = { client: 0, partner: 0 };
     for (const per of persons) {
       let rentalProfit = 0;
       for (const pid in propMeta) {
@@ -1396,6 +1417,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const share = pm.shares[per] ?? 0;
         const net = (pn.rent - pn.expenses) * share - pn.interest[per];
         if (net >= 0) { rentalProfit += net; continue; }
+        netInvestmentLoss[per] += -net;
         const allowed = fyStart < 2027 || pm.newBuild || pm.grandfathered;
         if (!allowed) {
           measured[per].deductions -= -net; // quarantine: pull the loss out
@@ -1415,6 +1437,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const assessed = {};
     const paygWithheld = { client: 0, partner: 0 };
     const newPendingRefund = { client: 0, partner: 0 };
+    // Document Set Commit 1 — HELP repayment for THIS FY, capped at the
+    // opening balance (never below zero). Assessed and applied to the
+    // balance in the same FY it's due (a modelling simplification, see
+    // helpRates.js's header); the CASH impact still follows the exact
+    // same PAYG-withheld-vs-actual settlement as income tax, landing as
+    // part of the same FY t+1 refund/balancing figure.
+    const helpDue = { client: 0, partner: 0 };
     taxOutArr.fill(0, yearStart(y), yearEnd(y));
     for (const p of persons) {
       const a = assessPerson({
@@ -1430,6 +1459,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
       });
       assessed[p] = a;
+
+      // Repayment income = taxable income (this FY's ordinary
+      // assessment — disclosed simplification: excludes this FY's own
+      // realised capital gain, which this engine only ever assesses in
+      // a later, separately-timed block) + reportable super
+      // contributions (salary sacrifice + personal deductible ONLY —
+      // superOutcome's field already excludes SG, see Tier 1.2) + net
+      // investment loss (property negative gearing only — see the
+      // block above). Reportable fringe benefits and exempt foreign
+      // employment income are NOT modelled — disclosed in the
+      // Parameters modal.
+      const repaymentIncome = a.taxableIncome
+        + (superOutcome[p]?.reportableSuperContributions ?? 0)
+        + netInvestmentLoss[p];
+      helpDue[p] = Math.min(helpRepaymentAmount(repaymentIncome, helpRatesY), helpBal[p]);
 
       // PAYG withholding, tax refund timing, and deductions: computed
       // on employment income ALONE — the tax-free threshold, Medicare
@@ -1455,13 +1499,20 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           excessConcessionalContributions: 0,
         });
         paygWithheld[p] = payg.netIncomeTax;
+        // Employer HELP withholding (also PAYG, same mechanism as
+        // income tax): estimated on employment income alone — a real
+        // payroll system has no visibility into the super/investment-
+        // loss add-backs — and capped at the opening balance, same as
+        // the actual repayment above.
+        const helpWithheld = Math.min(helpRepaymentAmount(employmentIncomeFy, helpRatesY), helpBal[p]);
         for (let m = yearStart(y); m < yearEnd(y); m++) {
-          if (empArr[m] > 0) taxOutArr[m] += paygWithheld[p] * (empArr[m] / employmentIncomeFy);
+          if (empArr[m] > 0) taxOutArr[m] += (paygWithheld[p] + helpWithheld) * (empArr[m] / employmentIncomeFy);
         }
-        newPendingRefund[p] = paygWithheld[p] - a.netIncomeTax;
+        newPendingRefund[p] = (paygWithheld[p] + helpWithheld) - (a.netIncomeTax + helpDue[p]);
       } else {
-        spreadTax(a.netIncomeTax, measured[p].incomeMonths, yearEnd(y) - 1);
+        spreadTax(a.netIncomeTax + helpDue[p], measured[p].incomeMonths, yearEnd(y) - 1);
       }
+      helpBal[p] -= helpDue[p];
     }
 
     // Division 293 (Tier 1.2, Commit 2): assessed this FY on the
@@ -1612,6 +1663,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // here would be a number that never corresponds to any real cash
       // event).
       refundOrBalancing: newPendingRefund[p],
+      // Document Set Commit 1 — this FY's compulsory HELP repayment
+      // (already capped at the opening balance) and the balance as it
+      // stands after it, for the Tax view's HELP row + closing balance
+      // and the Key figures table's HELP balance row.
+      helpRepayment: helpDue[p],
+      helpBalanceClosing: helpBal[p],
     } : null;
     for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY
     row.taxDetail = {
@@ -1636,6 +1693,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       refundSettled: refundDue,
       frankingCredits: persons.reduce((s, p) => s + assessed[p].frankingCredits, 0),
       netCapitalGain: persons.reduce((s, p) => s + real[p].netCapitalGain, 0),
+      helpRepayment: helpDue.client + helpDue.partner,
     };
     yearly.push(row);
     pendingCgt = newPending;

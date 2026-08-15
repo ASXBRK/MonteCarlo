@@ -12,8 +12,11 @@
 // (pre-reform discounted gains arrive already discounted; post-reform
 // gains get the 30% minimum-tax floor consistent with the engine's
 // simple_max application), and per-person capital-loss carry-forward.
-// NOT modelled (disclosed in the Parameters modal): SAPTO, HELP,
-// Medicare levy surcharge, Div 293, family Medicare thresholds.
+// HELP repayments are modelled separately (src/data/helpRates.js,
+// deterministic.js) since they depend on repayment income, not this
+// function's inputs. NOT modelled (disclosed in the Parameters modal):
+// SAPTO, Medicare levy surcharge, family Medicare thresholds. (Div 293
+// is also modelled separately — Tier 1.2 — this comment predates it.)
 //
 // Everything is in REAL dollars. Bracket modes (locked decision 6):
 //   "indexed" (default) — brackets/Medicare/LITO held constant in real

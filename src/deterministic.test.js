@@ -2780,6 +2780,128 @@ describe("PAYG withholding and tax refund timing", () => {
   });
 });
 
+// --- Document Set Commit 1: HELP repayments ---------------------------------
+describe("HELP repayments (Document Set Commit 1)", () => {
+  it("known-value: $100k salary, $50k balance — repayment income equals taxable income (no super/investment add-backs), matches the FY2026/27 bracket hand calc", () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [], // isolate the hand calc from the default asset's own distribution income
+      // ratePct 2.5 matches the default cpi (2.5%) exactly — a REAL
+      // return of zero, isolating the hand calc from WCA interest
+      // entirely (a literal 0% NOMINAL rate would still leave a small
+      // negative REAL return via Fisher deflation, still contaminating
+      // taxable income).
+      plan: { client: { currentAge: 40, helpBalance: 50000 }, workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      cashflows: { income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })] },
+    });
+    const out = projectPlan(s);
+    // hand calc (FY2026/27 base table, year 0 = no indexation drift):
+    // taxable income = 100,000 (no deductions); repayment income = same
+    // (no super sacrifice, no investment loss); (100000 − 69528) × 0.15
+    // = 30472 × 0.15 = 4570.80.
+    const due = 4570.80;
+    expect(out.yearly[0].taxDetail.client.helpRepayment).toBeCloseTo(due, 2);
+    expect(out.yearly[0].taxDetail.client.helpBalanceClosing).toBeCloseTo(50000 - due, 2);
+    expect(out.yearly[0].taxDetail.helpRepayment).toBeCloseTo(due, 2);
+  });
+
+  it("the $186,052 cliff reproduces in the full engine, not just the pure rate table", () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [],
+      plan: { client: { currentAge: 40, helpBalance: 100000 }, workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      cashflows: { income: [employmentRow({ amount: 186052, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })] },
+    });
+    const out = projectPlan(s);
+    // 10% of the WHOLE $186,052 (a person with zero deductions here has
+    // taxable income exactly equal to gross salary).
+    expect(out.yearly[0].taxDetail.client.helpRepayment).toBeCloseTo(186052 * 0.10, 2);
+  });
+
+  it("salary sacrifice does NOT reduce the repayment — the reportable-super-contributions add-back exactly cancels the taxable-income reduction", () => {
+    const base = (sacrificeAmount) => mkState({
+      endAge: 41,
+      assets: [],
+      plan: {
+        client: { currentAge: 40, helpBalance: 100000 }, superAccounts: [superAcct()],
+        workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 }, // real-zero — see the known-value test above
+      },
+      cashflows: {
+        income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
+        superContributions: sacrificeAmount > 0
+          ? [scRow({ type: "salarySacrifice", amount: sacrificeAmount, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })]
+          : [],
+      },
+    });
+    const withoutSacrifice = projectPlan(base(0));
+    const withSacrifice = projectPlan(base(20000));
+    // Taxable income genuinely drops (salary sacrifice reduces income
+    // at the source) — proving the two scenarios really do differ.
+    expect(withSacrifice.yearly[0].taxDetail.client.taxableIncome)
+      .toBeLessThan(withoutSacrifice.yearly[0].taxDetail.client.taxableIncome - 15000);
+    // But the HELP repayment is unchanged (within a cent), because
+    // reportableSuperContributions adds the sacrificed amount straight
+    // back into repayment income.
+    expect(withSacrifice.yearly[0].taxDetail.client.helpRepayment)
+      .toBeCloseTo(withoutSacrifice.yearly[0].taxDetail.client.helpRepayment, 2);
+  });
+
+  it("the balance amortises and stops at zero — never goes negative, never repays more than once the debt is gone", () => {
+    const s = mkState({
+      endAge: 43,
+      assets: [],
+      plan: { client: { currentAge: 40, helpBalance: 3000 } }, // small balance, well under one year's computed repayment
+      cashflows: { income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].taxDetail.client.helpRepayment).toBeCloseTo(3000, 2); // capped at the balance, not the full ~$4,570.80
+    expect(out.yearly[0].taxDetail.client.helpBalanceClosing).toBeCloseTo(0, 6);
+    // Every subsequent year: balance already zero, nothing left to repay.
+    for (let y = 1; y < out.yearly.length; y++) {
+      expect(out.yearly[y].taxDetail.client.helpRepayment).toBe(0);
+      expect(out.yearly[y].taxDetail.client.helpBalanceClosing).toBe(0);
+    }
+  });
+
+  it("PAYG withholding includes HELP — household cash flow actually differs with a nonzero balance, not just the tax-detail report", () => {
+    const base = (helpBalance) => mkState({
+      endAge: 42,
+      assets: [],
+      plan: {
+        client: { currentAge: 40, helpBalance },
+        workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 }, // real-zero — see the known-value test above
+      },
+      cashflows: { income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 } })] },
+    });
+    const withHelp = projectPlan(base(50000));
+    const withoutHelp = projectPlan(base(0));
+    // Year 0's household tax outflow is higher with a HELP balance —
+    // proof it's wired into taxOutArr (real cash), not just reported.
+    expect(withHelp.yearly[0].tax).toBeGreaterThan(withoutHelp.yearly[0].tax + 1000);
+    // The gap between the two runs' year-0 tax equals the HELP
+    // repayment exactly (nothing else differs between the scenarios).
+    const gap = withHelp.yearly[0].tax - withoutHelp.yearly[0].tax;
+    expect(gap).toBeCloseTo(withHelp.yearly[0].taxDetail.client.helpRepayment, 2);
+  });
+
+  it("regression gate: a zero (default) HELP balance leaves a rich scenario completely untouched", () => {
+    const s = mkState({
+      endAge: 42,
+      plan: { superAccounts: [superAcct()] }, // helpBalance omitted — defaults to 0
+      cashflows: {
+        income: [employmentRow({ amount: 150000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 } })],
+        superContributions: [scRow({ type: "salarySacrifice", amount: 10000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
+      },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.taxDetail.client.helpRepayment).toBe(0);
+      expect(row.taxDetail.client.helpBalanceClosing).toBe(0);
+      expect(row.taxDetail.helpRepayment).toBe(0);
+    }
+  });
+});
+
 describe("Deductions (PAYG withholding, tax refund timing, and deductions)", () => {
   it("a deduction row reduces the owner's taxable income and actual tax payable, with no household cash effect", () => {
     const scenario = (deduction) => mkState({
