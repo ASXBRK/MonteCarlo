@@ -94,6 +94,73 @@ export function bisectScalar({
   return { value: best, achieved: Math.abs(f(best) - targetValue) <= tolerance, iterations, converged: false, reason: "iteration-cap" };
 }
 
+// findMinimumThreshold({ lo, hi, metric, threshold, tolerance, maxIterations })
+// — binary search for the SMALLEST x in [lo, hi] at which `metric(x)`
+// (assumed monotonically NON-INCREASING in x — more x can only reduce
+// or leave unchanged how far the outcome is from what's wanted) first
+// drops to (or below) `threshold`.
+//
+// Deliberately NOT bisectScalar/solveFor: those solve f(x) = target for
+// a smoothly invertible f (Commit 1's own tests use "closing balance as
+// a function of contribution", which never plateaus). Several Focus
+// solvers instead ask "what's the SMALLEST/EARLIEST x that clears a bar"
+// — cumulative unfunded cashflow floors at exactly zero and STAYS there
+// for every x beyond the funding point (Focus Commit 2's two solvers), a
+// loan's payoff year keeps returning the same year for a wide range of
+// "more than enough" extra repayments (Focus Commit 5) — a genuine
+// plateau, not a single root. Solving "f(x) = threshold" on a plateau
+// would converge on an arbitrary point within it (typically the
+// search's own upper bound) rather than the minimum the question
+// actually asks for. This is the "leftmost true in a monotonic
+// predicate" shape, generalised so every Focus solver that needs it
+// shares one tested implementation instead of five reimplementations.
+export function findMinimumThreshold({ lo, hi, metric, threshold, tolerance = 0.5, maxIterations = MAX_ITERATIONS }) {
+  // `tolerance` is slop on the METRIC's own units — "at or below
+  // threshold" really means "within tolerance of it", the same way
+  // findMinimumFunded's own `tolerance` treated its (always-zero)
+  // threshold as a near-zero band rather than an exact bitwise
+  // comparison. For an integer-valued metric (a plan-year index, a
+  // payoff month) the default of 0.5 makes "<= threshold" exact
+  // without floating-point edge cases; a dollar-valued metric can pass
+  // a tighter one.
+  const clears = (v) => v <= threshold + tolerance;
+  let iterations = 0;
+  const atLo = metric(lo);
+  iterations++;
+  if (clears(atLo)) return { value: lo, achieved: true, iterations, converged: true, reason: "converged" };
+  const atHi = metric(hi);
+  iterations++;
+  if (!clears(atHi)) {
+    // Not achievable anywhere in the searched range — the honest
+    // answer, not a plausible-looking guess.
+    return { value: null, achieved: false, iterations, converged: false, reason: "out-of-bounds" };
+  }
+  let a = lo, b = hi;
+  // Width threshold: a cent for a continuous (dollar) domain, or
+  // effectively "done" for a coarser one (e.g. a caller solving over
+  // integer ages/months rounds the result anyway). Independent of the
+  // metric tolerance above — this is precision in x, not in f(x).
+  while (b - a > 0.01 && iterations < maxIterations) {
+    const mid = (a + b) / 2;
+    if (clears(metric(mid))) b = mid; else a = mid;
+    iterations++;
+  }
+  if (b - a > 0.01) {
+    return { value: null, achieved: false, iterations, converged: false, reason: "iteration-cap" };
+  }
+  // Spot-check the boundary really is a boundary — the same "did the
+  // assumed direction actually hold" discipline bisectScalar applies to
+  // a continuous equation search, adapted to a threshold predicate.
+  const metricAtA = metric(a);
+  iterations++;
+  const metricAtB = metric(b);
+  iterations++;
+  if (clears(metricAtA) || !clears(metricAtB)) {
+    return { value: null, achieved: false, iterations, converged: false, reason: "non-monotonic" };
+  }
+  return { value: b, achieved: true, iterations, converged: true, reason: "converged" };
+}
+
 // --- vary: where a trial value gets written into a CLONED plan state ---
 //
 // Kept as a small named-kind dispatch (not a raw closure) so callers

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { bisectScalar, solveFor, applyVary } from "./solve.js";
+import { bisectScalar, solveFor, applyVary, findMinimumThreshold } from "./solve.js";
 
 // Minimal v3-shaped state factory, mirroring deterministic.test.js's own
 // mkState — kept separate (not shared) since the two files test
@@ -161,6 +161,66 @@ describe("solveFor", () => {
       bounds: [0, 10000],
       tolerance: 0.5,
     });
+    expect(r.converged).toBe(false);
+    expect(r.reason).toBe("out-of-bounds");
+  });
+});
+
+describe("findMinimumThreshold", () => {
+  // A monotonically non-increasing metric that PLATEAUS at 0 for every
+  // x >= 40 — the shape bisectScalar/solveFor can't handle (solving
+  // "f(x) = 0" would land on an arbitrary point in [40, 100], not the
+  // leftmost one).
+  const plateauMetric = (x) => Math.max(0, 40 - x);
+
+  it("finds the SMALLEST x where the metric first clears the threshold, not an arbitrary point in the plateau", () => {
+    // tolerance: 0.01 — tight enough that "clears" means genuinely at
+    // the threshold, not within the default 0.5 metric slop.
+    const r = findMinimumThreshold({ lo: 0, hi: 100, metric: plateauMetric, threshold: 0, tolerance: 0.01 });
+    expect(r.converged).toBe(true);
+    expect(r.achieved).toBe(true);
+    expect(r.value).toBeCloseTo(40, 1);
+  });
+
+  it("lo already clears the threshold — returns lo immediately with a single metric read", () => {
+    const r = findMinimumThreshold({ lo: 50, hi: 100, metric: plateauMetric, threshold: 0 });
+    expect(r.converged).toBe(true);
+    expect(r.value).toBe(50);
+    expect(r.iterations).toBe(1);
+  });
+
+  it("not achievable anywhere in [lo, hi] reports out-of-bounds, not a plausible-looking guess", () => {
+    const r = findMinimumThreshold({ lo: 0, hi: 10, metric: plateauMetric, threshold: 0 });
+    expect(r.converged).toBe(false);
+    expect(r.achieved).toBe(false);
+    expect(r.value).toBeNull();
+    expect(r.reason).toBe("out-of-bounds");
+  });
+
+  it("a threshold other than zero is honoured (generalises beyond 'funded'/'unfunded')", () => {
+    const r = findMinimumThreshold({ lo: 0, hi: 100, metric: plateauMetric, threshold: 10, tolerance: 0.01 });
+    expect(r.converged).toBe(true);
+    expect(r.value).toBeCloseTo(30, 1);
+  });
+
+  it("an integer-valued metric (e.g. a plan-year index) converges cleanly with the default tolerance", () => {
+    // Mimics a payoff-year metric: an integer that steps down as x
+    // grows, then plateaus at year 3 for every x beyond the point that
+    // clears the loan a year early.
+    const yearMetric = (x) => Math.max(3, 10 - Math.floor(x / 10));
+    const r = findMinimumThreshold({ lo: 0, hi: 100, metric: yearMetric, threshold: 3 });
+    expect(r.converged).toBe(true);
+    expect(yearMetric(r.value)).toBe(3);
+  });
+
+  it("a non-monotonic metric (rises again after clearing the threshold) reports non-convergence", () => {
+    // Clears the threshold in the middle of the range, then rises back
+    // above it near hi — atHi itself already fails the "clears"
+    // check, so this is caught at the out-of-bounds gate, exactly like
+    // bisectScalar's own out-of-bounds path for a target the endpoints
+    // don't bracket.
+    const bumpMetric = (x) => (x > 80 ? 50 : Math.max(0, 40 - x));
+    const r = findMinimumThreshold({ lo: 0, hi: 100, metric: bumpMetric, threshold: 0 });
     expect(r.converged).toBe(false);
     expect(r.reason).toBe("out-of-bounds");
   });

@@ -53,6 +53,7 @@ import {
 import { eligibleFhsssPersons, buildFhsssFocus, buildFhsssComparison } from "./focusFhsss.js";
 import { FHSSS_ANNUAL_CAP, FHSSS_LIFETIME_CAP } from "./fhsss.js";
 import { eligibleSalarySacrificeRows, buildSalarySacrificeFocus } from "./focusSalarySacrifice.js";
+import { eligibleDebtPayoffLoans, buildDebtPayoffFocus, solveExtraRepaymentForPayoffDate } from "./focusDebtPayoff.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -6570,6 +6571,33 @@ function renderFocusDepositChart(f) {
   }, { displayModeBar: false, responsive: true });
 }
 
+function exportFocusDepositCSV() {
+  const f = buildDepositFocus({ out: projection, state, propertyId: focusDepositPropertyId });
+  if (!f) return;
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const py = f.target.purchaseYear;
+  const lines = [
+    ["Section", "Item", "Value"].map(csvEsc).join(","),
+    [csvEsc("Target"), csvEsc("Price today"), f.target.priceToday.toFixed(2)].join(","),
+    [csvEsc("Target"), csvEsc("Growth rate (% p.a.)"), f.target.growthPct].join(","),
+    [csvEsc("Target"), csvEsc("Purchase date"), csvEsc(`${f.target.fyLabel} (age ${f.target.purchaseAge})`)].join(","),
+    [csvEsc("Target"), csvEsc("Projected price at purchase"), (f.target.projectedPriceReal * factor(py)).toFixed(2)].join(","),
+    [csvEsc("Required at settlement"), csvEsc("Deposit"), (f.required.deposit * factor(py)).toFixed(2)].join(","),
+    [csvEsc("Required at settlement"), csvEsc("Stamp duty"), (f.required.duty * factor(py)).toFixed(2)].join(","),
+    [csvEsc("Required at settlement"), csvEsc("LMI"), (f.required.lmi * factor(py)).toFixed(2)].join(","),
+    [csvEsc("Required at settlement"), csvEsc("Transfer & legal costs"), (f.required.costs * factor(py)).toFixed(2)].join(","),
+    [csvEsc("Required at settlement"), csvEsc("First Home Owner Grant"), (-f.required.fhog * factor(py)).toFixed(2)].join(","),
+    [csvEsc("Required at settlement"), csvEsc("Total cash required"), (f.required.total * factor(py)).toFixed(2)].join(","),
+    [csvEsc("The answer"), csvEsc(f.answer.onTrack ? "Spare at settlement" : "Shortfall at settlement"), (f.answer.onTrack ? f.answer.spare : f.answer.shortfall).toFixed(2)].join(","),
+    "",
+    ["Year", "Age", "FY", "Available funds"].map(csvEsc).join(","),
+  ];
+  for (const a of f.accumulating) {
+    lines.push([a.year, a.age, csvEsc(a.fyLabel), (a.availableReal * factor(a.year)).toFixed(2)].join(","));
+  }
+  downloadCSV("focus-deposit", lines);
+}
+
 els.viewFocusDeposit.addEventListener("click", (e) => {
   const solveBtn = e.target.closest("[data-focus-solve]");
   if (solveBtn) {
@@ -6746,6 +6774,40 @@ function renderFocusFhsssChart(f, factor) {
   }, { displayModeBar: false, responsive: true });
 }
 
+function exportFocusFhsssCSV() {
+  const f = buildFhsssFocus({ out: projection, state, person: focusFhsssPerson });
+  if (!f) return;
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lines = [
+    ["Year", "Age", "FY", "Contribution accepted", "Contribution rejected", "Associated earnings"].map(csvEsc).join(","),
+  ];
+  for (const r of f.byYear) {
+    lines.push([
+      r.year, r.age, csvEsc(r.fyLabel),
+      (r.contributionAccepted * factor(r.year)).toFixed(2),
+      (r.contributionRejected * factor(r.year)).toFixed(2),
+      (r.earningsAccrued * factor(r.year)).toFixed(2),
+    ].join(","));
+  }
+  if (f.actualRelease) {
+    const r = f.actualRelease;
+    lines.push("", ["Release", "Value"].map(csvEsc).join(","));
+    lines.push([csvEsc(`Gross release (${r.fyLabel})`), (r.grossRelease * factor(r.year)).toFixed(2)].join(","));
+    lines.push([csvEsc("Taxable component"), (r.taxableComponent * factor(r.year)).toFixed(2)].join(","));
+    lines.push([csvEsc("Tax-free component"), (r.taxFreeComponent * factor(r.year)).toFixed(2)].join(","));
+    lines.push([csvEsc("30% offset"), (r.offset * factor(r.year)).toFixed(2)].join(","));
+  }
+  const comparison = buildFhsssComparison({ state, person: focusFhsssPerson });
+  if (comparison) {
+    const cf = factor(comparison.comparisonYear);
+    lines.push("", ["Comparison", "Value"].map(csvEsc).join(","));
+    lines.push([csvEsc(`Inside FHSSS (${comparison.fyLabel})`), (comparison.insideValue * cf).toFixed(2)].join(","));
+    lines.push([csvEsc("Saved outside super instead"), (comparison.outsideValue * cf).toFixed(2)].join(","));
+    lines.push([csvEsc("Difference"), (comparison.difference * cf).toFixed(2)].join(","));
+  }
+  downloadCSV("focus-fhsss", lines);
+}
+
 // --- Commit 4: Salary sacrifice ---------------------------------------------
 //
 // Both arms come from a real projectPlan() run (src/focusSalarySacrifice.js)
@@ -6850,21 +6912,234 @@ function renderFocusSacrificeChart(f, factor) {
   }, { displayModeBar: false, responsive: true });
 }
 
+function exportFocusSalarySacrificeCSV() {
+  const rows = eligibleSalarySacrificeRows(state);
+  const row = rows.find((r) => r.id === focusSalarySacrificeRowId);
+  if (!row) return;
+  const amount = focusSalarySacrificeAmount ?? row.amount;
+  const f = buildSalarySacrificeFocus({ state, contributionId: focusSalarySacrificeRowId, amount });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lines = [
+    [
+      "Year", "Age", "FY", "Income tax (with)", "Income tax (without)", "Income tax saved",
+      "HELP (with)", "HELP (without)", "Div 293 (with)", "Div 293 (without)",
+      "Super gained (net)", "Household cash reduced", "Net assets (with)", "Net assets (without)",
+    ].map(csvEsc).join(","),
+  ];
+  for (const r of f.byYear) {
+    lines.push([
+      r.year, r.age, csvEsc(r.fyLabel),
+      (r.incomeTaxWith * factor(r.year)).toFixed(2), (r.incomeTaxWithout * factor(r.year)).toFixed(2), (r.incomeTaxSaved * factor(r.year)).toFixed(2),
+      (r.helpWith * factor(r.year)).toFixed(2), (r.helpWithout * factor(r.year)).toFixed(2),
+      (r.div293With * factor(r.year)).toFixed(2), (r.div293Without * factor(r.year)).toFixed(2),
+      (r.superGainedNet * factor(r.year)).toFixed(2), (r.cashReduced * factor(r.year)).toFixed(2),
+      (r.netAssetsWith * factor(r.year)).toFixed(2), (r.netAssetsWithout * factor(r.year)).toFixed(2),
+    ].join(","));
+  }
+  downloadCSV("focus-salary-sacrifice", lines);
+}
+
 els.viewFocusSalarySacrifice.addEventListener("change", (e) => {
   if (e.target.id !== "focusSacrificeAmount") return;
   focusSalarySacrificeAmount = clampNumber(e.target.value, 0);
   renderFocusSalarySacrificeView();
 });
 
-// COMMIT 5 fills this in: per-loan payoff date, lifetime interest, and
-// the effect of extra repayments, with a solver for "what extra
-// repayment clears this by [date]?"
-function renderFocusDebtPayoffView() {
-  els.viewFocusDebtPayoff.innerHTML = focusEmptyStateHTML(
-    "When each loan clears, how much interest extra repayments actually save, and what it would take to clear one sooner — add a liability to see it.",
-    "liabilities"
-  );
+// --- Commit 5: Debt payoff --------------------------------------------------
+//
+// Every figure below is read straight off `projection` via
+// src/focusDebtPayoff.js's buildDebtPayoffFocus — this file only renders
+// it. The counterfactual chart is a real second projectPlan() run (the
+// loan's own extras stripped), not a hand-rolled amortisation. The
+// solver is button-triggered (up to 40 projectPlan calls), same
+// convention as the deposit and FHSSS solvers.
+let focusDebtPayoffLoanId = null;
+// { result, targetAge } | null — cleared whenever the loan changes or a
+// result is applied, so a stale solve is never shown against a plan it
+// no longer describes.
+let focusDebtPayoffSolveResult = null;
+
+function focusDebtPayoffStatsHTML(f, factor) {
+  if (!f.stats) {
+    return `<p class="helper-text">No extra or one-off repayments configured on this loan — nothing to compare against the scheduled term.</p>`;
+  }
+  const s = f.stats;
+  if (s.actualPayoffMonth == null) {
+    return `<p class="helper-text">Extra repayments are configured, but this loan doesn't reach zero within the projection — the true lifetime interest saved can't be determined yet.</p>`;
+  }
+  return `
+    <table class="focus-table">
+      <tr><td>Interest saved</td><td>${fmtMoney(s.interestSaved * factor(f.payoff?.year ?? 0))}</td></tr>
+      <tr><td>Time saved</td><td>${(s.timeSavedMonths / 12).toFixed(1)} years (${s.timeSavedMonths} months)</td></tr>
+    </table>
+  `;
 }
+
+function focusDebtPayoffSolverResultHTML() {
+  const r = focusDebtPayoffSolveResult;
+  if (!r) return "";
+  if (!r.result.converged) {
+    return `<p class="helper-warning">No extra repayment up to the loan's own balance clears it by age ${r.targetAge} — the target may not be reachable this way.</p>`;
+  }
+  if (r.result.value === 0) {
+    return `<p class="helper-text">Already on track to clear by age ${r.targetAge} without any extra repayment.</p>`;
+  }
+  const affordable = r.result.unfunded <= 0.5;
+  return `
+    <p class="${affordable ? "helper-text" : "helper-warning"}">
+      ${fmtMoney(r.result.value)}/month extra, from now to age ${r.targetAge}, clears this loan on time.
+      ${affordable
+        ? `<button class="btn-text" type="button" data-focus-apply="extra">Apply to plan</button>`
+        : `Short by ${fmtMoney(r.result.unfunded)} — the household can't fund this amount as things stand; applying it would leave cashflow unfunded, not clear the loan for free.`}
+    </p>
+  `;
+}
+
+function renderFocusDebtPayoffView() {
+  const loans = eligibleDebtPayoffLoans(state);
+  if (loans.length === 0) {
+    els.viewFocusDebtPayoff.innerHTML = focusEmptyStateHTML(
+      "When each loan clears, how much interest extra repayments actually save, and what it would take to clear one sooner — add a liability to see it.",
+      "liabilities"
+    );
+    return;
+  }
+  if (!loans.some((l) => l.id === focusDebtPayoffLoanId)) {
+    focusDebtPayoffLoanId = loans[0].id;
+    focusDebtPayoffSolveResult = null;
+  }
+  const f = buildDebtPayoffFocus({ out: projection, state, liabilityId: focusDebtPayoffLoanId });
+  if (!f) {
+    els.viewFocusDebtPayoff.innerHTML = focusEmptyStateHTML(
+      "When each loan clears, how much interest extra repayments actually save, and what it would take to clear one sooner — add a liability to see it.",
+      "liabilities"
+    );
+    return;
+  }
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const payoffLine = f.payoff
+    ? `${escapeHTML(f.payoff.fyLabel)} (age ${f.payoff.age})`
+    : "Beyond this projection — the loan outlives the current end date";
+
+  els.viewFocusDebtPayoff.innerHTML = `
+    <h2 class="section-heading">Debt payoff</h2>
+    ${loans.length > 1 ? `<div id="focusDebtEntity" class="seg-toggle entity-select" role="tablist" aria-label="Loan"></div>` : ""}
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>${escapeHTML(f.liability.name)}</h3>
+        <div class="summary-strip">
+          <div class="stat stat-headline"><div class="stat-label">Payoff date</div><div class="stat-value">${payoffLine}</div></div>
+          <div class="stat"><div class="stat-label">Total interest over the life</div><div class="stat-value">${fmtMoney(f.totalInterest)}</div></div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Effect of extra repayments</h3>
+        ${focusDebtPayoffStatsHTML(f, factor)}
+      </div>
+      <div class="focus-section">
+        <h3>Balance over time</h3>
+        <div id="focusDebtChart"></div>
+      </div>
+      <div class="focus-section focus-solvers">
+        <h3>What if?</h3>
+        <div class="focus-solver-row">
+          <label>Clear it by age
+            <input type="number" id="focusDebtTargetAge" min="${state.plan.client.currentAge + 1}" max="${state.plan.endAge}" value="${f.payoff ? Math.max(state.plan.client.currentAge + 1, f.payoff.age - 1) : state.plan.endAge}" />
+          </label>
+          <button class="btn-text" type="button" data-focus-solve="extra">What extra repayment clears this by then?</button>
+        </div>
+        ${focusDebtPayoffSolverResultHTML()}
+      </div>
+    </div>
+  `;
+  if (loans.length > 1) {
+    renderEntitySelector(
+      $("focusDebtEntity"),
+      loans.map((l) => ({ id: l.id, label: l.name })),
+      focusDebtPayoffLoanId,
+      (id) => { focusDebtPayoffLoanId = id; focusDebtPayoffSolveResult = null; renderFocusDebtPayoffView(); }
+    );
+  }
+  renderFocusDebtChart(f, factor);
+}
+
+function renderFocusDebtChart(f, factor) {
+  const el = $("focusDebtChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = f.balanceSeries.map((r) => r.age);
+  Plotly.react(el, [
+    {
+      x: ages, y: f.balanceSeries.map((r) => r.actual * factor(r.year)), name: "Actual balance",
+      type: "scatter", mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Actual balance</extra>",
+    },
+    {
+      x: ages, y: f.balanceSeries.map((r) => r.noExtras * factor(r.year)), name: "No extra repayments",
+      type: "scatter", mode: "lines", line: { color: "rgb(217, 90, 40)", width: 2, dash: "dash" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>No extra repayments</extra>",
+    },
+  ], {
+    margin: { l: 70, r: 20, t: 24, b: 40 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `${isNominal() ? "Future" : "Today's"} dollars`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function exportFocusDebtPayoffCSV() {
+  const f = buildDebtPayoffFocus({ out: projection, state, liabilityId: focusDebtPayoffLoanId });
+  if (!f) return;
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lines = [
+    ["Section", "Item", "Value"].map(csvEsc).join(","),
+    [csvEsc(f.liability.name), csvEsc("Payoff date"), csvEsc(f.payoff ? `${f.payoff.fyLabel} (age ${f.payoff.age})` : "Beyond this projection")].join(","),
+    [csvEsc(f.liability.name), csvEsc("Total interest over the life"), f.totalInterest.toFixed(2)].join(","),
+  ];
+  if (f.stats) {
+    lines.push([csvEsc(f.liability.name), csvEsc("Interest saved by extra repayments"), (f.stats.interestSaved ?? "").toString()].join(","));
+    lines.push([csvEsc(f.liability.name), csvEsc("Time saved (months)"), (f.stats.timeSavedMonths ?? "").toString()].join(","));
+  }
+  lines.push("", ["Year", "Age", "FY", "Actual balance", "No extra repayments"].map(csvEsc).join(","));
+  for (const r of f.balanceSeries) {
+    lines.push([r.year, r.age, csvEsc(r.fyLabel), (r.actual * factor(r.year)).toFixed(2), (r.noExtras * factor(r.year)).toFixed(2)].join(","));
+  }
+  downloadCSV("focus-debt-payoff", lines);
+}
+
+els.viewFocusDebtPayoff.addEventListener("click", (e) => {
+  const solveBtn = e.target.closest("[data-focus-solve]");
+  if (solveBtn) {
+    const targetAge = clampInt($("focusDebtTargetAge")?.value, state.plan.client.currentAge + 1, state.plan.endAge);
+    const result = solveExtraRepaymentForPayoffDate({ state, liabilityId: focusDebtPayoffLoanId, targetAge });
+    focusDebtPayoffSolveResult = { result, targetAge };
+    renderFocusDebtPayoffView();
+    return;
+  }
+  const applyBtn = e.target.closest("[data-focus-apply]");
+  if (!applyBtn || !focusDebtPayoffSolveResult?.result?.converged || focusDebtPayoffSolveResult.result.value <= 0) return;
+  const liability = state.liabilities.find((l) => l.id === focusDebtPayoffLoanId);
+  if (!liability) return;
+  const { result, targetAge } = focusDebtPayoffSolveResult;
+  liability.extraRepayments = [
+    ...liability.extraRepayments,
+    {
+      id: uid("er"), label: "Extra repayment (Focus)", amount: result.value, frequency: "monthly",
+      from: { kind: "age", age: state.plan.client.currentAge }, to: { kind: "age", age: targetAge },
+      indexBasis: "none", indexExtraPct: 0,
+    },
+  ];
+  focusDebtPayoffSolveResult = null;
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+});
 
 // COMMIT 6 fills this in: standalone stamp duty and LMI calculators —
 // the one deliberate exception to the governing principle (a lookup,
@@ -6895,6 +7170,22 @@ function exportChartPNG(chartElId, viewName) {
   });
 }
 
+// Shared by every Focus view's own CSV export (docs/specs/12-focus-views.md's
+// "each view with its own export") — a flat dump of the view's own
+// figures, distinct from exportTransposedCSV's year-columns-as-grid
+// shape (built for the multi-year ledger tables; a Focus view's data
+// mixes one-off scalars with its own short year series, so a simple
+// row-per-fact CSV fits better than forcing it through that machinery).
+function csvEsc(s) { return `"${String(s).replaceAll('"', '""')}"`; }
+function downloadCSV(viewName, lines) {
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${exportNameBase()}-${viewName}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 els.exportBtn.addEventListener("click", () => {
   if (activeView === "projection") exportChartPNG("chart", "projection");
   else if (activeView === "composite") exportChartPNG("chartComposite", "composite");
@@ -6913,6 +7204,10 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "snapshot") exportSnapshotCSV();
   else if (activeView === "monte-carlo-table") exportMonteCarloCSV();
   else if (activeView === "assumptions") exportTransposedCSV("assumptions", buildAssumptionsGroups());
+  else if (activeView === "focus-deposit") exportFocusDepositCSV();
+  else if (activeView === "focus-fhsss") exportFocusFhsssCSV();
+  else if (activeView === "focus-salary-sacrifice") exportFocusSalarySacrificeCSV();
+  else if (activeView === "focus-debt-payoff") exportFocusDebtPayoffCSV();
 });
 
 els.showAssetsToggle.addEventListener("change", () => {

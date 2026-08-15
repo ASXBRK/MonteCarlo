@@ -197,9 +197,31 @@ separate calculation.
   row); cap headroom reuses the input panel's own
   `superCapHeadroomHTML` display verbatim, per the spec's explicit
   instruction not to re-derive it.
+- Commit 5, **Debt payoff** — `src/focusDebtPayoff.js`. Payoff date and
+  lifetime interest work for ANY loan (summed straight off
+  `row.liabilities[id]`, no dependency on extras being configured); the
+  effect of extra repayments is the engine's own
+  `liabilityRepaymentStats`, read through unchanged, `null` (not zero)
+  when no extras are configured. The balance-over-time chart runs a
+  second real `projectPlan()` on a clone with the loan's own
+  `extraRepayments`/`oneOffRepayments` stripped — `scheduledAmortisation`
+  only returns summary figures, not a series, so this is a genuine
+  counterfactual run rather than a re-derivation. Solver ("What extra
+  repayment clears this by [date]?") generalised the deposit view's own
+  plateau-search into a shared `findMinimumThreshold` (`solve.js`) —
+  a loan's payoff year plateaus at the earliest sufficient extra
+  repayment exactly the way cumulative unfunded cashflow does, the same
+  reason `solveFor`/`bisectScalar` don't fit. Affordability is checked
+  and surfaced separately from convergence: a mathematically sufficient
+  extra repayment the household can't fund reports `unfunded > 0`
+  rather than a clean "apply this" success. Also closed a scaffold gap
+  from Commits 2–4: the sidebar's Export button was wired for every
+  other view but not one Focus view — added a CSV export (flat
+  section/item/value rows, not the year-columns ledger shape) for all
+  four Focus views built so far.
 
 ### In flight
-Focus Commits 5–6 (debt payoff, standalone lookups); super threshold
+Focus Commit 6 (standalone lookups); super threshold
 indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
 then Division 296, then Monte Carlo over the full scenario.
 
