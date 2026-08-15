@@ -780,6 +780,12 @@ function escapeHTML(s) {
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
+// Today's date (real-world, not plan-relative), ISO — used to bound an
+// "Owned" property's acquisition date input (input integrity: you
+// can't already own something you haven't bought yet, so a future
+// date there is unenterable, not just warned about — see CLAUDE.md).
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
 const isCouple = () => !!state.plan.partner;
 
 // --- Setup (plan bar): identity, timeline, tax profiles (D1) ---------------
@@ -863,7 +869,7 @@ function personBlockHTML(prefix, person, title) {
           <label>Retirement age
             <span class="helper-inline">Used as the Retirement key date and as the default report period anchor.</span>
           </label>
-          <input type="number" min="18" max="120" step="1" value="${person.retirementAge}"
+          <input type="number" min="${person.currentAge}" max="${state.plan.endAge}" step="1" value="${person.retirementAge}"
                  data-plan-field="${prefix}RetirementAge" />
         </div>
         ${personSpansWorkTestAges(person) ? `
@@ -1059,7 +1065,7 @@ function renderPlanBar() {
           ).join("")}
         </select>
         ${p.endBasis.mode === "fixedAge" ? `
-          <input type="number" min="19" max="120" step="1" value="${p.endBasis.fixedAge}"
+          <input type="number" min="${p.client.currentAge + 1}" max="120" step="1" value="${p.endBasis.fixedAge}"
                  data-plan-field="endFixedAge" aria-label="Fixed end age" />` : ""}
         ${p.endBasis.mode === "fixedYears" ? `
           <input type="number" min="1" max="100" step="1" value="${p.endBasis.fixedYears}"
@@ -2766,7 +2772,7 @@ function propertyCardHTML(p) {
           ${num("Growth (% p.a. nominal)", "growthPct", p.growthPct, 'min="-10" max="30" step="0.1"')}
           ${owned ? `
             ${num("Current value ($)", "currentValue", p.currentValue)}
-            ${cell("Acquisition date", `<input type="date" value="${p.acquisitionDate ?? ""}" data-pid="${p.id}" data-pfield="acquisitionDate" />`)}
+            ${cell("Acquisition date", `<input type="date" max="${todayISO()}" value="${p.acquisitionDate ?? ""}" data-pid="${p.id}" data-pfield="acquisitionDate" />`)}
             ${p.propertyType !== "ppr" ? num("Cost base ($)", "costBase", p.costBase) : ""}
           ` : `
             ${num("Price today ($)", "priceToday", p.priceToday)}
@@ -2817,6 +2823,21 @@ function findProperty(pid) {
   return (state.properties ?? []).find((p) => p.id === pid) || null;
 }
 
+// Owned → planned purchase (shared by the warning's button and the
+// acquisition-date input-integrity gate below). `p.acquisitionDate`
+// must already hold the date to convert from; caller re-normalises
+// and saves/renders afterward.
+function convertPropertyToPlanned(p) {
+  const acq = new Date(p.acquisitionDate);
+  const age = ageAtDate(state.plan.client.dob, acq.getFullYear(), acq.getMonth() + 1);
+  p.status = "planned";
+  p.priceToday = p.currentValue;
+  p.purchaseAt = {
+    kind: "age",
+    age: clampInt(age ?? state.plan.client.currentAge, state.plan.client.currentAge, state.plan.endAge),
+  };
+}
+
 wireDeferredDateCommit(els.propertySection, (e) => {
   const field = e.target.dataset.pfield;
   const p = findProperty(e.target.dataset.pid);
@@ -2828,7 +2849,34 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field === "propertyType") p.propertyType = v;
   else if (field === "growthPct") p.growthPct = clampNumber(v, -10, 30);
   else if (field === "currentValue") p.currentValue = clampNumber(v, 0);
-  else if (field === "acquisitionDate") p.acquisitionDate = v || null;
+  else if (field === "acquisitionDate") {
+    // Input integrity (C1): a future acquisition date on an "Owned"
+    // property is impossible, not just unusual — you can't already
+    // own something you haven't bought yet. Reject the commit outright
+    // rather than accepting it and relying on the warning below to
+    // catch it after the fact; offer the same planned-purchase
+    // conversion inline instead. The warning + button stay in place
+    // for state already saved before this gate existed (or imported
+    // from elsewhere) — this only stops NEW future dates from being
+    // entered going forward.
+    if (p.status === "owned" && v && v > todayISO()) {
+      const convert = window.confirm(
+        `A future acquisition date isn't valid for an "Owned" property — you can't already own ` +
+        `something you haven't bought yet.\n\nSwitch "${p.name}" to a planned purchase instead? ` +
+        `Its acquisition date becomes the purchase date, and its current value becomes today's price ` +
+        `to grow from until then.\n\nCancel leaves the acquisition date unchanged.`
+      );
+      if (convert) {
+        p.acquisitionDate = v;
+        convertPropertyToPlanned(p);
+      }
+      // Declined: acquisitionDate is left untouched — the future date
+      // is never stored, and renderProperties() below reverts the
+      // input's displayed value to it.
+    } else {
+      p.acquisitionDate = v || null;
+    }
+  }
   else if (field === "costBase") p.costBase = clampNumber(v, 0);
   else if (field === "priceToday") p.priceToday = clampNumber(v, 0);
   else if (field === "purchaseAt") {
@@ -2837,7 +2885,9 @@ wireDeferredDateCommit(els.propertySection, (e) => {
         ? { kind: "age", age: resolveRef(p.purchaseAt, state.plan, projection.schedule, "client").age }
         : { kind: "anchor", anchorId: v };
     } else {
-      p.purchaseAt = { kind: "age", age: clampInt(v, state.plan.client.currentAge, state.plan.endAge) };
+      const age = clampInt(v, state.plan.client.currentAge, state.plan.endAge);
+      p.purchaseAt = { kind: "age", age };
+      flagIfClamped(e.target, age); // same visible cue every other date-ref "Specific age" field uses
     }
   }
   else if (field === "lvrPct") p.lvrPct = clampNumber(v, 0, 100);
@@ -2888,14 +2938,7 @@ els.propertySection.addEventListener("click", (e) => {
       `its acquisition date becomes the purchase date, and its current value becomes today's price ` +
       `to grow from until then.`
     )) return;
-    const acq = new Date(p.acquisitionDate);
-    const age = ageAtDate(state.plan.client.dob, acq.getFullYear(), acq.getMonth() + 1);
-    p.status = "planned";
-    p.priceToday = p.currentValue;
-    p.purchaseAt = {
-      kind: "age",
-      age: clampInt(age ?? state.plan.client.currentAge, state.plan.client.currentAge, state.plan.endAge),
-    };
+    convertPropertyToPlanned(p);
     state.properties = normaliseProperties(state.properties, state.plan);
     state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
   }
@@ -3475,7 +3518,7 @@ function liabilityCardHTML(l) {
           ${l.repayment === "io" ? `
             <div class="cf-cell">
               <label>IO period (years)</label>
-              <input type="number" min="1" max="30" step="1" value="${l.ioYears}" data-lid="${l.id}" data-lfield="ioYears" />
+              <input type="number" min="1" max="${l.termYears}" step="1" value="${l.ioYears}" data-lid="${l.id}" data-lfield="ioYears" />
             </div>
           ` : ""}
           <div class="cf-cell">
@@ -3532,7 +3575,7 @@ els.liabilitiesSection.addEventListener("change", (e) => {
   else if (field === "balance") l.balance = clampNumber(e.target.value, 0);
   else if (field === "interestRatePct") l.interestRatePct = clampNumber(e.target.value, 0, 30);
   else if (field === "termYears") l.termYears = clampInt(e.target.value, 1, 50);
-  else if (field === "ioYears") l.ioYears = clampInt(e.target.value, 1, 30);
+  else if (field === "ioYears") l.ioYears = clampInt(e.target.value, 1, l.termYears); // never longer than the loan's own term
   else if (field === "deductible") l.deductible = e.target.checked;
   else if (field === "linkedAssetId") l.linkedAssetId = e.target.value || null;
   else if (field === "offsetAssetId") l.offsetAssetId = e.target.value || null;

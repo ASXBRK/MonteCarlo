@@ -645,6 +645,7 @@ export function clampLiability(l, plan, assets, properties = []) {
     ...(Array.isArray(properties) ? properties.map((p) => p.id) : []),
   ]);
   const type = LIABILITY_TYPES.includes(l.type) ? l.type : "mortgage";
+  const termYears = clampInt(l.termYears ?? 25, 1, 50);
   return {
     id: typeof l.id === "string" && l.id ? l.id : uid("lb"),
     name: typeof l.name === "string" && l.name.trim() ? l.name : "Loan",
@@ -653,9 +654,15 @@ export function clampLiability(l, plan, assets, properties = []) {
       ? l.owner : "client",
     balance: clampNumber(l.balance, 0),
     interestRatePct: clampNumber(l.interestRatePct ?? 6, 0, 30),
-    termYears: clampInt(l.termYears ?? 25, 1, 50),
+    termYears,
     repayment: l.repayment === "io" ? "io" : "pi",
-    ioYears: clampInt(l.ioYears ?? 5, 1, 30),
+    // An IO period longer than the loan's own term is a contradiction,
+    // not just unusual — bound it to the term, not a static 30
+    // (input integrity; the engine already capped this defensively at
+    // use-time via ioMonths()'s own Math.min, so no projection was
+    // ever actually wrong, but the stored value could silently say
+    // something the output never did).
+    ioYears: clampInt(l.ioYears ?? 5, 1, termYears),
     deductible: l.deductible === true,
     linkedAssetId: allIds.has(l.linkedAssetId) ? l.linkedAssetId : null,
     offsetAssetId: financialIds.has(l.offsetAssetId) ? l.offsetAssetId : null,
@@ -748,7 +755,7 @@ export function createSuperContribution(plan, superAccounts = [], owner = "clien
   };
 }
 
-export function clampSuperContribution(sc, plan, superAccountIds, incomeRowIds) {
+export function clampSuperContribution(sc, plan, superAccountOwnerById, incomeRowIds) {
   const owner = sc.owner === "partner" && plan.partner ? "partner" : "client";
   const type = SUPER_CONTRIBUTION_TYPES.includes(sc.type) ? sc.type : "salarySacrifice";
   const basis = SUPER_CONTRIBUTION_BASES.includes(sc.basis) ? sc.basis : "amount";
@@ -757,7 +764,13 @@ export function clampSuperContribution(sc, plan, superAccountIds, incomeRowIds) 
     id: typeof sc.id === "string" && sc.id ? sc.id : uid("sc"),
     label: typeof sc.label === "string" && sc.label.trim() ? sc.label : "Contribution",
     owner,
-    accountId: superAccountIds.has(sc.accountId) ? sc.accountId : null,
+    // Super accounts are never joint (Tier 1.2) — a contribution's
+    // account must belong to the SAME person as its own owner field,
+    // not just exist somewhere in the plan (input integrity: crediting
+    // one person's money, and its tax attribution, to the other
+    // person's account is a real, silent misattribution bug, not a
+    // cosmetic one).
+    accountId: superAccountOwnerById.get(sc.accountId) === owner ? sc.accountId : null,
     type,
     basis,
     amount: clampNumber(sc.amount, 0),
@@ -769,9 +782,9 @@ export function clampSuperContribution(sc, plan, superAccountIds, incomeRowIds) 
   };
 }
 
-export function normaliseSuperContributions(rows, plan, superAccountIds, incomeRowIds) {
+export function normaliseSuperContributions(rows, plan, superAccountOwnerById, incomeRowIds) {
   if (!Array.isArray(rows)) return [];
-  return rows.map((sc) => clampSuperContribution(sc, plan, superAccountIds, incomeRowIds));
+  return rows.map((sc) => clampSuperContribution(sc, plan, superAccountOwnerById, incomeRowIds));
 }
 
 // --- superannuation withdrawals (Tier 1.2, Commit 3) -----------------------
@@ -798,14 +811,14 @@ export function createSuperWithdrawal(plan, superAccounts = [], owner = "client"
   };
 }
 
-export function clampSuperWithdrawal(sw, plan, superAccountIds) {
+export function clampSuperWithdrawal(sw, plan, superAccountOwnerById) {
   const owner = sw.owner === "partner" && plan.partner ? "partner" : "client";
   const { from, to } = clampFromTo(sw, plan.client.currentAge, plan.endAge, plan);
   return {
     id: typeof sw.id === "string" && sw.id ? sw.id : uid("sw"),
     label: typeof sw.label === "string" && sw.label.trim() ? sw.label : "Withdrawal",
     owner,
-    accountId: superAccountIds.has(sw.accountId) ? sw.accountId : null,
+    accountId: superAccountOwnerById.get(sw.accountId) === owner ? sw.accountId : null, // same-owner only — see clampSuperContribution
     amount: clampNumber(sw.amount, 0),
     frequency: sw.frequency === "annual" ? "annual" : "monthly",
     from, to,
@@ -813,9 +826,9 @@ export function clampSuperWithdrawal(sw, plan, superAccountIds) {
   };
 }
 
-export function normaliseSuperWithdrawals(rows, plan, superAccountIds) {
+export function normaliseSuperWithdrawals(rows, plan, superAccountOwnerById) {
   if (!Array.isArray(rows)) return [];
-  return rows.map((sw) => clampSuperWithdrawal(sw, plan, superAccountIds));
+  return rows.map((sw) => clampSuperWithdrawal(sw, plan, superAccountOwnerById));
 }
 
 function nextAssetNumber(existing) {
@@ -1062,9 +1075,9 @@ export function clampPlan(plan, profiles = {}) {
   let household = plan.household === "couple" ? "married" : plan.household;
   if (!["single", "married", "defacto"].includes(household)) household = "single";
 
-  const client = clampPerson(plan.client, start);
-  const partner = isCoupleHousehold(household)
-    ? clampPerson(plan.partner ?? { currentAge: client.currentAge }, start)
+  const clientRaw = clampPerson(plan.client, start);
+  const partnerRaw = isCoupleHousehold(household)
+    ? clampPerson(plan.partner ?? { currentAge: clientRaw.currentAge }, start)
     : null;
 
   // Missing basis (pre-D1 blob or partial edit): fix at the stored
@@ -1072,7 +1085,17 @@ export function clampPlan(plan, profiles = {}) {
   const endBasis = clampEndBasis(
     plan.endBasis ?? { mode: "fixedAge", fixedAge: clampInt(plan.endAge, 19, 120) }
   );
-  const { endAge } = resolveEndBasis(endBasis, client, partner);
+  const { endAge } = resolveEndBasis(endBasis, clientRaw, partnerRaw);
+  // Input integrity: a retirement age below the person's current age,
+  // or beyond the projection's own end, isn't a real retirement date
+  // this tool can model — re-clamp now that endAge is finally known
+  // (clampPerson runs before endAge is resolved, so it could only
+  // enforce the static [18,120] bound). See CLAUDE.md's Input
+  // integrity section.
+  const client = { ...clientRaw, retirementAge: clampInt(clientRaw.retirementAge, clientRaw.currentAge, endAge) };
+  const partner = partnerRaw
+    ? { ...partnerRaw, retirementAge: clampInt(partnerRaw.retirementAge, partnerRaw.currentAge, endAge) }
+    : null;
   // keyDates are validated against the PRE-clamp partner presence too
   // (normaliseKeyDates itself falls a partner-basis date back to
   // client when there's no partner), so this order is safe either way.
@@ -1211,7 +1234,7 @@ export function clampAllToPlan(state, profiles = {}) {
   const assets = state.assets.map((a) => ({ ...a }));
   const income = state.cashflows.income.map((r) => clampIncomeRow(r, plan));
   const incomeRowIds = new Set(income.map((r) => r.id));
-  const superAccountIds = new Set(plan.superAccounts.map((s) => s.id));
+  const superAccountOwnerById = new Map(plan.superAccounts.map((s) => [s.id, s.owner]));
   const cashflows = {
     income,
     deductions: (state.cashflows.deductions ?? []).map((r) => clampDeductionRow(r, plan)),
@@ -1220,9 +1243,9 @@ export function clampAllToPlan(state, profiles = {}) {
     withdrawals: state.cashflows.withdrawals.map((w) => clampCashflow(w, plan)),
     lumpSums: state.cashflows.lumpSums.map((l) => clampLumpSum(l, plan)),
     superContributions: normaliseSuperContributions(
-      state.cashflows.superContributions, plan, superAccountIds, incomeRowIds
+      state.cashflows.superContributions, plan, superAccountOwnerById, incomeRowIds
     ),
-    superWithdrawals: normaliseSuperWithdrawals(state.cashflows.superWithdrawals, plan, superAccountIds),
+    superWithdrawals: normaliseSuperWithdrawals(state.cashflows.superWithdrawals, plan, superAccountOwnerById),
   };
   const settings = normaliseSettings(state.settings, assets);
   const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
@@ -1537,7 +1560,7 @@ export function hydrate(json, profiles = {}) {
     const assetIds = new Set(assets.filter(isFinancial).map((a) => a.id));
     const cf = raw.cashflows || {};
     const income = hydrateIncomeRows(cf.income, plan);
-    const superAccountIds = new Set(plan.superAccounts.map((s) => s.id));
+    const superAccountOwnerById = new Map(plan.superAccounts.map((s) => [s.id, s.owner]));
     const incomeRowIds = new Set(income.map((r) => r.id));
 
     const state = {
@@ -1551,8 +1574,8 @@ export function hydrate(json, profiles = {}) {
         contributions: hydrateCashflows(cf.contributions, plan, assetIds),
         withdrawals: hydrateCashflows(cf.withdrawals, plan, assetIds),
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
-        superContributions: hydrateSuperContributions(cf.superContributions, plan, superAccountIds, incomeRowIds),
-        superWithdrawals: hydrateSuperWithdrawals(cf.superWithdrawals, plan, superAccountIds),
+        superContributions: hydrateSuperContributions(cf.superContributions, plan, superAccountOwnerById, incomeRowIds),
+        superWithdrawals: hydrateSuperWithdrawals(cf.superWithdrawals, plan, superAccountOwnerById),
       },
       liabilities: normaliseLiabilities(raw.liabilities, plan, assets, raw.properties),
       properties: normaliseProperties(raw.properties, plan),
@@ -1645,7 +1668,7 @@ function hydrateLumpSums(arr, plan, assetIds) {
     }, plan));
 }
 
-function hydrateSuperContributions(arr, plan, superAccountIds, incomeRowIds) {
+function hydrateSuperContributions(arr, plan, superAccountOwnerById, incomeRowIds) {
   if (!Array.isArray(arr)) return [];
   return arr.map((sc) => clampSuperContribution({
     id: typeof sc.id === "string" && sc.id ? sc.id : uid("sc"),
@@ -1662,10 +1685,10 @@ function hydrateSuperContributions(arr, plan, superAccountIds, incomeRowIds) {
     to: sc.to,
     indexBasis: sc.indexBasis,
     indexExtraPct: sc.indexExtraPct,
-  }, plan, superAccountIds, incomeRowIds));
+  }, plan, superAccountOwnerById, incomeRowIds));
 }
 
-function hydrateSuperWithdrawals(arr, plan, superAccountIds) {
+function hydrateSuperWithdrawals(arr, plan, superAccountOwnerById) {
   if (!Array.isArray(arr)) return [];
   return arr.map((sw) => clampSuperWithdrawal({
     id: typeof sw.id === "string" && sw.id ? sw.id : uid("sw"),
@@ -1678,7 +1701,7 @@ function hydrateSuperWithdrawals(arr, plan, superAccountIds) {
     to: sw.to,
     indexBasis: sw.indexBasis,
     indexExtraPct: sw.indexExtraPct,
-  }, plan, superAccountIds));
+  }, plan, superAccountOwnerById));
 }
 
 function hydrateIncomeRows(arr, plan) {

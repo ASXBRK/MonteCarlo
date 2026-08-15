@@ -11,7 +11,7 @@ import {
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear, clampTaxProfile,
   ageAtDate, synthDob, resolveEndBasis, clampCashflow, createLifestyleAsset,
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
-  createLiability, createProperty, clampProperty,
+  createLiability, clampLiability, createProperty, clampProperty,
   clampReportPeriod, clampChartTreatment, defaultChartTreatment,
   defaultReportPeriod, createKeyDate, clampKeyDate, normaliseKeyDates,
   clampDateRef, removeKeyDate, referencesToAnchor, convertAnchorReferences,
@@ -839,13 +839,20 @@ describe("D5 — report period + chart treatment display state", () => {
 });
 
 describe("Key Dates (Tier 1.1) — retirementAge, keyDates, DateRef clamping", () => {
-  it("every person defaults to retirementAge 65, clamped to [18, 120]", () => {
+  it("every person defaults to retirementAge 65, clamped to [18, 120] and then to [currentAge, endAge]", () => {
     const s = defaultState(PROFILES, NOW);
     expect(s.plan.client.retirementAge).toBe(DEFAULT_RETIREMENT_AGE);
     const withCustom = clampPlan({ ...couplePlan(), client: { ...couplePlan().client, retirementAge: 60 } });
     expect(withCustom.client.retirementAge).toBe(60);
     expect(withCustom.partner.retirementAge).toBe(DEFAULT_RETIREMENT_AGE);
-    expect(clampPlan({ ...couplePlan(), client: { ...couplePlan().client, retirementAge: 5 } }).client.retirementAge).toBe(18);
+    // The static [18,120] bound alone would allow 5 through; input
+    // integrity requires the tighter [currentAge, endAge] bound (a
+    // retirement before "now" or after the projection's own end isn't
+    // a real retirement date this tool can model) — couplePlan()'s
+    // client is 40, endAge 90, so 5 clamps up to 40, not down to 18.
+    expect(clampPlan({ ...couplePlan(), client: { ...couplePlan().client, retirementAge: 5 } }).client.retirementAge).toBe(40);
+    // Above the projection's own end clamps down to endAge.
+    expect(clampPlan({ ...couplePlan(), client: { ...couplePlan().client, retirementAge: 200 } }).client.retirementAge).toBe(90);
   });
 
   it("defaultPlan/clampPlan carry an empty keyDates array by default", () => {
@@ -1035,7 +1042,7 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(sc.type).toBe("salarySacrifice");
     expect(sc.basis).toBe("amount");
 
-    const accountIds = new Set([account.id]);
+    const accountIds = new Map([[account.id, "client"]]);
     const incomeIds = new Set(["i1"]);
     const clamped = clampSuperContribution(
       { type: "bogus", basis: "bogus", accountId: "nope", incomeRowId: "nope", amount: -5, percent: 200 },
@@ -1062,7 +1069,7 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
 
   it("normaliseSuperContributions defends non-array input", () => {
     const plan = clampPlan(couplePlan(), PROFILES);
-    expect(normaliseSuperContributions(null, plan, new Set(), new Set())).toEqual([]);
+    expect(normaliseSuperContributions(null, plan, new Map(), new Set())).toEqual([]);
   });
 });
 
@@ -1088,7 +1095,7 @@ describe("Tier 1.2 — Super (Commit 3): withdrawals, preservation, proportionin
   it("clampSuperWithdrawal validates amount, frequency, and drops an unknown account reference", () => {
     const plan = clampPlan(couplePlan(), PROFILES);
     const account = createSuperAccount(plan, [], PROFILES, "client");
-    const accountIds = new Set([account.id]);
+    const accountIds = new Map([[account.id, "client"]]);
     const clamped = clampSuperWithdrawal(
       { owner: "client", accountId: "nope", amount: -500, frequency: "bogus" },
       plan, accountIds
@@ -1108,13 +1115,13 @@ describe("Tier 1.2 — Super (Commit 3): withdrawals, preservation, proportionin
 
   it("clampSuperWithdrawal demotes an orphan partner owner to client", () => {
     const single = clampPlan({ ...couplePlan(), household: "single", partner: null }, PROFILES);
-    const clamped = clampSuperWithdrawal({ owner: "partner", accountId: null, amount: 0 }, single, new Set());
+    const clamped = clampSuperWithdrawal({ owner: "partner", accountId: null, amount: 0 }, single, new Map());
     expect(clamped.owner).toBe("client");
   });
 
   it("normaliseSuperWithdrawals defends non-array input", () => {
     const plan = clampPlan(couplePlan(), PROFILES);
-    expect(normaliseSuperWithdrawals(null, plan, new Set())).toEqual([]);
+    expect(normaliseSuperWithdrawals(null, plan, new Map())).toEqual([]);
   });
 
   it("hydrate round-trips cashflows.superWithdrawals", () => {
@@ -1222,5 +1229,151 @@ describe("hydrate migrates a pre-Commit-1 (v9) blob forward (PAYG withholding, t
     expect(s.schemaVersion).toBe(SCHEMA_VERSION);
     expect(s.cashflows.deductions).toEqual([]);
     expect(s.properties[0].depreciation).toBe(0);
+  });
+});
+
+// --- Input integrity (audit follow-up, Part C) ------------------------------
+//
+// Impossible states must be unenterable, not warned about (CLAUDE.md).
+// Each test below asserts BOTH halves of C4's requirement: the invalid
+// state cannot be produced through the normal edit path (clamping on a
+// freshly-built row), AND a scenario hydrated with that state already
+// stored (legacy save, hand-edited JSON, an older schema) loads without
+// throwing and comes out corrected rather than preserved.
+describe("Input integrity — unenterable states (audit Part C)", () => {
+  it("retirementAge clamps into [currentAge, endAge], not just the static [18,120] bound", () => {
+    const plan = clampPlan({
+      household: "single", client: { currentAge: 50, retirementAge: 30 }, partner: null,
+      endAge: 70, start: { year: 2026, month: 7 },
+    });
+    expect(plan.client.retirementAge).toBe(50); // below current age → clamped up to it
+    const plan2 = clampPlan({
+      household: "single", client: { currentAge: 50, retirementAge: 200 }, partner: null,
+      endAge: 70, start: { year: 2026, month: 7 },
+    });
+    expect(plan2.client.retirementAge).toBe(70); // above projection end → clamped down to it
+  });
+
+  it("clampLiability bounds the IO period to the loan's own term — never longer, even via legacy/hand-edited state", () => {
+    const s = defaultState(PROFILES, NOW);
+    const clamped = clampLiability(
+      { id: "lb1", name: "Loan", type: "mortgage", owner: "client", balance: 100000,
+        interestRatePct: 6, termYears: 5, repayment: "io", ioYears: 30, deductible: false,
+        linkedAssetId: null, offsetAssetId: null },
+      s.plan, s.assets
+    );
+    expect(clamped.termYears).toBe(5);
+    expect(clamped.ioYears).toBe(5); // was 30, capped to the term
+  });
+
+  it("clampLiability never allows a zero term even from legacy state (a zero-length loan with a real balance is meaningless)", () => {
+    const s = defaultState(PROFILES, NOW);
+    const clamped = clampLiability(
+      { id: "lb1", name: "Loan", type: "personal", owner: "client", balance: 50000,
+        interestRatePct: 6, termYears: 0, repayment: "pi", ioYears: 0, deductible: false,
+        linkedAssetId: null, offsetAssetId: null },
+      s.plan, s.assets
+    );
+    expect(clamped.termYears).toBeGreaterThanOrEqual(1);
+  });
+
+  it("clampSuperContribution drops an accountId belonging to the other person — never credits the wrong owner's account", () => {
+    const plan = clampPlan({
+      household: "married", client: { currentAge: 45 }, partner: { currentAge: 43 },
+      endAge: 90, start: { year: 2026, month: 7 },
+      superAccounts: [
+        { id: "su-client", name: "Client fund", owner: "client", balance: 100000, taxFreeComponent: 0,
+          allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0, include: true },
+        { id: "su-partner", name: "Partner fund", owner: "partner", balance: 50000, taxFreeComponent: 0,
+          allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0, include: true },
+      ],
+    }, PROFILES);
+    const ownerById = new Map(plan.superAccounts.map((s) => [s.id, s.owner]));
+    // A client-owned contribution naming the PARTNER's account — the
+    // kind of mismatch that survives untouched through JSON import or
+    // an older schema, unlike the live UI's owner-change handler which
+    // already clears this on the spot.
+    const clamped = clampSuperContribution(
+      { owner: "client", accountId: "su-partner", type: "salarySacrifice", basis: "amount", amount: 1000 },
+      plan, ownerById, new Set()
+    );
+    expect(clamped.accountId).toBeNull(); // dropped, not silently credited to the wrong person
+    // The matching same-owner account is accepted normally.
+    const valid = clampSuperContribution(
+      { owner: "client", accountId: "su-client", type: "salarySacrifice", basis: "amount", amount: 1000 },
+      plan, ownerById, new Set()
+    );
+    expect(valid.accountId).toBe("su-client");
+  });
+
+  it("clampSuperWithdrawal drops an accountId belonging to the other person", () => {
+    const plan = clampPlan({
+      household: "married", client: { currentAge: 65 }, partner: { currentAge: 63 },
+      endAge: 90, start: { year: 2026, month: 7 },
+      superAccounts: [
+        { id: "su-client", name: "Client fund", owner: "client", balance: 200000, taxFreeComponent: 0,
+          allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0, include: true },
+        { id: "su-partner", name: "Partner fund", owner: "partner", balance: 150000, taxFreeComponent: 0,
+          allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0, include: true },
+      ],
+    }, PROFILES);
+    const ownerById = new Map(plan.superAccounts.map((s) => [s.id, s.owner]));
+    const clamped = clampSuperWithdrawal(
+      { owner: "partner", accountId: "su-client", amount: 5000, frequency: "monthly" },
+      plan, ownerById
+    );
+    expect(clamped.accountId).toBeNull();
+  });
+
+  it("a scenario hydrated with every C2 impossible state already stored loads without throwing and comes out corrected", () => {
+    const bad = {
+      schemaVersion: SCHEMA_VERSION,
+      plan: {
+        household: "married",
+        client: { currentAge: 50, retirementAge: 200, dob: synthDob(50, { year: 2026, month: 7 }) },
+        partner: { currentAge: 48, retirementAge: 10, dob: synthDob(48, { year: 2026, month: 7 }) },
+        endAge: 70,
+        endBasis: { mode: "fixedAge", offset: 0, fixedAge: 70, fixedYears: 40 },
+        start: { year: 2026, month: 7 },
+        keyDates: [],
+        superAccounts: [
+          { id: "su-c", name: "Client fund", owner: "client", balance: 100000, taxFreeComponent: 0,
+            allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0, include: true },
+          { id: "su-p", name: "Partner fund", owner: "partner", balance: 80000, taxFreeComponent: 0,
+            allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0, include: true },
+        ],
+      },
+      assets: [{ id: "a1", name: "A1", include: true, owner: "client", distributions: "reinvest",
+                 balance: 100000, allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0,
+                 cgtAsset: false, costBase: null }],
+      cashflows: {
+        income: [], expenses: [], deductions: [], contributions: [], withdrawals: [], lumpSums: [],
+        superContributions: [
+          { id: "sc1", label: "Sacrifice", owner: "client", accountId: "su-p", type: "salarySacrifice",
+            basis: "amount", amount: 5000, percent: 0, incomeRowId: null, frequency: "annual",
+            from: { kind: "age", age: 50 }, to: { kind: "age", age: 65 }, indexBasis: "none", indexExtraPct: 0 },
+        ],
+        superWithdrawals: [],
+      },
+      liabilities: [
+        { id: "lb1", name: "Loan", type: "mortgage", owner: "client", balance: 300000,
+          interestRatePct: 6, termYears: 5, repayment: "io", ioYears: 25, deductible: false,
+          linkedAssetId: null, offsetAssetId: null },
+      ],
+      properties: [],
+      settings: { surplus: { mode: "accumulate", assetId: null }, fundingOrder: ["a1"] },
+      display: { units: "real" },
+      assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed" },
+    };
+    const s = hydrate(JSON.stringify(bad), PROFILES);
+    expect(s).not.toBeNull(); // never throws
+    expect(s.plan.client.retirementAge).toBe(70); // clamped down to endAge
+    expect(s.plan.partner.retirementAge).toBe(48); // clamped up to partner's currentAge
+    expect(s.cashflows.superContributions[0].accountId).toBeNull(); // wrong-owner account dropped
+    expect(s.liabilities[0].ioYears).toBe(5); // capped to the loan's own term
+    // Every clamped field is independently correctable from here — none
+    // of this required discarding the row/person/account, only the
+    // specific bad value.
+    expect(s.cashflows.superContributions[0].amount).toBe(5000); // rest of the row survives untouched
   });
 });

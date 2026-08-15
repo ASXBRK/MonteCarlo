@@ -505,7 +505,10 @@ describe("Key Dates — v5 → v6 migration gate", () => {
     expect(migrated.cashflows.income[0].from).toEqual({ kind: "age", age: 40 });
     expect(migrated.cashflows.lumpSums[0].at).toEqual({ kind: "age", age: 43 });
     expect(migrated.properties[0].purchaseAt).toEqual({ kind: "age", age: 44 });
-    expect(migrated.plan.client.retirementAge).toBe(65); // new field default
+    // New field default is 65, but this plan ends at 55 — input
+    // integrity clamps retirementAge into [currentAge, endAge], so it
+    // lands at endAge here rather than the raw default (audit C2).
+    expect(migrated.plan.client.retirementAge).toBe(55);
     expect(migrated.plan.keyDates).toEqual([]);
 
     // native bypasses hydrate/clamp entirely — same values, real

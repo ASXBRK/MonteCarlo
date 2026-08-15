@@ -26,6 +26,11 @@ spec wins and says so explicitly.**
   rather than reconstructing it.
 - Keep `docs/reference/build-log.md` current: move completed items to
   DONE with their commit hashes as they land.
+- When a bug is found, the fix must close the whole class, not just the
+  reported instance — check for sibling cases before calling it done.
+  The property acquisition-date bug and the super-contribution
+  money-creation bug each needed two rounds because the first fix
+  addressed only the one case that was reported.
 
 ## Architecture map
 - `src/planState.js` — schema (v5+), migrations, factories. localStorage via
@@ -94,6 +99,21 @@ sticky labels, all-zero rows hidden, negatives in parentheses, per-view CSV
 of visible cells; period selector per scenario. In-grid one-off cells edit
 plan state (`source:"table"`); first-FY cells blocked when annual-skip
 applies. Real names from Setup flow through all labels.
+
+## Input integrity
+Impossible states must be UNENTERABLE, not warned about: bound the control
+(min/max, a disabled option, dependent visibility) where a bound can express
+the constraint, or reject the commit outright with an inline message naming
+the conflict when it can't (cross-field constraints — an age before another
+anchor, a period longer than its own term). Improbable-but-legal states may
+be warned about instead (a validation warning is for judgement calls the
+user is entitled to make deliberately). Nothing that would produce a wrong
+projection may be silently accepted — clamping a value with no visible cue
+is not a fix, it's the same bug with the evidence hidden. The property
+acquisition-date bug (a legal-looking "Owned" property with a future date
+silently produced rent from year one) is the canonical example: the fix
+that matters is making the state unenterable, not warning about it after
+the fact.
 
 ## Testing conventions
 Pure modules never import DOM/Plotly. Known-value tests carry the hand
