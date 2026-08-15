@@ -6427,16 +6427,42 @@ function focusDepositLmiRowHTML(f) {
     : `<tr><td>LMI</td><td>${fmtMoney(f.required.lmi)} — capitalised into the loan, not part of settlement cash</td></tr>`;
 }
 
+// "Earliest settleable" is CONTEXT, never the answer: a date/amount
+// that clears settlement but leaves the mortgage unserviceable for the
+// rest of the projection is exactly the bug this view exists to avoid
+// repeating — see solveWithAffordabilitySplit's own header
+// (src/focusDeposit.js). Labelled "settlement only" everywhere it
+// appears so it's never mistaken for a genuine recommendation.
+function focusDepositEarliestSettleableHTML(earliestSettleable, formatValue) {
+  if (!earliestSettleable) return "";
+  return `<p class="helper-text">Settlement only, NOT an answer — the deposit itself could be raised by ${formatValue(earliestSettleable.value)}, but the mortgage still can't be serviced afterward.</p>`;
+}
+
 function focusDepositAnswerHTML(f) {
   if (f.answer.onTrack) {
     return `<p class="helper-text">On track: funded by ${escapeHTML(f.target.fyLabel)}, ${fmtMoney(f.answer.spare)} to spare.</p>`;
   }
-  // "on current savings the target is reached in FY…" — see this
-  // function's header: a real solveWhenCouldIBuy run, not a guess.
+  if (f.answer.reason === "servicing-unaffordable") {
+    // Settles fine on its own configured date; the loan it creates
+    // can't be serviced for the rest of the projection. NOT a date
+    // problem — a later purchase doesn't fix an unaffordable loan, so
+    // no "reached in FY…" guess is offered here (see solveWhenCouldIBuy's
+    // own header for why "later" isn't guaranteed to help at all once
+    // servicing, not just settlement, is the constraint).
+    return `<p class="helper-warning">Cannot afford this purchase: settlement clears, but servicing the loan leaves ${fmtMoney(f.answer.shortfall)} of unfunded cashflow over the rest of the projection.</p>`;
+  }
+  // reason === "settlement-unaffordable" — "on current savings the
+  // target is reached in FY…" — see solveWhenCouldIBuy's own header: a
+  // real run against the WHOLE-projection metric, not a guess.
   const when = solveWhenCouldIBuy({ state, propertyId: focusDepositPropertyId });
-  const reached = when.converged
-    ? `on current savings the target is reached in ${escapeHTML(fyLabelForAge(state.plan, "client", when.value))} (age ${when.value})`
-    : "on current savings, the target may never be reached within this projection";
+  let reached;
+  if (when.converged) {
+    reached = `on current savings the target is reached in ${escapeHTML(fyLabelForAge(state.plan, "client", when.value))} (age ${when.value})`;
+  } else if (when.reason === "servicing-unaffordable") {
+    reached = `no date makes this affordable — even the earliest settleable date (age ${when.earliestSettleable.value}) leaves the mortgage unserviceable`;
+  } else {
+    reached = "on current savings, the target may never be reached within this projection";
+  }
   return `<p class="helper-warning">Short by ${fmtMoney(f.answer.shortfall)} at the purchase date (${escapeHTML(f.target.fyLabel)}); ${reached}.</p>`;
 }
 
@@ -6444,15 +6470,25 @@ function focusDepositSolverResultHTML() {
   const r = focusDepositSolveResult;
   if (!r) return "";
   if (r.kind === "contribution") {
-    return r.result.converged
-      ? `<p class="helper-text">Save ${fmtMoney(r.result.value)}/month from now to fund the purchase on time.
-          <button class="btn-text" type="button" data-focus-apply="contribution">Apply to plan</button></p>`
-      : `<p class="helper-warning">No monthly amount up to ${fmtMoney(20000)} gets there — the shortfall is larger than saving alone can close by the purchase date.</p>`;
+    if (r.result.converged) {
+      return `<p class="helper-text">Save ${fmtMoney(r.result.value)}/month from now to fund the purchase AND service the mortgage afterward.
+          <button class="btn-text" type="button" data-focus-apply="contribution">Apply to plan</button></p>`;
+    }
+    if (r.result.reason === "servicing-unaffordable") {
+      return `<p class="helper-warning">Cannot afford this purchase by saving alone: some amount up to ${fmtMoney(20000)}/month raises the deposit, but the mortgage still can't be serviced afterward.
+          ${focusDepositEarliestSettleableHTML(r.result.earliestSettleable, (v) => `${fmtMoney(v)}/month`)}</p>`;
+    }
+    return `<p class="helper-warning">No monthly amount up to ${fmtMoney(20000)} gets there — the shortfall is larger than saving alone can close by the purchase date.</p>`;
   }
-  return r.result.converged
-    ? `<p class="helper-text">Earliest fundable: ${escapeHTML(fyLabelForAge(state.plan, "client", r.result.value))} (age ${r.result.value}).
-        <button class="btn-text" type="button" data-focus-apply="date">Apply to plan</button></p>`
-    : `<p class="helper-warning">No date within this projection is fully funded on current savings.</p>`;
+  if (r.result.converged) {
+    return `<p class="helper-text">Earliest affordable: ${escapeHTML(fyLabelForAge(state.plan, "client", r.result.value))} (age ${r.result.value}) — settles AND services the mortgage afterward.
+        <button class="btn-text" type="button" data-focus-apply="date">Apply to plan</button></p>`;
+  }
+  if (r.result.reason === "servicing-unaffordable") {
+    return `<p class="helper-warning">Cannot afford this purchase at any date within the projection: it settles somewhere, but the mortgage is never serviceable afterward — no later date fixes an unaffordable loan.
+        ${focusDepositEarliestSettleableHTML(r.result.earliestSettleable, (v) => `age ${v}`)}</p>`;
+  }
+  return `<p class="helper-warning">No date within this projection is fully funded on current savings.</p>`;
 }
 
 function renderFocusDepositView() {
@@ -6592,7 +6628,8 @@ function exportFocusDepositCSV() {
     [csvEsc("Required at settlement"), csvEsc("Transfer & legal costs"), (f.required.costs * factor(py)).toFixed(2)].join(","),
     [csvEsc("Required at settlement"), csvEsc("First Home Owner Grant"), (-f.required.fhog * factor(py)).toFixed(2)].join(","),
     [csvEsc("Required at settlement"), csvEsc("Total cash required"), (f.required.total * factor(py)).toFixed(2)].join(","),
-    [csvEsc("The answer"), csvEsc(f.answer.onTrack ? "Spare at settlement" : "Shortfall at settlement"), (f.answer.onTrack ? f.answer.spare : f.answer.shortfall).toFixed(2)].join(","),
+    [csvEsc("The answer"), csvEsc("Status"), csvEsc(f.answer.onTrack ? "On track" : f.answer.reason)].join(","),
+    [csvEsc("The answer"), csvEsc(f.answer.onTrack ? "Spare at settlement" : f.answer.reason === "servicing-unaffordable" ? "Unfunded cashflow after settlement" : "Shortfall at settlement"), (f.answer.onTrack ? f.answer.spare : f.answer.shortfall).toFixed(2)].join(","),
     "",
     ["Year", "Age", "FY", "Available funds"].map(csvEsc).join(","),
   ];

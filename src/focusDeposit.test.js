@@ -146,12 +146,54 @@ describe("buildDepositFocus", () => {
     const outShort = projectPlan(short);
     const fShort = buildDepositFocus({ out: outShort, state: short, propertyId: "p1" });
     expect(fShort.answer.onTrack).toBe(false);
+    expect(fShort.answer.reason).toBe("settlement-unaffordable");
     expect(outShort.shortfall).not.toBeNull();
     // Reconciles to the SAME cumulative unfunded figure the engine itself recorded.
     let cumulative = 0;
     for (let y = 0; y <= fShort.target.purchaseYear; y++) cumulative += outShort.yearly[y].unfundedCashflow;
     expect(fShort.answer.shortfall).toBeCloseTo(cumulative, 2);
     expect(fShort.answer.shortfall).toBeGreaterThan(0);
+  });
+
+  it("a property that settles fine but can never service its own loan reads as 'servicing-unaffordable', not a shortfall-by-date problem", () => {
+    // A big, fast-growing (5%) loan against income that only grows at
+    // CPI: the deposit itself is easily raised from the large starting
+    // asset (settlement clears), but the resulting mortgage repayment
+    // permanently outstrips the household's thin surplus for the rest
+    // of the projection. This is the reported bug's shape: unfunded
+    // cashflow scoped to the purchase year alone is zero here, which is
+    // exactly why the OLD metric was fooled.
+    const state = mkState({
+      endAge: 80,
+      assets: [mkAsset({ balance: 500000 })],
+      cashflows: {
+        income: [{
+          id: "sal1", label: "Salary", owner: "client", amount: 6000, frequency: "monthly",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+          indexBasis: "cpi", indexExtraPct: 0, category: "salary", incomeType: "employment", sgApplies: false,
+        }],
+        expenses: [{
+          id: "exp1", label: "Living", category: "nonDiscretionary", amount: 5000, frequency: "monthly",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 }, indexBasis: "cpi", indexExtraPct: 0,
+        }],
+      },
+      properties: [prop({ priceToday: 800000, purchaseAt: { kind: "age", age: 45 }, lvrPct: 80, firstHomeBuyer: true, state: "WA" })],
+    });
+    const out = projectPlan(state);
+    const f = buildDepositFocus({ out, state, propertyId: "p1" });
+    // Sanity: settlement really does clear on its own — this is NOT a
+    // settlement-unaffordable case wearing a different label.
+    let settlementUnfunded = 0;
+    for (let y = 0; y <= f.target.purchaseYear; y++) settlementUnfunded += out.yearly[y].unfundedCashflow;
+    expect(settlementUnfunded).toBeLessThanOrEqual(0.5);
+
+    expect(f.answer.onTrack).toBe(false);
+    expect(f.answer.reason).toBe("servicing-unaffordable");
+    expect(f.answer.shortfall).toBeGreaterThan(0);
+    // The shortfall is the POST-purchase burden, not the (zero) settlement one.
+    let wholeUnfunded = 0;
+    for (const row of out.yearly) wholeUnfunded += row.unfundedCashflow ?? 0;
+    expect(f.answer.shortfall).toBeCloseTo(wholeUnfunded - settlementUnfunded, 2);
   });
 
   it("the accumulating series runs opening balances through the purchase year, ending at the purchase year", () => {
@@ -240,6 +282,62 @@ describe("solveDepositContribution — What would I need to save?", () => {
       expect(r.value).toBeNull();
     }
   });
+
+  it("reports 'servicing-unaffordable' — with the earliest-settleable amount reported as CONTEXT, not the answer — when saving can raise the deposit but never service the ongoing mortgage", () => {
+    // Only one year to save (age 40 → purchase at 41) and zero income —
+    // whatever's left over after the deposit is essentially nothing, so
+    // no contribution amount up to the $20,000/month cap leaves enough
+    // to service the resulting $540,000 loan for the following 29 years.
+    const state = mkState({
+      endAge: 70,
+      assets: [mkAsset({ balance: 50000 })],
+      properties: [prop({ priceToday: 600000, purchaseAt: { kind: "age", age: 41 }, lvrPct: 90, lmiPayAtSettlement: true })],
+    });
+    const r = solveDepositContribution({ state, propertyId: "p1", assetId: "a1", fromAge: 40 });
+    expect(r.converged).toBe(false);
+    expect(r.value).toBeNull();
+    expect(r.reason).toBe("servicing-unaffordable");
+    // Context, clearly a DIFFERENT figure from the (null) answer.
+    expect(r.earliestSettleable).not.toBeNull();
+    expect(r.earliestSettleable.value).toBeGreaterThan(0);
+    expect(r.earliestSettleable.value).toBeLessThanOrEqual(20000);
+
+    // Confirm the label is honest: applying the earliest-settleable
+    // amount really does clear settlement, but leaves the projection
+    // unfunded overall — it would be a real bug for "settleable" to be
+    // a lie too.
+    const applied = structuredClone(state);
+    applied.cashflows.contributions.push({
+      id: "applied", assetId: "a1", amount: r.earliestSettleable.value, frequency: "monthly",
+      from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+      indexed: false, owner: "client", label: "Deposit savings",
+    });
+    const out = projectPlan(applied);
+    const py = out.yearly.findIndex((row) => row.properties.p1 && (row.properties.p1.deposit !== 0 || row.properties.p1.duty !== 0 || row.properties.p1.costs !== 0 || row.properties.p1.fhog !== 0));
+    let settlementUnfunded = 0;
+    for (let y = 0; y <= py; y++) settlementUnfunded += out.yearly[y].unfundedCashflow ?? 0;
+    expect(settlementUnfunded).toBeLessThanOrEqual(0.5);
+    let wholeUnfunded = 0;
+    for (const row of out.yearly) wholeUnfunded += row.unfundedCashflow ?? 0;
+    expect(wholeUnfunded).toBeGreaterThan(0.5);
+  });
+
+  it("reports 'settlement-unaffordable' (no earliestSettleable) when no contribution up to the cap raises the deposit at all", () => {
+    // A $2,000,000 property at 50% LVR needs a $1,000,000+ deposit with
+    // only one year to save — no amount up to the $20,000/month cap
+    // gets close, so this never even reaches the "can it be serviced"
+    // question.
+    const state = mkState({
+      endAge: 41,
+      assets: [mkAsset({ balance: 50000 })],
+      properties: [prop({ priceToday: 2_000_000, purchaseAt: { kind: "age", age: 41 }, lvrPct: 50, lmiPayAtSettlement: true })],
+    });
+    const r = solveDepositContribution({ state, propertyId: "p1", assetId: "a1", fromAge: 40 });
+    expect(r.converged).toBe(false);
+    expect(r.value).toBeNull();
+    expect(r.reason).toBe("settlement-unaffordable");
+    expect(r.earliestSettleable).toBeNull();
+  });
 });
 
 describe("solveWhenCouldIBuy — When could I buy?", () => {
@@ -264,6 +362,8 @@ describe("solveWhenCouldIBuy — When could I buy?", () => {
     });
     const r = solveWhenCouldIBuy({ state, propertyId: "p1" });
     expect(r.converged).toBe(true);
+    expect(r.reason).toBe("converged");
+    expect(r.earliestSettleable).toBeNull(); // context is only populated on failure
     expect(r.value).toBeGreaterThan(41); // later than the original (underfunded) date
 
     const applied = structuredClone(state);
@@ -271,12 +371,17 @@ describe("solveWhenCouldIBuy — When could I buy?", () => {
     // integer age itself, not a fractional crossing point.
     applied.properties[0].purchaseAt = { kind: "age", age: r.value };
     const out = projectPlan(applied);
-    // "A funded purchase" — funded THROUGH the purchase itself, the
-    // question this view answers (same check buildDepositFocus's own
-    // answer.onTrack makes); not "the whole rest of the plan is
-    // shortfall-free forever after", a different question entirely.
+    // "A funded purchase" now means the WHOLE projection, not just
+    // settlement — buildDepositFocus's own answer.onTrack requires
+    // both halves (see its own header) — this fixture's ongoing income
+    // comfortably services the resulting loan, so it should read as
+    // genuinely on track, not just "settled".
     const f = buildDepositFocus({ out, state: applied, propertyId: "p1" });
     expect(f.answer.onTrack).toBe(true);
+    // Explicitly the WHOLE-projection metric, not just settlement.
+    let wholeUnfunded = 0;
+    for (const row of out.yearly) wholeUnfunded += row.unfundedCashflow ?? 0;
+    expect(wholeUnfunded).toBeLessThanOrEqual(0.5);
   });
 
   it("never mutates the caller's state", () => {
@@ -295,5 +400,58 @@ describe("solveWhenCouldIBuy — When could I buy?", () => {
     const before = JSON.stringify(state);
     solveWhenCouldIBuy({ state, propertyId: "p1" });
     expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("REGRESSION (reported bug): a date that clears settlement early but is never serviceable reports 'servicing-unaffordable', not a converged date", () => {
+    // The exact class of bug reported: a fast-growing (5%) property
+    // against income that only grows at CPI. Unfunded cashflow scoped
+    // to the purchase year is zero from the very first age tried
+    // (settlement always clears, given the large starting asset) — the
+    // OLD purchase-year-scoped metric would have returned `achieved:
+    // true` at the very first age checked, hiding the fact that the
+    // resulting mortgage is never affordable to service for the rest
+    // of the projection.
+    const state = mkState({
+      endAge: 80,
+      assets: [mkAsset({ balance: 500000 })],
+      cashflows: {
+        income: [{
+          id: "sal1", label: "Salary", owner: "client", amount: 6000, frequency: "monthly",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+          indexBasis: "cpi", indexExtraPct: 0, category: "salary", incomeType: "employment", sgApplies: false,
+        }],
+        expenses: [{
+          id: "exp1", label: "Living", category: "nonDiscretionary", amount: 5000, frequency: "monthly",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 }, indexBasis: "cpi", indexExtraPct: 0,
+        }],
+      },
+      properties: [prop({ priceToday: 800000, purchaseAt: { kind: "age", age: 46 }, lvrPct: 80, firstHomeBuyer: true, state: "WA" })],
+    });
+    const r = solveWhenCouldIBuy({ state, propertyId: "p1" });
+    expect(r.converged).toBe(false);
+    expect(r.value).toBeNull();
+    expect(r.reason).toBe("servicing-unaffordable");
+    // Context — a real settlement-only date — but clearly distinct
+    // from `value`, which stays null: this is NOT the answer.
+    expect(r.earliestSettleable).not.toBeNull();
+    expect(r.earliestSettleable.value).toBeGreaterThanOrEqual(state.plan.client.currentAge);
+    expect(r.earliestSettleable.value).toBeLessThanOrEqual(state.plan.endAge);
+  });
+
+  it("reports 'settlement-unaffordable' (no earliestSettleable) when the deposit can never be raised at any age in range", () => {
+    // No income at all and a stagnant (real-zero-growth) starting
+    // balance against a 5%-growing full-cash-price purchase (lvrPct 0):
+    // the required cash only pulls further ahead of savings the longer
+    // the client waits, at every age in the search range.
+    const state = mkState({
+      endAge: 80,
+      assets: [mkAsset({ balance: 5000 })],
+      properties: [prop({ priceToday: 600000, purchaseAt: { kind: "age", age: 41 }, lvrPct: 0 })],
+    });
+    const r = solveWhenCouldIBuy({ state, propertyId: "p1" });
+    expect(r.converged).toBe(false);
+    expect(r.value).toBeNull();
+    expect(r.reason).toBe("settlement-unaffordable");
+    expect(r.earliestSettleable).toBeNull();
   });
 });

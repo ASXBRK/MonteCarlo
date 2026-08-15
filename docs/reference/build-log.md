@@ -232,6 +232,32 @@ separate calculation.
   dates and verification caveats from each data module's own metadata
   are shown directly in the view, not summarised away.
 
+**Deposit solver: whole-of-projection affordability** — Focus Commit
+2's own fix (settlement-year-scoped `cumulativeUnfundedThroughYear`, to
+close the "deposit funded but the new loan's first-year repayments
+aren't" bug) reintroduced the same class of error one step later: a
+metric scoped to the purchase year is still blind to a loan that clears
+settlement and then becomes unaffordable to service in year three, five,
+or any year after. `solveWhenCouldIBuy` could report a fully "achieved"
+date on a mortgage that, once drawn down, produced six figures of
+unfunded cashflow for the rest of the projection — it was checking
+"did this settle", not "does the plan work". Both solvers now target a
+NEW `cumulativeUnfundedWhole` (sum through the LAST projected year, not
+the purchase year) as the primary metric, via a shared
+`solveWithAffordabilitySplit`. Where nothing in range clears that bar, a
+second pass against the old settlement-only metric distinguishes WHY —
+`"settlement-unaffordable"` (the deposit itself is never raised) from
+`"servicing-unaffordable"` (settlement clears somewhere, but the
+resulting loan is never serviceable) — because they call for opposite
+advice: save more / wait, versus this property isn't affordable
+regardless of timing. The settlement-only figure survives as
+`earliestSettleable`, reported as clearly-labelled CONTEXT alongside the
+`servicing-unaffordable` result, never as the answer itself (no apply
+button — it isn't one). `buildDepositFocus`'s own `answer.onTrack` gained
+the same two-reason split, so a property that settles but never
+services reads as "cannot afford this purchase" with the servicing
+shortfall, not as a shortfall-by-date the client just hasn't reached yet.
+
 ### In flight
 Super threshold
 indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
