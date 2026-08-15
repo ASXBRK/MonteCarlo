@@ -2438,6 +2438,19 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         termYears: randInt(10, 25), repayment: pick(["io", "pi"]), ioYears: 3,
         deductible: Math.random() < 0.5, linkedAssetId: null, offsetAssetId: null,
         extraRepayments: [], oneOffRepayments: [],
+        // Fixed-rate rollover (Implementation/Rates spec, Commit 1) —
+        // half the time fixed, with the rollover date spanning BEFORE
+        // the projection starts (already rolled over), squarely WITHIN
+        // it (the case that changes interest accrual and recomputes
+        // the payment mid-run — the actual new money-flow-shaped code
+        // path this invariant needs to exercise), and beyond its own
+        // end (never fires) — a plain rand(40, endAge) rarely lands
+        // exactly at either edge, so pick explicitly covers all three.
+        rateType: pick(["variable", "fixed"]),
+        fixedRatePct: rand(3, 7),
+        fixedUntil: { kind: "age", age: pick([39, randInt(40, endAge), endAge + 5]) },
+        revertRatePct: pick([null, rand(3, 9)]),
+        commencedOn: pick([null, "2022-01-01"]),
       };
       if (Math.random() < 0.6) {
         liab.extraRepayments = [{
@@ -3716,6 +3729,131 @@ describe("Extra and one-off loan repayments (Document Set Commit 5)", () => {
     for (let y = 0; y < withEmpty.yearly.length; y++) {
       expect(withEmpty.yearly[y].liabilities.lb1.closing).toBeCloseTo(withUndefined.yearly[y].liabilities.lb1.closing, 8);
       expect(withEmpty.yearly[y].liabilities.lb1.extraRepayment).toBe(0);
+    }
+  });
+});
+
+describe("Fixed-rate loans and rollover (Implementation/Rates spec, Commit 1)", () => {
+  const loan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 100000, interestRatePct: 6, termYears: 10, repayment: "pi",
+    ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+    extraRepayments: [], oneOffRepayments: [],
+    rateType: "variable", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 },
+    revertRatePct: null, commencedOn: null,
+    ...over,
+  });
+  const bigAsset = () => mkAsset({ allocation: zeroRealAlloc(), balance: 2000000 });
+  const withLoan = (l, over = {}) => ({
+    ...mkState({ endAge: 40 + (over.years ?? 11), assets: [bigAsset()], ...over }),
+    liabilities: [l],
+  });
+
+  it("known-value: interest accrues at the fixed rate up to rollover, the revert rate after, and the payment recomputes exactly once", () => {
+    const l = loan({
+      rateType: "fixed", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: 8,
+    });
+    const out = projectPlan(withLoan(l, { years: 11 }));
+    const iFixed = 0.06 / 12, iRevert = 0.08 / 12;
+    let b = 100000;
+    let pmt = levelPayment(100000, iFixed, 120);
+    let recomputed = false;
+    const checkpoints = {};
+    for (let m = 0; m < 120 && b > 1e-9; m++) {
+      const rate = m >= 36 ? iRevert : iFixed;
+      if (m >= 36 && !recomputed) { pmt = levelPayment(b, iRevert, 120 - m); recomputed = true; }
+      const interest = b * rate;
+      const payment = Math.min(pmt, b + interest);
+      b = b + interest - payment;
+      if (b < 1e-9) b = 0;
+      if ((m + 1) % 12 === 0) checkpoints[(m + 1) / 12 - 1] = b;
+    }
+    for (const [y, nominalClosing] of Object.entries(checkpoints)) {
+      const infl = Math.pow(1.025, Number(y) + 1);
+      expect(out.yearly[Number(y)].liabilities.lb1.closing).toBeCloseTo(nominalClosing / infl, 2);
+    }
+  });
+
+  it("the recomputed repayment matches a closed form over the remaining balance and remaining term", () => {
+    const l = loan({
+      rateType: "fixed", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: 8,
+    });
+    const out = projectPlan(withLoan(l, { years: 11 }));
+    const rollover = out.liabilityRollovers.lb1;
+    expect(rollover).toBeTruthy();
+    expect(rollover.planYear).toBe(3); // age 43 − currentAge 40
+    expect(rollover.fromRatePct).toBeCloseTo(6, 6);
+    expect(rollover.toRatePct).toBeCloseTo(8, 6);
+
+    // Year 2's closing == year 3's opening == the balance AT rollover
+    // (rollover always lands on a plan-year boundary) — the closed
+    // form's own input, converted to the same nominal-dollar terms
+    // levelPayment operates in.
+    const infl = Math.pow(1.025, 3);
+    const balanceAtRolloverNominal = out.yearly[2].liabilities.lb1.closing * infl;
+    const expectedPayment = levelPayment(balanceAtRolloverNominal, 0.08 / 12, 120 - 36);
+    expect(rollover.repaymentAfter * infl).toBeCloseTo(expectedPayment, 2);
+  });
+
+  it("a rollover mid-projection produces the expected step — before/after repayments genuinely differ, not smoothed", () => {
+    const l = loan({
+      rateType: "fixed", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: 9,
+    });
+    const out = projectPlan(withLoan(l, { years: 11 }));
+    expect(out.yearly[0].liabilities.lb1.ratePct).toBeCloseTo(6, 6);
+    expect(out.yearly[2].liabilities.lb1.ratePct).toBeCloseTo(6, 6);
+    expect(out.yearly[3].liabilities.lb1.ratePct).toBeCloseTo(9, 6);
+    const rollover = out.liabilityRollovers.lb1;
+    // repaymentBefore/After are real-dollar figures (deflated at the
+    // rollover point, like every other point-in-time figure on this
+    // row) — convert back to nominal to compare against the raw
+    // closed-form payment.
+    const infl = Math.pow(1.025, 3);
+    expect(rollover.repaymentBefore * infl).toBeCloseTo(levelPayment(100000, 0.06 / 12, 120), 2);
+    expect(Math.abs(rollover.repaymentAfter - rollover.repaymentBefore)).toBeGreaterThan(1);
+  });
+
+  it("regression: rateType 'variable' (explicit or omitted) matches the pre-Commit-1 level-payment closed form exactly", () => {
+    const withExplicit = projectPlan(withLoan(loan({ rateType: "variable" }), { years: 11 }));
+    const withOmitted = projectPlan(withLoan(loan({ rateType: undefined }), { years: 11 }));
+    const i = 0.06 / 12;
+    const pmt = levelPayment(100000, i, 120);
+    let b = 100000;
+    const checkpoints = {};
+    for (let m = 0; m < 120 && b > 1e-9; m++) {
+      const interest = b * i;
+      const payment = Math.min(pmt, b + interest);
+      b = b + interest - payment;
+      if (b < 1e-9) b = 0;
+      if ((m + 1) % 12 === 0) checkpoints[(m + 1) / 12 - 1] = b;
+    }
+    for (const [y, nominalClosing] of Object.entries(checkpoints)) {
+      const infl = Math.pow(1.025, Number(y) + 1);
+      expect(withExplicit.yearly[Number(y)].liabilities.lb1.closing).toBeCloseTo(nominalClosing / infl, 2);
+      expect(withOmitted.yearly[Number(y)].liabilities.lb1.closing).toBeCloseTo(nominalClosing / infl, 2);
+    }
+    expect(withExplicit.liabilityRollovers.lb1).toBeUndefined();
+    expect(withOmitted.liabilityRollovers.lb1).toBeUndefined();
+  });
+
+  it("extras during a fixed period still work, and the scheduled (no-extras) baseline rolls over too — isolating extras' own effect from the rate switch", () => {
+    const l = loan({
+      rateType: "fixed", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: 9,
+      extraRepayments: [{
+        id: "er1", label: "Extra", amount: 500, frequency: "monthly",
+        from: { kind: "age", age: 40 }, to: { kind: "age", age: 50 },
+        indexBasis: "none", indexExtraPct: 0,
+      }],
+    });
+    const out = projectPlan(withLoan(l, { years: 11 }));
+    const stats = out.liabilityRepaymentStats.lb1;
+    expect(stats).toBeTruthy();
+    // The SCHEDULED (no-extras) baseline has no extras but DOES still
+    // roll over — a level-payment schedule always retires exactly at
+    // its own term regardless of the rate path.
+    expect(stats.scheduledPayoffMonth).toBe(120);
+    if (stats.actualPayoffMonth != null) {
+      expect(stats.interestSaved).toBeGreaterThan(0);
     }
   });
 });

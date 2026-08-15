@@ -144,6 +144,21 @@
 //    so N doesn't yet reflect it; that's the documented convention, not
 //    a leak)
 //
+// Fixed-rate rollover (Implementation/Rates spec, Commit 1) — changes
+// HOW `row.liabilities[l.id].interest`/the payment are computed (the
+// rate and the level payment both switch at the rollover month), but
+// not WHAT is reported or what pocket it moves through: it's still the
+// same interest-accrues-then-gets-paid shape, folded into the SAME
+// liabilityInterest/liabilityRevaluation terms above regardless of
+// whether the rate was constant for the whole projection or switched
+// once. Verified, not assumed: randomScenario() (deterministic.test.js)
+// generates fixed-rate liabilities with a rollover date spanning
+// before/during/after the projection, and this invariant holds against
+// it across hundreds of randomised runs with NO new named term —
+// exactly the kind of change this file's header asks a new-money-flow
+// commit to check for, even when the answer turns out to be "the
+// existing terms already cover it."
+//
 // Monte Carlo's random return shocks (Session B) touch none of the
 // terms above except `row.growth`/superDetail's earnings figures
 // themselves — those are accumulated from whatever return was actually

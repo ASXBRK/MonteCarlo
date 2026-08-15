@@ -390,12 +390,36 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // pass ever writes into it, deflating loanBal at the point of write.
   const liabSeries = {};
   const offsetLoansByAsset = {}; // assetId → [liability ids]
+  // Fixed-rate rollover (Implementation/Rates spec, Commit 1) — the
+  // recomputed post-rollover level payment, keyed by liability id.
+  // null/absent until the recompute trigger month is actually reached
+  // (see the liability loop below) — snapshotted/restored alongside
+  // loanBal (measurement vs real pass) since it's derived from the
+  // path-dependent balance AT that month, not a static setup value.
+  const postRolloverPmt = {};
   for (const l of liabs) {
-    const i = monthlyRate(l);
     const termM = termMonths(l);
     const ioM = ioMonths(l);
     const offsetId = l.offsetAssetId && l.offsetAssetId in bal && !meta[l.offsetAssetId].lifestyle
       ? l.offsetAssetId : null;
+    // rateType is only ever "fixed" for user-entered liabilities — D4
+    // purchase loans (derivedLoans) never set it, so they default to
+    // "variable" here exactly like every other field they don't supply.
+    const rateType = l.rateType === "fixed" ? "fixed" : "variable";
+    const revertPct = l.revertRatePct != null ? l.revertRatePct : mortgageRateAssum * 100;
+    const revertRate = revertPct / 100 / 12;
+    // The rate in force UNTIL rollover — the plain variable rate, or
+    // the loan's own fixed rate. Rollover resolves via the SAME
+    // "fires in July of the resolved plan year, null = never within
+    // this projection" convention every other one-off plan event uses
+    // (goals, property purchases) — see julyOf's own definition above.
+    const i = rateType === "fixed" ? (l.fixedRatePct ?? 0) / 100 / 12 : monthlyRate(l);
+    let rolloverMonth = null;
+    let rolloverYear = null;
+    if (rateType === "fixed") {
+      rolloverYear = resolveRef(l.fixedUntil, state.plan, schedule, "client").planYear;
+      rolloverMonth = julyOf(rolloverYear);
+    }
     liabMeta[l.id] = {
       i,
       termM,
@@ -406,6 +430,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       deductible: l.deductible === true,
       shares: ownerShares(l, couple),
       propertyId: l.propertyId ?? null, // interest joins that property's gearing calc
+      rateType, revertRate, rolloverMonth, rolloverYear,
+      // The payment recomputes at the LATER of rollover or IO-end —
+      // rolling over mid-IO changes nothing about the (still
+      // interest-only) contractual payment, so recompute waits for
+      // whichever actually starts the level-payment phase.
+      recomputeTriggerMonth: rolloverMonth != null ? Math.max(rolloverMonth, (l.startMonth ?? 0) + ioM) : null,
     };
     // Purchase loans hold zero until the settlement month sets them.
     loanBal[l.id] = (l.startMonth ?? 0) > 0 ? 0 : l.balance;
@@ -641,10 +671,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // already means for an ordinary loan.
     liabilities: Object.fromEntries([
       ...liabs.map((l) => [l.id, {
-        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0,
+        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0, ratePct: 0,
       }]),
       ...helpLiabPersons.map((p) => [`help_${p}`, {
-        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0,
+        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0, ratePct: 0,
       }]),
     ]),
     liabilitiesClosing: 0,
@@ -1222,8 +1252,27 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const mRel = m - md.startMonth;
         const infl = inflAt(m);
         const offsetNom = md.offsetId ? Math.min(bal[md.offsetId] * infl, b0) : 0;
-        const interest = (b0 - offsetNom) * md.i;
-        const contractual = mRel < md.ioM ? interest : md.pmtPI;
+        // Fixed-rate rollover (Implementation/Rates spec, Commit 1): the
+        // rate switches exactly at rolloverMonth, unconditional on
+        // IO/P&I status — md.i already IS the correct pre-rollover rate
+        // (fixed or plain variable) from setup, so a variable loan
+        // (rolloverMonth stays null) takes this branch's `false` arm
+        // every month and is bit-identical to before this feature.
+        const rate = md.rolloverMonth != null && m >= md.rolloverMonth ? md.revertRate : md.i;
+        // The payment recomputes ONCE, at the trigger month, over the
+        // CURRENT balance and remaining term — then holds fixed exactly
+        // like the original pre-rollover payment ("the step change in
+        // repayment is the point of the feature — do not smooth it").
+        // Guarded by postRolloverPmt[l.id] == null so a later month
+        // revisiting this branch (there is none within a single pass,
+        // but the measurement/real replay reaches this month twice per
+        // year) doesn't re-derive it from an already-amortised balance.
+        if (md.recomputeTriggerMonth != null && m >= md.recomputeTriggerMonth && postRolloverPmt[l.id] == null) {
+          postRolloverPmt[l.id] = levelPayment(b0, md.revertRate, md.termM - mRel);
+        }
+        const pmtPI = postRolloverPmt[l.id] ?? md.pmtPI;
+        const interest = (b0 - offsetNom) * rate;
+        const contractual = mRel < md.ioM ? interest : pmtPI;
         const payment = Math.min(Math.max(contractual, 0), b0 + interest);
         // Extra/lump-sum repayments (Document Set Commit 5): a
         // household cash outflow through the WCA exactly like the
@@ -1264,6 +1313,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           // Snapshot, not a sum — overwritten every month so it holds
           // the year-end value, same convention as closing.
           row.liabilities[l.id].offsetApplied = offsetNom * defl;
+          // Nominal annual rate applying THIS month (Commit 1) —
+          // rollover always lands on a plan-year boundary (July), so a
+          // full plan year only ever sees one rate; this snapshot holds
+          // whichever one was current at year-end, same convention as
+          // closing/offsetApplied. Genuinely 0 for HELP (no separate
+          // liab loop entry — see mkYearRow's own header), which is
+          // correct: HELP charges no interest, only indexation.
+          row.liabilities[l.id].ratePct = rate * 12 * 100;
           liabSeries[l.id][m + 1] = b1 / inflAt(m + 1);
         }
       }
@@ -1728,6 +1785,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const balSnap = { ...bal };
     const poolSnap = { ...pools };
     const loanSnap = { ...loanBal };
+    // Fixed-rate rollover (Commit 1): postRolloverPmt is derived from
+    // loanBal at the trigger month, so it's path-dependent the same way
+    // — measurement-pass writes must roll back exactly like loanBal's
+    // own, or the real pass would start with an already-recomputed
+    // payment for months BEFORE it actually reaches the trigger.
+    const pmtSnap = { ...postRolloverPmt };
     const propValSnap = { ...propVal };
     const propPoolSnap = { ...propPools };
     const wcaBalSnap = wcaBal;
@@ -1738,6 +1801,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     Object.assign(bal, balSnap);
     pools = poolSnap;
     Object.assign(loanBal, loanSnap);
+    for (const k of Object.keys(postRolloverPmt)) delete postRolloverPmt[k];
+    Object.assign(postRolloverPmt, pmtSnap);
     Object.assign(propVal, propValSnap);
     propPools = propPoolSnap;
     wcaBal = wcaBalSnap;
@@ -2195,6 +2260,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const scheduled = scheduledAmortisation({
       balance: l.balance, i: md.i, ioM: md.ioM, termM: md.termM, pmtPI: md.pmtPI,
       startMonth: md.startMonth, inflAt,
+      rolloverMonth: md.rolloverMonth, revertRate: md.revertRate,
     });
     let actualPayoffMonth = null;
     const series = liabSeries[l.id];
@@ -2210,6 +2276,32 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           interestSaved: scheduled.totalInterestReal - actualTotalInterest,
           timeSavedMonths: scheduled.payoffMonth - actualPayoffMonth,
         };
+  }
+
+  // Fixed-rate rollover (Implementation/Rates spec, Commit 1) — one
+  // entry per liability with rateType "fixed" whose rollover actually
+  // fires (resolves within the projection) WHILE the loan is still
+  // open, giving the Liabilities table/chart and the Focus debt-payoff
+  // view the "before vs after" figures without recomputing anything
+  // the engine already derived. Gated on postRolloverPmt actually
+  // having been set — a loan paid off (or never reaching b0 > 0 at the
+  // trigger month) before rollover never ran the recompute, so there's
+  // no "after" to report. repaymentBefore/After are real-dollar monthly
+  // $ figures at the rollover point (deflated the same way every other
+  // point-in-time figure on this row is).
+  const liabilityRollovers = {};
+  for (const l of state.liabilities ?? []) {
+    const md = liabMeta[l.id];
+    if (!md || md.rolloverMonth == null || postRolloverPmt[l.id] == null) continue;
+    const infl = inflAt(md.rolloverMonth);
+    liabilityRollovers[l.id] = {
+      planYear: md.rolloverYear,
+      fyLabel: schedule.fyLabels[md.rolloverYear],
+      fromRatePct: md.i * 12 * 100,
+      toRatePct: md.revertRate * 12 * 100,
+      repaymentBefore: md.pmtPI / infl,
+      repaymentAfter: postRolloverPmt[l.id] / infl,
+    };
   }
 
   // Document Set Commit 6 — per-goal outcome: achieved in full, or
@@ -2272,6 +2364,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     superWarnings,
     propertyWarnings,
     liabilityRepaymentStats,
+    liabilityRollovers,
     goalStats,
   };
 }

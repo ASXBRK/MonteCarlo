@@ -3553,7 +3553,11 @@ els.superSection.addEventListener("click", (e) => {
 
 function liabilityDerivedText(l) {
   if (!(l.balance > 0)) return "Enter a balance to see repayments.";
-  const i = monthlyRate(l);
+  // Fixed-rate rollover (Commit 1): the STARTING rate is the fixed
+  // rate while rateType is "fixed" — interestRatePct is unused then —
+  // this quick summary is the pre-rollover figure; the post-rollover
+  // one is shown by liabilityRolloverSummaryHTML below.
+  const i = l.rateType === "fixed" ? (l.fixedRatePct ?? 0) / 100 / 12 : monthlyRate(l);
   const pmt = levelPayment(l.balance, i, termMonths(l) - ioMonths(l));
   const ioPart = l.repayment === "io"
     ? `interest-only ≈ ${fmtMoney(l.balance * i)}/mo for ${l.ioYears}y, then `
@@ -3634,6 +3638,22 @@ function oneOffRepaymentRowHTML(lid, or) {
   `;
 }
 
+// Fixed-rate rollover (Implementation/Rates spec, Commit 1) — read
+// straight off the live projection's own liabilityRollovers, never
+// recomputed here. A fixed loan whose rollover never actually fires
+// within the current projection (fixedUntil clamps to a year the loan
+// is already retired by, or is simply beyond the plan's own end) shows
+// as informational text instead of a blank gap.
+function liabilityRolloverSummaryHTML(l) {
+  if (l.rateType !== "fixed") return "";
+  const r = projection?.liabilityRollovers?.[l.id];
+  if (!r) {
+    const fixedUntilAge = resolveRef(l.fixedUntil, state.plan, projection.schedule, "client").age;
+    return `<p class="helper-text">Fixed until age ${fixedUntilAge} — no rollover falls within the current projection while this loan is still open.</p>`;
+  }
+  return `<p class="helper-text">Rolls over in ${escapeHTML(r.fyLabel)}: ${r.fromRatePct.toFixed(2)}% → ${r.toRatePct.toFixed(2)}% p.a., repayment ${fmtMoney(r.repaymentBefore)}/mo → ${fmtMoney(r.repaymentAfter)}/mo.</p>`;
+}
+
 function liabilityCardHTML(l) {
   const financialAssets = state.assets.filter((a) => a.class !== "lifestyle");
   const opt = (list, sel) => `<option value=""${!sel ? " selected" : ""}>None</option>` +
@@ -3668,9 +3688,37 @@ function liabilityCardHTML(l) {
             <input type="number" min="0" step="1000" value="${l.balance}" data-lid="${l.id}" data-lfield="balance" />
           </div>
           <div class="cf-cell">
-            <label>Interest rate (% p.a.)</label>
-            <input type="number" min="0" max="30" step="0.05" value="${l.interestRatePct}" data-lid="${l.id}" data-lfield="interestRatePct" />
+            <label>Rate type</label>
+            <div class="seg-toggle">
+              <button class="seg-option${l.rateType !== "fixed" ? " active" : ""}" type="button"
+                      data-liab-action="rateType" data-lid="${l.id}" data-value="variable">Variable</button>
+              <button class="seg-option${l.rateType === "fixed" ? " active" : ""}" type="button"
+                      data-liab-action="rateType" data-lid="${l.id}" data-value="fixed">Fixed</button>
+            </div>
           </div>
+          ${l.rateType === "fixed" ? `
+            <div class="cf-cell">
+              <label>Fixed rate (% p.a.)</label>
+              <input type="number" min="0" max="30" step="0.05" value="${l.fixedRatePct}" data-lid="${l.id}" data-lfield="fixedRatePct" />
+            </div>
+            <div class="cf-cell">
+              <label>Fixed until (age)</label>
+              <input type="number" min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1"
+                     value="${resolveRef(l.fixedUntil, state.plan, projection.schedule, "client").age}"
+                     data-lid="${l.id}" data-lfield="fixedUntilAge" />
+            </div>
+            <div class="cf-cell">
+              <label>Revert rate (% p.a.)</label>
+              <input type="number" min="0" max="30" step="0.05" value="${l.revertRatePct ?? ""}"
+                     placeholder="${(state.assumptions.mortgageRate * 100).toFixed(2)} (assumption)"
+                     data-lid="${l.id}" data-lfield="revertRatePct" />
+            </div>
+          ` : `
+            <div class="cf-cell">
+              <label>Interest rate (% p.a.)</label>
+              <input type="number" min="0" max="30" step="0.05" value="${l.interestRatePct}" data-lid="${l.id}" data-lfield="interestRatePct" />
+            </div>
+          `}
           <div class="cf-cell">
             <label>Term (years)</label>
             <input type="number" min="1" max="50" step="1" value="${l.termYears}" data-lid="${l.id}" data-lfield="termYears" />
@@ -3705,7 +3753,12 @@ function liabilityCardHTML(l) {
             <label>Offset account</label>
             <select data-lid="${l.id}" data-lfield="offsetAssetId">${opt(financialAssets, l.offsetAssetId)}</select>
           </div>
+          <div class="cf-cell">
+            <label>Loan commenced (optional)</label>
+            <input type="date" value="${l.commencedOn ?? ""}" data-lid="${l.id}" data-lfield="commencedOn" />
+          </div>
         </div>
+        ${liabilityRolloverSummaryHTML(l)}
         ${liabilityRepaymentPlansHTML(l)}
       </div>
     </div>
@@ -3839,6 +3892,13 @@ els.liabilitiesSection.addEventListener("change", (e) => {
     else if (field === "deductible") l.deductible = e.target.checked;
     else if (field === "linkedAssetId") l.linkedAssetId = e.target.value || null;
     else if (field === "offsetAssetId") l.offsetAssetId = e.target.value || null;
+    // Fixed-rate rollover (Commit 1).
+    else if (field === "fixedRatePct") l.fixedRatePct = clampNumber(e.target.value, 0, 30);
+    else if (field === "fixedUntilAge") l.fixedUntil = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
+    // Blank clears back to "use the mortgage-rate assumption" — the
+    // same override-or-default shape as dutyOverride/lmiOverride.
+    else if (field === "revertRatePct") l.revertRatePct = e.target.value === "" ? null : clampNumber(e.target.value, 0, 30);
+    else if (field === "commencedOn") l.commencedOn = e.target.value || null; // informational only
   } else if (erField) {
     // Document Set Commit 5 — extra repayment sub-row.
     const er = (l.extraRepayments ?? []).find((x) => x.id === e.target.dataset.erid);
@@ -3881,6 +3941,13 @@ els.liabilitiesSection.addEventListener("click", (e) => {
     state.liabilities = state.liabilities.filter((x) => x.id !== l.id);
   } else if (btn.dataset.liabAction === "repayment") {
     l.repayment = btn.dataset.value === "io" ? "io" : "pi";
+  } else if (btn.dataset.liabAction === "rateType") {
+    const next = btn.dataset.value === "fixed" ? "fixed" : "variable";
+    // A nice-to-have on first switch, not a continuous sync: seed the
+    // fixed rate from whatever's already entered as the variable rate,
+    // so toggling to Fixed doesn't show an unrelated stale default.
+    if (next === "fixed" && l.rateType !== "fixed") l.fixedRatePct = l.interestRatePct;
+    l.rateType = next;
   } else if (btn.dataset.liabAction === "add-extra") {
     l.extraRepayments = [...(l.extraRepayments ?? []), createExtraRepayment(state.plan, l.extraRepayments ?? [])];
   } else if (btn.dataset.liabAction === "remove-extra") {
@@ -4232,6 +4299,11 @@ function forcedYearIndices() {
     forced.push(resolveRef(p.purchaseAt, state.plan, projection.schedule, "client").planYear);
   }
   for (const a of listAnchors(state.plan, projection.schedule)) forced.push(a.planYear);
+  // Fixed-rate rollover (Implementation/Rates spec, Commit 1) — "the
+  // rollover is a key date" per the spec: forced into every table/chart
+  // the same way a planned property's purchase year already is (not a
+  // plan.keyDates entry itself, so it can't go through listAnchors).
+  for (const r of Object.values(projection.liabilityRollovers ?? {})) forced.push(r.planYear);
   return forced;
 }
 
@@ -5067,6 +5139,24 @@ function renderLiabilitiesBalancesChart() {
     });
   }
 
+  // Fixed-rate rollover (Implementation/Rates spec, Commit 1) — "the
+  // rollover is a key date... and annotates charts automatically", the
+  // same thin dashed-rule + label pattern as the composite chart's own
+  // key-date/goal markers, applied here since this is the debt-specific
+  // chart the rollover most concretely affects.
+  const rolloverMarks = Object.entries(projection.liabilityRollovers ?? {})
+    .filter(([, r]) => yearIdxs.includes(r.planYear))
+    .map(([lid, r]) => ({ age: projection.schedule.clientAges[r.planYear], label: `${loanName(lid)} rolls over` }));
+  const rolloverShapes = rolloverMarks.map((k) => ({
+    type: "line", xref: "x", x0: k.age, x1: k.age, yref: "paper", y0: 0, y1: 1,
+    line: { color: "rgba(217, 123, 47, 0.55)", width: 1.5, dash: "dot" },
+  }));
+  const rolloverAnnotations = rolloverMarks.map((k) => ({
+    x: k.age, y: 1, xref: "x", yref: "paper", yanchor: "bottom", xanchor: "left",
+    text: k.label, showarrow: false, textangle: -90,
+    font: { size: 9, color: "rgba(217, 123, 47, 0.9)" },
+  }));
+
   Plotly.react(el, traces, {
     margin: { l: 70, r: 20, t: 24, b: 50 },
     paper_bgcolor: "white", plot_bgcolor: "white",
@@ -5077,6 +5167,8 @@ function renderLiabilitiesBalancesChart() {
       title: { text: `Balance owing (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
       tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
     },
+    shapes: rolloverShapes,
+    annotations: rolloverAnnotations,
     font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
   }, { displayModeBar: false, responsive: true });
 }
@@ -5941,6 +6033,14 @@ function liabilityDetailRows(get, opts = {}) {
     // convention) for a loan with no extra/one-off repayments configured.
     { label: "Extra repayments", cell: (y) => -get(y).extraRepayment },
     { label: "Offset balance applied", cell: (y) => get(y).offsetApplied },
+    // Fixed-rate rollover (Implementation/Rates spec, Commit 1) — the
+    // nominal annual rate actually applying that year. Suppressed in
+    // the "Combined" (all-loans-summed) view: summing a PERCENTAGE
+    // across loans is meaningless, unlike every other row here which is
+    // a genuine dollar figure. A HELP/HECS row (opts.help) genuinely
+    // shows 0% throughout — it charges no interest, only indexation
+    // (its own row above).
+    ...(opts.combined ? [] : [{ label: "Interest rate (% p.a., nominal)", cell: (y) => get(y).ratePct ?? 0, pct: true }]),
   ];
 }
 
@@ -5964,14 +6064,14 @@ function liabilitiesPayoffFooter(liabIds) {
 function buildLiabilitiesGroups(entity) {
   const yl = projection.yearly;
   const liabIds = Object.keys(yl[0]?.liabilities ?? {});
-  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0 };
+  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0, ratePct: 0 };
 
   if (entity === "all") {
     const combined = liabilityDetailRows((y) => liabIds.reduce((s, lid) => {
       const d = yl[y].liabilities[lid] ?? zero;
       for (const k in s) s[k] += d[k] ?? 0;
       return s;
-    }, { ...zero }));
+    }, { ...zero }), { combined: true });
     combined.push({ label: "Closing balance", cell: (y) => yl[y].liabilitiesClosing, always: true, cls: "tl-total" });
     const closingRow = (lid) => ({ label: loanName(lid), cell: (y) => yl[y].liabilities[lid]?.closing ?? 0 });
     const byLoan = liabIds.map(closingRow);
@@ -7016,6 +7116,25 @@ function focusDebtPayoffStatsHTML(f, factor) {
   `;
 }
 
+// Fixed-rate rollover (Implementation/Rates spec, Commit 1) — the
+// repayment before and after, read straight off f.rollover (already
+// the engine's own liabilityRollovers entry, via buildDebtPayoffFocus —
+// never recomputed here).
+function focusDebtPayoffRolloverHTML(f, factor) {
+  if (!f.rollover) return "";
+  const r = f.rollover;
+  return `
+    <div class="focus-section">
+      <h3>Fixed-rate rollover</h3>
+      <table class="focus-table">
+        <tr><td>Rolls over</td><td>${escapeHTML(r.fyLabel)}</td></tr>
+        <tr><td>Rate</td><td>${r.fromRatePct.toFixed(2)}% → ${r.toRatePct.toFixed(2)}% p.a.</td></tr>
+        <tr class="tl-total"><td>Repayment</td><td>${fmtMoney(r.repaymentBefore * factor(r.planYear))}/mo → ${fmtMoney(r.repaymentAfter * factor(r.planYear))}/mo</td></tr>
+      </table>
+    </div>
+  `;
+}
+
 function focusDebtPayoffSolverResultHTML() {
   const r = focusDebtPayoffSolveResult;
   if (!r) return "";
@@ -7077,6 +7196,7 @@ function renderFocusDebtPayoffView() {
         <h3>Effect of extra repayments</h3>
         ${focusDebtPayoffStatsHTML(f, factor)}
       </div>
+      ${focusDebtPayoffRolloverHTML(f, factor)}
       <div class="focus-section">
         <h3>Balance over time</h3>
         <div id="focusDebtChart"></div>
@@ -7146,6 +7266,12 @@ function exportFocusDebtPayoffCSV() {
   if (f.stats) {
     lines.push([csvEsc(f.liability.name), csvEsc("Interest saved by extra repayments"), (f.stats.interestSaved ?? "").toString()].join(","));
     lines.push([csvEsc(f.liability.name), csvEsc("Time saved (months)"), (f.stats.timeSavedMonths ?? "").toString()].join(","));
+  }
+  if (f.rollover) {
+    const rf = factor(f.rollover.planYear);
+    lines.push([csvEsc(f.liability.name), csvEsc(`Rolls over (${f.rollover.fyLabel})`), csvEsc(`${f.rollover.fromRatePct.toFixed(2)}% -> ${f.rollover.toRatePct.toFixed(2)}%`)].join(","));
+    lines.push([csvEsc(f.liability.name), csvEsc("Repayment before rollover"), (f.rollover.repaymentBefore * rf).toFixed(2)].join(","));
+    lines.push([csvEsc(f.liability.name), csvEsc("Repayment after rollover"), (f.rollover.repaymentAfter * rf).toFixed(2)].join(","));
   }
   lines.push("", ["Year", "Age", "FY", "Actual balance", "No extra repayments"].map(csvEsc).join(","));
   for (const r of f.balanceSeries) {

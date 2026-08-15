@@ -82,7 +82,13 @@ export function buildDebtPayoffFocus({ out, state, liabilityId }) {
     noExtras: counterfactualOut.yearly[y]?.liabilities?.[liabilityId]?.closing ?? 0,
   }));
 
-  return { liability: { id: liability.id, name: liability.name }, payoff, totalInterest, stats, balanceSeries };
+  // Fixed-rate rollover (Implementation/Rates spec, Commit 1) — the
+  // engine's own before/after repayment figures, read through
+  // unchanged. null for a variable loan, or a fixed one whose rollover
+  // never actually fires within the projection while the loan is open.
+  const rollover = out.liabilityRollovers?.[liabilityId] ?? null;
+
+  return { liability: { id: liability.id, name: liability.name }, payoff, totalInterest, stats, balanceSeries, rollover };
 }
 
 // solveExtraRepaymentForPayoffDate — "What extra repayment clears this

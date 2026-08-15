@@ -651,7 +651,7 @@ export function createLiability(plan, existing = []) {
     type: "mortgage",
     owner: "client",
     balance: 0,
-    interestRatePct: 6.0, // nominal p.a.
+    interestRatePct: 6.0, // nominal p.a. — the rate while rateType is "variable"
     termYears: 25,
     repayment: "pi",      // "pi" | "io" (ioYears of IO, then P&I)
     ioYears: 5,
@@ -660,6 +660,13 @@ export function createLiability(plan, existing = []) {
     offsetAssetId: null,  // financial asset whose balance offsets interest
     extraRepayments: [],  // Document Set Commit 5
     oneOffRepayments: [], // Document Set Commit 5
+    // Fixed-rate rollover (Implementation/Rates spec, Commit 1) — see
+    // that spec's own header for the accrual/repayment mechanics.
+    rateType: "variable",              // "variable" | "fixed"
+    fixedRatePct: 6.0,                 // used while rateType === "fixed"; interestRatePct is unused then
+    fixedUntil: ageRef(plan.client.currentAge + 3), // DateRef — the rollover point
+    revertRatePct: null,               // null = falls back to assumptions.mortgageRate at use-time (same override-or-default shape as dutyOverride/lmiOverride)
+    commencedOn: null,                 // ISO date (past); informational only, drives nothing
   };
 }
 
@@ -738,6 +745,19 @@ export function clampLiability(l, plan, assets, properties = []) {
     offsetAssetId: financialIds.has(l.offsetAssetId) ? l.offsetAssetId : null,
     extraRepayments: Array.isArray(l.extraRepayments) ? l.extraRepayments.map((er) => clampExtraRepayment(er, plan)) : [],
     oneOffRepayments: Array.isArray(l.oneOffRepayments) ? l.oneOffRepayments.map((or) => clampOneOffRepayment(or, plan)) : [],
+    // Fixed-rate rollover (Implementation/Rates spec, Commit 1).
+    // fixedUntil is a DateRef like any other one-off plan event
+    // (goal.targetAt, oneOffRepayment.at) — clamped into the projection
+    // window the same way, never left dangling. revertRatePct is a
+    // manual-override-or-default field (null = "use the assumption"),
+    // the same shape dutyOverride/lmiOverride already use elsewhere —
+    // a legitimate stored state, not a value needing a numeric clamp.
+    rateType: l.rateType === "fixed" ? "fixed" : "variable",
+    fixedRatePct: clampNumber(l.fixedRatePct ?? 6, 0, 30),
+    fixedUntil: clampDateRef(l.fixedUntil ?? ageRef(plan.client.currentAge + 3), plan.client.currentAge, plan.endAge, plan),
+    revertRatePct: l.revertRatePct != null ? clampNumber(l.revertRatePct, 0, 30) : null,
+    commencedOn: typeof l.commencedOn === "string" && !Number.isNaN(new Date(l.commencedOn).getTime())
+      ? l.commencedOn : null,
   };
 }
 

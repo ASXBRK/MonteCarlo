@@ -150,6 +150,24 @@ describe("buildDebtPayoffFocus", () => {
     buildDebtPayoffFocus({ out, state, liabilityId: "lb1" });
     expect(JSON.stringify(state)).toBe(before);
   });
+
+  it("rollover is null for a variable loan, and reports the engine's own before/after figures for a fixed one (Implementation/Rates spec, Commit 1)", () => {
+    const variable = mkState({ endAge: 51, liabilities: [loan({ termYears: 10 })] });
+    const outVariable = projectPlan(variable);
+    expect(buildDebtPayoffFocus({ out: outVariable, state: variable, liabilityId: "lb1" }).rollover).toBeNull();
+
+    const fixed = mkState({
+      endAge: 51,
+      liabilities: [loan({
+        termYears: 10, rateType: "fixed", fixedRatePct: 5, revertRatePct: 8,
+        fixedUntil: { kind: "age", age: 43 },
+      })],
+    });
+    const outFixed = projectPlan(fixed);
+    const f = buildDebtPayoffFocus({ out: outFixed, state: fixed, liabilityId: "lb1" });
+    expect(f.rollover).toEqual(outFixed.liabilityRollovers.lb1);
+    expect(f.rollover.repaymentAfter).not.toBeCloseTo(f.rollover.repaymentBefore, 0);
+  });
 });
 
 describe("solveExtraRepaymentForPayoffDate — What extra repayment clears this by [date]?", () => {

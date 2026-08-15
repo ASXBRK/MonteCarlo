@@ -258,8 +258,39 @@ the same two-reason split, so a property that settles but never
 services reads as "cannot afford this purchase" with the servicing
 shortfall, not as a shortfall-by-date the client just hasn't reached yet.
 
+**Implementation, Fixed Rates, Equity, and Comparison
+(docs/specs/13-implementation-rates-equity-comparison.md)**
+- Commit 1, **Fixed-rate loans and rollover** — a liability gains
+  `rateType`/`fixedRatePct`/`fixedUntil`/`revertRatePct`/`commencedOn`.
+  Interest accrues at `fixedRatePct` until the rollover month (resolved
+  via the SAME "fires in July of the resolved plan year" convention
+  every other one-off plan event uses), `revertRatePct` after (null =
+  falls back to `assumptions.mortgageRate`, the same override-or-default
+  shape as `dutyOverride`/`lmiOverride`). The level repayment recomputes
+  EXACTLY ONCE, at the later of rollover or IO-end, over the loan's
+  actual balance and remaining term at that point — held fixed
+  afterward, deliberately not smoothed. The recomputed payment
+  (`postRolloverPmt`) is path-dependent (balance-at-trigger), so it gets
+  the SAME measurement/real-pass snapshot-and-restore treatment as
+  `loanBal` itself. `scheduledAmortisation`'s own "no extras" baseline
+  (Document Set Commit 5's interest-saved comparison) now rolls over
+  too, or a fixed-then-reverting loan WITH extras would misattribute
+  the rate switch's own effect to the extras. New `out.liabilityRollovers`
+  gives the Liabilities table's new rate row, the rollover's forced
+  annotation on tables/the Liabilities chart (same `forcedYearIndices`
+  mechanism a planned property's purchase date already uses), and the
+  Focus debt-payoff view's before/after figures — all read straight
+  through, never recomputed. Verified (not assumed) that this needs NO
+  new conservation-invariant term: `randomScenario()` now generates
+  fixed-rate liabilities with a rollover before/during/after the
+  projection, and the existing `liabilityInterest`/`liabilityRevaluation`
+  terms held across thousands of randomised runs — documented in
+  `conservationCheck.js` itself.
+
 ### In flight
-Super threshold
+Spec 13 Commits 2–6 (adviser fees & flow of funds, usable equity,
+net worth decomposition, fortnightly transfer schedule, scenario
+comparison); super threshold
 indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
 then Division 296, then Monte Carlo over the full scenario.
 
