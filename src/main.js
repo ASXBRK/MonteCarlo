@@ -59,6 +59,7 @@ import {
   computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
   STAMP_DUTY_META, LMI_META, FHBG_META,
 } from "./focusLookups.js";
+import { eligibleEquityProperties, buildEquityFocus } from "./focusEquity.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -176,6 +177,7 @@ const els = {
   viewFocusSalarySacrifice: $("viewFocusSalarySacrifice"),
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
   viewFocusLookups: $("viewFocusLookups"),
+  viewFocusEquity: $("viewFocusEquity"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -391,6 +393,7 @@ const OUTPUT_NAV = {
     { id: "focus-salary-sacrifice", label: "Salary sacrifice" },
     { id: "focus-debt-payoff", label: "Debt payoff" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
+    { id: "focus-equity", label: "Usable equity" },
   ],
 };
 const SECTION_LABELS = Object.fromEntries([
@@ -3009,6 +3012,16 @@ function propertyHelperText(p) {
   };
 }
 
+// Usable equity and borrowing capacity (Commit 3) — every OTHER
+// property, for the "source" select on a planned purchase's
+// depositFromEquity flag. A property can't source its own deposit from
+// its own equity (normaliseProperties enforces this too, defensively).
+function otherPropertyOptions(p) {
+  const others = (state.properties ?? []).filter((x) => x.id !== p.id);
+  return `<option value="">None</option>` +
+    others.map((x) => `<option value="${x.id}"${x.id === p.depositFromEquitySourcePropertyId ? " selected" : ""}>${escapeHTML(x.name)}</option>`).join("");
+}
+
 function propertyCardHTML(p) {
   const owned = p.status === "owned";
   const invest = p.propertyType === "investment";
@@ -3049,6 +3062,7 @@ function propertyCardHTML(p) {
               <button class="seg-option${!owned ? " active" : ""}" type="button" data-prop-action="status" data-pid="${p.id}" data-value="planned">Planned purchase</button>
             </div>`)}
           ${num("Growth (% p.a. nominal)", "growthPct", p.growthPct, 'min="-10" max="30" step="0.1"')}
+          ${num("Equity ceiling (%)", "equityCeilingPct", p.equityCeilingPct ?? 80, 'min="0" max="100" step="1"')}
           ${owned ? `
             ${num("Current value ($)", "currentValue", p.currentValue)}
             ${cell("Acquisition date", `<input type="date" max="${todayISO()}" value="${p.acquisitionDate ?? ""}" data-pid="${p.id}" data-pfield="acquisitionDate" />`)}
@@ -3065,6 +3079,8 @@ function propertyCardHTML(p) {
             ${p.firstHomeBuyer ? cell("First Home Guarantee (waives LMI)", `<label class="ptg-check"><input type="checkbox"${p.firstHomeGuarantee ? " checked" : ""} data-pid="${p.id}" data-pfield="firstHomeGuarantee" /><span>Yes</span></label>`) : ""}
             ${p.lvrPct > 80 ? num("LMI override ($, blank = table)", "lmiOverride", p.lmiOverride ?? "", 'min="0" step="100"') : ""}
             ${p.lvrPct > 80 ? cell("Pay LMI at settlement (default: capitalised)", `<label class="ptg-check"><input type="checkbox"${p.lmiPayAtSettlement ? " checked" : ""} data-pid="${p.id}" data-pfield="lmiPayAtSettlement" /><span>Yes</span></label>`) : ""}
+            ${cell("Deposit from another property's equity", `<label class="ptg-check"><input type="checkbox"${p.depositFromEquity ? " checked" : ""} data-pid="${p.id}" data-pfield="depositFromEquity" /><span>Yes</span></label>`)}
+            ${p.depositFromEquity ? cell("Source property", `<select data-pid="${p.id}" data-pfield="depositFromEquitySourcePropertyId">${otherPropertyOptions(p)}</select>`) : ""}
           `}
           ${invest ? `
             ${flowCells("Rent", "rent", p.rent)}
@@ -3078,6 +3094,10 @@ function propertyCardHTML(p) {
             ? ` <button class="btn-text" type="button" data-prop-action="convertToPlanned" data-pid="${p.id}">Switch to planned purchase</button>`
             : ""
         }</p>` : ""}
+        ${(projection?.propertyWarnings ?? [])
+          .filter((w) => w.type === "insufficientEquity" && w.propertyId === p.id)
+          .map((w) => `<p class="helper-warning">${escapeHTML(w.reason)}</p>`)
+          .join("")}
       </div>
     </div>
   `;
@@ -3184,6 +3204,9 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field === "lmiPayAtSettlement") p.lmiPayAtSettlement = e.target.checked;
   else if (field === "expensesDeductible") p.expensesDeductible = e.target.checked;
   else if (field === "depreciation") p.depreciation = clampNumber(v, 0);
+  else if (field === "equityCeilingPct") p.equityCeilingPct = clampNumber(v, 0, 100);
+  else if (field === "depositFromEquity") p.depositFromEquity = e.target.checked;
+  else if (field === "depositFromEquitySourcePropertyId") p.depositFromEquitySourcePropertyId = v || null;
   else if (field.includes(".")) {
     const [group, sub] = field.split(".");
     if ((group === "rent" || group === "expenses") && p[group]) {
@@ -4412,6 +4435,7 @@ const VIEW_MOUNTS = {
   "focus-salary-sacrifice": () => els.viewFocusSalarySacrifice,
   "focus-debt-payoff": () => els.viewFocusDebtPayoff,
   "focus-lookups": () => els.viewFocusLookups,
+  "focus-equity": () => els.viewFocusEquity,
 };
 const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
@@ -4458,6 +4482,7 @@ function renderActiveView() {
   else if (activeView === "focus-salary-sacrifice") renderFocusSalarySacrificeView();
   else if (activeView === "focus-debt-payoff") renderFocusDebtPayoffView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
+  else if (activeView === "focus-equity") renderFocusEquityView();
 }
 
 const isNominal = () => state.display.units === "nominal";
@@ -7628,6 +7653,106 @@ els.viewFocusLookups.addEventListener("change", (e) => {
   renderFocusLookupsView();
 });
 
+// --- Commit 3 (docs/specs/13-implementation-rates-equity-comparison.md):
+// Usable equity and borrowing capacity ---------------------------------
+//
+// Every figure below is read straight off `projection` via
+// src/focusEquity.js's buildEquityFocus — this file only renders it.
+// The disclosure ("a security constraint, not a serviceability
+// assessment") is shown prominently, not buried, per the spec's own
+// "be explicit about what this is not".
+
+function focusEquityWarningsHTML(warnings) {
+  if (!warnings.length) return "";
+  return `<div class="focus-section">${warnings.map((w) => `<p class="helper-warning">${escapeHTML(w.reason)}</p>`).join("")}</div>`;
+}
+
+function renderFocusEquityView() {
+  const properties = eligibleEquityProperties(state);
+  if (properties.length === 0) {
+    els.viewFocusEquity.innerHTML = focusEmptyStateHTML(
+      "How much usable equity sits in each property over the projection, so you can see when equity could fund a deposit elsewhere — add a property with a value or purchase price to see it.",
+      "property"
+    );
+    return;
+  }
+  const f = buildEquityFocus({ out: projection, state });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const y0 = f.byYear[0];
+  els.viewFocusEquity.innerHTML = `
+    <h2 class="section-heading">Usable equity</h2>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <p class="helper-warning">${escapeHTML(f.disclosure)}</p>
+      </div>
+      ${focusEquityWarningsHTML(f.warnings)}
+      <div class="focus-section">
+        <h3>This year (${escapeHTML(y0.fyLabel)})</h3>
+        <table class="focus-table">
+          ${f.properties.map((p) => `<tr><td>${escapeHTML(p.name)} (ceiling ${p.equityCeilingPct}%)</td><td>${fmtMoney(y0.byProperty[p.id] * factor(0))}</td></tr>`).join("")}
+          <tr class="tl-total"><td>Total usable equity</td><td>${fmtMoney(y0.total * factor(0))}</td></tr>
+        </table>
+      </div>
+      <div class="focus-section">
+        <h3>Usable equity over time</h3>
+        <div id="focusEquityChart"></div>
+      </div>
+    </div>
+  `;
+  renderFocusEquityChart(f, factor);
+}
+
+function renderFocusEquityChart(f, factor) {
+  const el = $("focusEquityChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = f.byYear.map((r) => r.age);
+  const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#b5179e", "#d97b2f", "#9a031e", "#3a86c9"];
+  const traces = f.properties.map((p, i) => ({
+    x: ages, y: f.byYear.map((r) => r.byProperty[p.id] * factor(r.year)),
+    name: p.name, type: "scatter", mode: "lines",
+    line: { color: palette[i % palette.length], width: 1.5 },
+    hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(p.name)}</extra>`,
+  }));
+  traces.push({
+    x: ages, y: f.byYear.map((r) => r.total * factor(r.year)),
+    name: "Total", type: "scatter", mode: "lines",
+    line: { color: "#222", width: 2.5, dash: "dot" },
+    hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Total</extra>",
+  });
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Usable equity (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function exportFocusEquityCSV() {
+  const f = buildEquityFocus({ out: projection, state });
+  if (!f) return;
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lines = [
+    ["Year", "Age", "FY", ...f.properties.map((p) => p.name), "Total"].map(csvEsc).join(","),
+  ];
+  for (const r of f.byYear) {
+    lines.push([
+      r.year, r.age, csvEsc(r.fyLabel),
+      ...f.properties.map((p) => (r.byProperty[p.id] * factor(r.year)).toFixed(2)),
+      (r.total * factor(r.year)).toFixed(2),
+    ].join(","));
+  }
+  lines.push("", csvEsc(f.disclosure));
+  for (const w of f.warnings) lines.push(csvEsc(w.reason));
+  downloadCSV("focus-equity", lines);
+}
+
 // --- exports -----------------------------------------------------------------
 
 function exportNameBase() {
@@ -7685,6 +7810,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-salary-sacrifice") exportFocusSalarySacrificeCSV();
   else if (activeView === "focus-debt-payoff") exportFocusDebtPayoffCSV();
   else if (activeView === "focus-lookups") exportFocusLookupsCSV();
+  else if (activeView === "focus-equity") exportFocusEquityCSV();
 });
 
 els.showAssetsToggle.addEventListener("change", () => {

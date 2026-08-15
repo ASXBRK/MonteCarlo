@@ -755,6 +755,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     properties: Object.fromEntries(props.map((p) => [p.id, {
       value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0, fhsssRelease: 0, lmi: 0,
       deposit: 0, duty: 0, costs: 0, fhog: 0,
+      // Usable equity and borrowing capacity (Implementation/Rates
+      // spec, Commit 3) — filled in by a post-pass once `yearly` is
+      // complete (needs the property's own linked liabilities' closing
+      // balances, which are only final at year-end).
+      usableEquity: 0,
     }])),
     propertyClosing: 0,
     netAssets: 0,
@@ -2461,6 +2466,69 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       repaymentBefore: md.pmtPI / infl,
       repaymentAfter: postRolloverPmt[l.id] / infl,
     };
+  }
+
+  // --- Usable equity and borrowing capacity (Implementation/Rates
+  // spec, Commit 3) — a SECURITY constraint only: usable equity =
+  // value × equityCeilingPct − (loan balance − offset balance). This
+  // tool never asks whether income could service the resulting loan —
+  // "be explicit about what this is not" (the spec's own words) — so
+  // it is deliberately NOT folded into anything that could read as a
+  // serviceability or approval signal. Every input is a figure the
+  // engine already reports per year (value, a linked liability's own
+  // closing balance and offsetApplied); no new money moves, so no new
+  // conservation-invariant term is needed. Floored at 0 — "usable
+  // equity" is a capacity, not a signed balance; a loan bigger than the
+  // ceiling allows means none available, not a negative amount.
+  const allPropsForEquity = state.properties ?? [];
+  const loanIdsForProperty = {};
+  for (const p of allPropsForEquity) loanIdsForProperty[p.id] = [];
+  for (const l of state.liabilities ?? []) {
+    if (l.linkedAssetId && loanIdsForProperty[l.linkedAssetId]) loanIdsForProperty[l.linkedAssetId].push(l.id);
+  }
+  for (const p of allPropsForEquity) {
+    const derivedId = `prop-${p.id}`;
+    if (liabMeta[derivedId]) loanIdsForProperty[p.id].push(derivedId);
+  }
+  for (const row of yearly) {
+    for (const p of allPropsForEquity) {
+      const detail = row.properties[p.id];
+      if (!detail) continue;
+      let loanClosing = 0, offsetApplied = 0;
+      for (const lid of loanIdsForProperty[p.id]) {
+        const ld = row.liabilities[lid];
+        if (!ld) continue;
+        loanClosing += ld.closing;
+        offsetApplied += ld.offsetApplied;
+      }
+      detail.usableEquity = Math.max(0, detail.value * ((p.equityCeilingPct ?? 80) / 100) - (loanClosing - offsetApplied));
+    }
+  }
+
+  // The purchase-check: where a planned purchase's deposit is meant to
+  // come from another property's usable equity, flag when that source
+  // property's usable equity — AS AT the purchase year (year-level
+  // granularity, the same coarseness every other year-resolved check
+  // in this engine uses) — falls short of the deposit this purchase
+  // actually needs (row.properties[pid].deposit, the SAME figure Focus
+  // Commit 2 already exposes — never re-derived here). A flag, never a
+  // block: the purchase still completes through the ordinary funding
+  // order regardless, same as every other "insufficient funds" case in
+  // this engine.
+  for (const p of allPropsForEquity) {
+    if (!p.depositFromEquity || !p.depositFromEquitySourcePropertyId) continue;
+    const ref = resolveRef(p.purchaseAt, state.plan, schedule, "client");
+    const row = yearly[ref.planYear];
+    if (!row) continue;
+    const required = row.properties[p.id]?.deposit ?? 0;
+    if (required <= 0) continue; // purchase didn't actually fire this year
+    const available = row.properties[p.depositFromEquitySourcePropertyId]?.usableEquity ?? 0;
+    if (available < required) {
+      propertyWarnings.push({
+        propertyId: p.id, type: "insufficientEquity",
+        reason: `Deposit of $${Math.round(required).toLocaleString()} at ${ref.fyLabel} relies on usable equity from another property, but only $${Math.round(available).toLocaleString()} is available then — a security constraint, not a serviceability assessment`,
+      });
+    }
   }
 
   // Document Set Commit 6 — per-goal outcome: achieved in full, or

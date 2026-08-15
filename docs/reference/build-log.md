@@ -315,9 +315,30 @@ shortfall, not as a shortfall-by-date the client just hasn't reached yet.
   against what's genuinely left after the earlier ones, not the raw
   balance. Per CLAUDE.md's rule, the whole class was closed in this
   commit, not just the adviser-fee instance that surfaced it.
+- Commit 3, **Usable equity and borrowing capacity** — per property,
+  `usableEquity = value × equityCeilingPct − (linked loan closing −
+  offset applied)`, floored at 0 (a capacity, not a signed balance).
+  A property's "linked loan" is either the D4-derived purchase loan OR
+  any user-entered liability the adviser has explicitly linked via
+  `linkedAssetId` — both are real, already-tracked liabilities, netted
+  together. No new money flow (a read-only, derived security-constraint
+  figure, never a projection input), so no conservation-invariant
+  change. New `depositFromEquity`/`depositFromEquitySourcePropertyId`
+  on a planned purchase (validated in two stages — self-reference and
+  stale ids both fall back to off/null, the same pattern
+  `plan.implementation`'s own cross-referencing fields use) flags, at
+  the purchase year, when the source property's usable equity falls
+  short of the deposit this purchase actually needs
+  (`row.properties[pid].deposit`, Focus Commit 2's own field, never
+  re-derived) — a flag, never a block; the purchase still completes
+  through the ordinary funding order regardless. New Focus view (usable
+  equity by property and in total, over the projection) carries the
+  spec's own "be explicit about what this is not" disclosure
+  prominently, not buried: a security constraint, not a serviceability
+  assessment.
 
 ### In flight
-Spec 13 Commits 3–6 (usable equity,
+Spec 13 Commits 4–6 (
 net worth decomposition, fortnightly transfer schedule, scenario
 comparison); super threshold
 indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),

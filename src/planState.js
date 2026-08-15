@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -587,6 +587,20 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
     // refund timing, and deductions). Not indexed (a fixed depreciation
     // schedule figure, entered in nominal-today dollars).
     depreciation: 0,
+    // Usable equity and borrowing capacity (Implementation/Rates spec,
+    // Commit 3) — a SECURITY constraint (this tool never asks whether
+    // income could service the resulting loan; see the spec's own
+    // "be explicit about what this is not"). equityCeilingPct is the
+    // bank's usual LVR ceiling for a security property (default 80%,
+    // configurable per property). depositFromEquity/SourcePropertyId
+    // only make sense for a still-to-happen purchase — see
+    // clampProperty/normaliseProperties for why the source is
+    // validated in two stages, the same pattern releaseFhsssAtPurchase
+    // and firstHomeGuarantee already use for their own "only on a
+    // planned purchase" rules.
+    equityCeilingPct: 80,
+    depositFromEquity: false,
+    depositFromEquitySourcePropertyId: null,
   };
 }
 
@@ -634,12 +648,40 @@ export function clampProperty(p, plan) {
     // an owned property or an investment purchase rather than left to
     // produce a silently-meaningless flag.
     releaseFhsssAtPurchase: p.releaseFhsssAtPurchase === true && status === "planned" && propertyType === "ppr",
+    // Usable equity and borrowing capacity (Commit 3). equityCeilingPct
+    // is meaningful for ANY property (equity can be a deposit source
+    // whether the property housing it is owned or itself still
+    // planned), so it's not gated on status the way the flag below is.
+    equityCeilingPct: clampNumber(p.equityCeilingPct ?? 80, 0, 100),
+    // depositFromEquity only makes sense for a still-to-happen
+    // purchase (same "only on a planned purchase" input-integrity rule
+    // as releaseFhsssAtPurchase above); depositFromEquitySourcePropertyId
+    // is only SHAPE-validated here (a string or null) — existence
+    // against the SIBLING property list can't be checked in this
+    // function (clampProperty never sees the other properties), so
+    // normaliseProperties does that second-stage check below, the same
+    // two-stage pattern clampAllToPlan already uses for
+    // plan.implementation's own cross-referencing fields.
+    depositFromEquity: p.depositFromEquity === true && status === "planned",
+    depositFromEquitySourcePropertyId: typeof p.depositFromEquitySourcePropertyId === "string" && p.depositFromEquitySourcePropertyId
+      ? p.depositFromEquitySourcePropertyId : null,
   };
 }
 
 export function normaliseProperties(properties, plan) {
   if (!Array.isArray(properties)) return [];
-  return properties.map((p) => clampProperty(p, plan));
+  const clamped = properties.map((p) => clampProperty(p, plan));
+  const ids = new Set(clamped.map((p) => p.id));
+  // A depositFromEquity flag with no valid, DIFFERENT sibling property
+  // to source from is meaningless — forced off entirely (not just its
+  // source nulled) rather than left as a flag pointing nowhere.
+  return clamped.map((p) => {
+    const validSource = p.depositFromEquitySourcePropertyId
+      && p.depositFromEquitySourcePropertyId !== p.id
+      && ids.has(p.depositFromEquitySourcePropertyId);
+    if (p.depositFromEquity && validSource) return p;
+    return { ...p, depositFromEquity: false, depositFromEquitySourcePropertyId: null };
+  });
 }
 
 // --- liabilities (D3) --------------------------------------------------------
@@ -1842,6 +1884,15 @@ function migrateV11toV12(raw) {
   return { ...raw, schemaVersion: 12 };
 }
 
+// v12 → v13 (Implementation/Rates spec, Commit 3): properties gain
+// equityCeilingPct (default 80)/depositFromEquity/
+// depositFromEquitySourcePropertyId (both default off/null). No
+// existing field changes shape or is removed, so again just the
+// version gate.
+function migrateV12toV13(raw) {
+  return { ...raw, schemaVersion: 13 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -1860,6 +1911,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 9) raw = migrateV9toV10(raw);
     if (raw.schemaVersion === 10) raw = migrateV10toV11(raw);
     if (raw.schemaVersion === 11) raw = migrateV11toV12(raw);
+    if (raw.schemaVersion === 12) raw = migrateV12toV13(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 

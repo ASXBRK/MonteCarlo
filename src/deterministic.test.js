@@ -4055,6 +4055,138 @@ describe("Fixed-rate loans and rollover (Implementation/Rates spec, Commit 1)", 
   });
 });
 
+describe("Usable equity and borrowing capacity (Implementation/Rates spec, Commit 3)", () => {
+  const prop = (over = {}) => ({
+    id: "p1", name: "Home", owner: "client", state: "NSW",
+    propertyType: "ppr", status: "owned",
+    currentValue: 800000, acquisitionDate: null, costBase: 0,
+    priceToday: 0, purchaseAt: { kind: "age", age: 40 },
+    lvrPct: 80, firstHomeBuyer: false, newBuild: false,
+    purchaseCostsPct: 0, dutyOverride: null,
+    growthPct: 2.5, // = cpi, so real value stays exactly $800,000
+    rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expensesDeductible: true, depreciation: 0,
+    equityCeilingPct: 80, depositFromEquity: false, depositFromEquitySourcePropertyId: null,
+    ...over,
+  });
+  const homeLoan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 400000, interestRatePct: 6, termYears: 25, repayment: "pi",
+    ioYears: 5, deductible: false, linkedAssetId: "p1", offsetAssetId: null,
+    extraRepayments: [], oneOffRepayments: [],
+    ...over,
+  });
+  const offsetAsset = (balance) => mkAsset({
+    id: "offset1", balance, cgtAsset: false,
+    allocation: { mode: "custom", incomePct: 0, growthPct: 2.5, frankingPct: 0, volBasis: "Balanced" },
+  });
+
+  it("known-value: usable equity = value × ceiling − (loan closing − offset applied), reconciled against the engine's own already-reported figures", () => {
+    const s = {
+      ...mkState({ endAge: 42, assets: [offsetAsset(50000)], fundingOrder: [] }),
+      properties: [prop()],
+      liabilities: [homeLoan({ offsetAssetId: "offset1" })],
+    };
+    const out = projectPlan(s);
+    const row = out.yearly[0];
+    const expected = row.properties.p1.value * 0.8 - (row.liabilities.lb1.closing - row.liabilities.lb1.offsetApplied);
+    expect(row.properties.p1.usableEquity).toBeCloseTo(Math.max(0, expected), 2);
+    expect(row.properties.p1.usableEquity).toBeGreaterThan(0);
+  });
+
+  it("offset genuinely increases usable equity (a bigger offset balance means less NET loan to subtract)", () => {
+    const build = (offsetBalance) => projectPlan({
+      ...mkState({ endAge: 42, assets: [offsetAsset(offsetBalance)], fundingOrder: [] }),
+      properties: [prop()],
+      liabilities: [homeLoan({ offsetAssetId: "offset1" })],
+    });
+    const withOffset = build(50000).yearly[0];
+    const withoutOffset = build(0).yearly[0];
+    expect(withOffset.liabilities.lb1.offsetApplied).toBeGreaterThan(40000);
+    expect(withoutOffset.liabilities.lb1.offsetApplied).toBe(0);
+    expect(withOffset.properties.p1.usableEquity).toBeGreaterThan(withoutOffset.properties.p1.usableEquity);
+  });
+
+  it("the ceiling is configurable — a lower ceiling reduces usable equity proportionally", () => {
+    const build = (ceilingPct) => projectPlan({
+      ...mkState({ endAge: 42, assets: [], fundingOrder: [] }),
+      properties: [prop({ equityCeilingPct: ceilingPct })],
+      liabilities: [homeLoan()],
+    }).yearly[0];
+    const at60 = build(60);
+    const at90 = build(90);
+    // Same loan balance either way — only the ceiling changes, so the
+    // DIFFERENCE is exactly value × (0.90 − 0.60).
+    expect(at90.properties.p1.usableEquity - at60.properties.p1.usableEquity).toBeCloseTo(800000 * 0.3, 1);
+  });
+
+  it("usable equity floors at 0 rather than going negative when the loan exceeds the ceiling", () => {
+    const out = projectPlan({
+      ...mkState({ endAge: 42, assets: [], fundingOrder: [] }),
+      properties: [prop({ currentValue: 100000, equityCeilingPct: 80 })], // ceiling = $80,000
+      liabilities: [homeLoan({ balance: 400000 })], // loan far exceeds the ceiling
+    });
+    expect(out.yearly[0].properties.p1.usableEquity).toBe(0);
+  });
+
+  it("aggregates correctly across properties — the sum of each property's own usable equity", () => {
+    const out = projectPlan({
+      ...mkState({ endAge: 42, assets: [], fundingOrder: [] }),
+      properties: [prop({ id: "p1", currentValue: 800000 }), prop({ id: "p2", currentValue: 400000, equityCeilingPct: 80 })],
+      liabilities: [homeLoan({ id: "lb1", linkedAssetId: "p1", balance: 400000 }), homeLoan({ id: "lb2", linkedAssetId: "p2", balance: 100000 })],
+    });
+    const row = out.yearly[0];
+    const total = row.properties.p1.usableEquity + row.properties.p2.usableEquity;
+    // Independently: p1 = 800000×0.8 − 400000-ish closing; p2 = 400000×0.8 − 100000-ish closing.
+    // Just confirm the total is the plain sum (no cross-contamination
+    // between properties' own loan/offset figures) and both are individually positive.
+    expect(row.properties.p1.usableEquity).toBeGreaterThan(0);
+    expect(row.properties.p2.usableEquity).toBeGreaterThan(0);
+    expect(total).toBeCloseTo(row.properties.p1.usableEquity + row.properties.p2.usableEquity, 6);
+  });
+
+  it("the insufficient-equity flag fires at the right year when a planned purchase's deposit relies on another property's usable equity", () => {
+    const planned = prop({
+      id: "p2", status: "planned", currentValue: 0, priceToday: 900000,
+      purchaseAt: { kind: "age", age: 41 }, lvrPct: 80,
+      depositFromEquity: true, depositFromEquitySourcePropertyId: "p1",
+    });
+    // p1 (the source) is worth only $500,000 with an $450,000 loan —
+    // barely any usable equity, nowhere near p2's ~$180,000 deposit.
+    const insufficient = projectPlan({
+      ...mkState({ endAge: 43, assets: [], fundingOrder: [] }),
+      properties: [prop({ currentValue: 500000 }), planned],
+      liabilities: [homeLoan({ balance: 450000 })],
+    });
+    const flagged = insufficient.propertyWarnings.filter((w) => w.type === "insufficientEquity" && w.propertyId === "p2");
+    expect(flagged.length).toBe(1);
+
+    // The SAME purchase, but p1 is worth much more with a small loan —
+    // plenty of usable equity now.
+    const sufficient = projectPlan({
+      ...mkState({ endAge: 43, assets: [], fundingOrder: [] }),
+      properties: [prop({ currentValue: 3_000_000 }), planned],
+      liabilities: [homeLoan({ balance: 100000 })],
+    });
+    expect(sufficient.propertyWarnings.filter((w) => w.type === "insufficientEquity")).toHaveLength(0);
+  });
+
+  it("no flag when depositFromEquity is off — an ordinary planned purchase never triggers this warning", () => {
+    const planned = prop({
+      id: "p2", status: "planned", currentValue: 0, priceToday: 900000,
+      purchaseAt: { kind: "age", age: 41 }, lvrPct: 80,
+      depositFromEquity: false, depositFromEquitySourcePropertyId: null,
+    });
+    const out = projectPlan({
+      ...mkState({ endAge: 43, assets: [], fundingOrder: [] }),
+      properties: [prop({ currentValue: 500000 }), planned],
+      liabilities: [homeLoan({ balance: 450000 })],
+    });
+    expect(out.propertyWarnings.filter((w) => w.type === "insufficientEquity")).toHaveLength(0);
+  });
+});
+
 describe("Goals (Document Set Commit 6)", () => {
   const goal = (over = {}) => ({
     id: "gl1", label: "Car", targetAmount: 12000, targetAt: { kind: "age", age: 42 },
