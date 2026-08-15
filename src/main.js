@@ -60,6 +60,7 @@ import {
   STAMP_DUTY_META, LMI_META, FHBG_META,
 } from "./focusLookups.js";
 import { eligibleEquityProperties, buildEquityFocus } from "./focusEquity.js";
+import { buildTransferScheduleFocus, defaultTransferScheduleYear, perFortnight, perMonth } from "./focusTransferSchedule.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -179,6 +180,7 @@ const els = {
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
   viewFocusLookups: $("viewFocusLookups"),
   viewFocusEquity: $("viewFocusEquity"),
+  viewFocusTransferSchedule: $("viewFocusTransferSchedule"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -396,6 +398,7 @@ const OUTPUT_NAV = {
     { id: "focus-debt-payoff", label: "Debt payoff" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
+    { id: "focus-transfer-schedule", label: "Transfer schedule" },
   ],
 };
 const SECTION_LABELS = Object.fromEntries([
@@ -4439,6 +4442,7 @@ const VIEW_MOUNTS = {
   "focus-debt-payoff": () => els.viewFocusDebtPayoff,
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
+  "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
 };
 const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
@@ -4487,6 +4491,7 @@ function renderActiveView() {
   else if (activeView === "focus-debt-payoff") renderFocusDebtPayoffView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
+  else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
 }
 
 const isNominal = () => state.display.units === "nominal";
@@ -7892,6 +7897,169 @@ function exportFocusEquityCSV() {
   downloadCSV("focus-equity", lines);
 }
 
+// --- Commit 5: Fortnightly transfer schedule --------------------------------
+//
+// Every figure below is read straight off `projection` via
+// src/focusTransferSchedule.js's buildTransferScheduleFocus — this file
+// only renders it. The firm's own banking-structure "mud map" diagram
+// is built separately (deferred, per the spec); this view exists to
+// produce the numbers to copy into it.
+let transferScheduleYear = null;
+let transferScheduleCadence = "fortnightly"; // "fortnightly" | "monthly" | "annual"
+
+function cadenceConvert(annual) {
+  if (transferScheduleCadence === "fortnightly") return perFortnight(annual);
+  if (transferScheduleCadence === "monthly") return perMonth(annual);
+  return annual;
+}
+function cadenceLabel() {
+  return transferScheduleCadence === "fortnightly" ? "Per fortnight"
+    : transferScheduleCadence === "monthly" ? "Per month" : "Per year";
+}
+
+function renderFocusTransferScheduleView() {
+  const emptyMsg = "What to set up as recurring transfers — take-home pay per source, and where it goes each pay cycle — add an income row to see it.";
+  if ((state.cashflows.income ?? []).length === 0) {
+    els.viewFocusTransferSchedule.innerHTML = focusEmptyStateHTML(emptyMsg, "income");
+    return;
+  }
+  const years = projection.yearly.length;
+  if (transferScheduleYear == null || transferScheduleYear >= years) {
+    transferScheduleYear = defaultTransferScheduleYear(state, years);
+  }
+  const f = buildTransferScheduleFocus({ out: projection, state, year: transferScheduleYear });
+  if (!f) {
+    els.viewFocusTransferSchedule.innerHTML = focusEmptyStateHTML(emptyMsg, "income");
+    return;
+  }
+  const factor = displayFactor(endMonthOfYear(f.year));
+  const couple = isCouple();
+  const ownerLabel = (owner) => (couple ? (owner === "partner" ? partnerName() : clientName()) : null);
+  const yearOptions = projection.yearly.map((_, y) =>
+    `<option value="${y}"${y === f.year ? " selected" : ""}>${escapeHTML(yearHeaderText(y))}</option>`
+  ).join("");
+
+  const sourceRows = f.sources.map((s) => `
+    <tr>
+      <td>${escapeHTML(s.label)}${ownerLabel(s.owner) ? ` <span class="helper-text">(${escapeHTML(ownerLabel(s.owner))})</span>` : ""}</td>
+      <td class="tl-num">${fmtMoney(cadenceConvert(s.annual * factor))}</td>
+    </tr>
+  `).join("");
+  const destRows = f.destinations.map((d) => `
+    <tr><td>${escapeHTML(d.label)}</td><td class="tl-num">${fmtMoney(cadenceConvert(d.annual * factor))}</td></tr>
+  `).join("");
+  const initialRows = f.initialTransfers.map((a) => `
+    <tr><td>${escapeHTML(a.label)}</td><td class="tl-num">${fmtMoney(a.amount * factor)}</td></tr>
+  `).join("");
+
+  els.viewFocusTransferSchedule.innerHTML = `
+    <h2 class="section-heading">Transfer schedule</h2>
+    <p class="helper-text">The firm's own banking-structure diagram is built separately — this is the numbers to copy into it.</p>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <label>Plan year
+          <select id="transferScheduleYearSelect">${yearOptions}</select>
+        </label>
+        <div id="transferScheduleCadence" class="seg-toggle" role="tablist" aria-label="Cadence"></div>
+      </div>
+      ${f.initialTransfers.length ? `
+      <div class="focus-section">
+        <h3>Initial transfer (one-off, plan start)</h3>
+        <table class="focus-table">${initialRows}</table>
+      </div>` : ""}
+      <div class="focus-section">
+        <h3>Sources — ${escapeHTML(cadenceLabel())}</h3>
+        <table class="focus-table">
+          ${sourceRows}
+          <tr class="tl-total"><td>Total sources</td><td class="tl-num">${fmtMoney(cadenceConvert(f.sourcesTotal * factor))}</td></tr>
+        </table>
+      </div>
+      <div class="focus-section">
+        <h3>Destinations — ${escapeHTML(cadenceLabel())}</h3>
+        <table class="focus-table">
+          ${destRows}
+          <tr><td>Residual to savings</td><td class="tl-num">${fmtMoney(cadenceConvert(f.residual * factor))}</td></tr>
+          <tr class="tl-total"><td>Total destinations + residual</td><td class="tl-num">${fmtMoney(cadenceConvert((f.destinationsTotal + f.residual) * factor))}</td></tr>
+        </table>
+      </div>
+      <div class="focus-section">
+        <div class="output-actions">
+          <button class="btn-text" type="button" id="transferScheduleCopyBtn">Copy for Word</button>
+        </div>
+      </div>
+    </div>
+  `;
+  renderEntitySelector(
+    $("transferScheduleCadence"),
+    [{ id: "fortnightly", label: "Fortnightly" }, { id: "monthly", label: "Monthly" }, { id: "annual", label: "Annual" }],
+    transferScheduleCadence,
+    (id) => { transferScheduleCadence = id; renderFocusTransferScheduleView(); }
+  );
+}
+
+function transferScheduleToHTML(f, factor) {
+  const row = (label, amt) => `<tr><td>${escapeHTML(label)}</td><td>${fmtMoney(cadenceConvert(amt * factor))}</td></tr>`;
+  const sourceRows = f.sources.map((s) => row(s.label, s.annual)).join("");
+  const destRows = f.destinations.map((d) => row(d.label, d.annual)).join("");
+  return `
+    <p><strong>Transfer schedule — ${escapeHTML(f.fyLabel)} (${escapeHTML(cadenceLabel())})</strong></p>
+    <table border="1" cellspacing="0" cellpadding="4">
+      <tr><th colspan="2">Sources</th></tr>
+      ${sourceRows}
+      <tr><td><strong>Total sources</strong></td><td><strong>${fmtMoney(cadenceConvert(f.sourcesTotal * factor))}</strong></td></tr>
+      <tr><th colspan="2">Destinations</th></tr>
+      ${destRows}
+      <tr><td>Residual to savings</td><td>${fmtMoney(cadenceConvert(f.residual * factor))}</td></tr>
+    </table>
+  `;
+}
+
+function exportFocusTransferScheduleCSV() {
+  const f = buildTransferScheduleFocus({ out: projection, state, year: transferScheduleYear });
+  if (!f) return;
+  const factor = displayFactor(endMonthOfYear(f.year));
+  const lines = [`Transfer schedule,${csvEsc(f.fyLabel)},${csvEsc(cadenceLabel())}`];
+  if (f.initialTransfers.length) {
+    lines.push("", "Initial transfer (one-off)");
+    for (const a of f.initialTransfers) lines.push([csvEsc(a.label), (a.amount * factor).toFixed(2)].join(","));
+  }
+  lines.push("", "Sources");
+  for (const s of f.sources) lines.push([csvEsc(s.label), cadenceConvert(s.annual * factor).toFixed(2)].join(","));
+  lines.push([csvEsc("Total sources"), cadenceConvert(f.sourcesTotal * factor).toFixed(2)].join(","));
+  lines.push("", "Destinations");
+  for (const d of f.destinations) lines.push([csvEsc(d.label), cadenceConvert(d.annual * factor).toFixed(2)].join(","));
+  lines.push([csvEsc("Residual to savings"), cadenceConvert(f.residual * factor).toFixed(2)].join(","));
+  downloadCSV("focus-transfer-schedule", lines);
+}
+
+els.viewFocusTransferSchedule.addEventListener("change", (e) => {
+  if (e.target.id !== "transferScheduleYearSelect") return;
+  transferScheduleYear = Number(e.target.value);
+  renderFocusTransferScheduleView();
+});
+
+els.viewFocusTransferSchedule.addEventListener("click", (e) => {
+  if (e.target.id !== "transferScheduleCopyBtn") return;
+  const f = buildTransferScheduleFocus({ out: projection, state, year: transferScheduleYear });
+  if (!f) return;
+  const factor = displayFactor(endMonthOfYear(f.year));
+  const html = transferScheduleToHTML(f, factor);
+  const plain = `Transfer schedule — ${f.fyLabel}`;
+  if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+    navigator.clipboard.write([
+      new ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }),
+        "text/plain": new Blob([plain], { type: "text/plain" }),
+      }),
+    ]).then(() => {
+      e.target.textContent = "Copied!";
+      setTimeout(() => { e.target.textContent = "Copy for Word"; }, 1500);
+    }).catch(() => window.alert("Couldn't access the clipboard — try again, or use Export CSV instead."));
+  } else {
+    window.alert("Clipboard access isn't available in this browser — use Export CSV instead.");
+  }
+});
+
 // --- exports -----------------------------------------------------------------
 
 function exportNameBase() {
@@ -7951,6 +8119,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-debt-payoff") exportFocusDebtPayoffCSV();
   else if (activeView === "focus-lookups") exportFocusLookupsCSV();
   else if (activeView === "focus-equity") exportFocusEquityCSV();
+  else if (activeView === "focus-transfer-schedule") exportFocusTransferScheduleCSV();
 });
 
 els.showAssetsToggle.addEventListener("change", () => {

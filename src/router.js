@@ -22,7 +22,7 @@ export const OUTPUT_VIEWS = [
   "money-decomposition",                                                                                                                                      // Graphs (docs/specs/13-implementation-rates-equity-comparison.md, Commit 4)
   "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "monte-carlo-table", "assumptions",                                        // Tables
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
-  "focus-equity",                                                                                                                                              // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
+  "focus-equity", "focus-transfer-schedule",                                                                                                                  // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
 ];
 export const DEFAULT_OUTPUT_VIEW = "composite"; // the composite chart is the default Graphs view (D5)
 

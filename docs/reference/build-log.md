@@ -365,10 +365,40 @@ shortfall, not as a shortfall-by-date the client just hasn't reached yet.
   per CLAUDE.md's rule for a decomposition of this kind — a dedicated
   test asserting exact reconciliation to closing net worth across
   `randomScenario()`-generated scenarios (not a single case).
+- Commit 5, **Fortnightly transfer schedule** — new `src/focusTransferSchedule.js`,
+  pure. For a selected plan year (default: the first FULL year —
+  `monthsInFirstYear(plan.start) === 12`, else year 1), Sources lists
+  every income cashflow row take-home plus every investment property's
+  rent; Destinations lists every expense row, every non-HELP liability's
+  repayment, every super account's personal (non-sacrifice) contribution,
+  every goal's accrual, adviser fees paid from cash, and a settling
+  property's own cash contribution. "Net of PAYG" mirrors
+  `cashflowStatement.js`'s `cashReceivedSums` exactly — only the
+  "salary" category is withheld at all in this model, and a person's
+  PAYG is spread across THEIR OWN salary rows proportionally by gross
+  share, one level deeper than the Cashflow table's own household
+  total — verified to sum back to that exact figure. HELP/HECS never
+  appears as a destination (already withheld via PAYG, never a
+  household-initiated transfer), and neither does salary sacrifice (a
+  payroll deduction before the money is "received", already its own
+  line in the Cashflow table). Residual to savings = sources −
+  destinations. No new money flow (a pure regrouping of already-taxed,
+  already-computed engine figures), so no conservation-invariant
+  change. New Focus view (**Transfer schedule**): fortnightly by
+  default with monthly/annual toggle, a year selector, an Initial
+  transfer section straight from Commit 2's implementation allocations
+  (a one-off, never converted to a rate), CSV and "Copy for Word"
+  clipboard export (same `ClipboardItem` pattern as the Snapshot view's
+  own Word export). Tested: fortnightly/monthly = annual ÷ 26 / ÷ 12;
+  a two-salary-row household's summed take-home matches the Cashflow
+  table's own `regularTakeHomePay` exactly, with the PAYG split
+  correctly proportional to each row's gross share; sources reconcile
+  to destinations plus residual; HELP is never a destination; loan/
+  super/goal rows each surface correctly; the initial transfer column
+  is read straight from `plan.implementation`, never re-derived.
 
 ### In flight
-Spec 13 Commits 5–6 (fortnightly transfer schedule, scenario
-comparison); super threshold
+Spec 13 Commit 6 (scenario comparison); super threshold
 indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
 then Division 296, then Monte Carlo over the full scenario.
 

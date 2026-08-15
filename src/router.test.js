@@ -140,7 +140,7 @@ describe("known section/view ids", () => {
       "money-decomposition",
       "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "monte-carlo-table", "assumptions",
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
-      "focus-equity",
+      "focus-equity", "focus-transfer-schedule",
     ]);
     expect(DEFAULT_OUTPUT_VIEW).toBe("composite");
   });
