@@ -1305,16 +1305,48 @@ export function deletePartnerOwned(state) {
   return { ...state, assets: keepAssets, cashflows, settings, liabilities };
 }
 
+// Every contribution/withdrawal/one-off row currently targeting
+// `assetId` — the "affected rows" a removal confirmation must list
+// (Phase A.1's asset-deletion dialog, never actually built until this
+// audit follow-up: the tool used to cascade-delete these rows with no
+// way to keep them). Cashflow rows carry no label, so each entry
+// summarises itself for display.
+export function cashflowRowsForAsset(state, assetId) {
+  const cf = state.cashflows;
+  const describe = (kind, r) => ({
+    kind, id: r.id,
+    summary: `${kind} — $${Math.round(r.amount).toLocaleString()}` +
+      (kind === "One-off amount" ? ` (${r.direction === "out" ? "outflow" : "inflow"})` : `/${r.frequency}`),
+  });
+  return [
+    ...cf.contributions.filter((c) => c.assetId === assetId).map((c) => describe("Contribution", c)),
+    ...cf.withdrawals.filter((w) => w.assetId === assetId).map((w) => describe("Withdrawal", w)),
+    ...cf.lumpSums.filter((l) => l.assetId === assetId).map((l) => describe("One-off amount", l)),
+  ];
+}
+
 // Remove one asset with full cascade. Never removes the last asset.
-export function removeAsset(state, assetId) {
+// `reassignToId`, when given (and a valid remaining financial asset),
+// retargets the victim's contribution/withdrawal/one-off rows to it
+// instead of deleting them — never orphaning an assetId. Omitting it
+// (or passing an invalid id) keeps the original cascade-delete
+// behaviour exactly, so every existing call site is unaffected.
+export function removeAsset(state, assetId, reassignToId = null) {
   // The last FINANCIAL asset can never be removed; lifestyle assets
   // (D2) are always removable.
   const victim = state.assets.find((a) => a.id === assetId);
   if (!victim) return state;
   if (isFinancial(victim) && state.assets.filter(isFinancial).length <= 1) return state;
   const assets = state.assets.filter((a) => a.id !== assetId);
+  const reassign = assets.some((a) => a.id === reassignToId && a.class !== "lifestyle") ? reassignToId : null;
+  const retarget = (r) => (r.assetId === assetId ? { ...r, assetId: reassign } : r);
   const cf = state.cashflows;
-  const cashflows = {
+  const cashflows = reassign ? {
+    ...cf,
+    contributions: cf.contributions.map(retarget),
+    withdrawals: cf.withdrawals.map(retarget),
+    lumpSums: cf.lumpSums.map(retarget),
+  } : {
     ...cf,
     contributions: cf.contributions.filter((c) => c.assetId !== assetId),
     withdrawals: cf.withdrawals.filter((w) => w.assetId !== assetId),

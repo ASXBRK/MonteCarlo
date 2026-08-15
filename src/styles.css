@@ -416,6 +416,13 @@ html, body {
   vertical-align: middle;
 }
 
+/* A cashflow row targeting an excluded asset (audit follow-up B2) —
+   same red used by .helper-warning/.list-danger elsewhere. */
+.cf-tag-warn {
+  color: #a33;
+  background: #fdf2f2;
+}
+
 /* --- breadcrumb + page navigation (A.5) --- */
 
 .breadcrumb {
@@ -2616,6 +2623,13 @@ dialog.modal::backdrop {
   padding-left: 20px;
 }
 .modal-body li { margin: 2px 0; }
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
 
 .modal-body code {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;

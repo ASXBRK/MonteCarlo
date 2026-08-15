@@ -383,6 +383,20 @@
       </div>
     </dialog>
 
+    <!-- Asset removal (audit follow-up, Phase A.1 B1): when the asset
+         being removed has attached contribution/withdrawal/one-off
+         rows, list them and require an explicit choice — reassign to
+         another financial asset, or delete the rows too — rather than
+         silently cascade-deleting. An asset with no attached rows
+         skips this dialog entirely (a plain confirm, in main.js). -->
+    <dialog id="assetRemoveModal" class="modal" aria-labelledby="assetRemoveTitle">
+      <div class="modal-head">
+        <h2 id="assetRemoveTitle" class="modal-title">Remove asset</h2>
+        <button class="modal-close" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" id="assetRemoveModalBody"></div>
+    </dialog>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

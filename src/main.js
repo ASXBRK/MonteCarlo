@@ -15,7 +15,7 @@ import {
   clampPlan, clampAllToPlan, clampAllocation, clampIncomeRow,
   nearestVolBasis, normaliseSettings, normaliseFundingOrder,
   partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
-  removeAsset, ownerWindow, fyLabelForAge,
+  removeAsset, cashflowRowsForAsset, ownerWindow, fyLabelForAge,
   clampInt, clampNumber, serialize, hydrate, ageAtDate,
   planSummaryText, allocationSummary, ALLOC_PCT_MAX,
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
@@ -142,6 +142,8 @@ const els = {
   chartTreatmentSelects: document.querySelectorAll("[data-treatment]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
+  assetRemoveModal: $("assetRemoveModal"),
+  assetRemoveModalBody: $("assetRemoveModalBody"),
   paramAssetTable: $("paramAssetTable"),
   inflationInput: $("inflationInput"),
   unitsToggle: document.querySelector(".display-toggle"),
@@ -1473,6 +1475,17 @@ function assetOptions(selected) {
   ).join("");
 }
 
+// A cashflow row targeting an excluded asset has no effect on the
+// projection at all — the asset card itself dims when excluded, but a
+// row in a table elsewhere never showed that (audit follow-up B1/B2:
+// this was the only place "excluded" wasn't visibly flagged). Returns
+// "" when the row's target is included or missing (no flag needed).
+function assetExcludedFlagHTML(assetId) {
+  const a = findAsset(assetId);
+  if (!a || a.include) return "";
+  return `<span class="cf-tag cf-tag-warn" title="&quot;${escapeHTML(a.name)}&quot; is excluded from the projection — this row has no effect until it's re-included.">excluded</span>`;
+}
+
 // A single date-ref control (Tier 1.1): a <select> listing every
 // available anchor plus "Specific age…", each option carrying its
 // resolved value so the user never has to work it out; a number input
@@ -1649,6 +1662,7 @@ function contributionRowHTML(kind, cf) {
     <tr class="cf-tr" data-cfid="${cf.id}">
       <td class="cf-td-asset">
         <select data-kind="${kind}" data-cfid="${cf.id}" data-field="assetId">${assetOptions(cf.assetId)}</select>
+        ${assetExcludedFlagHTML(cf.assetId)}
       </td>
       ${amountTdHTML(kind, cf.id, cf.amount)}
       <td class="cf-td-freq">
@@ -1753,6 +1767,7 @@ function lumpSumRowHTML(ls) {
       <td class="cf-td-asset">
         <select data-kind="lumpSums" data-cfid="${ls.id}" data-field="assetId">${assetOptions(ls.assetId)}</select>
         ${ls.source === "table" ? '<span class="cf-tag">from table</span>' : ""}
+        ${assetExcludedFlagHTML(ls.assetId)}
       </td>
       ${amountTdHTML("lumpSums", ls.id, ls.amount)}
       <td class="cf-td-direction">
@@ -2477,6 +2492,7 @@ function onAssetSectionClick(e) {
       saveState();
       assetCardEl(aid)?.classList.toggle("excluded", !a.include);
       renderSettings();
+      renderCashflows(); // B2: excluded-asset flag on any row targeting it
       refreshOutputs();
       break;
     }
@@ -2484,16 +2500,26 @@ function onAssetSectionClick(e) {
       const financialCount = state.assets.filter((x) => x.class !== "lifestyle").length;
       if (a.class !== "lifestyle" && financialCount <= 1) return; // keep the last financial asset
       const isSurplusTarget = state.settings.surplus.assetId === aid;
-      const msg = isSurplusTarget
-        ? `Remove "${a.name}"? It is the surplus investment target — surplus treatment will revert to Spend, and the asset's cashflow rows will be deleted.`
-        : `Remove "${a.name}"? Its cashflow rows will be deleted too.`;
-      if (!window.confirm(msg)) return;
-      state = removeAsset(state, aid);
-      collapsed.delete(aid);
-      allocMemory.delete(aid);
-      volBasisTouched.delete(aid);
-      saveState();
-      renderAll();
+      const affectedRows = cashflowRowsForAsset(state, aid);
+      // No attached cashflow rows (the common case — lifestyle assets
+      // never have any, per D2) — a plain confirm is enough; nothing
+      // to reassign or delete. Otherwise never orphan those rows
+      // silently: require an explicit reassign-or-delete choice (audit
+      // follow-up B1 — this used to cascade-delete unconditionally).
+      if (affectedRows.length === 0) {
+        const msg = isSurplusTarget
+          ? `Remove "${a.name}"? It is the surplus investment target — surplus treatment will revert to Spend.`
+          : `Remove "${a.name}"?`;
+        if (!window.confirm(msg)) return;
+        state = removeAsset(state, aid);
+        collapsed.delete(aid);
+        allocMemory.delete(aid);
+        volBasisTouched.delete(aid);
+        saveState();
+        renderAll();
+        break;
+      }
+      openAssetRemoveDialog(a, affectedRows, isSurplusTarget);
       break;
     }
     case "alloc-mode": {
@@ -2517,6 +2543,54 @@ function onAssetSectionClick(e) {
 
 els.assets.addEventListener("click", onAssetSectionClick);
 els.lifestyleSection.addEventListener("click", onAssetSectionClick);
+
+// Asset removal with attached cashflow rows (audit follow-up B1): list
+// the rows and require an explicit reassign-or-delete choice —
+// removeAsset(state, aid) still cascade-deletes when called with no
+// third argument, so every other call site (there are none besides
+// this one) is unaffected.
+function openAssetRemoveDialog(asset, rows, isSurplusTarget) {
+  const otherFinancial = state.assets.filter((x) => x.id !== asset.id && x.class !== "lifestyle");
+  const rowList = rows.map((r) => `<li>${escapeHTML(r.summary)}</li>`).join("");
+  const surplusNote = isSurplusTarget
+    ? `<p>It is also the surplus investment target — surplus treatment will revert to Spend.</p>` : "";
+  els.assetRemoveModalBody.innerHTML = `
+    <p>"${escapeHTML(asset.name)}" has ${rows.length} cashflow row(s) attached:</p>
+    <ul>${rowList}</ul>
+    <p>Removing the asset must not silently delete these — choose one:</p>
+    ${surplusNote}
+    <div class="cf-cell">
+      <label>Reassign rows to</label>
+      <select id="assetRemoveReassignSelect">${otherFinancial.map((x) => `<option value="${x.id}">${escapeHTML(x.name)}</option>`).join("")}</select>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn-text" id="assetRemoveReassignBtn"${otherFinancial.length === 0 ? " disabled" : ""}>Reassign and remove</button>
+      <button type="button" class="btn-text list-danger" id="assetRemoveDeleteBtn">Delete these rows and remove</button>
+      <button type="button" class="btn-text" id="assetRemoveCancelBtn">Cancel</button>
+    </div>
+  `;
+  els.assetRemoveModal.showModal();
+
+  const close = () => els.assetRemoveModal.close();
+  const finish = (reassignToId) => {
+    state = removeAsset(state, asset.id, reassignToId);
+    collapsed.delete(asset.id);
+    allocMemory.delete(asset.id);
+    volBasisTouched.delete(asset.id);
+    saveState();
+    close();
+    renderAll();
+  };
+  $("assetRemoveReassignBtn").addEventListener("click", () => {
+    finish($("assetRemoveReassignSelect").value);
+  }, { once: true });
+  $("assetRemoveDeleteBtn").addEventListener("click", () => finish(null), { once: true });
+  $("assetRemoveCancelBtn").addEventListener("click", close, { once: true });
+}
+els.assetRemoveModal.querySelector(".modal-close").addEventListener("click", () => els.assetRemoveModal.close());
+els.assetRemoveModal.addEventListener("click", (e) => {
+  if (e.target === els.assetRemoveModal) els.assetRemoveModal.close();
+});
 
 function switchAllocMode(a, mode) {
   if (a.allocation.mode === mode) return;

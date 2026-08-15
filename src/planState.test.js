@@ -6,7 +6,7 @@ import {
   nearestVolBasis, allocationTotalNominal, allocationSummary,
   normaliseFundingOrder, normaliseSettings,
   partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
-  removeAsset, ownerWindow, fyLabelForAge, horizonYears,
+  removeAsset, cashflowRowsForAsset, ownerWindow, fyLabelForAge, horizonYears,
   serialize, hydrate, summarise, planSummaryText, annualisedAmount,
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear, clampTaxProfile,
   ageAtDate, synthDob, resolveEndBasis, clampCashflow, createLifestyleAsset,
@@ -223,6 +223,57 @@ describe("fundingOrder invariants", () => {
   it("never removes the last asset", () => {
     const s = defaultState(PROFILES, NOW);
     expect(removeAsset(s, s.assets[0].id)).toBe(s);
+  });
+
+  // Phase A.1's asset-deletion dialog (audit follow-up B1): reassigning
+  // a removed asset's cashflow rows to another asset instead of
+  // deleting them — the reassignToId branch never exercised until now.
+  it("cashflowRowsForAsset lists every contribution/withdrawal/one-off targeting an asset", () => {
+    const s = defaultState(PROFILES, NOW);
+    const victim = s.assets[0];
+    s.cashflows.withdrawals.push({ ...createCashflow("withdrawal", s.plan, victim.id), amount: 500 });
+    s.cashflows.lumpSums.push({ ...createLumpSum(s.plan, victim.id), amount: 1000, direction: "out" });
+    // The default plan already seeds one $0 monthly contribution on this asset.
+    const rows = cashflowRowsForAsset(s, victim.id);
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.kind)).toEqual(["Contribution", "Withdrawal", "One-off amount"]);
+    expect(rows.find((r) => r.kind === "Withdrawal").summary).toMatch(/\$500.*monthly/);
+    expect(rows.find((r) => r.kind === "One-off amount").summary).toMatch(/outflow/);
+  });
+
+  it("removeAsset(state, id, reassignToId) retargets cashflow rows instead of deleting them", () => {
+    const s = defaultState(PROFILES, NOW);
+    const victim = s.assets[0];
+    const keeper = createAsset(s.plan, s.assets, PROFILES);
+    s.assets.push(keeper);
+    s.cashflows.withdrawals.push(createCashflow("withdrawal", s.plan, victim.id));
+    s.cashflows.lumpSums.push(createLumpSum(s.plan, victim.id));
+
+    const out = removeAsset(s, victim.id, keeper.id);
+    expect(out.assets.map((a) => a.id)).toEqual([keeper.id]);
+    // Nothing orphaned: every row that pointed at the victim now points
+    // at the keeper — none deleted, none left dangling.
+    expect(out.cashflows.contributions.every((c) => c.assetId === keeper.id)).toBe(true);
+    expect(out.cashflows.withdrawals.every((w) => w.assetId === keeper.id)).toBe(true);
+    expect(out.cashflows.lumpSums.every((l) => l.assetId === keeper.id)).toBe(true);
+    expect(out.cashflows.withdrawals).toHaveLength(1);
+    expect(out.cashflows.lumpSums).toHaveLength(1);
+  });
+
+  it("removeAsset ignores an invalid reassignToId (stale/missing/lifestyle) and falls back to cascade-delete — never orphans", () => {
+    const s = defaultState(PROFILES, NOW);
+    const victim = s.assets[0];
+    const keeper = createAsset(s.plan, s.assets, PROFILES);
+    s.assets.push(keeper);
+    const lifestyle = createLifestyleAsset(s.plan, s.assets);
+    s.assets.push(lifestyle);
+    s.cashflows.withdrawals.push(createCashflow("withdrawal", s.plan, victim.id));
+
+    for (const badId of ["not-a-real-id", lifestyle.id, null]) {
+      const out = removeAsset(s, victim.id, badId);
+      expect(out.cashflows.withdrawals).toHaveLength(0); // deleted, not orphaned to a bad id
+      expect(out.assets.some((a) => a.id === victim.id)).toBe(false);
+    }
   });
 });
 
