@@ -10,7 +10,17 @@
 // an FHSSS release crediting settlement cash with the full requested
 // amount regardless of whether the super account actually held that
 // much — was found and fixed while extending this invariant to cover
-// the Document Set's new money flows (see the FHSSS section below).
+// the Document Set's new money flows (see the FHSSS section below). A
+// FOURTH — adviser fees, Division 293/296, and FHSSS each independently
+// capping their own release against the SAME account's raw balance,
+// so two mechanisms sharing an account in the same year could each
+// believe they alone could take the full amount and together debit
+// more than the account ever held — was found via THIS invariant
+// again, once adviser fees (Implementation/Rates spec, Commit 2) made
+// that combination common enough for randomScenario() to hit it; fixed
+// by deterministic.js's reserveFromSuper, which resolves every
+// same-year claim on an account in a fixed order against what's
+// actually left after the earlier ones.
 //
 // IMPORTANT — any commit that introduces a new money flow (a new leak,
 // external inflow, or transfer between two pockets of net worth) MUST
@@ -276,12 +286,35 @@ export function checkYearConservation(out, y, ctx) {
   // can't see, but already reflected in `closingN` via liabilitiesClosing).
   const helpRepayment = row.taxDetail?.helpRepayment ?? 0;
 
+  // --- Adviser fees (Implementation/Rates spec, Commit 2) — TWO leaks,
+  // one per pocket, exactly the shape divReleaseFromSuper already
+  // established: adviserFeeFromSuper is a direct super-balance
+  // reduction (row.superDetail[*].adviserFee, same mechanic as
+  // release — no preservation gate, not assessable, applied before
+  // growth); adviserFeeCash is the household's own cash cost — the
+  // genuine outside-super slice PLUS whatever a nominated account
+  // couldn't cover (requestedFromSuper − paidFromSuper, "paid
+  // personally" per the spec), which the engine already folds into
+  // net/wcaBal, so it must be named here too or the invariant would
+  // read those months as gaining money into netAssets with nothing to
+  // explain it. Both slices — upfront (year 0 only) and ongoing (every
+  // year) — are summed into the same two terms; the projection reports
+  // them separately (row.adviserFeesUpfront/row.adviserFeesOngoing)
+  // purely for the UI's "requested vs paid vs shortfall" display.
+  const adviserFeeFromSuper = sumVals(row.superDetail, "adviserFee");
+  const zeroFees = { outsideCash: 0, requestedFromSuper: 0, paidFromSuper: 0 };
+  const adviserFeesUpfront = row.adviserFeesUpfront ?? zeroFees;
+  const adviserFeesOngoing = row.adviserFeesOngoing ?? zeroFees;
+  const adviserFeeCash =
+    adviserFeesUpfront.outsideCash + (adviserFeesUpfront.requestedFromSuper - adviserFeesUpfront.paidFromSuper)
+    + adviserFeesOngoing.outsideCash + (adviserFeesOngoing.requestedFromSuper - adviserFeesOngoing.paidFromSuper);
+
   const expected =
     income + growth + sgInflow
     - row.expenses - row.tax - contributionsTax - liabilityInterest
     - row.surplusSpent + row.unfundedCashflow - divReleaseFromSuper
     + propertyAcquisitionCosts + fhsssRelease - fhsssSuperDebit - lmiPremium
-    - goalSpend + helpRepayment;
+    - goalSpend + helpRepayment - adviserFeeFromSuper - adviserFeeCash;
 
   const delta = closingN - openingN;
   const gap = delta - expected;

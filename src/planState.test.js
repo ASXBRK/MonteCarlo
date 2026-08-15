@@ -24,6 +24,8 @@ import {
   createDeductionRow, clampDeductionRow, DEDUCTION_CATEGORIES, DEDUCTION_CATEGORY_LABELS,
   createGoal, clampGoal, normaliseGoals,
   clampSnapshotYears, MAX_SNAPSHOT_YEARS,
+  defaultAdviserFees, clampAdviserFees, defaultImplementation,
+  clampImplementationBasic, refineImplementationAllocations, createAllocation,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -1202,6 +1204,92 @@ describe("Working Cash Account (engine correctness fix)", () => {
     // An existing scenario's explicit "spend" choice is preserved —
     // the new "accumulate" default only applies to brand-new scenarios.
     expect(s.settings.surplus).toEqual({ mode: "spend", assetId: null });
+  });
+});
+
+describe("Adviser fees and flow of initial funds (Implementation/Rates spec, Commit 2)", () => {
+  const superAccounts = [{ id: "su1", owner: "client" }, { id: "su2", owner: "partner" }];
+
+  it("defaultAdviserFees/defaultImplementation ship an all-zero, no-op shape", () => {
+    expect(defaultAdviserFees()).toEqual({
+      upfront: { total: 0, fromSuperAmount: 0, superAccountId: null },
+      ongoing: { annualAmount: 0, fromSuperAmount: 0, superAccountId: null, indexBasis: "cpi" },
+    });
+    expect(defaultImplementation()).toEqual({ totalCashAvailable: 0, emergencyFundTarget: 0, allocations: [] });
+  });
+
+  it("clampAdviserFees bounds fromSuperAmount to [0, the fee it covers] but does not zero it just because no account is nominated yet", () => {
+    const clamped = clampAdviserFees({
+      upfront: { total: 10000, fromSuperAmount: 15000, superAccountId: null }, // over-requested AND no account yet
+      ongoing: { annualAmount: 5000, fromSuperAmount: 2000, superAccountId: "nope", indexBasis: "bogus" },
+    }, superAccounts);
+    expect(clamped.upfront.fromSuperAmount).toBe(10000); // capped at the fee total
+    expect(clamped.upfront.superAccountId).toBeNull(); // preserved as null, not defaulted to a guess
+    expect(clamped.ongoing.superAccountId).toBeNull(); // a stale/unknown account id falls back to null
+    expect(clamped.ongoing.fromSuperAmount).toBe(2000); // NOT wiped by the invalid account id
+    expect(clamped.ongoing.indexBasis).toBe("cpi"); // invalid basis falls back to cpi
+  });
+
+  it("clampAdviserFees accepts a valid nominated super account", () => {
+    const clamped = clampAdviserFees({
+      upfront: { total: 20000, fromSuperAmount: 12000, superAccountId: "su1" },
+      ongoing: { annualAmount: 0, fromSuperAmount: 0, superAccountId: null, indexBasis: "awote" },
+    }, superAccounts);
+    expect(clamped.upfront).toEqual({ total: 20000, fromSuperAmount: 12000, superAccountId: "su1" });
+    expect(clamped.ongoing.indexBasis).toBe("awote");
+  });
+
+  it("clampPlan wires adviserFees/implementation with defaults when the raw plan never had them", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(plan.adviserFees).toEqual(defaultAdviserFees());
+    expect(plan.implementation).toEqual(defaultImplementation());
+  });
+
+  it("emergencyFundTarget writes through to workingCash.minimumBalance once it's set, without clobbering a manually-entered minimum when it's still zero", () => {
+    const untouched = clampPlan({ ...couplePlan(), workingCash: { balance: 0, minimumBalance: 8000, ratePct: null } }, PROFILES);
+    expect(untouched.workingCash.minimumBalance).toBe(8000); // implementation never touched — the manual value survives
+
+    const withTarget = clampPlan({
+      ...couplePlan(),
+      workingCash: { balance: 0, minimumBalance: 8000, ratePct: null },
+      implementation: { totalCashAvailable: 0, emergencyFundTarget: 25000, allocations: [] },
+    }, PROFILES);
+    expect(withTarget.workingCash.minimumBalance).toBe(25000); // now authoritative
+  });
+
+  it("clampImplementationBasic accepts any string targetAssetId shape (existence is checked later, by refineImplementationAllocations)", () => {
+    const raw = { totalCashAvailable: 500000, emergencyFundTarget: 20000, allocations: [{ label: "Home deposit", amount: 100000, targetAssetId: "does-not-exist-yet" }] };
+    const clamped = clampImplementationBasic(raw);
+    expect(clamped.totalCashAvailable).toBe(500000);
+    expect(clamped.allocations[0].targetAssetId).toBe("does-not-exist-yet");
+    expect(clamped.allocations[0].id).toBeTruthy();
+  });
+
+  it("refineImplementationAllocations falls a stale/unknown targetAssetId back to workingCash, without dropping the row", () => {
+    const impl = clampImplementationBasic({
+      allocations: [
+        { id: "al1", label: "To an asset", amount: 100, targetAssetId: "a1" },
+        { id: "al2", label: "To a goal", amount: 200, targetAssetId: "goal:g1" },
+        { id: "al3", label: "Stale", amount: 300, targetAssetId: "no-longer-exists" },
+        { id: "al4", label: "Already WCA", amount: 400, targetAssetId: "workingCash" },
+      ],
+    });
+    const refined = refineImplementationAllocations(impl, [{ id: "a1" }], [{ id: "g1" }]);
+    expect(refined.allocations.map((a) => a.targetAssetId)).toEqual(["a1", "goal:g1", "workingCash", "workingCash"]);
+    expect(refined.allocations).toHaveLength(4); // nothing dropped, only redirected
+  });
+
+  it("clampAllToPlan performs the second-stage refinement automatically", () => {
+    const state = {
+      ...defaultState(PROFILES, NOW),
+      plan: {
+        ...defaultState(PROFILES, NOW).plan,
+        implementation: { totalCashAvailable: 0, emergencyFundTarget: 0, allocations: [createAllocation()] },
+      },
+    };
+    state.plan.implementation.allocations[0].targetAssetId = "some-asset-that-does-not-exist";
+    const out = clampAllToPlan(state, PROFILES);
+    expect(out.plan.implementation.allocations[0].targetAssetId).toBe("workingCash");
   });
 });
 

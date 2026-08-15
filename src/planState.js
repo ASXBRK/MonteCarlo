@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -197,6 +197,8 @@ export function defaultPlan(now = new Date()) {
     keyDates: [],
     superAccounts: [],
     workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
+    adviserFees: defaultAdviserFees(),
+    implementation: defaultImplementation(),
   };
 }
 
@@ -1276,13 +1278,31 @@ export function clampPlan(plan, profiles = {}) {
   // belong with identity rather than with the joint-ownable financial
   // asset list.
   const superAccounts = normaliseSuperAccounts(plan.superAccounts, { client, partner }, profiles);
-  const workingCash = clampWorkingCash(plan.workingCash);
+  // Adviser fees (Implementation/Rates spec, Commit 2) — validated
+  // against superAccounts, which is already known here; implementation
+  // is only BASIC-clamped at this stage (see clampImplementationBasic's
+  // own header for why its allocations need a second pass, later, once
+  // assets/goals are known too).
+  const adviserFees = clampAdviserFees(plan.adviserFees, superAccounts);
+  const implementation = clampImplementationBasic(plan.implementation);
+  const workingCash = {
+    ...clampWorkingCash(plan.workingCash),
+    // "emergencyFundTarget writing through to workingCash.minimumBalance"
+    // (the spec's own words) — authoritative once it's actually set
+    // (>0); a household that has never touched Implementation keeps
+    // whatever minimum balance was entered directly, so this never
+    // silently overwrites a value nobody asked it to.
+    ...(implementation.emergencyFundTarget > 0 ? { minimumBalance: implementation.emergencyFundTarget } : {}),
+  };
 
   // Document Set Commit 2 — household-level dependent children, for
   // the Medicare Levy Surcharge family threshold (+$1,500/indexed per
   // child after the first — see src/data/mlsRates.js).
   const dependentChildren = clampInt(plan.dependentChildren ?? 0, 0, 20);
-  return { household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash, dependentChildren };
+  return {
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash, dependentChildren,
+    adviserFees, implementation,
+  };
 }
 
 // --- Working Cash Account ---------------------------------------------------
@@ -1301,6 +1321,102 @@ export function clampWorkingCash(raw) {
     // null = "use the Cash profile's return" (deterministic.js resolves
     // this at projection time, since it needs the profiles table).
     ratePct: raw?.ratePct == null ? null : clampNumber(raw.ratePct, -10, 30),
+  };
+}
+
+// --- Adviser fees and flow of initial funds (Implementation/Rates
+// spec, Commit 2) ------------------------------------------------------
+//
+// Two independent slices — upfront (once, at plan start) and ongoing
+// (every year, indexed) — each split outside/inside super. Lives on
+// the plan, not state.X, per the spec's own shape (these are
+// implementation-of-the-plan concepts, not client holdings).
+
+export function defaultAdviserFees() {
+  return {
+    upfront: { total: 0, fromSuperAmount: 0, superAccountId: null },
+    ongoing: { annualAmount: 0, fromSuperAmount: 0, superAccountId: null, indexBasis: "cpi" },
+  };
+}
+
+// fromSuperAmount can't exceed the fee it's meant to cover — bound at
+// the control (input integrity). Deliberately NOT zeroed just because
+// no account is nominated YET: the two fields are edited independently
+// (one change event per keystroke re-clamps the whole plan), so
+// wiping fromSuperAmount the instant superAccountId is momentarily
+// null would silently discard whatever the adviser just typed if they
+// happen to fill the amount before choosing the account — a plain
+// data-entry ordering, not an impossible state. The engine itself
+// already treats fromSuperAmount as inert without a nominated account
+// (deterministic.js gates every use on superAccountId being set), so
+// there's no correctness cost to preserving the stored number here.
+function clampAdviserFeeSide(raw, total, superAccountIds) {
+  const superAccountId = superAccountIds.has(raw?.superAccountId) ? raw.superAccountId : null;
+  const requested = clampNumber(raw?.fromSuperAmount ?? 0, 0);
+  return { superAccountId, fromSuperAmount: Math.min(requested, total) };
+}
+
+export function clampAdviserFees(raw, superAccounts) {
+  const superAccountIds = new Set((superAccounts ?? []).map((s) => s.id));
+  const upfrontTotal = clampNumber(raw?.upfront?.total ?? 0, 0);
+  const ongoingAnnual = clampNumber(raw?.ongoing?.annualAmount ?? 0, 0);
+  const upfrontSide = clampAdviserFeeSide(raw?.upfront, upfrontTotal, superAccountIds);
+  const ongoingSide = clampAdviserFeeSide(raw?.ongoing, ongoingAnnual, superAccountIds);
+  return {
+    upfront: { total: upfrontTotal, ...upfrontSide },
+    ongoing: { annualAmount: ongoingAnnual, ...ongoingSide, indexBasis: INDEX_BASES.includes(raw?.ongoing?.indexBasis) ? raw.ongoing.indexBasis : "cpi" },
+  };
+}
+
+// --- Flow of initial funds (Commit 2) ---------------------------------
+//
+// A reconciliation block, not a new source of truth — assets already
+// carry their own opening balances; this shows how the client's
+// starting cash gets there. targetAssetId is validated in TWO stages:
+// clampImplementationBasic (here) accepts any string shape, since
+// clampPlan has no visibility into state.assets/state.goals (they're
+// siblings of plan, not children of it); clampAllToPlan's
+// refineImplementationAllocations (below) does the real existence
+// check once assets/goals are known — the same two-stage pattern
+// clampPlan already uses internally for client.retirementAge (bounded
+// against endAge, which isn't known until later in the same function).
+
+export function createAllocation(existing = []) {
+  return { id: uid("al"), label: `Allocation ${existing.length + 1}`, amount: 0, targetAssetId: "workingCash" };
+}
+
+export function defaultImplementation() {
+  return { totalCashAvailable: 0, emergencyFundTarget: 0, allocations: [] };
+}
+
+export function clampImplementationBasic(raw) {
+  return {
+    totalCashAvailable: clampNumber(raw?.totalCashAvailable ?? 0, 0),
+    emergencyFundTarget: clampNumber(raw?.emergencyFundTarget ?? 0, 0),
+    allocations: Array.isArray(raw?.allocations)
+      ? raw.allocations.map((a) => ({
+          id: typeof a?.id === "string" && a.id ? a.id : uid("al"),
+          label: typeof a?.label === "string" && a.label.trim() ? a.label.trim().slice(0, 60) : "Allocation",
+          amount: clampNumber(a?.amount ?? 0, 0),
+          targetAssetId: typeof a?.targetAssetId === "string" && a.targetAssetId ? a.targetAssetId : "workingCash",
+        }))
+      : [],
+  };
+}
+
+// Second-stage refinement (clampAllToPlan, once assets/goals exist): a
+// targetAssetId that doesn't resolve to "workingCash", a real asset, or
+// a real goal falls back to "workingCash" — never silently dropped
+// (the amount stays; only a stale/deleted target is corrected), and
+// never a throw (an imported/migrated blob may reference an asset that
+// no longer exists).
+export function refineImplementationAllocations(implementation, assets, goals) {
+  const assetIds = new Set((assets ?? []).map((a) => a.id));
+  const goalIds = new Set((goals ?? []).map((g) => `goal:${g.id}`));
+  const valid = (id) => id === "workingCash" || assetIds.has(id) || goalIds.has(id);
+  return {
+    ...implementation,
+    allocations: implementation.allocations.map((a) => (valid(a.targetAssetId) ? a : { ...a, targetAssetId: "workingCash" })),
   };
 }
 
@@ -1426,7 +1542,14 @@ export function clampAllToPlan(state, profiles = {}) {
   const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
   const properties = normaliseProperties(state.properties, plan);
   const goals = normaliseGoals(state.goals, plan, assets);
-  return { ...state, plan, assets, cashflows, settings, liabilities, properties, goals };
+  // Flow of initial funds (Commit 2), second stage: targetAssetId needs
+  // assets/goals, neither of which clampPlan can see (siblings of
+  // plan, not children of it) — refined here, now that both exist.
+  const planWithRefinedImplementation = {
+    ...plan,
+    implementation: refineImplementationAllocations(plan.implementation, assets, goals),
+  };
+  return { ...state, plan: planWithRefinedImplementation, assets, cashflows, settings, liabilities, properties, goals };
 }
 
 // Surplus treatment (Working Cash Account FY-end sweep): "accumulate"
@@ -1709,6 +1832,16 @@ function migrateV10toV11(raw) {
   return { ...raw, schemaVersion: 11 };
 }
 
+// v11 → v12 (Implementation/Rates spec, Commit 1 + 2): liabilities gain
+// rateType/fixedRatePct/fixedUntil/revertRatePct/commencedOn (default
+// "variable", bit-identical); plan gains adviserFees/implementation
+// (both clamp-defaulted to their zero/no-op shape by
+// clampAdviserFees/clampImplementationBasic when absent). No existing
+// field changes shape or is removed, so again just the version gate.
+function migrateV11toV12(raw) {
+  return { ...raw, schemaVersion: 12 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -1726,6 +1859,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 8) raw = migrateV8toV9(raw);
     if (raw.schemaVersion === 9) raw = migrateV9toV10(raw);
     if (raw.schemaVersion === 10) raw = migrateV10toV11(raw);
+    if (raw.schemaVersion === 11) raw = migrateV11toV12(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -1739,9 +1873,13 @@ export function hydrate(json, profiles = {}) {
     const superAccountOwnerById = new Map(plan.superAccounts.map((s) => [s.id, s.owner]));
     const incomeRowIds = new Set(income.map((r) => r.id));
 
+    const goalsForImplementation = normaliseGoals(raw.goals, plan, assets);
     const state = {
       schemaVersion: SCHEMA_VERSION,
-      plan,
+      // Flow of initial funds (Commit 2), second stage — see
+      // clampAllToPlan's own comment for why this can't happen inside
+      // clampPlan itself.
+      plan: { ...plan, implementation: refineImplementationAllocations(plan.implementation, assets, goalsForImplementation) },
       assets,
       cashflows: {
         income,
@@ -1755,7 +1893,7 @@ export function hydrate(json, profiles = {}) {
       },
       liabilities: normaliseLiabilities(raw.liabilities, plan, assets, raw.properties),
       properties: normaliseProperties(raw.properties, plan),
-      goals: normaliseGoals(raw.goals, plan, assets),
+      goals: goalsForImplementation,
       settings: normaliseSettings(raw.settings, assets),
       display: {
         units: raw.display?.units === "nominal" ? "nominal" : "real",

@@ -286,9 +286,38 @@ shortfall, not as a shortfall-by-date the client just hasn't reached yet.
   projection, and the existing `liabilityInterest`/`liabilityRevaluation`
   terms held across thousands of randomised runs — documented in
   `conservationCheck.js` itself.
+- Commit 2, **Adviser fees and flow of initial funds** —
+  `plan.adviserFees` (upfront once at plan start, ongoing every year,
+  indexed; each split outside/inside super) and `plan.implementation`
+  (a reconciliation block, not a new source of truth: total cash
+  available less the upfront fee less each allocation equals residual,
+  cross-checked against entered opening balances and flagged, never
+  overwritten, on mismatch). Inside-super fees are a direct balance
+  debit via `withdrawFromSuper` — the SAME mechanic and reasoning as
+  the Division 293/296 release (not a benefit payment, no preservation
+  gate, applied before that period's growth so growth compounds on the
+  post-fee balance). `emergencyFundTarget` writes through to
+  `workingCash.minimumBalance` once it's actually set, giving the
+  emergency fund a modelled consequence, without clobbering a
+  manually-entered minimum on a household that's never touched
+  Implementation. Not modelled as deductible (disclosed in the
+  Parameters modal — the partial deductibility for advice on existing
+  investments needs an apportionment this build doesn't collect).
+  **A fourth conservation-invariant bug found via `randomScenario()`**
+  (not the reported one, but the SAME class): adviser fees, Division
+  293/296, and FHSSS each independently capped their own release
+  against a super account's raw balance, so two mechanisms sharing an
+  account in the same year could each believe they alone could take
+  the full amount and together debit more than the account ever
+  held — closed by a new `reserveFromSuper`, which resolves every
+  same-year claim on an account in a fixed order (adviser fees, then
+  Division 293/296, then FHSSS — matching the order they actually debit)
+  against what's genuinely left after the earlier ones, not the raw
+  balance. Per CLAUDE.md's rule, the whole class was closed in this
+  commit, not just the adviser-fee instance that surfaced it.
 
 ### In flight
-Spec 13 Commits 2–6 (adviser fees & flow of funds, usable equity,
+Spec 13 Commits 3–6 (usable equity,
 net worth decomposition, fortnightly transfer schedule, scenario
 comparison); super threshold
 indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),

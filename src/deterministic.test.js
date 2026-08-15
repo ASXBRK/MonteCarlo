@@ -2533,6 +2533,33 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const surplusMode = pick(["accumulate", "invest", "spend"]);
     const surplus = { mode: surplusMode, assetId: surplusMode === "invest" ? assets[0].id : null };
 
+    // Adviser fees (Implementation/Rates spec, Commit 2) — half the
+    // time present, each slice independently possibly targeting a
+    // super account (when the household has one) so both the
+    // cap-binding path (a super balance too small to cover what's
+    // requested — genuinely likely here, since superAccounts are often
+    // seeded at 0, per the FHSSS-release comment above) and the
+    // plain-cash path get exercised over enough runs.
+    const superAccountIds = superAccounts.map((sa) => sa.id);
+    const pickSuperTarget = () => (superAccountIds.length > 0 && Math.random() < 0.7 ? pick(superAccountIds) : null);
+    const upfrontTotal = Math.random() < 0.5 ? rand(0, 30000) : 0;
+    const upfrontSuperTarget = upfrontTotal > 0 ? pickSuperTarget() : null;
+    const ongoingAnnual = Math.random() < 0.5 ? rand(0, 15000) : 0;
+    const ongoingSuperTarget = ongoingAnnual > 0 ? pickSuperTarget() : null;
+    const adviserFees = {
+      upfront: {
+        total: upfrontTotal,
+        fromSuperAmount: upfrontSuperTarget ? rand(0, upfrontTotal) : 0,
+        superAccountId: upfrontSuperTarget,
+      },
+      ongoing: {
+        annualAmount: ongoingAnnual,
+        fromSuperAmount: ongoingSuperTarget ? rand(0, ongoingAnnual) : 0,
+        superAccountId: ongoingSuperTarget,
+        indexBasis: pick(["none", "cpi", "awote"]),
+      },
+    };
+
     return {
       ...mkState({
         endAge, cpi: rand(0.02, 0.04), assets,
@@ -2540,6 +2567,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           household: couple ? "couple" : "single",
           client, partner, dependentChildren,
           superAccounts, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
+          adviserFees,
         },
         cashflows: { income, expenses, superContributions },
         surplus,
@@ -3730,6 +3758,175 @@ describe("Extra and one-off loan repayments (Document Set Commit 5)", () => {
       expect(withEmpty.yearly[y].liabilities.lb1.closing).toBeCloseTo(withUndefined.yearly[y].liabilities.lb1.closing, 8);
       expect(withEmpty.yearly[y].liabilities.lb1.extraRepayment).toBe(0);
     }
+  });
+});
+
+describe("Adviser fees and flow of initial funds (Implementation/Rates spec, Commit 2)", () => {
+  const bigSuper = (over = {}) => superAcct({ id: "su1", owner: "client", balance: 200000, allocation: zeroRealSuperAlloc(), ...over });
+  // Zero-real via GROWTH, not income, and cgtAsset:false — a plain
+  // income-yield zero-real allocation (zeroRealAlloc) is still
+  // genuinely taxable distribution income each year even in
+  // "reinvest" mode, which would drag real tax out of this fixture
+  // and contaminate the hand-calc; growth-only + non-CGT has no tax
+  // event at all, keeping this fixture's only cashflow the fee itself.
+  const bigAsset = (cpi = 0.025) => mkAsset({
+    id: "a1", balance: 2_000_000, cgtAsset: false,
+    allocation: { mode: "custom", incomePct: 0, growthPct: cpi * 100, frankingPct: 0, volBasis: "Balanced" },
+  });
+  const withFees = (adviserFees, over = {}) => mkState({
+    endAge: 43,
+    assets: [bigAsset()],
+    ...over,
+    // plan/settings set explicitly AFTER the ...over spread — a plain
+    // trailing ...over would otherwise clobber the whole plan object
+    // wholesale (losing adviserFees) instead of merging into it.
+    plan: { superAccounts: [bigSuper()], adviserFees, ...over.plan },
+    settings: { surplus: { mode: "accumulate", assetId: null }, fundingOrder: ["a1"] },
+  });
+
+  it("known-value: the upfront fee splits exactly — outside-super debits household cash, inside-super debits the nominated account, before that year's growth", () => {
+    const s = withFees({
+      upfront: { total: 20000, fromSuperAmount: 12000, superAccountId: "su1" },
+      ongoing: { annualAmount: 0, fromSuperAmount: 0, superAccountId: null, indexBasis: "cpi" },
+    });
+    const out = projectPlan(s);
+    // Inside-super: exactly the requested $12,000 comes straight off
+    // the account (zero-real allocation, so this is the ONLY thing
+    // touching the balance — the closing figure isolates it exactly).
+    expect(out.yearly[0].superDetail.su1.adviserFee).toBeCloseTo(12000, 2);
+    expect(out.yearly[0].superDetail.su1.closing).toBeCloseTo(200000 - 12000, 1);
+    // Outside-super: the remaining $8,000 — the big financial asset
+    // (zero-real, no other cashflow in this fixture) absorbs it exactly.
+    expect(out.yearly[0].adviserFeesUpfront.outsideCash).toBeCloseTo(8000, 2);
+    expect(out.yearly[0].adviserFeesUpfront.requestedFromSuper).toBeCloseTo(12000, 2);
+    expect(out.yearly[0].adviserFeesUpfront.paidFromSuper).toBeCloseTo(12000, 2);
+    expect(out.yearly[0].closingBalance).toBeCloseTo(2_000_000 - 8000, 1);
+    // Fires ONCE, at month 0 of the whole projection — no trace in
+    // later years.
+    expect(out.yearly[1].adviserFeesUpfront.outsideCash).toBe(0);
+    expect(out.yearly[1].superDetail.su1.adviserFee).toBe(0);
+  });
+
+  it("the inside-super cap binds when the account can't cover the requested amount, and the shortfall falls back to cash ('paid personally')", () => {
+    const s = withFees(
+      { upfront: { total: 20000, fromSuperAmount: 15000, superAccountId: "su1" }, ongoing: { annualAmount: 0, fromSuperAmount: 0, superAccountId: null, indexBasis: "cpi" } },
+      { plan: { superAccounts: [bigSuper({ balance: 5000 })] } } // far short of the $15,000 requested
+    );
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.adviserFee).toBeCloseTo(5000, 2); // capped at what's there
+    expect(out.yearly[0].superDetail.su1.closing).toBeCloseTo(0, 1);
+    expect(out.yearly[0].adviserFeesUpfront.requestedFromSuper).toBeCloseTo(15000, 2);
+    expect(out.yearly[0].adviserFeesUpfront.paidFromSuper).toBeCloseTo(5000, 2);
+    // Shortfall (15000 − 5000 = 10000) + the genuine outside-super
+    // portion (20000 − 15000 = 5000) both land on household cash —
+    // $15,000 total, not the $5,000 outside-super figure alone.
+    const totalCashOut = 2_000_000 - out.yearly[0].closingBalance;
+    expect(totalCashOut).toBeCloseTo(15000, 1);
+  });
+
+  it("the ongoing fee flows monthly outside super and is indexed; the inside-super portion applies once per FY, in July", () => {
+    const s = withFees({
+      upfront: { total: 0, fromSuperAmount: 0, superAccountId: null },
+      ongoing: { annualAmount: 12000, fromSuperAmount: 6000, superAccountId: "su1", indexBasis: "none" },
+    }, { endAge: 44, cpi: 0.025 });
+    const out = projectPlan(s);
+    // Year 0: half from super, resolved once at FY start (July, m=0
+    // this year) — no decay yet, since that's the very first month.
+    expect(out.yearly[0].superDetail.su1.adviserFee).toBeCloseTo(6000, 1);
+    // The outside-super half flows monthly, and indexBasis "none"
+    // decays it (in real terms) a little EVERY month, even within the
+    // same FY — so the year's SUM is a hair under 12 × (500 flat), not
+    // exactly 6000. Computed via the same closed form the engine uses,
+    // rather than asserting a flat annual figure that isn't what
+    // month-by-month decay actually produces.
+    let expectedOutsideY0 = 0;
+    for (let m = 0; m < 12; m++) expectedOutsideY0 += (12000 * Math.pow(1 / 1.025, m / 12) * 0.5) / 12;
+    expect(out.yearly[0].adviserFeesOngoing.outsideCash).toBeCloseTo(expectedOutsideY0, 1);
+    // indexBasis "none" holds the NOMINAL amount fixed, so the REAL
+    // value decays at CPI — year 1's real requested-from-super is
+    // smaller than year 0's.
+    expect(out.yearly[1].adviserFeesOngoing.requestedFromSuper).toBeLessThan(out.yearly[0].adviserFeesOngoing.requestedFromSuper);
+    expect(out.yearly[1].adviserFeesOngoing.requestedFromSuper).toBeCloseTo(6000 / 1.025, 1);
+  });
+
+  it("regression: no adviser fees configured is bit-identical to the pre-Commit-2 shape", () => {
+    const withNone = projectPlan(withFees({
+      upfront: { total: 0, fromSuperAmount: 0, superAccountId: null },
+      ongoing: { annualAmount: 0, fromSuperAmount: 0, superAccountId: null, indexBasis: "cpi" },
+    }));
+    const withMissing = projectPlan({ ...withFees(undefined), plan: { ...withFees(undefined).plan, adviserFees: undefined } });
+    for (let y = 0; y < withNone.yearly.length; y++) {
+      expect(withNone.yearly[y].closingBalance).toBeCloseTo(withMissing.yearly[y].closingBalance, 6);
+      expect(withNone.yearly[y].adviserFeesUpfront.outsideCash).toBe(0);
+      expect(withNone.yearly[y].adviserFeesOngoing.outsideCash).toBe(0);
+    }
+  });
+
+  it("conservation invariant holds with adviser fees present (both slices are named leaks)", () => {
+    const s = withFees({
+      upfront: { total: 20000, fromSuperAmount: 12000, superAccountId: "su1" },
+      ongoing: { annualAmount: 12000, fromSuperAmount: 6000, superAccountId: "su1", indexBasis: "cpi" },
+    }, { endAge: 45 });
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) {
+      checkYearConservation(out, y, `adviser fees fixture, year ${y}`);
+    }
+  });
+
+  it("regression: two claims on the SAME super account in the SAME year never sum to more than the account holds (found via randomScenario — see reserveFromSuper in deterministic.js)", () => {
+    // $15,000 upfront + $10,000 ongoing requested from an account that
+    // only holds $20,000 — naively capping EACH request independently
+    // against the raw $20,000 balance (the original bug) would let
+    // BOTH believe they can be paid in full, debiting $25,000 from an
+    // account that never held more than $20,000. Upfront resolves
+    // FIRST (see reserveFromSuper's own header for the fixed order),
+    // so it gets its full $15,000; ongoing — second in line — gets
+    // only the $5,000 left, with $5,000 falling back to cash.
+    const s = withFees(
+      { upfront: { total: 15000, fromSuperAmount: 15000, superAccountId: "su1" }, ongoing: { annualAmount: 10000, fromSuperAmount: 10000, superAccountId: "su1", indexBasis: "cpi" } },
+      { plan: { superAccounts: [bigSuper({ balance: 20000 })] } }
+    );
+    const out = projectPlan(s);
+    const totalDebited = out.yearly[0].adviserFeesUpfront.paidFromSuper + out.yearly[0].adviserFeesOngoing.paidFromSuper;
+    expect(totalDebited).toBeLessThanOrEqual(20000 + 0.01);
+    expect(out.yearly[0].adviserFeesUpfront.paidFromSuper).toBeCloseTo(15000, 1); // first in line, paid in full
+    expect(out.yearly[0].adviserFeesOngoing.paidFromSuper).toBeCloseTo(5000, 1); // second in line, only what's left
+    expect(out.yearly[0].superDetail.su1.closing).toBeCloseTo(0, 1);
+    checkYearConservation(out, 0, "shared-account regression, year 0");
+  });
+
+  it("emergency fund target (workingCash.minimumBalance) prevents the buffer being drawn down — a shortfall reports as unfunded instead", () => {
+    // planState.test.js covers emergencyFundTarget writing through to
+    // workingCash.minimumBalance; this is the ENGINE consequence the
+    // spec calls out — "deficit funding will not draw the buffer below
+    // it, so a plan that would eat the emergency fund shows as
+    // unfunded instead" — exercised directly against the field the
+    // engine actually reads (convention 11).
+    const s = mkState({
+      endAge: 41,
+      // Growth-only zero-real allocation, not zeroRealAlloc's own
+      // income-yield version — a reinvest-mode INCOME yield is still
+      // genuinely taxable each year even though it never leaves the
+      // asset as cash, which would drag real tax into this fixture and
+      // contaminate the exact hand-calc below; growth-only + non-CGT
+      // (mkAsset's own default) has no tax event at all.
+      assets: [mkAsset({ id: "a1", balance: 5000, allocation: { mode: "custom", incomePct: 0, growthPct: 2.5, frankingPct: 0, volBasis: "Balanced" } })],
+      // ratePct = cpi*100, not 0 or null — a literal 0% NOMINAL rate
+      // still decays in REAL terms via Fisher deflation (same trap
+      // zeroRealAlloc's own header warns about for assets); this is
+      // the WCA's own "real return exactly 0" rate.
+      plan: { workingCash: { balance: 20000, minimumBalance: 20000, ratePct: 2.5 } },
+      cashflows: { expenses: [cf({ amount: 10000, frequency: "annual", fromAge: 40, toAge: 40 })] },
+      fundingOrder: ["a1"],
+    });
+    const out = projectPlan(s);
+    // The WCA never drops below its $20,000 minimum...
+    expect(out.yearly[0].wcaDetail.closing).toBeCloseTo(20000, 1);
+    // ...the $5,000 asset is fully drained trying to cover the shortfall...
+    expect(out.yearly[0].perAssetDetail.a1.closing).toBeCloseTo(0, 1);
+    // ...and the remaining $5,000 the funding order couldn't cover
+    // shows up as unfunded, not as a silently-breached buffer.
+    expect(out.yearly[0].unfundedCashflow).toBeCloseTo(5000, 1);
   });
 });
 

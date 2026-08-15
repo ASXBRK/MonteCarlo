@@ -32,6 +32,7 @@ import {
   createSuperWithdrawal, normaliseSuperWithdrawals,
   SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, FHSSS_ELIGIBLE_TYPES,
   clampWorkingCash, uid,
+  createAllocation,
   INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
   incomeCategoryTaxTreatment,
 } from "./planState.js";
@@ -96,6 +97,7 @@ const els = {
   pageClient: $("pageClient"),
   pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
+  implementationSection: $("implementationSection"),
   assets: $("assets"),
   lifestyleSection: $("lifestyleSection"),
   liabilitiesSection: $("liabilitiesSection"),
@@ -343,6 +345,7 @@ function mountWorkspace(clientId, scenarioId) {
 
 const INPUT_NAV = [
   { id: "setup", label: "Setup" },
+  { id: "implementation", label: "Implementation" },
   { id: "income", label: "Income" },
   { id: "deductions", label: "Deductions" },
   { id: "expenses", label: "Expenses" },
@@ -458,7 +461,7 @@ function persistLastVisited(area, section) {
 function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
-  for (const el of [els.planBar, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
+  for (const el of [els.planBar, els.implementationSection, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
                     els.lifestyleSection, els.liabilitiesSection, els.goalsSection, els.propertySection,
                     els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
@@ -1256,6 +1259,197 @@ els.planBar.addEventListener("click", (e) => {
   state = clampAllToPlan(state, PROFILES);
   saveState();
   renderAll();
+});
+
+// --- Implementation: adviser fees & flow of initial funds
+// (Implementation/Rates spec, Commit 2) ---------------------------------
+
+function superAccountOptionsForFees(selected) {
+  const accts = state.plan.superAccounts ?? [];
+  return `<option value=""${!selected ? " selected" : ""}>None</option>` +
+    accts.map((s) => `<option value="${s.id}"${s.id === selected ? " selected" : ""}>${escapeHTML(s.name)}</option>`).join("");
+}
+
+// The three shapes an allocation can target — an existing financial
+// asset, the Working Cash Account, or a goal — mirrors the spec's own
+// `targetAssetId | "workingCash" | "goal:<id>"` union exactly.
+function allocationTargetOptions(selected) {
+  const opts = [`<option value="workingCash"${selected === "workingCash" ? " selected" : ""}>Working Cash Account</option>`];
+  for (const a of state.assets.filter((x) => x.class !== "lifestyle")) {
+    opts.push(`<option value="${a.id}"${a.id === selected ? " selected" : ""}>${escapeHTML(a.name)}</option>`);
+  }
+  for (const g of state.goals ?? []) {
+    const val = `goal:${g.id}`;
+    opts.push(`<option value="${val}"${val === selected ? " selected" : ""}>Goal: ${escapeHTML(g.label)}</option>`);
+  }
+  return opts.join("");
+}
+
+// "Show the cap, the requested amount, and any shortfall that must be
+// paid personally" — read straight off the live projection's own
+// per-year adviser-fee report, never recomputed.
+function adviserFeeCapRowHTML(label, fee) {
+  if (!fee || !(fee.requestedFromSuper > 0)) return "";
+  const shortfall = fee.requestedFromSuper - fee.paidFromSuper;
+  return `
+    <tr>
+      <td>${escapeHTML(label)} — requested from super</td>
+      <td>${fmtMoney(fee.requestedFromSuper)}, paid ${fmtMoney(fee.paidFromSuper)}${shortfall > 0.5 ? ` — short ${fmtMoney(shortfall)}, paid personally` : ""}</td>
+    </tr>
+  `;
+}
+
+// A reconciliation block, not a new source of truth (the spec's own
+// words): total cash available, less the upfront fee's outside-super
+// slice, less every allocation, equals residual — cross-checked
+// against what's ACTUALLY entered as opening balances elsewhere in the
+// plan. A mismatch is flagged, never silently corrected — entered
+// balances are never overwritten by this display.
+function implementationReconciliationHTML() {
+  const impl = state.plan.implementation;
+  const upfront = state.plan.adviserFees.upfront;
+  const upfrontOutside = Math.max(0, upfront.total - upfront.fromSuperAmount);
+  const allocatedTotal = impl.allocations.reduce((s, a) => s + a.amount, 0);
+  const residual = impl.totalCashAvailable - upfrontOutside - allocatedTotal;
+  const enteredTotal = state.assets.reduce((s, a) => s + (a.balance || 0), 0) + (state.plan.workingCash.balance || 0);
+  const mismatch = allocatedTotal - enteredTotal;
+  return `
+    <table class="focus-table">
+      <tr><td>Total cash available</td><td>${fmtMoney(impl.totalCashAvailable)}</td></tr>
+      <tr><td>Less: upfront adviser fee (outside super)</td><td>−${fmtMoney(upfrontOutside)}</td></tr>
+      ${impl.allocations.map((a) => `<tr><td>Less: ${escapeHTML(a.label)}</td><td>−${fmtMoney(a.amount)}</td></tr>`).join("")}
+      <tr class="tl-total"><td>Residual</td><td>${fmtMoney(residual)}</td></tr>
+    </table>
+    ${Math.abs(mismatch) > 0.5
+      ? `<p class="helper-warning">Allocations total ${fmtMoney(allocatedTotal)}, but entered opening balances (financial + lifestyle assets, plus the Working Cash Account) total ${fmtMoney(enteredTotal)} — a ${fmtMoney(Math.abs(mismatch))} difference. A reconciliation flag only; entered balances are never overwritten.</p>`
+      : `<p class="helper-text">Allocations reconcile with entered opening balances.</p>`}
+  `;
+}
+
+function renderImplementation() {
+  const af = state.plan.adviserFees;
+  const impl = state.plan.implementation;
+  const y0 = projection?.yearly?.[0];
+  els.implementationSection.innerHTML = `
+    <h2 class="section-heading">Implementation</h2>
+    <div class="pcard">
+      <div class="pcard-head"><span class="pcard-name">Adviser fees</span></div>
+      <div class="pcard-body">
+        <div class="cf-section-title">Upfront (paid once, at plan start)</div>
+        <div class="person-grid">
+          <div class="cf-cell"><label>Total fee ($)</label>
+            <input type="number" min="0" step="100" value="${af.upfront.total}" data-impl-field="upfrontTotal" /></div>
+          <div class="cf-cell"><label>From super ($)</label>
+            <input type="number" min="0" max="${af.upfront.total}" step="100" value="${af.upfront.fromSuperAmount}" data-impl-field="upfrontFromSuper" /></div>
+          <div class="cf-cell"><label>Super account</label>
+            <select data-impl-field="upfrontSuperAccount">${superAccountOptionsForFees(af.upfront.superAccountId)}</select></div>
+        </div>
+        <div class="cf-section-title">Ongoing (indexed, every year)</div>
+        <div class="person-grid">
+          <div class="cf-cell"><label>Annual amount ($)</label>
+            <input type="number" min="0" step="100" value="${af.ongoing.annualAmount}" data-impl-field="ongoingAnnual" /></div>
+          <div class="cf-cell"><label>From super ($/yr)</label>
+            <input type="number" min="0" max="${af.ongoing.annualAmount}" step="100" value="${af.ongoing.fromSuperAmount}" data-impl-field="ongoingFromSuper" /></div>
+          <div class="cf-cell"><label>Super account</label>
+            <select data-impl-field="ongoingSuperAccount">${superAccountOptionsForFees(af.ongoing.superAccountId)}</select></div>
+          <div class="cf-cell"><label>Indexation</label>
+            <select data-impl-field="ongoingIndexBasis">
+              <option value="cpi"${af.ongoing.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
+              <option value="awote"${af.ongoing.indexBasis === "awote" ? " selected" : ""}>AWOTE (wages)</option>
+              <option value="none"${af.ongoing.indexBasis === "none" ? " selected" : ""}>None (nominal fixed)</option>
+            </select>
+          </div>
+        </div>
+        <p class="helper-text">Financial advice fees are not modelled as tax-deductible here. The partial deductibility available for advice relating to EXISTING investments is real but needs an apportionment this tool doesn't collect — see the Parameters modal.</p>
+        <p class="helper-text">Fees paid from super are not a benefit payment and are not assessable to the member — they reduce the account's own balance directly, so its future earnings are on a smaller base (the same treatment as a Division 293/296 release from super).</p>
+        ${y0 && (y0.adviserFeesUpfront?.requestedFromSuper > 0 || y0.adviserFeesOngoing?.requestedFromSuper > 0) ? `
+          <table class="focus-table">
+            ${adviserFeeCapRowHTML("Upfront", y0.adviserFeesUpfront)}
+            ${adviserFeeCapRowHTML("Ongoing, this year", y0.adviserFeesOngoing)}
+          </table>
+        ` : ""}
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="pcard-head"><span class="pcard-name">Flow of initial funds</span></div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          <div class="cf-cell"><label>Total cash available ($)</label>
+            <input type="number" min="0" step="1000" value="${impl.totalCashAvailable}" data-impl-field="totalCashAvailable" /></div>
+          <div class="cf-cell"><label>Emergency fund target ($)</label>
+            <input type="number" min="0" step="1000" value="${impl.emergencyFundTarget}" data-impl-field="emergencyFundTarget" /></div>
+        </div>
+        <p class="helper-text">Emergency fund target sets the Working Cash Account's minimum balance once it's nonzero — deficit funding will not draw the buffer below it, so a plan that would eat the emergency fund shows as unfunded instead.</p>
+        <div class="cf-section-title">Allocations</div>
+        ${impl.allocations.length === 0 ? "" : `
+          <table class="cf-table">
+            <thead><tr><th>Label</th><th>Amount</th><th>Target</th><th></th></tr></thead>
+            <tbody>${impl.allocations.map((a) => `
+              <tr class="cf-tr">
+                <td class="cf-td-label"><input type="text" maxlength="40" value="${escapeHTML(a.label)}" data-alid="${a.id}" data-alfield="label" /></td>
+                <td class="cf-td-amount"><input type="text" inputmode="decimal" class="cf-amount-input" value="${fmtAmountValue(a.amount)}" data-alid="${a.id}" data-alfield="amount" /></td>
+                <td class="cf-td-date"><select data-alid="${a.id}" data-alfield="targetAssetId">${allocationTargetOptions(a.targetAssetId)}</select></td>
+                <td class="cf-td-remove"><button class="cf-remove" type="button" data-impl-action="remove-allocation" data-alid="${a.id}">×</button></td>
+              </tr>
+            `).join("")}</tbody>
+          </table>
+        `}
+        <button class="add-row-btn" type="button" data-impl-action="add-allocation">+ Add allocation</button>
+        ${implementationReconciliationHTML()}
+      </div>
+    </div>
+  `;
+}
+
+els.implementationSection.addEventListener("change", (e) => {
+  const field = e.target.dataset.implField;
+  const alField = e.target.dataset.alfield;
+  if (field) {
+    const af = state.plan.adviserFees;
+    const impl = state.plan.implementation;
+    if (field === "upfrontTotal") af.upfront.total = clampNumber(e.target.value, 0);
+    else if (field === "upfrontFromSuper") af.upfront.fromSuperAmount = clampNumber(e.target.value, 0);
+    else if (field === "upfrontSuperAccount") af.upfront.superAccountId = e.target.value || null;
+    else if (field === "ongoingAnnual") af.ongoing.annualAmount = clampNumber(e.target.value, 0);
+    else if (field === "ongoingFromSuper") af.ongoing.fromSuperAmount = clampNumber(e.target.value, 0);
+    else if (field === "ongoingSuperAccount") af.ongoing.superAccountId = e.target.value || null;
+    else if (field === "ongoingIndexBasis") af.ongoing.indexBasis = e.target.value;
+    else if (field === "totalCashAvailable") impl.totalCashAvailable = clampNumber(e.target.value, 0);
+    else if (field === "emergencyFundTarget") impl.emergencyFundTarget = clampNumber(e.target.value, 0);
+    else return;
+  } else if (alField) {
+    const a = (state.plan.implementation.allocations ?? []).find((x) => x.id === e.target.dataset.alid);
+    if (!a) return;
+    if (alField === "label") a.label = e.target.value.trim() || a.label;
+    else if (alField === "amount") a.amount = clampNumber(e.target.value, 0);
+    else if (alField === "targetAssetId") a.targetAssetId = e.target.value;
+    else return;
+  } else {
+    return;
+  }
+  state.plan = clampPlan(state.plan, PROFILES);
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+  renderImplementation();
+});
+
+els.implementationSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-impl-action]");
+  if (!btn) return;
+  if (btn.dataset.implAction === "add-allocation") {
+    state.plan.implementation.allocations = [
+      ...state.plan.implementation.allocations, createAllocation(state.plan.implementation.allocations),
+    ];
+  } else if (btn.dataset.implAction === "remove-allocation") {
+    state.plan.implementation.allocations = state.plan.implementation.allocations.filter((a) => a.id !== btn.dataset.alid);
+  } else {
+    return;
+  }
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+  renderImplementation();
 });
 
 // --- asset cards ------------------------------------------------------
@@ -7676,6 +7870,7 @@ function renderAll() {
   renderProperties();
   renderSuper(); // after refreshOutputs — the cap-headroom display reads the projection
   renderGoals(); // after refreshOutputs — goalStats read the projection
+  renderImplementation(); // after refreshOutputs — the fee cap/shortfall display reads the projection
 }
 
 window.addEventListener("hashchange", handleRoute);

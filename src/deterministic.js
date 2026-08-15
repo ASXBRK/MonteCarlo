@@ -375,6 +375,51 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     return (flow.amount / 12) * Math.pow((1 + g) / (1 + cpi), m / 12);
   };
 
+  // --- adviser fees (Implementation/Rates spec, Commit 2) ---------------
+  //
+  // Two independent slices — upfront (once, at plan start) and ongoing
+  // (every year, indexed) — each split outside/inside super. The
+  // outside-super portion is an ordinary household cash outflow,
+  // flowing through the monthly `net` calc exactly like any other
+  // outflow (never deductible — financial advice fees aren't; the
+  // partial deductibility available for advice relating to EXISTING
+  // investments needs an apportionment this build doesn't collect —
+  // disclosed in the Parameters modal). The inside-super portion is a
+  // DIRECT balance debit via withdrawFromSuper — the SAME mechanic and
+  // reasoning as the Division 293/296 release further below: not a
+  // benefit payment, no preservation gate, no assessable income,
+  // applied BEFORE that period's growth so growth compounds on the
+  // post-fee balance ("reduce the interest proportionally" — not a
+  // special formula, just growth reading an already-reduced balance).
+  const adviserFeesPlan = state.plan.adviserFees ?? {
+    upfront: { total: 0, fromSuperAmount: 0, superAccountId: null },
+    ongoing: { annualAmount: 0, fromSuperAmount: 0, superAccountId: null, indexBasis: "cpi" },
+  };
+  const upfrontFee = adviserFeesPlan.upfront;
+  // The household's own cash cost: the outside-super slice PLUS
+  // whatever the nominated account couldn't cover — "any shortfall
+  // that must be paid personally" (the spec's own words). The from-
+  // super side (paid/shortfall) is resolved per-year, in the main year
+  // loop below, alongside every other release mechanism that can
+  // target the same account (Division 293/296, FHSSS) — see
+  // reserveFromSuper's own header for why this can't be resolved here,
+  // once and for all, the way Commit 1's own top-level setup can.
+  const upfrontOutsideOnly = Math.max(0, upfrontFee.total - upfrontFee.fromSuperAmount);
+
+  const ongoingFee = adviserFeesPlan.ongoing;
+  const ongoingSuperFraction = ongoingFee.annualAmount > 0 ? ongoingFee.fromSuperAmount / ongoingFee.annualAmount : 0;
+  const ongoingBasisRate = ongoingFee.indexBasis === "awote" ? awoteAssum : ongoingFee.indexBasis === "none" ? 0 : cpi;
+  // Real-dollar ANNUAL figure at month m — the same indexed-real
+  // convention every other annual flow here uses (propFlowAt, goal
+  // targets): real amount = annual × ((1+g)/(1+cpi))^(m/12).
+  const ongoingAnnualRealAt = (m) => ongoingFee.annualAmount * Math.pow((1 + ongoingBasisRate) / (1 + cpi), m / 12);
+  // The outside-super slice genuinely flows monthly (the household's
+  // own cash experience); the inside-super slice is resolved and
+  // applied once per FY, in July (see the per-year block below) — a
+  // disclosed simplification of "monthly" for the mechanics only, not
+  // for what the household actually pays each month.
+  const ongoingOutsideMonthlyAt = (m) => (ongoingAnnualRealAt(m) * (1 - ongoingSuperFraction)) / 12;
+
   // --- liabilities (D3): simulated in NOMINAL dollars, deflated at the
   // ledger. Repayments are nominal-fixed (basis-None behaviour), so
   // their real burden falls at CPI. Constant rate for the projection
@@ -678,6 +723,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       }]),
     ]),
     liabilitiesClosing: 0,
+    // Adviser fees (Implementation/Rates spec, Commit 2) — outsideCash
+    // is the genuine outside-super household cash cost (excluding any
+    // from-super shortfall, which is already folded into it via
+    // adviserFeeCashOut at the point net is computed — see that
+    // comment); requestedFromSuper/paidFromSuper (the latter credited
+    // onto superDetail[id].adviserFee, same account) let the UI derive
+    // "shortfall paid personally" without re-deriving anything.
+    // adviserFeesUpfront is nonzero only in the projection's first
+    // year (the upfront fee fires once, at month 0); adviserFeesOngoing
+    // accrues every year.
+    adviserFeesUpfront: { outsideCash: 0, requestedFromSuper: 0, paidFromSuper: 0 },
+    adviserFeesOngoing: { outsideCash: 0, requestedFromSuper: 0, paidFromSuper: 0 },
     // Per-goal detail (Document Set Commit 6), real dollars — this
     // FY's contribution only (summed across years for the lifetime
     // accrued figure; see goalStats in the final return object).
@@ -742,6 +799,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // credited the full requested amount; the account paid only what
       // it had) was found to silently create money.
       fhsssRelease: 0,
+      // Adviser fees (Implementation/Rates spec, Commit 2) — the amount
+      // ACTUALLY debited from this account for a fee, same shape as
+      // `release` above (a direct balance reduction, not a withdrawal:
+      // no preservation gate, not assessable).
+      adviserFee: 0,
       closing: 0, taxFreeClosing: 0,
     }])),
     superClosing: 0,
@@ -772,7 +834,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   //   trackUnfunded — record into the projection-level shortfall trackers
   // Returns per-person income components + realised gains + months in
   // which each person's income arose.
-  function runYear(y, { taxOut, cgtDue, row, trackUnfunded, superOutcome, divReleaseFromSuper, divReleaseAccountId, fhsssRelease }) {
+  function runYear(y, {
+    taxOut, cgtDue, row, trackUnfunded, superOutcome, divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
+    ongoingFromSuperRequested = 0, ongoingFromSuperShortfall = 0, upfrontFromSuperShortfall = 0,
+  }) {
     const fyStart = fy0 + y;
     // Condition of release (Tier 1.2, Commit 3): static for the whole
     // projection (retirementAge doesn't change), so cheap to recompute
@@ -961,6 +1026,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // nothing to snapshot/roll back for that pass, unlike `bal`/
       // `pools` above.
       if (row) {
+        // Adviser fees, inside-super portion (Implementation/Rates
+        // spec, Commit 2) — direct balance debits via the SAME
+        // withdrawFromSuper the Division 293/296 release uses just
+        // below, applied BEFORE growth for the same reason. Upfront
+        // fires once, at month 0 of the whole projection; ongoing
+        // fires once per FY, in July (ongoingFromSuperShortfall was
+        // already resolved against the SAME opening-of-year balance
+        // this call will now debit — see the per-year setup for why).
+        if (m === 0 && upfrontFee.superAccountId && upfrontFee.fromSuperAmount > 0) {
+          const paid = withdrawFromSuper(upfrontFee.superAccountId, upfrontFee.fromSuperAmount);
+          row.superDetail[upfrontFee.superAccountId].adviserFee += paid;
+          row.adviserFeesUpfront.paidFromSuper += paid;
+        }
+        if (m === first && ongoingFee.superAccountId && ongoingFromSuperRequested > 0) {
+          const paid = withdrawFromSuper(ongoingFee.superAccountId, ongoingFromSuperRequested);
+          row.superDetail[ongoingFee.superAccountId].adviserFee += paid;
+          row.adviserFeesOngoing.paidFromSuper += paid;
+        }
         // Division 293/296 release authority: resolved once per FY
         // (above, before either pass, against the opening balance) —
         // applied here, at the very top of July's month, before growth/
@@ -1374,7 +1457,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const flows = schedule.superFlows[id];
         return s + (flows ? flows.personalDeductible[m] + flows.nonConcessional[m] : 0);
       }, 0) + fillCashDebit;
-      let net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut - superContribCashOut;
+      // Adviser fees, outside-super cash (Implementation/Rates spec,
+      // Commit 2) — UNGATED, exactly like exp/tax/superContribCashOut
+      // above: this can force a deficit-funded asset sale (a real
+      // realised gain), which the tax measurement pass must see too,
+      // not just the real pass. Upfront fires once, at month 0 of the
+      // whole projection; ongoing flows monthly. Each also carries its
+      // OWN shortfall — whatever the nominated super account couldn't
+      // cover falls back to cash here, "paid personally" per the spec.
+      const upfrontCashOut = m === 0 ? upfrontOutsideOnly + upfrontFromSuperShortfall : 0;
+      const ongoingCashOut = ongoingOutsideMonthlyAt(m) + (m === first ? ongoingFromSuperShortfall : 0);
+      const adviserFeeCashOut = upfrontCashOut + ongoingCashOut;
+      let net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut - superContribCashOut - adviserFeeCashOut;
       // Goals, surplus-funded: capped at whatever's actually left over
       // this month (a goal can't manufacture cash that doesn't exist,
       // unlike an instructed transaction such as a loan repayment or a
@@ -1397,6 +1491,20 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         row.cashDistributions += cashDist;
         row.expenses += exp + propExpenseOut;
         row.tax += tax;
+        // Adviser fees (Commit 2) — outsideCash/requestedFromSuper let
+        // the UI show "cap, requested, shortfall" without recomputing
+        // anything (shortfall = requestedFromSuper − paidFromSuper,
+        // the latter credited above, before growth, alongside
+        // superDetail[id].adviserFee). outsideCash deliberately excludes
+        // any from-super shortfall — that's already folded into
+        // adviserFeeCashOut/net above; keeping it separate here is what
+        // makes "requested vs paid vs shortfall" a clean read.
+        if (m === 0) {
+          row.adviserFeesUpfront.outsideCash += upfrontOutsideOnly;
+          row.adviserFeesUpfront.requestedFromSuper += upfrontFee.fromSuperAmount;
+        }
+        row.adviserFeesOngoing.outsideCash += ongoingOutsideMonthlyAt(m);
+        if (m === first) row.adviserFeesOngoing.requestedFromSuper += ongoingFromSuperRequested;
         row.surplusOrDeficit += net;
         row.wcaDetail.netFlow += net;
       }
@@ -1512,6 +1620,49 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // --- year loop -------------------------------------------------------------
   for (let y = 0; y < years; y++) {
     const fyStart = fy0 + y;
+
+    // Shared per-account "already spoken for" tally (Implementation/
+    // Rates spec, Commit 2 follow-on) — FOUR independent mechanisms can
+    // each want to release from super in the SAME year (adviser fees,
+    // Division 293/296, FHSSS), all resolved "once per FY, before
+    // either pass, against the opening balance" for the SAME reason
+    // (a shortfall mustn't depend on which pass computes it). But
+    // "before either pass" means none of them has actually touched
+    // superBal yet — read independently, EACH would see the FULL
+    // current balance and could believe it alone can cover its full
+    // request, even though another mechanism targeting the SAME
+    // account already claimed part of it this same year. reserve()
+    // resolves them in a FIXED order (adviser fees, then Division
+    // 293/296, then FHSSS — matching the order they actually debit
+    // inside runYear) against what's left AFTER earlier claims, so the
+    // SUM of what every mechanism believes it can take never exceeds
+    // what the account actually holds. This is the same class of bug
+    // as the FHSSS-release money-creation fix this file's own header
+    // references (conservationCheck.js) — found here via the identical
+    // invariant, once adviser fees made two draws on the same account
+    // in the same year common enough to hit in the random-scenario
+    // suite.
+    const superReservedThisYear = {};
+    const reserveFromSuper = (accountId, amount) => {
+      if (!accountId || !(amount > 0)) return 0;
+      const already = superReservedThisYear[accountId] ?? 0;
+      const remaining = Math.max(0, (superBal[accountId] ?? 0) - already);
+      const claimed = Math.min(amount, remaining);
+      superReservedThisYear[accountId] = already + claimed;
+      return claimed;
+    };
+
+    // Adviser fees (Commit 2) — resolved first (see reserveFromSuper's
+    // own header for the ordering this depends on). Upfront only ever
+    // has anything to resolve in year 0 (it fires once, at month 0 of
+    // the whole projection); ongoing resolves every year.
+    const upfrontFromSuperPaid = y === 0 ? reserveFromSuper(upfrontFee.superAccountId, upfrontFee.fromSuperAmount) : 0;
+    const upfrontFromSuperShortfall = y === 0 ? upfrontFee.fromSuperAmount - upfrontFromSuperPaid : 0;
+    const ongoingFromSuperRequested = ongoingFee.superAccountId
+      ? ongoingAnnualRealAt(yearStart(y)) * ongoingSuperFraction : 0;
+    const ongoingFromSuperPaid = reserveFromSuper(ongoingFee.superAccountId, ongoingFromSuperRequested);
+    const ongoingFromSuperShortfall = ongoingFromSuperRequested - ongoingFromSuperPaid;
+
     const div293DueDetail = y > 0 ? pendingDiv293 : { client: 0, partner: 0 };
     const div296DueDetail = y > 0 ? pendingDiv296 : { client: 0, partner: 0 };
     const div293Due = div293DueDetail.client + div293DueDetail.partner;
@@ -1559,7 +1710,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         });
         continue;
       }
-      const released = Math.min(personDue, superBal[accountId]);
+      // reserveFromSuper, not a plain Math.min against superBal — see
+      // its own header: adviser fees may have already claimed part of
+      // this SAME account this SAME year, resolved just above.
+      const released = reserveFromSuper(accountId, personDue);
       divReleaseFromSuper[p] = released;
       divReleaseAccountId[p] = accountId;
       // Insufficient balance: take what's there, fall back to cash for
@@ -1746,27 +1900,30 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           concessionalBalance: fb.concessional, nonConcessionalBalance: fb.nonConcessional, earnings: fb.earnings,
         });
         if (amounts.grossRelease <= 0) continue;
-        // Cap at what's actually in the account: the FHSSS notional
-        // balance is a running subset of real contributions credited
-        // to the real account, but something else touching the SAME
-        // account first this FY (a Division 293/296 release, an
-        // explicit withdrawal) could have drained it below the
-        // notional figure. Capping here — before either pass runs, so
-        // both see the identical, already-capped amount — keeps the
-        // settlement-cash credit and the super debit exactly in sync;
-        // requesting more than the account holds and crediting the
-        // settlement with the uncapped figure anyway is the same class
-        // of money-creation bug the conservation invariant exists to
-        // catch (found via this exact check — see conservationCheck.js).
+        // Cap at what's actually AVAILABLE — via reserveFromSuper, not
+        // a plain read of superBal: the FHSSS notional balance is a
+        // running subset of real contributions credited to the real
+        // account, but something else touching the SAME account first
+        // this FY (adviser fees, a Division 293/296 release, an
+        // explicit withdrawal) could have drained it below the notional
+        // figure, OR already reserved part of it this same year (see
+        // reserveFromSuper's own header — resolved fourth, after
+        // adviser fees and Division 293/296, matching the order these
+        // mechanisms actually debit inside runYear). Capping here —
+        // before either pass runs, so both see the identical,
+        // already-capped amount — keeps the settlement-cash credit and
+        // the super debit exactly in sync; requesting more than the
+        // account holds and crediting the settlement with the uncapped
+        // figure anyway is the same class of money-creation bug the
+        // conservation invariant exists to catch (found via this exact
+        // check — see conservationCheck.js).
         const accountId = superAccountsByOwner[per]?.[0];
-        const available = accountId ? superBal[accountId] : 0;
-        const scale = amounts.grossRelease > available
-          ? (amounts.grossRelease > 0 ? Math.max(0, available) / amounts.grossRelease : 1)
-          : 1;
-        const capped = scale === 1 ? amounts : {
+        const claimed = reserveFromSuper(accountId, amounts.grossRelease);
+        const scale = amounts.grossRelease > 0 ? claimed / amounts.grossRelease : 1;
+        const capped = scale >= 1 ? amounts : {
           taxableComponent: amounts.taxableComponent * scale,
           taxFreeComponent: amounts.taxFreeComponent * scale,
-          grossRelease: amounts.grossRelease * scale,
+          grossRelease: claimed,
         };
         if (capped.grossRelease <= 0) continue;
         fhsssRelease[per] = { ...capped, propertyId: p.id };
@@ -1797,6 +1954,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const measured = runYear(y, {
       taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
+      ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
     });
     Object.assign(bal, balSnap);
     pools = poolSnap;
@@ -2053,6 +2211,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const real = runYear(y, {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
+      ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
     });
     row.closingBalance = combined[yearEnd(y)];
     row.wcaDetail.closing = wcaSeries[yearEnd(y)];
