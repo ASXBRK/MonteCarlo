@@ -41,7 +41,20 @@ implementation (unfunded cashflow re-recording cumulatively).
 **Output additions** — liabilities table and chart; cashflow bars chart; key
 figures table; projection chart moved to annual points on an age axis.
 
-Roughly 406 tests, clean build.
+**Document Set (docs/specs/11-document-set.md)** — gap-filling commits found
+by the workbook document-sense-check:
+- Commit 1, **HELP repayments** (`1f3a5eb`) — FY-keyed bracket table with the
+  $186,052 whole-income cliff; per-person `helpBalance`; repayment income =
+  taxable income + reportable super contributions (SS+PD, not SG) + net
+  investment loss; folded into PAYG withholding/refund settlement.
+- Commit 2, **Medicare Levy Surcharge** (`afbfdec`) — single/family band
+  tables (AWOTE-indexed), +$1,500/child-after-first family threshold step;
+  reuses HELP's repayment-income figure; `privateHospitalCover` (per person)
+  and `dependentChildren` (household) inputs. Also fixed a latent bug: the
+  Setup plan-bar's commit handler dropped `workingCash` from the next plan
+  object, silently resetting the WCA to defaults on every Setup edit.
+
+Roughly 571 tests, clean build.
 
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with nominal
