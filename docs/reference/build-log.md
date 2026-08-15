@@ -81,8 +81,20 @@ by the workbook document-sense-check:
   `liabilities.js` computes the no-extras baseline; the Liabilities table
   reports interest/time saved once a loan with extras is fully repaid
   within the projection.
+- Commit 6, **Goals** — `state.goals` (per goal: label, targetAmount,
+  targetAt, fundedFrom [assetId | "surplus"], indexation), a new input
+  page. Accrues straight-line from plan start to the (indexed) target
+  month; asset-funded draws via the same `sell()` every asset-affecting
+  cashflow uses (naturally capped at the asset's balance); surplus-funded
+  is capped at whatever's actually left over each month (a discretionary
+  contribution can't manufacture cash, unlike an instructed transaction —
+  no "unfunded" cascade, the shortfall reduces the goal's own accrual
+  instead). "Spent at the target date" = the accrual itself, no separate
+  goal-balance ledger. Reports achieved/shortfall + an extrapolated
+  alternative date; own group in the Cashflow table; dated markers on
+  the composite chart.
 
-Roughly 628 tests, clean build.
+Roughly 635 tests, clean build.
 
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with nominal

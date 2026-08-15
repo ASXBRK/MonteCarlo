@@ -22,6 +22,7 @@ import {
   INCOME_TYPES, SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, CARRY_FORWARD_YEARS,
   clampWorkingCash,
   createDeductionRow, clampDeductionRow, DEDUCTION_CATEGORIES, DEDUCTION_CATEGORY_LABELS,
+  createGoal, clampGoal, normaliseGoals,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -1375,5 +1376,26 @@ describe("Input integrity — unenterable states (audit Part C)", () => {
     // of this required discarding the row/person/account, only the
     // specific bad value.
     expect(s.cashflows.superContributions[0].amount).toBe(5000); // rest of the row survives untouched
+  });
+
+  it("clampGoal drops a stale/removed fundedFrom asset — falls back to surplus, never funds from nothing", () => {
+    const s = defaultState(PROFILES, NOW);
+    const clamped = clampGoal(
+      { id: "gl1", label: "Car", targetAmount: 20000, targetAt: { kind: "age", age: s.plan.endAge },
+        fundedFrom: "no-such-asset", indexBasis: "cpi", indexExtraPct: 0 },
+      s.plan, s.assets
+    );
+    expect(clamped.fundedFrom).toBe("surplus");
+  });
+
+  it("clampGoal keeps a valid fundedFrom asset reference", () => {
+    const s = defaultState(PROFILES, NOW);
+    const assetId = s.assets[0].id;
+    const clamped = clampGoal(
+      { id: "gl1", label: "Car", targetAmount: 20000, targetAt: { kind: "age", age: s.plan.endAge },
+        fundedFrom: assetId, indexBasis: "cpi", indexExtraPct: 0 },
+      s.plan, s.assets
+    );
+    expect(clamped.fundedFrom).toBe(assetId);
   });
 });

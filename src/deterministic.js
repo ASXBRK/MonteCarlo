@@ -414,6 +414,47 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     if (offsetId) (offsetLoansByAsset[offsetId] ??= []).push(l.id);
   }
 
+  // --- goals (Document Set Commit 6) ------------------------------------
+  //
+  // Straight-line accrual from plan start to the (indexed) target
+  // month — "spent at the target date" is modelled as the accrual
+  // itself: the money progressively leaves its funding source exactly
+  // as it's earmarked, so by the target month the indexed target has
+  // already left the model; there is no separate goal-balance ledger
+  // holding money in limbo between accrual and spend. Target month
+  // resolves via the SAME "fires in July of the resolved plan year"
+  // convention every other one-off event in this engine uses.
+  const goals = state.goals ?? [];
+  const goalMeta = {};
+  for (const g of goals) {
+    const targetYear = resolveRef(g.targetAt, state.plan, schedule, "client").planYear;
+    const targetMonth = julyOf(targetYear); // null = never fires (partial-first-year skip, convention 5)
+    if (targetMonth == null) continue;
+    const basisRate = g.indexBasis === "awote" ? awoteAssum : g.indexBasis === "cpi" ? cpi : 0;
+    const gRate = basisRate + (g.indexExtraPct ?? 0) / 100;
+    const targetReal = g.targetAmount * Math.pow((1 + gRate) / (1 + cpi), targetMonth / 12);
+    const totalMonths = Math.max(1, targetMonth);
+    goalMeta[g.id] = {
+      targetMonth,
+      targetReal,
+      requiredMonthly: targetReal / totalMonths,
+      fundedFrom: g.fundedFrom,
+      // A stale/removed asset reference falls back to "surplus" at the
+      // planState clamp layer already — this is a defensive re-check
+      // for a raw/imported state that could still reach here with one.
+      assetOk: g.fundedFrom !== "surplus" && g.fundedFrom in bal,
+    };
+  }
+  // Reporting-only running total per goal (real $, this-FY-only reset
+  // by `row` — summed across years for the final accrued figure).
+  // Gated on `row` exactly like row.liabilities[l.id].extraRepayment
+  // above: the ACTUAL sell()/cash effect runs unconditionally in both
+  // passes (bal/pools/net are snapshotted and restored around them,
+  // same as every other asset-affecting cashflow), only the reporting
+  // accumulation needs to avoid double-counting the measure pass.
+  const goalAccruedTotal = {};
+  for (const g of goals) goalAccruedTotal[g.id] = 0;
+
   // Lifestyle assets are illiquid to the engine: never funding
   // sources, never surplus targets (defensive — settings invariants
   // already exclude them).
@@ -577,6 +618,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0,
     }])),
     liabilitiesClosing: 0,
+    // Per-goal detail (Document Set Commit 6), real dollars — this
+    // FY's contribution only (summed across years for the lifetime
+    // accrued figure; see goalStats in the final return object).
+    goals: Object.fromEntries(goals.map((g) => [g.id, { contribution: 0 }])),
     // Per-property detail (D4), real dollars.
     properties: Object.fromEntries(props.map((p) => [p.id, {
       value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0, fhsssRelease: 0, lmi: 0,
@@ -1146,6 +1191,20 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         }
       }
 
+      // Goals (Document Set Commit 6), asset-funded: a scheduled
+      // withdrawal via the SAME sell() every other asset-affecting
+      // cashflow uses — unconditional in both passes (bal/pools are
+      // snapshotted/restored around them), naturally capped at the
+      // asset's own balance, so a goal simply accrues slower once its
+      // funding asset runs low (no separate "unfunded" plumbing needed
+      // the way a surplus-funded goal needs, below).
+      for (const g of goals) {
+        const gm = goalMeta[g.id];
+        if (!gm || gm.fundedFrom === "surplus" || !gm.assetOk || m >= gm.targetMonth) continue;
+        const contributed = sell(gm.fundedFrom, gm.requiredMonthly, m);
+        if (row) { row.goals[g.id].contribution += contributed; goalAccruedTotal[g.id] += contributed; }
+      }
+
       // c. Household net, including tax outflows (decision 14) —
       // applied to the WCA balance rather than spent/sold immediately
       // (Working Cash Account fix): this is what lets an annual lump
@@ -1181,7 +1240,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const flows = schedule.superFlows[id];
         return s + (flows ? flows.personalDeductible[m] + flows.nonConcessional[m] : 0);
       }, 0) + fillCashDebit;
-      const net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut - superContribCashOut;
+      let net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut - superContribCashOut;
+      // Goals, surplus-funded: capped at whatever's actually left over
+      // this month (a goal can't manufacture cash that doesn't exist,
+      // unlike an instructed transaction such as a loan repayment or a
+      // property purchase — those happen regardless of funding, with
+      // ONLY their cash consequence flowing to deficit-then-unfunded;
+      // a discretionary savings contribution has no equivalent "happens
+      // anyway" event). Multiple surplus-funded goals in the same month
+      // compete for the SAME pool, in plan order — a disclosed
+      // simplification, not a priority system.
+      for (const g of goals) {
+        const gm = goalMeta[g.id];
+        if (!gm || gm.fundedFrom !== "surplus" || m >= gm.targetMonth) continue;
+        const contributed = Math.min(gm.requiredMonthly, Math.max(0, net));
+        net -= contributed;
+        if (row) { row.goals[g.id].contribution += contributed; goalAccruedTotal[g.id] += contributed; }
+      }
       wcaBal += net;
       if (row) {
         row.income += inc;
@@ -1959,6 +2034,34 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         };
   }
 
+  // Document Set Commit 6 — per-goal outcome: achieved in full, or
+  // short by the target date. The "reached instead" date extrapolates
+  // the goal's OWN average funding rate achieved so far forward at the
+  // same pace — a disclosed simplification (the real rate could
+  // improve or worsen; this assumes it stays constant).
+  const goalStats = {};
+  for (const g of goals) {
+    const gm = goalMeta[g.id];
+    if (!gm) { goalStats[g.id] = null; continue; }
+    const accrued = goalAccruedTotal[g.id] ?? 0;
+    const shortfallAmount = Math.max(0, gm.targetReal - accrued);
+    let alternativeMonth = null;
+    if (shortfallAmount > 1e-6) {
+      const avgMonthlyRate = gm.targetMonth > 0 ? accrued / gm.targetMonth : 0;
+      alternativeMonth = avgMonthlyRate > 1e-9
+        ? gm.targetMonth + Math.ceil(shortfallAmount / avgMonthlyRate)
+        : null; // never, at this rate
+    }
+    goalStats[g.id] = {
+      targetReal: gm.targetReal,
+      targetMonth: gm.targetMonth,
+      accrued,
+      shortfall: shortfallAmount,
+      achieved: shortfallAmount <= 1e-6,
+      alternativeMonth,
+    };
+  }
+
   let shortfall = null;
   if (firstUnfundedMonth >= 0) {
     const y = schedule.yearOfMonth[firstUnfundedMonth];
@@ -1991,5 +2094,6 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     superWarnings,
     propertyWarnings,
     liabilityRepaymentStats,
+    goalStats,
   };
 }

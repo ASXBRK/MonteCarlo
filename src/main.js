@@ -22,6 +22,7 @@ import {
   personDisplayName, resolveEndBasis,
   createLiability, LIABILITY_TYPES, normaliseLiabilities,
   createExtraRepayment, createOneOffRepayment,
+  createGoal, normaliseGoals,
   createProperty, normaliseProperties, PROPERTY_STATES, PROPERTY_TYPES,
   clampLastVisited, isScenarioEffectivelyEmpty, sectionCounts,
   createKeyDate, removeKeyDate, referencesToAnchor, convertAnchorReferences,
@@ -85,6 +86,7 @@ const els = {
   assets: $("assets"),
   lifestyleSection: $("lifestyleSection"),
   liabilitiesSection: $("liabilitiesSection"),
+  goalsSection: $("goalsSection"),
   propertySection: $("propertySection"),
   superSection: $("superSection"),
   addAssetBtn: $("addAssetBtn"),
@@ -327,6 +329,7 @@ const INPUT_NAV = [
   { id: "property", label: "Property" },
   { id: "super", label: "Super" },
   { id: "liabilities", label: "Liabilities" },
+  { id: "goals", label: "Goals" },
   { id: "investment-cashflows", label: "Investment cashflows" },
   { id: "settings", label: "Settings" },
 ];
@@ -420,7 +423,7 @@ function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
   for (const el of [els.planBar, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
-                    els.lifestyleSection, els.liabilitiesSection, els.propertySection,
+                    els.lifestyleSection, els.liabilitiesSection, els.goalsSection, els.propertySection,
                     els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
                     els.viewTax, els.viewAssumptions]) {
@@ -3810,6 +3813,147 @@ els.liabilitiesSection.addEventListener("click", (e) => {
   renderLiabilities();
 });
 
+// --- goals (Document Set Commit 6) ------------------------------------------
+//
+// A goal accrues straight-line from plan start toward its (indexed)
+// target, funded either from a named financial asset or from household
+// surplus — see deterministic.js's own header for the full mechanics.
+// "Spent at the target date" is the accrual itself; there is no
+// separate goal-balance ledger to show here beyond the running total
+// (goalStats.accrued) and whether it reached the (indexed) target.
+
+function findGoal(gid) {
+  return (state.goals ?? []).find((g) => g.id === gid) || null;
+}
+
+function goalStatusHTML(g) {
+  const stats = projection?.goalStats?.[g.id];
+  if (!stats) return "";
+  if (stats.achieved) {
+    return `<p class="helper-text">On track: ${fmtMoney(stats.accrued)} of ${fmtMoney(stats.targetReal)} accrued by the target date (today's dollars).</p>`;
+  }
+  const altText = stats.alternativeMonth == null
+    ? "at the current funding rate, the target may never be reached"
+    : `reachable by ${projection.schedule.fyLabels[Math.min(projection.schedule.planYears - 1, Math.floor(stats.alternativeMonth / 12))]} instead`;
+  return `<p class="helper-warning">Short by ${fmtMoney(stats.shortfall)} at the target date (${fmtMoney(stats.accrued)} of ${fmtMoney(stats.targetReal)} accrued, today's dollars) — ${altText}.</p>`;
+}
+
+function goalCardHTML(g) {
+  const financialAssets = state.assets.filter((a) => a.class !== "lifestyle");
+  return `
+    <div class="pcard" data-gid="${g.id}">
+      <div class="pcard-head">
+        <span class="pcard-name">${escapeHTML(g.label)}</span>
+        <span class="pcard-meta">${fmtMoney(g.targetAmount)} target</span>
+        <button class="pcard-remove" type="button" data-goal-action="remove" data-gid="${g.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Label</label>
+            <input type="text" maxlength="60" value="${escapeHTML(g.label)}" data-gid="${g.id}" data-gfield="label" />
+          </div>
+          <div class="cf-cell">
+            <label>Target amount ($, today's dollars)</label>
+            <input type="number" min="0" step="1000" value="${g.targetAmount}" data-gid="${g.id}" data-gfield="targetAmount" />
+          </div>
+          <div class="cf-cell">
+            <label>Target date</label>
+            ${dateRefControlHTML(g.targetAt, "client", `data-gid="${g.id}" data-gfield="targetAt"`, state.plan.client.currentAge, state.plan.endAge)}
+          </div>
+          <div class="cf-cell">
+            <label>Funded from</label>
+            <select data-gid="${g.id}" data-gfield="fundedFrom">
+              <option value="surplus"${g.fundedFrom === "surplus" ? " selected" : ""}>Household surplus</option>
+              ${financialAssets.map((a) => `<option value="${a.id}"${g.fundedFrom === a.id ? " selected" : ""}>${escapeHTML(a.name)}</option>`).join("")}
+            </select>
+          </div>
+          <div class="cf-cell">
+            <label>Target indexation</label>
+            <select data-gid="${g.id}" data-gfield="indexBasis">
+              <option value="none"${g.indexBasis === "none" ? " selected" : ""}>None (fixed nominal)</option>
+              <option value="cpi"${g.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
+              <option value="awote"${g.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+            </select>
+          </div>
+          <div class="cf-cell">
+            <label>Additional %</label>
+            <input type="number" min="-10" max="10" step="0.1" value="${g.indexExtraPct}" data-gid="${g.id}" data-gfield="indexExtraPct" />
+          </div>
+        </div>
+        ${goalStatusHTML(g)}
+      </div>
+    </div>
+  `;
+}
+
+function renderGoals() {
+  const goals = state.goals ?? [];
+  const cards = goals.map(goalCardHTML).join("");
+  els.goalsSection.innerHTML = cards === ""
+    ? `
+      <h2 class="section-heading">Goals</h2>
+      ${pageEmptyHTML(
+        "Track named savings goals — a car, a wedding, a deposit — separately from ordinary living expenses.",
+        `<button class="add-row-btn" type="button" data-goal-action="add">+ Add goal</button>`
+      )}
+    `
+    : `
+      <h2 class="section-heading">Goals</h2>
+      <div class="portfolio-stack">${cards}</div>
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-goal-action="add">+ Add goal</button>
+      </div>
+    `;
+}
+
+els.goalsSection.addEventListener("change", (e) => {
+  const g = findGoal(e.target.dataset.gid);
+  const field = e.target.dataset.gfield;
+  if (!g || !field) return;
+  const v = e.target.value;
+  if (field === "label") g.label = v.trim() || g.label;
+  else if (field === "targetAmount") g.targetAmount = clampNumber(v, 0);
+  else if (field === "fundedFrom") g.fundedFrom = v;
+  else if (field === "indexBasis") g.indexBasis = ["none", "cpi", "awote"].includes(v) ? v : "cpi";
+  else if (field === "indexExtraPct") g.indexExtraPct = clampNumber(v, -10, 10);
+  else if (field === "targetAt") {
+    if (e.target.dataset.drRole === "anchor") {
+      g.targetAt = v === "__age__"
+        ? { kind: "age", age: resolveRef(g.targetAt, state.plan, projection.schedule, "client").age }
+        : { kind: "anchor", anchorId: v };
+    } else {
+      const age = clampInt(v, state.plan.client.currentAge, state.plan.endAge);
+      g.targetAt = { kind: "age", age };
+      flagIfClamped(e.target, age);
+    }
+  } else {
+    return;
+  }
+  state.goals = normaliseGoals(state.goals, state.plan, state.assets);
+  saveState();
+  refreshOutputs();
+  renderGoals();
+});
+
+els.goalsSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-goal-action]");
+  if (!btn) return;
+  if (btn.dataset.goalAction === "add") {
+    state.goals = [...(state.goals ?? []), createGoal(state.plan, state.goals ?? [])];
+  } else if (btn.dataset.goalAction === "remove") {
+    const g = findGoal(btn.dataset.gid);
+    if (!g || !window.confirm(`Remove "${g.label}"?`)) return;
+    state.goals = (state.goals ?? []).filter((x) => x.id !== g.id);
+  } else {
+    return;
+  }
+  state.goals = normaliseGoals(state.goals, state.plan, state.assets);
+  saveState();
+  refreshOutputs();
+  renderGoals();
+});
+
 // --- projection outputs (Phase B) -----------------------------------------
 //
 // The engine is sub-millisecond at this size: recompute live on every
@@ -4249,6 +4393,28 @@ function renderCompositeChart() {
     font: { size: 9, color: "rgba(0, 0, 0, 0.5)" },
   }));
 
+  // Goal markers (Document Set Commit 6) — same shape/annotation
+  // pattern as key dates above, distinguished by colour (green =
+  // reached its target, red = fell short) rather than a separate legend.
+  const goalMarks = (state.goals ?? [])
+    .map((g) => {
+      const stats = projection.goalStats?.[g.id];
+      if (!stats) return null;
+      const y = Math.min(projection.schedule.planYears - 1, Math.floor(stats.targetMonth / 12));
+      if (!yearIdxs.includes(y)) return null;
+      return { age: projection.schedule.clientAges[y], label: g.label, achieved: stats.achieved };
+    })
+    .filter(Boolean);
+  const goalShapes = goalMarks.map((k) => ({
+    type: "line", xref: "x", x0: k.age, x1: k.age, yref: "paper", y0: 0, y1: 1,
+    line: { color: k.achieved ? "rgba(46, 139, 87, 0.55)" : "rgba(180, 40, 40, 0.55)", width: 1.5, dash: "dash" },
+  }));
+  const goalAnnotations = goalMarks.map((k) => ({
+    x: k.age, y: 1, xref: "x", yref: "paper", yanchor: "bottom", xanchor: "left",
+    text: `🎯 ${k.label}`, showarrow: false, textangle: -90,
+    font: { size: 9, color: k.achieved ? "rgba(46, 139, 87, 0.85)" : "rgba(180, 40, 40, 0.85)" },
+  }));
+
   Plotly.react(el, traces, {
     margin: { l: 64, r: 64, t: 16, b: 44 },
     paper_bgcolor: "white", plot_bgcolor: "white",
@@ -4271,8 +4437,9 @@ function renderCompositeChart() {
       { type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: zeroFraction, y1: zeroFraction,
         line: { color: "rgba(0, 0, 0, 0.3)", width: 1 } },
       ...keyDateShapes,
+      ...goalShapes,
     ],
-    annotations: keyDateAnnotations,
+    annotations: [...keyDateAnnotations, ...goalAnnotations],
     font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 11.5, color: "#222" },
   }, { displayModeBar: false, responsive: true });
 }
@@ -5301,6 +5468,17 @@ function buildCashflowGroups() {
     { title: "Cash Received", rows: cashReceivedRows },
     { title: "Expenses", rows: expenseSectionRows },
   ];
+  // Document Set Commit 6 — Goals get their OWN group, matching the
+  // workbook's separate Goals block: tracked apart from ordinary
+  // living expenses even though a goal contribution is, mechanically,
+  // a household cash outflow.
+  const goalRows = state.goals ?? [];
+  if (goalRows.length) {
+    const rows = goalRows.map((g) => ({ label: g.label, cell: (y) => -(yl[y].goals?.[g.id]?.contribution ?? 0) }));
+    rows.push({ label: "Total goal contributions", always: true, cls: "tl-total",
+      cell: (y) => -goalRows.reduce((s, g) => s + (yl[y].goals?.[g.id]?.contribution ?? 0), 0) });
+    groups.push({ title: "Goals", rows });
+  }
   if (oneOffRows.length) groups.push({ title: "One-off amounts", rows: oneOffRows });
   groups.push({ title: "Funding", rows: [
     { label: surplusTarget ? `Surplus invested (to ${surplusTarget.name})` : "Surplus invested",
@@ -6101,6 +6279,7 @@ function renderAll() {
   renderLiabilities(); // after refreshOutputs — payoff FYs read the projection
   renderProperties();
   renderSuper(); // after refreshOutputs — the cap-headroom display reads the projection
+  renderGoals(); // after refreshOutputs — goalStats read the projection
 }
 
 window.addEventListener("hashchange", handleRoute);

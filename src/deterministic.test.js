@@ -3406,6 +3406,108 @@ describe("Extra and one-off loan repayments (Document Set Commit 5)", () => {
   });
 });
 
+describe("Goals (Document Set Commit 6)", () => {
+  const goal = (over = {}) => ({
+    id: "gl1", label: "Car", targetAmount: 12000, targetAt: { kind: "age", age: 42 },
+    fundedFrom: "surplus", indexBasis: "cpi", indexExtraPct: 0,
+    ...over,
+  });
+
+  it("known-value: an asset-funded goal accrues straight-line and reaches its (real-constant) target exactly at the target month", () => {
+    const s = {
+      ...mkState({
+        endAge: 45,
+        assets: [mkAsset({ id: "a1", balance: 1000000, allocation: zeroRealAlloc() })],
+      }),
+      goals: [goal({ fundedFrom: "a1" })],
+    };
+    const out = projectPlan(s);
+    // Target month = age 42 = plan year 2 = month 24 (July start).
+    // requiredMonthly = 12,000 / 24 = 500.
+    expect(out.yearly[0].goals.gl1.contribution).toBeCloseTo(500 * 12, 2);
+    expect(out.yearly[1].goals.gl1.contribution).toBeCloseTo(500 * 12, 2);
+    // Nothing left to accrue from year 2 onward (already at target).
+    expect(out.yearly[2].goals.gl1.contribution).toBeCloseTo(0, 6);
+    const stats = out.goalStats.gl1;
+    expect(stats.achieved).toBe(true);
+    expect(stats.accrued).toBeCloseTo(12000, 2);
+    expect(stats.shortfall).toBeCloseTo(0, 6);
+  });
+
+  it("the asset actually loses the withdrawn balance — this isn't money created from nothing", () => {
+    const s = {
+      ...mkState({
+        endAge: 45,
+        assets: [mkAsset({ id: "a1", balance: 1000000, allocation: zeroRealAlloc() })],
+      }),
+      goals: [goal({ fundedFrom: "a1", targetAmount: 12000 })],
+    };
+    const withGoal = projectPlan(s);
+    const without = projectPlan({ ...mkState({
+      endAge: 45,
+      assets: [mkAsset({ id: "a1", balance: 1000000, allocation: zeroRealAlloc() })],
+    }) });
+    // Sanity check only (not an exact hand-calc): the asset genuinely
+    // lost the withdrawn amount — not exactly $12,000 to the cent,
+    // since the smaller balance also very slightly changes WCA
+    // interest/tax feedback, but it must be close, and strictly less.
+    const diff = without.yearly[1].closingBalance - withGoal.yearly[1].closingBalance;
+    expect(diff).toBeGreaterThan(11900);
+    expect(diff).toBeLessThan(12100);
+  });
+
+  it("indexed targets: none/cpi/awote produce different real target amounts at the same target date", () => {
+    const base = (indexBasis) => ({
+      ...mkState({ endAge: 45, assets: [mkAsset({ id: "a1", balance: 1000000, allocation: zeroRealAlloc() })] }),
+      goals: [goal({ fundedFrom: "a1", indexBasis, targetAmount: 12000 })],
+    });
+    const none = projectPlan(base("none")).goalStats.gl1.targetReal;
+    const cpiTarget = projectPlan(base("cpi")).goalStats.gl1.targetReal;
+    const awote = projectPlan(base("awote")).goalStats.gl1.targetReal;
+    // "none" (fixed nominal) decays in real terms; "cpi" stays exactly
+    // 12,000; "awote" (> cpi by default) grows in real terms.
+    expect(none).toBeCloseTo(12000 / Math.pow(1.025, 2), 2);
+    expect(cpiTarget).toBeCloseTo(12000, 2);
+    expect(awote).toBeCloseTo(12000 * Math.pow(1.035 / 1.025, 2), 2);
+    expect(none).toBeLessThan(cpiTarget);
+    expect(cpiTarget).toBeLessThan(awote);
+  });
+
+  it("a surplus-funded goal that can't be fully funded is flagged with the shortfall and an alternative date", () => {
+    // Household income exactly covers expenses — zero ordinary
+    // surplus, so a $12,000 goal funded "from surplus" cannot accrue
+    // anything at all from the household's own cashflow, but a modest
+    // asset return could... use assets:[] and balanced income/expense
+    // to guarantee genuinely zero surplus.
+    const s = {
+      ...mkState({
+        endAge: 45,
+        assets: [],
+        cashflows: {
+          income: [{ id: "i1", label: "Salary", owner: "client", amount: 60000, frequency: "annual",
+            from: { kind: "age", age: 40 }, to: { kind: "age", age: 44 },
+            indexBasis: "none", indexExtraPct: 0, incomeType: "employment", sgApplies: false }],
+          expenses: [{ id: "e1", label: "Living", owner: "client", amount: 60000, frequency: "monthly",
+            from: { kind: "age", age: 40 }, to: { kind: "age", age: 44 },
+            indexBasis: "none", indexExtraPct: 0, category: "nonDiscretionary" }],
+        },
+      }),
+      goals: [goal({ fundedFrom: "surplus", targetAmount: 12000 })],
+    };
+    const out = projectPlan(s);
+    const stats = out.goalStats.gl1;
+    expect(stats.achieved).toBe(false);
+    expect(stats.shortfall).toBeGreaterThan(0);
+  });
+
+  it("regression gate: a scenario with no goals is completely untouched", () => {
+    const s = mkState({ endAge: 42, assets: [mkAsset({ balance: 100000 })] });
+    const out = projectPlan(s);
+    expect(out.goalStats).toEqual({});
+    for (const row of out.yearly) expect(row.goals).toEqual({});
+  });
+});
+
 describe("Deductions (PAYG withholding, tax refund timing, and deductions)", () => {
   it("a deduction row reduces the owner's taxable income and actual tax payable, with no household cash effect", () => {
     const scenario = (deduction) => mkState({

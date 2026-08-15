@@ -129,7 +129,7 @@ describe("known section/view ids", () => {
   it("exposes the full input section list", () => {
     expect(INPUT_SECTIONS).toEqual([
       "setup", "income", "deductions", "expenses", "financial-assets", "lifestyle-assets",
-      "property", "super", "liabilities", "investment-cashflows", "settings",
+      "property", "super", "liabilities", "goals", "investment-cashflows", "settings",
     ]);
     expect(DEFAULT_INPUT_SECTION).toBe("setup");
   });

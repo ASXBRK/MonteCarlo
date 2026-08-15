@@ -746,6 +746,52 @@ export function normaliseLiabilities(liabilities, plan, assets, properties = [])
   return liabilities.map((l) => clampLiability(l, plan, assets, properties));
 }
 
+// --- goals (Document Set Commit 6) ------------------------------------------
+//
+// A goal accrues straight-line from plan start toward its (indexed)
+// target, funded either from a named financial asset (a scheduled
+// withdrawal, naturally capped at the asset's balance) or from
+// household surplus (capped at whatever's actually left over each
+// month — a goal can't manufacture cash that doesn't exist, unlike an
+// instructed transaction such as a loan repayment or a property
+// purchase). "Spent at the target date" is modelled as the accrual
+// itself — the money progressively leaves its funding source exactly
+// as it's earmarked, so by the target date the (indexed) target amount
+// has already left the model; there is no separate goal-balance ledger
+// holding money in limbo between accrual and spend.
+
+export function createGoal(plan, existing = []) {
+  return {
+    id: uid("gl"),
+    label: `Goal ${existing.length + 1}`,
+    targetAmount: 0,
+    targetAt: anchorRef("end"),
+    fundedFrom: "surplus",
+    indexBasis: "cpi",
+    indexExtraPct: 0,
+  };
+}
+
+export function clampGoal(g, plan, assets) {
+  const financialIds = new Set(assets.filter((a) => isFinancial(a)).map((a) => a.id));
+  return {
+    id: typeof g.id === "string" && g.id ? g.id : uid("gl"),
+    label: typeof g.label === "string" && g.label.trim() ? g.label : "Goal",
+    targetAmount: clampNumber(g.targetAmount, 0),
+    targetAt: clampDateRef(g.targetAt ?? anchorRef("end"), plan.client.currentAge, plan.endAge, plan),
+    // A stale/removed asset reference falls back to "surplus" rather
+    // than silently funding from nothing — same "unknown reference
+    // dropped" convention as linkedAssetId/offsetAssetId.
+    fundedFrom: g.fundedFrom === "surplus" || financialIds.has(g.fundedFrom) ? g.fundedFrom : "surplus",
+    ...clampIndexation(g),
+  };
+}
+
+export function normaliseGoals(goals, plan, assets) {
+  if (!Array.isArray(goals)) return [];
+  return goals.map((g) => clampGoal(g, plan, assets));
+}
+
 // --- superannuation accounts (Tier 1.2, accumulation phase only) -----------
 //
 // Super accounts are never joint (owner: "client" | "partner" only) and
@@ -946,6 +992,7 @@ export function defaultState(profiles = {}, now = new Date()) {
     },
     liabilities: [],
     properties: [],
+    goals: [],
     settings: {
       surplus: { mode: "accumulate", assetId: null },
       fundingOrder: [asset.id],
@@ -1115,6 +1162,7 @@ export function sectionCounts(state) {
     property: (state.properties ?? []).length,
     super: (state.plan.superAccounts ?? []).length,
     liabilities: (state.liabilities ?? []).length,
+    goals: (state.goals ?? []).length,
     "investment-cashflows": cf.contributions.length + cf.withdrawals.length + cf.lumpSums.length,
   };
 }
@@ -1341,7 +1389,8 @@ export function clampAllToPlan(state, profiles = {}) {
   const settings = normaliseSettings(state.settings, assets);
   const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
   const properties = normaliseProperties(state.properties, plan);
-  return { ...state, plan, assets, cashflows, settings, liabilities, properties };
+  const goals = normaliseGoals(state.goals, plan, assets);
+  return { ...state, plan, assets, cashflows, settings, liabilities, properties, goals };
 }
 
 // Surplus treatment (Working Cash Account FY-end sweep): "accumulate"
@@ -1670,6 +1719,7 @@ export function hydrate(json, profiles = {}) {
       },
       liabilities: normaliseLiabilities(raw.liabilities, plan, assets, raw.properties),
       properties: normaliseProperties(raw.properties, plan),
+      goals: normaliseGoals(raw.goals, plan, assets),
       settings: normaliseSettings(raw.settings, assets),
       display: {
         units: raw.display?.units === "nominal" ? "nominal" : "real",
