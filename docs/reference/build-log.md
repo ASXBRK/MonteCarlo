@@ -220,8 +220,20 @@ separate calculation.
   section/item/value rows, not the year-columns ledger shape) for all
   four Focus views built so far.
 
+- Commit 6, **Standalone lookups** — `src/focusLookups.js`. The one
+  deliberate exception to the governing principle: a lookup, not a
+  projection, so it takes no plan/scenario input at all — just state,
+  price, FHB/new-build/FHBG flags and an LVR. Calls the SAME functions
+  the purchase engine calls (`dutyWithConcessions`, `fhogAmount`,
+  `lmiPremium`, `fhbgPriceCapExceeded`), no new rate data; reconciled
+  against a real `projectPlan()` run with a property purchasing at
+  month 0 (nominal price = today's price exactly at that point,
+  regardless of growth/CPI) per the spec's own test requirement. As-at
+  dates and verification caveats from each data module's own metadata
+  are shown directly in the view, not summarised away.
+
 ### In flight
-Focus Commit 6 (standalone lookups); super threshold
+Super threshold
 indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
 then Division 296, then Monte Carlo over the full scenario.
 

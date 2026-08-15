@@ -55,6 +55,10 @@ import { FHSSS_ANNUAL_CAP, FHSSS_LIFETIME_CAP } from "./fhsss.js";
 import { eligibleSalarySacrificeRows, buildSalarySacrificeFocus } from "./focusSalarySacrifice.js";
 import { eligibleDebtPayoffLoans, buildDebtPayoffFocus, solveExtraRepaymentForPayoffDate } from "./focusDebtPayoff.js";
 import {
+  computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
+  STAMP_DUTY_META, LMI_META, FHBG_META,
+} from "./focusLookups.js";
+import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
   incomeCategorySums as incomeCategorySumsPure,
@@ -7141,16 +7145,131 @@ els.viewFocusDebtPayoff.addEventListener("click", (e) => {
   refreshOutputs();
 });
 
-// COMMIT 6 fills this in: standalone stamp duty and LMI calculators —
-// the one deliberate exception to the governing principle (a lookup,
-// not a projection, so it can't contradict the plan). Takes no plan
-// input, so there is no "add X to see it" action.
-function renderFocusLookupsView() {
-  els.viewFocusLookups.innerHTML = focusEmptyStateHTML(
-    "Stamp duty, First Home Owner Grant and LMI for a hypothetical purchase — state, price and buyer flags, no client required.",
-    null
-  );
+// --- Commit 6: Standalone lookups -------------------------------------------
+//
+// The one deliberate exception to the governing principle: a lookup,
+// not a projection, so it can't contradict the plan. Takes no plan
+// input at all (src/focusLookups.js), so there's no "add X to see it"
+// empty state — the calculator is always available, seeded with
+// sensible defaults rather than the client's own data.
+let focusLookupsInput = {
+  stateCode: FOCUS_LOOKUP_STATES[0], price: 600000,
+  firstHomeBuyer: false, newBuild: false,
+  lvrPct: 80, firstHomeGuarantee: false,
+};
+
+function focusLookupsDutyHTML(duty) {
+  return `
+    <table class="focus-table">
+      <tr><td>General transfer duty</td><td>${fmtMoney(duty.general)}</td></tr>
+      ${duty.concessionSaving > 0.005 ? `<tr><td>First-home-buyer concession</td><td>−${fmtMoney(duty.concessionSaving)}</td></tr>` : ""}
+      <tr class="tl-total"><td>Duty payable</td><td>${fmtMoney(duty.duty)}</td></tr>
+      ${duty.fhog > 0 ? `<tr><td>First Home Owner Grant</td><td>${fmtMoney(duty.fhog)}</td></tr>` : ""}
+    </table>
+    <p class="helper-text">As at ${escapeHTML(STAMP_DUTY_META.asAt)}. ${escapeHTML(STAMP_DUTY_META.note)}</p>
+  `;
 }
+
+function focusLookupsLmiHTML(lmi, stateCode, lvrPct) {
+  const body = lmi.firstHomeGuarantee
+    ? `<p class="helper-text">LMI waived — First Home Guarantee.</p>
+       ${lmi.capExceeded ? `<p class="helper-warning">Purchase price exceeds the ${escapeHTML(stateCode)} First Home Guarantee price cap — confirm current eligibility.</p>` : ""}`
+    : lmi.lmi > 0
+      ? `<table class="focus-table">
+          <tr><td>Loan amount (${lvrPct}% LVR)</td><td>${fmtMoney(lmi.loanAmount)}</td></tr>
+          <tr class="tl-total"><td>LMI premium</td><td>${fmtMoney(lmi.lmi)}</td></tr>
+        </table>`
+      : `<p class="helper-text">No LMI at ${lvrPct}% LVR — at or below the 80% threshold.</p>`;
+  return `
+    ${body}
+    <p class="helper-text">As at ${escapeHTML(LMI_META.asAt)}. ${escapeHTML(LMI_META.note)}</p>
+    <p class="helper-text">First Home Guarantee price caps as at ${escapeHTML(FHBG_META.asAt)}. ${escapeHTML(FHBG_META.note)}</p>
+  `;
+}
+
+function renderFocusLookupsView() {
+  const in_ = focusLookupsInput;
+  const duty = computeStampDutyLookup({ stateCode: in_.stateCode, price: in_.price, firstHomeBuyer: in_.firstHomeBuyer, newBuild: in_.newBuild });
+  const lmi = computeLmiLookup({ stateCode: in_.stateCode, price: in_.price, lvrPct: in_.lvrPct, firstHomeGuarantee: in_.firstHomeGuarantee });
+
+  els.viewFocusLookups.innerHTML = `
+    <h2 class="section-heading">Stamp duty & LMI</h2>
+    <p class="helper-text">A standalone lookup — state, price and buyer flags only, no client or plan involved.</p>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>Purchase</h3>
+        <div class="focus-solver-row">
+          <label>State
+            <select id="focusLookupState">${FOCUS_LOOKUP_STATES.map((s) => `<option value="${s}"${s === in_.stateCode ? " selected" : ""}>${s}</option>`).join("")}</select>
+          </label>
+          <label>Purchase price ($)
+            <input type="number" id="focusLookupPrice" min="0" step="10000" value="${in_.price}" />
+          </label>
+          <label>LVR (%)
+            <input type="number" id="focusLookupLvr" min="0" max="100" step="1" value="${in_.lvrPct}" />
+          </label>
+        </div>
+        <div class="focus-solver-row">
+          <label><input type="checkbox" id="focusLookupFhb" ${in_.firstHomeBuyer ? "checked" : ""} /> First home buyer</label>
+          <label><input type="checkbox" id="focusLookupNewBuild" ${in_.newBuild ? "checked" : ""} /> New build</label>
+          <label><input type="checkbox" id="focusLookupFhbg" ${in_.firstHomeGuarantee ? "checked" : ""} /> First Home Guarantee</label>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Stamp duty & FHOG</h3>
+        ${focusLookupsDutyHTML(duty)}
+      </div>
+      <div class="focus-section">
+        <h3>LMI & First Home Guarantee</h3>
+        ${focusLookupsLmiHTML(lmi, in_.stateCode, in_.lvrPct)}
+      </div>
+    </div>
+  `;
+}
+
+function exportFocusLookupsCSV() {
+  const in_ = focusLookupsInput;
+  const duty = computeStampDutyLookup({ stateCode: in_.stateCode, price: in_.price, firstHomeBuyer: in_.firstHomeBuyer, newBuild: in_.newBuild });
+  const lmi = computeLmiLookup({ stateCode: in_.stateCode, price: in_.price, lvrPct: in_.lvrPct, firstHomeGuarantee: in_.firstHomeGuarantee });
+  const lines = [
+    ["Input", "Value"].map(csvEsc).join(","),
+    [csvEsc("State"), csvEsc(in_.stateCode)].join(","),
+    [csvEsc("Purchase price"), in_.price].join(","),
+    [csvEsc("LVR (%)"), in_.lvrPct].join(","),
+    [csvEsc("First home buyer"), in_.firstHomeBuyer].join(","),
+    [csvEsc("New build"), in_.newBuild].join(","),
+    [csvEsc("First Home Guarantee"), in_.firstHomeGuarantee].join(","),
+    "",
+    [csvEsc("Stamp duty & FHOG"), csvEsc("Value")].join(","),
+    [csvEsc("General transfer duty"), duty.general.toFixed(2)].join(","),
+    [csvEsc("Concession saving"), duty.concessionSaving.toFixed(2)].join(","),
+    [csvEsc("Duty payable"), duty.duty.toFixed(2)].join(","),
+    [csvEsc("First Home Owner Grant"), duty.fhog.toFixed(2)].join(","),
+    "",
+    [csvEsc("LMI & First Home Guarantee"), csvEsc("Value")].join(","),
+    [csvEsc("Loan amount"), lmi.loanAmount.toFixed(2)].join(","),
+    [csvEsc("LMI premium"), lmi.lmi.toFixed(2)].join(","),
+    [csvEsc("Waived (First Home Guarantee)"), lmi.waived].join(","),
+    [csvEsc("Price exceeds FHBG cap"), lmi.capExceeded].join(","),
+    "",
+    [csvEsc(`Stamp duty as at ${STAMP_DUTY_META.asAt}`), csvEsc(STAMP_DUTY_META.note)].join(","),
+    [csvEsc(`LMI as at ${LMI_META.asAt}`), csvEsc(LMI_META.note)].join(","),
+    [csvEsc(`FHBG caps as at ${FHBG_META.asAt}`), csvEsc(FHBG_META.note)].join(","),
+  ];
+  downloadCSV("focus-lookups", lines);
+}
+
+els.viewFocusLookups.addEventListener("change", (e) => {
+  const id = e.target.id;
+  if (id === "focusLookupState") focusLookupsInput = { ...focusLookupsInput, stateCode: e.target.value };
+  else if (id === "focusLookupPrice") focusLookupsInput = { ...focusLookupsInput, price: clampNumber(e.target.value, 0) };
+  else if (id === "focusLookupLvr") focusLookupsInput = { ...focusLookupsInput, lvrPct: clampInt(e.target.value, 0, 100) };
+  else if (id === "focusLookupFhb") focusLookupsInput = { ...focusLookupsInput, firstHomeBuyer: e.target.checked };
+  else if (id === "focusLookupNewBuild") focusLookupsInput = { ...focusLookupsInput, newBuild: e.target.checked };
+  else if (id === "focusLookupFhbg") focusLookupsInput = { ...focusLookupsInput, firstHomeGuarantee: e.target.checked };
+  else return;
+  renderFocusLookupsView();
+});
 
 // --- exports -----------------------------------------------------------------
 
@@ -7208,6 +7327,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-fhsss") exportFocusFhsssCSV();
   else if (activeView === "focus-salary-sacrifice") exportFocusSalarySacrificeCSV();
   else if (activeView === "focus-debt-payoff") exportFocusDebtPayoffCSV();
+  else if (activeView === "focus-lookups") exportFocusLookupsCSV();
 });
 
 els.showAssetsToggle.addEventListener("change", () => {
