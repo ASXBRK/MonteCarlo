@@ -1825,6 +1825,21 @@ html, body {
   line-height: 1.5;
 }
 
+/* An inline text button embedded mid-sentence (e.g. "see why" linking
+   into the Parameters modal) — no border/background, just an
+   underlined word matching the surrounding text's size/color. */
+.link-inline {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-inline:hover { color: var(--accent); }
+
 /* --- Parameters modal inline field --- */
 
 .param-inline-field {

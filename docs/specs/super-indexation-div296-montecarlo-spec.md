@@ -206,3 +206,34 @@ old single-portfolio model and consume a data shape that no longer exists —
 they cannot simply be re-enabled. Reworking them against the new per-path
 output is a separate phase (Tier 3.4) and should be scoped only once the
 fan chart is working and the per-path output shape is settled.
+
+---
+
+## ERRATA (added 15 Aug 2026, after the spec-audit follow-up — not an edit to the body above)
+
+The correlation formula in Commit 3 —
+
+    r_profile,t = μ_profile + σ_profile × ( ρ·z_t + √(1−ρ²)·ε_profile,t )
+
+— is wrong as a specification of "ρ is a single configurable parameter"
+meaning the realised pairwise correlation. Under that exact formula, two
+holdings sharing one market factor `z_t` with independent idiosyncratic
+noise `ε` realise pairwise correlation **ρ², not ρ** (at the spec's own
+default ρ = 0.85, that's 0.7225, not 0.85).
+
+The shipped implementation (`src/monteCarlo.js`) instead uses
+
+    r_profile,t = μ_profile + σ_profile × ( √ρ·z_t + √(1−ρ)·ε_profile,t )
+
+which realises pairwise correlation ρ directly (verified 0.849 at
+ρ = 0.85, against the `ρ = 1` / `ρ = 0` boundary tests in
+`monteCarlo.test.js`). This is the standard asset-correlation
+(Vasicek-style) one-factor parameterisation, and it is what "ρ is the
+correlation" actually requires.
+
+**Resolution: the implementation is correct; the formula above is the
+error, and the code is not being changed to match it.** This spec's
+`Session B` text is otherwise unchanged and remains the historical record
+of what was asked for — see `docs/specs/README.md` on why specs aren't
+edited after the fact. Anyone implementing a similar shared-factor model
+from this document should use the code's formula, not the one above.

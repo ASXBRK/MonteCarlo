@@ -3510,12 +3510,25 @@ let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liab
 // monteCarlo.js's own header and this session's measured benchmark),
 // so it never runs automatically and runs in a dedicated worker
 // (monteCarloWorker.js) rather than blocking the main thread. mcResult
-// is invalidated on every plan mutation (refreshOutputs, below) rather
-// than silently going stale — the Monte Carlo view shows "Run" again
-// rather than an old simulation's chart for a plan that's since
-// changed; an in-flight run is terminated outright for the same reason
-// (its result would be for a plan that no longer exists).
+// is invalidated when the PLAN changes (a fingerprint of everything
+// that feeds projectPlan — see planFingerprint below) rather than on
+// every call to refreshOutputs(): a display-only change (Real/Nominal
+// toggle) must re-render the existing result in the new units, not
+// discard a completed run and force a multi-second re-run just to see
+// it differently formatted (audit fix, spec 10 commit 4's "results
+// cache against a hash of scenario state" requirement — no such cache
+// existed before this). The report period selector never called
+// refreshOutputs() in the first place (setReportPeriod re-renders
+// directly), so it was already unaffected; the units toggle was the
+// actual bug. An in-flight run IS still terminated when the plan
+// itself changes (its result would be for a plan that no longer
+// exists) — see refreshOutputs below.
 let mcResult = null;
+// The planFingerprint() the current mcResult (or in-flight run) is
+// valid for — null when there is neither. Compared against the live
+// fingerprint in refreshOutputs() to decide whether a plan mutation
+// actually happened, as opposed to a display-only change.
+let mcResultFingerprint = null;
 let mcRunning = false;
 let mcProgress = null; // { done, total } while mcRunning; null otherwise
 let mcWorker = null;
@@ -3526,16 +3539,43 @@ function stopMonteCarloWorker() {
   mcProgress = null;
 }
 
+// Discard the cached/in-flight Monte Carlo result — used only when the
+// PLAN (not a display setting) has actually changed since it started.
+function invalidateMonteCarloResult() {
+  mcResult = null;
+  mcResultFingerprint = null;
+  stopMonteCarloWorker();
+}
+
+// Everything that feeds projectPlan()'s output — i.e., everything that
+// would make a completed (or in-flight) Monte Carlo run stale.
+// `state.display` (units, report period, chart treatment, hide-empty-
+// rows, show-individual-items, last-visited) is deliberately excluded:
+// it's presentation-only and must never invalidate a run. JSON
+// stringify comparison is the "hash" — cheap enough at this state size
+// and simpler than a real hash function for a same-session equality
+// check.
+function planFingerprint() {
+  return JSON.stringify({
+    plan: state.plan, assets: state.assets, cashflows: state.cashflows,
+    settings: state.settings, assumptions: state.assumptions,
+    properties: state.properties, liabilities: state.liabilities,
+  });
+}
+
 function recomputeProjection() {
   projection = projectPlan(state);
 }
 
 // One entry point after any mutation: recompute + refresh everything
-// that displays engine output.
+// that displays engine output. Called for BOTH plan mutations and
+// display-only changes (e.g. the units toggle) — only the former may
+// invalidate a cached/in-flight Monte Carlo result.
 function refreshOutputs() {
   recomputeProjection();
-  mcResult = null;
-  stopMonteCarloWorker();
+  if (mcResultFingerprint !== null && mcResultFingerprint !== planFingerprint()) {
+    invalidateMonteCarloResult();
+  }
   renderPeriodSelector();
   renderSummaryStrip();
   renderActiveView();
@@ -4109,6 +4149,10 @@ function renderMonteCarloChart() {
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const band = (key) => yearIdxs.map((y) => mcResult.netAssets[key][y] * factor(y));
   const p10 = band("p10"), p25 = band("p25"), p50 = band("p50"), p75 = band("p75"), p90 = band("p90");
+  // Same netAssets figure the deterministic engine reports (out.yearly[y].
+  // netAssets — deterministic.js), same units/scaling as the bands above:
+  // genuinely comparable, not a second, differently-derived series.
+  const deterministic = yearIdxs.map((y) => projection.yearly[y].netAssets * factor(y));
 
   const outer = "rgba(28, 90, 180, 0.12)";
   const inner = "rgba(28, 90, 180, 0.28)";
@@ -4121,6 +4165,8 @@ function renderMonteCarloChart() {
       name: "25th–75th percentile", hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
     { x: ages, y: p50, mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
       name: "Median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
+    { x: ages, y: deterministic, mode: "lines", line: { color: "#444", width: 1.5, dash: "dash" },
+      name: "Deterministic projection", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Deterministic</extra>" },
   ];
 
   Plotly.react(el, traces, {
@@ -4279,6 +4325,10 @@ function exportMonteCarloCSV() {
 function startMonteCarloRun() {
   if (mcRunning) return;
   mcRunning = true;
+  // Stamped now, not on completion: if the plan mutates while this run
+  // is in flight, refreshOutputs() compares against THIS fingerprint
+  // and correctly cancels the now-stale run.
+  mcResultFingerprint = planFingerprint();
   mcProgress = { done: 0, total: DEFAULT_NUM_PATHS };
   refreshMonteCarloViews();
 
@@ -4293,14 +4343,14 @@ function startMonteCarloRun() {
       stopMonteCarloWorker();
       refreshMonteCarloViews();
     } else if (msg.type === "error") {
-      stopMonteCarloWorker();
+      invalidateMonteCarloResult();
       refreshMonteCarloViews();
       els.monteCarloStatus.textContent = `Monte Carlo run failed: ${msg.message}`;
       els.monteCarloTableStatus.textContent = `Monte Carlo run failed: ${msg.message}`;
     }
   };
   mcWorker.onerror = (e) => {
-    stopMonteCarloWorker();
+    invalidateMonteCarloResult();
     refreshMonteCarloViews();
     els.monteCarloStatus.textContent = `Monte Carlo run failed: ${e.message}`;
     els.monteCarloTableStatus.textContent = `Monte Carlo run failed: ${e.message}`;
@@ -4311,7 +4361,7 @@ function startMonteCarloRun() {
 }
 
 function cancelMonteCarloRun() {
-  stopMonteCarloWorker();
+  invalidateMonteCarloResult();
   refreshMonteCarloViews(); // resets button visibility; clears status since mcResult is still null
   els.monteCarloStatus.textContent = "Cancelled.";
   els.monteCarloTableStatus.textContent = "Cancelled.";
@@ -4321,6 +4371,7 @@ els.runMonteCarloBtn.addEventListener("click", startMonteCarloRun);
 els.cancelMonteCarloBtn.addEventListener("click", cancelMonteCarloRun);
 els.runMonteCarloTableBtn.addEventListener("click", startMonteCarloRun);
 els.cancelMonteCarloTableBtn.addEventListener("click", cancelMonteCarloRun);
+$("mcVolatilityDragLink").addEventListener("click", () => openModal("volatility-drag"));
 
 // --- View: Super balances chart (Tier 1.2, Commit 4) ------------------------
 //
@@ -5502,6 +5553,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "super-balances") exportChartPNG("chartSuperBalances", "super-balances");
   else if (activeView === "liabilities-balances") exportChartPNG("chartLiabilitiesBalances", "liabilities-balances");
   else if (activeView === "cashflow-bars") exportChartPNG("chartCashflowBars", "cashflow-bars");
+  else if (activeView === "monte-carlo") exportChartPNG("chartMonteCarlo", "monte-carlo");
   else if (activeView === "key-figures") exportTransposedCSV("key-figures", buildKeyFiguresGroups());
   else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
@@ -5593,8 +5645,15 @@ function openModal(scrollToId = null) {
   els.paramsModal.showModal();
   renderBellCurves("bellCurves", PROFILES, state.assumptions.cpi);
   if (scrollToId) {
-    const target = els.paramsModal.querySelector(`#${scrollToId}`);
-    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Deferred a frame: `<dialog>` is display:none until showModal()
+    // promotes it to the top layer, and scrollIntoView computed against
+    // that not-yet-painted geometry silently no-ops. First real caller
+    // of this branch — the Monte Carlo view's volatility-drag link — is
+    // what surfaced this; it was previously dead code.
+    requestAnimationFrame(() => {
+      const target = els.paramsModal.querySelector(`#${scrollToId}`);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
 }
 

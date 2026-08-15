@@ -142,6 +142,7 @@
                 </div>
                 <div id="monteCarloResults" hidden>
                   <div id="chartMonteCarlo"></div>
+                  <p class="chart-note-inline">The dashed line is the deterministic projection, overlaid for comparison — it sits above the median because of volatility drag, <button type="button" class="link-inline" id="mcVolatilityDragLink">see why</button>.</p>
                   <div id="monteCarloStats" class="summary-strip"></div>
                   <p id="monteCarloCustomNote" class="chart-note-inline"></p>
                   <div id="monteCarloTable"></div>
@@ -335,7 +336,7 @@
           <p>Annual steps would distort the early years, as monthly contributions do not compress cleanly into yearly buckets.</p>
         </section>
 
-        <section>
+        <section id="volatility-drag">
           <h3>Why a deterministic projection sits above the Monte Carlo median</h3>
           <p>A deterministic projection compounds at the expected return μ every year — it represents the arithmetic expected outcome. In a log-normal accumulation, the median outcome sits below that mean, roughly by μ − σ²/2 in continuous time. When both are on screen, the deterministic line will visibly sit above the Monte Carlo median, and the gap widens at higher σ. This is volatility drag — correct behaviour, not a discrepancy to reconcile.</p>
         </section>
