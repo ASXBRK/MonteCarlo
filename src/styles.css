@@ -1525,6 +1525,64 @@ html, body {
   justify-content: center;
 }
 
+/* --- Focus views (docs/specs/12-focus-views.md) --- */
+
+.focus-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.focus-section {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px;
+}
+
+.focus-section h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.focus-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.focus-table td {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.focus-table td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.focus-table tr.tl-total td {
+  border-bottom: none;
+  font-weight: 600;
+  padding-top: 10px;
+}
+
+.focus-solver-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.focus-solver-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+
 /* --- report period selector --- */
 
 .period-select {

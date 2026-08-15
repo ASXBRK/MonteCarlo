@@ -652,9 +652,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // FY's contribution only (summed across years for the lifetime
     // accrued figure; see goalStats in the final return object).
     goals: Object.fromEntries(goals.map((g) => [g.id, { contribution: 0 }])),
-    // Per-property detail (D4), real dollars.
+    // Per-property detail (D4), real dollars. deposit/duty/costs/fhog
+    // (Focus Commit 2 follow-on): the purchase-year breakdown behind
+    // `settlement`'s single net figure — by construction (same local
+    // variables the purchase-event block already computes for
+    // `settlement` itself, just also written out individually so a
+    // Focus view can show the breakdown without re-deriving it):
+    //   settlement === deposit + duty + costs − fhog − fhsssRelease
+    //                  + lmi, IF the purchase's own lmiPayAtSettlement
+    //                  flag is true — `lmi` is reported unconditionally
+    //                  (Commit 4) even when capitalised, but a
+    //                  capitalised premium is folded into the linked
+    //                  liability's own `drawdown` instead and must NOT
+    //                  be added again here.
     properties: Object.fromEntries(props.map((p) => [p.id, {
       value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0, fhsssRelease: 0, lmi: 0,
+      deposit: 0, duty: 0, costs: 0, fhog: 0,
     }])),
     propertyClosing: 0,
     netAssets: 0,
@@ -1088,6 +1101,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             row.properties[pid].costBaseSeed = realPrice + dutyReal + costsReal;
             row.properties[pid].fhsssRelease = fhsssReleasedHere;
             row.properties[pid].lmi = lmiReal;
+            // Focus Commit 2 follow-on: the same local variables above,
+            // individually — see the field's own header comment.
+            row.properties[pid].deposit = realPrice - loanReal;
+            row.properties[pid].duty = dutyReal;
+            row.properties[pid].costs = costsReal;
+            row.properties[pid].fhog = fhogReal;
           }
         } else if (propVal[pid] > 0) {
           propVal[pid] *= 1 + pm.rate;

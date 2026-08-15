@@ -32,6 +32,7 @@ function mkState(over = {}) {
     assets,
     goals: over.goals ?? [],
     liabilities: over.liabilities ?? [],
+    properties: over.properties ?? [],
     cashflows: {
       income: [], expenses: [], deductions: [], contributions: [], withdrawals: [], lumpSums: [],
       superContributions: [],
@@ -182,6 +183,12 @@ describe("applyVary", () => {
     const state = mkState({ goals: [{ id: "g1", targetAt: { kind: "age", age: 45 } }] });
     applyVary(state, { kind: "goalTargetDate", id: "g1" }, 50);
     expect(state.goals[0].targetAt).toEqual({ kind: "age", age: 50 });
+  });
+
+  it("propertyPurchaseDate writes an age-based DateRef onto the property, not an amount", () => {
+    const state = mkState({ properties: [{ id: "p1", purchaseAt: { kind: "age", age: 42 } }] });
+    applyVary(state, { kind: "propertyPurchaseDate", id: "p1" }, 46);
+    expect(state.properties[0].purchaseAt).toEqual({ kind: "age", age: 46 });
   });
 
   it("an unknown vary.kind throws rather than silently no-op-ing", () => {

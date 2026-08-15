@@ -31,7 +31,7 @@ import {
   createSuperContribution, normaliseSuperContributions,
   createSuperWithdrawal, normaliseSuperWithdrawals,
   SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, FHSSS_ELIGIBLE_TYPES,
-  clampWorkingCash,
+  clampWorkingCash, uid,
   INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
   incomeCategoryTaxTreatment,
 } from "./planState.js";
@@ -47,6 +47,9 @@ import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
 import { buildSnapshotColumns, buildSnapshotTable, snapshotToHTML, snapshotToCSV } from "./snapshot.js";
+import {
+  eligibleDepositProperties, buildDepositFocus, solveDepositContribution, solveWhenCouldIBuy,
+} from "./focusDeposit.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -6388,15 +6391,222 @@ els.outputCanvas.addEventListener("click", (e) => {
   navigate({ page: "workspace", clientId: client.id, scenarioId: scenario.id, area: "input", section: btn.dataset.inputSection });
 });
 
-// COMMIT 2 fills this in: target price, required-at-settlement
-// breakdown, accumulating funds vs required cash, and the two solver
-// actions ("What would I need to save?" / "When could I buy?").
-function renderFocusDepositView() {
-  els.viewFocusDeposit.innerHTML = focusEmptyStateHTML(
-    "How much cash a planned property purchase needs at settlement, and whether the client is on track to have it — add a planned property purchase to see it.",
-    "property"
-  );
+// --- Commit 2: Deposit & home purchase --------------------------------------
+//
+// Every figure below is read straight off `projection` via
+// src/focusDeposit.js's buildDepositFocus — this file only renders it.
+// The two solver actions are BUTTON-triggered (not eager): each is a
+// real solveFor/solveWhenCouldIBuy run (up to 40 projectPlan calls),
+// cheap enough to run on a click but wasteful to re-run on every
+// unrelated keystroke while parked on this view. "The answer"'s own
+// "reached in FY…" line for a shortfall DOES run eagerly — it's a
+// single solveWhenCouldIBuy call per render, and the spec shows it as
+// part of the answer itself, not behind a button.
+let focusDepositPropertyId = null;
+// { kind: "contribution", result, assetId, fromAge, toAge } |
+// { kind: "date", result } | null — cleared whenever the property
+// changes or a result is applied, so a stale solve is never shown
+// against a plan it no longer describes.
+let focusDepositSolveResult = null;
+
+function focusDepositLmiRowHTML(f) {
+  if (f.required.firstHomeGuarantee) {
+    return `<tr><td>LMI</td><td>Waived — First Home Guarantee</td></tr>`;
+  }
+  if (f.required.lmi <= 0) return "";
+  return f.required.lmiInCash
+    ? `<tr><td>LMI (paid at settlement)</td><td>${fmtMoney(f.required.lmi)}</td></tr>`
+    : `<tr><td>LMI</td><td>${fmtMoney(f.required.lmi)} — capitalised into the loan, not part of settlement cash</td></tr>`;
 }
+
+function focusDepositAnswerHTML(f) {
+  if (f.answer.onTrack) {
+    return `<p class="helper-text">On track: funded by ${escapeHTML(f.target.fyLabel)}, ${fmtMoney(f.answer.spare)} to spare.</p>`;
+  }
+  // "on current savings the target is reached in FY…" — see this
+  // function's header: a real solveWhenCouldIBuy run, not a guess.
+  const when = solveWhenCouldIBuy({ state, propertyId: focusDepositPropertyId });
+  const reached = when.converged
+    ? `on current savings the target is reached in ${escapeHTML(fyLabelForAge(state.plan, "client", when.value))} (age ${when.value})`
+    : "on current savings, the target may never be reached within this projection";
+  return `<p class="helper-warning">Short by ${fmtMoney(f.answer.shortfall)} at the purchase date (${escapeHTML(f.target.fyLabel)}); ${reached}.</p>`;
+}
+
+function focusDepositSolverResultHTML() {
+  const r = focusDepositSolveResult;
+  if (!r) return "";
+  if (r.kind === "contribution") {
+    return r.result.converged
+      ? `<p class="helper-text">Save ${fmtMoney(r.result.value)}/month from now to fund the purchase on time.
+          <button class="btn-text" type="button" data-focus-apply="contribution">Apply to plan</button></p>`
+      : `<p class="helper-warning">No monthly amount up to ${fmtMoney(20000)} gets there — the shortfall is larger than saving alone can close by the purchase date.</p>`;
+  }
+  return r.result.converged
+    ? `<p class="helper-text">Earliest fundable: ${escapeHTML(fyLabelForAge(state.plan, "client", r.result.value))} (age ${r.result.value}).
+        <button class="btn-text" type="button" data-focus-apply="date">Apply to plan</button></p>`
+    : `<p class="helper-warning">No date within this projection is fully funded on current savings.</p>`;
+}
+
+function renderFocusDepositView() {
+  const props = eligibleDepositProperties(state);
+  if (props.length === 0) {
+    els.viewFocusDeposit.innerHTML = focusEmptyStateHTML(
+      "How much cash a planned property purchase needs at settlement, and whether the client is on track to have it — add a planned property purchase to see it.",
+      "property"
+    );
+    return;
+  }
+  if (!props.some((p) => p.id === focusDepositPropertyId)) {
+    focusDepositPropertyId = props[0].id;
+    focusDepositSolveResult = null;
+  }
+  const f = buildDepositFocus({ out: projection, state, propertyId: focusDepositPropertyId });
+  if (!f) {
+    els.viewFocusDeposit.innerHTML = focusEmptyStateHTML(
+      "This property's purchase date doesn't fall inside the current projection — adjust the purchase date or the projection's end to see this view.",
+      "property"
+    );
+    return;
+  }
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const financialAssets = state.assets.filter((a) => a.class !== "lifestyle" && a.include);
+
+  els.viewFocusDeposit.innerHTML = `
+    <h2 class="section-heading">Deposit & home purchase</h2>
+    ${props.length > 1 ? `<div id="focusDepositEntity" class="seg-toggle entity-select" role="tablist" aria-label="Property"></div>` : ""}
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>Target</h3>
+        <div class="summary-strip">
+          <div class="stat"><div class="stat-label">Price today</div><div class="stat-value">${fmtMoney(f.target.priceToday)}</div></div>
+          <div class="stat"><div class="stat-label">Growth rate</div><div class="stat-value">${f.target.growthPct}% p.a.</div></div>
+          <div class="stat"><div class="stat-label">Purchase date</div><div class="stat-value">${escapeHTML(f.target.fyLabel)} (age ${f.target.purchaseAge})</div></div>
+          <div class="stat stat-headline"><div class="stat-label">Projected price at purchase</div><div class="stat-value">${fmtMoney(f.target.projectedPriceReal * factor(f.target.purchaseYear))}</div></div>
+        </div>
+        <p class="helper-text">A ${fmtMoney(f.target.priceToday)} property growing at ${f.target.growthPct}% a year is not ${fmtMoney(f.target.priceToday)} in ${escapeHTML(f.target.fyLabel)} — the price itself is the moving part of this question.</p>
+      </div>
+      <div class="focus-section">
+        <h3>Required at settlement</h3>
+        <table class="focus-table">
+          <tr><td>Deposit (price less the loan)</td><td>${fmtMoney(f.required.deposit * factor(f.target.purchaseYear))}</td></tr>
+          <tr><td>Stamp duty</td><td>${fmtMoney(f.required.duty * factor(f.target.purchaseYear))}</td></tr>
+          ${focusDepositLmiRowHTML(f)}
+          <tr><td>Transfer &amp; legal costs</td><td>${fmtMoney(f.required.costs * factor(f.target.purchaseYear))}</td></tr>
+          ${f.required.fhog > 0 ? `<tr><td>Less: First Home Owner Grant</td><td>−${fmtMoney(f.required.fhog * factor(f.target.purchaseYear))}</td></tr>` : ""}
+          <tr class="tl-total"><td>Total cash required</td><td>${fmtMoney(f.required.total * factor(f.target.purchaseYear))}</td></tr>
+        </table>
+      </div>
+      <div class="focus-section">
+        <h3>Accumulating</h3>
+        <div id="focusDepositChart"></div>
+        ${f.fhsssReleaseAtPurchase > 0 ? `<p class="helper-text">Includes a ${fmtMoney(f.fhsssReleaseAtPurchase * factor(f.target.purchaseYear))} FHSSS release at the purchase date.</p>` : ""}
+      </div>
+      <div class="focus-section focus-answer">
+        <h3>The answer</h3>
+        ${focusDepositAnswerHTML(f)}
+      </div>
+      <div class="focus-section focus-solvers">
+        <h3>What if?</h3>
+        <div class="focus-solver-row">
+          <label>Save into
+            <select id="focusDepositAsset">
+              ${financialAssets.map((a) => `<option value="${a.id}">${escapeHTML(a.name)}</option>`).join("")}
+            </select>
+          </label>
+          <label>From age
+            <input type="number" id="focusDepositFromAge" min="${state.plan.client.currentAge}" max="${f.target.purchaseAge}" value="${state.plan.client.currentAge}" />
+          </label>
+          <button class="btn-text" type="button" data-focus-solve="contribution">What would I need to save?</button>
+        </div>
+        <button class="btn-text" type="button" data-focus-solve="date">When could I buy?</button>
+        ${focusDepositSolverResultHTML()}
+      </div>
+    </div>
+  `;
+  if (props.length > 1) {
+    renderEntitySelector(
+      $("focusDepositEntity"),
+      props.map((p) => ({ id: p.id, label: p.name })),
+      focusDepositPropertyId,
+      (id) => { focusDepositPropertyId = id; focusDepositSolveResult = null; renderFocusDepositView(); }
+    );
+  }
+  renderFocusDepositChart(f);
+}
+
+function renderFocusDepositChart(f) {
+  const el = $("focusDepositChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const ages = f.accumulating.map((a) => a.age);
+  const available = f.accumulating.map((a) => a.availableReal * factor(a.year));
+  const requiredLine = ages.map(() => f.required.total * factor(f.target.purchaseYear));
+  Plotly.react(el, [
+    {
+      x: ages, y: available, name: "Available funds", type: "scatter", mode: "lines+markers",
+      line: { color: "rgb(28, 90, 180)", width: 2 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Available funds</extra>",
+    },
+    {
+      x: ages, y: requiredLine, name: "Required at settlement", type: "scatter", mode: "lines",
+      line: { color: "rgb(217, 90, 40)", width: 2, dash: "dash" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Required at settlement</extra>",
+    },
+  ], {
+    margin: { l: 70, r: 20, t: 24, b: 40 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: 1 },
+    yaxis: {
+      title: { text: `${isNominal() ? "Future" : "Today's"} dollars`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+els.viewFocusDeposit.addEventListener("click", (e) => {
+  const solveBtn = e.target.closest("[data-focus-solve]");
+  if (solveBtn) {
+    const kind = solveBtn.dataset.focusSolve;
+    if (kind === "contribution") {
+      const assetId = $("focusDepositAsset")?.value;
+      const fromAge = clampInt($("focusDepositFromAge")?.value, state.plan.client.currentAge, state.plan.endAge);
+      const result = solveDepositContribution({ state, propertyId: focusDepositPropertyId, assetId, fromAge });
+      focusDepositSolveResult = { kind: "contribution", result, assetId, fromAge };
+    } else if (kind === "date") {
+      const result = solveWhenCouldIBuy({ state, propertyId: focusDepositPropertyId });
+      focusDepositSolveResult = { kind: "date", result };
+    }
+    renderFocusDepositView();
+    return;
+  }
+  const applyBtn = e.target.closest("[data-focus-apply]");
+  if (!applyBtn || !focusDepositSolveResult?.result?.converged) return;
+  const property = state.properties.find((p) => p.id === focusDepositPropertyId);
+  if (!property) return;
+  if (focusDepositSolveResult.kind === "contribution") {
+    const { result, assetId, fromAge } = focusDepositSolveResult;
+    const ref = resolveRef(property.purchaseAt, state.plan, projection.schedule, "client");
+    const owner = state.assets.find((a) => a.id === assetId)?.owner ?? "client";
+    state.cashflows.contributions = [
+      ...state.cashflows.contributions,
+      {
+        id: uid("cf"), assetId, amount: result.value, frequency: "monthly",
+        from: { kind: "age", age: fromAge }, to: { kind: "age", age: Math.max(fromAge, ref.age - 1) },
+        indexed: false, owner, label: "Deposit savings (Focus)",
+      },
+    ];
+  } else if (focusDepositSolveResult.kind === "date") {
+    property.purchaseAt = { kind: "age", age: focusDepositSolveResult.result.value };
+  }
+  focusDepositSolveResult = null;
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+});
 
 // COMMIT 3 fills this in: FHSSS contributions/earnings/release/tax by
 // year, and the inside-vs-outside-super comparison that justifies the

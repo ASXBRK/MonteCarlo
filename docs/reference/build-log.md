@@ -135,9 +135,41 @@ would have counted it a second time as "Other Loan Repayments" — excluded
 explicitly (`isHelpLiability`), with a regression test proving the bug
 would have broken the Client + Partner = Total identity.
 
+**Focus views (docs/specs/12-focus-views.md)** — one question, one page,
+read from the same `projectPlan()` output every other view reads, never a
+separate calculation.
+- Commit 1, **scaffold and solver** — `src/solve.js`'s `bisectScalar`
+  (monotonic-direction inferred from the two endpoints, non-monotonicity
+  detected and reported rather than silently narrowed on) and `solveFor`
+  (clones the plan, applies one of three named vary targets, re-validates
+  via `clampAllToPlan`, runs the real engine). Third sidebar group
+  (Graphs · Tables · Focus) with five empty-state views, each with a
+  direct link to the input section it needs.
+- Commit 2, **Deposit & home purchase** — `src/focusDeposit.js`. Target
+  price/growth/purchase date, required-at-settlement breakdown (deposit,
+  duty, LMI or the FHBG waiver, costs, less FHOG — new `deposit`/`duty`/
+  `costs`/`fhog` fields on `row.properties[pid]`, exposing figures the
+  purchase-event block already computes), an accumulating-funds-vs-
+  required chart, and an on-track/shortfall answer keyed to the engine's
+  own cumulative `unfundedCashflow` — not a separate arithmetic
+  threshold. Two solver actions ("What would I need to save?" / "When
+  could I buy?") via a new `findMinimumFunded` search (binary search for
+  the SMALLEST/EARLIEST value at which cumulative unfunded cashflow
+  drops to zero — deliberately not `solveFor`/`bisectScalar`, since
+  "funded" floors at exactly zero and stays there, a plateau rather than
+  a single root, which an equation solver would land on arbitrarily
+  rather than at the minimum). Caught a genuine bug in its own build:
+  an earlier metric that only checked "opening balance vs. required
+  settlement cash" could converge on an amount that funded the deposit
+  but left the new loan's own first-year repayments unfunded — fixed by
+  switching both solvers to the engine's actual `unfundedCashflow`
+  ground truth, with a regression test.
+
 ### In flight
-Super threshold indexation per figure (AWOTE / CPI / unindexed, with nominal
-rounding), then Division 296, then Monte Carlo over the full scenario.
+Focus Commits 3–6 (FHSSS, salary sacrifice, debt payoff, standalone
+lookups); super threshold indexation per figure (AWOTE / CPI / unindexed,
+with nominal rounding), then Division 296, then Monte Carlo over the full
+scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary

@@ -1140,6 +1140,15 @@ describe("D4 — property", () => {
     expect(out.yearly[1].liabilities["prop-p1"].drawdown).toBe(0);
     expect(y2.liabilities["prop-p1"].opening).toBe(0);
     expect(out.yearly[3].liabilities["prop-p1"].opening).toBeCloseTo(y2.liabilities["prop-p1"].closing, 6);
+    // Focus Commit 2 follow-on: settlement's own breakdown, individually
+    // reported — deposit + duty + costs − fhog (no FHOG/FHSSS/LMI here)
+    // reconciles to the SAME settlement total exactly, by construction.
+    expect(y2.properties.p1.deposit).toBeCloseTo(realPrice - loanReal, 2);
+    expect(y2.properties.p1.duty).toBeCloseTo(dutyReal, 2);
+    expect(y2.properties.p1.costs).toBeCloseTo(costsReal, 2);
+    expect(y2.properties.p1.fhog).toBe(0);
+    expect(y2.properties.p1.deposit + y2.properties.p1.duty + y2.properties.p1.costs - y2.properties.p1.fhog)
+      .toBeCloseTo(y2.properties.p1.settlement, 2);
   });
 
   it("a settlement the assets cannot fund becomes unfunded cashflow — the purchase still completes", () => {
@@ -1165,6 +1174,12 @@ describe("D4 — property", () => {
     const nominalPrice = 600000 * Math.pow(1.05, 2);
     const dutyNominal = 17325 + 0.045 * (nominalPrice - 540000);
     expect(dNot - dFhb).toBeCloseTo((dutyNominal + 30000) / infl, 1);
+    // Focus Commit 2 follow-on: the breakdown fields individually show
+    // what changed — duty waived to zero, and the grant reported as its
+    // own (positive) fhog figure, not just netted invisibly into settlement.
+    expect(fhb.yearly[2].properties.p1.duty).toBeCloseTo(0, 6);
+    expect(fhb.yearly[2].properties.p1.fhog).toBeCloseTo(30000 / infl, 1);
+    expect(not.yearly[2].properties.p1.fhog).toBe(0);
   });
 
   it("negative gearing: pre-2027 and new-build losses offset salary; existing dwellings quarantine", () => {
@@ -3497,6 +3512,13 @@ describe("LMI and First Home Guarantee (Document Set Commit 4)", () => {
     // Settlement cash is unaffected by a capitalised premium.
     const withoutLmi = projectPlan(lmiState(lmiProp({ lvrPct: 88, lmiOverride: 0, lmiPayAtSettlement: false })));
     expect(y2.properties.p1.settlement).toBeCloseTo(withoutLmi.yearly[2].properties.p1.settlement, 2);
+    // Focus Commit 2 follow-on: capitalised — `lmi` is still reported
+    // (Commit 4's own field), but must NOT be added into the
+    // deposit/duty/costs/fhog reconciliation since it never touched
+    // settlement cash.
+    expect(y2.properties.p1.lmi).toBeCloseTo(lmiReal, 2);
+    expect(y2.properties.p1.deposit + y2.properties.p1.duty + y2.properties.p1.costs - y2.properties.p1.fhog)
+      .toBeCloseTo(y2.properties.p1.settlement, 2);
   });
 
   it("paid at settlement: LMI adds to settlement cash, not to the loan drawdown", () => {
@@ -3507,6 +3529,11 @@ describe("LMI and First Home Guarantee (Document Set Commit 4)", () => {
     expect(y2.liabilities["prop-p1"].drawdown).toBeCloseTo(loanRealBase, 2);
     const withoutLmi = projectPlan(lmiState(lmiProp({ lvrPct: 88, lmiOverride: 0, lmiPayAtSettlement: true })));
     expect(y2.properties.p1.settlement).toBeCloseTo(withoutLmi.yearly[2].properties.p1.settlement + lmiReal, 2);
+    // Focus Commit 2 follow-on: paid at settlement — `lmi` DOES belong
+    // in the reconciliation this time, since it genuinely left
+    // settlement cash rather than being folded into the loan drawdown.
+    expect(y2.properties.p1.deposit + y2.properties.p1.duty + y2.properties.p1.costs - y2.properties.p1.fhog + y2.properties.p1.lmi)
+      .toBeCloseTo(y2.properties.p1.settlement, 2);
   });
 
   it("the First Home Guarantee price cap is flagged, not blocked, when exceeded", () => {

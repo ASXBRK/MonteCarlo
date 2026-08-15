@@ -133,6 +133,13 @@ export function applyVary(clonedState, vary, x) {
       goal.targetAt = { kind: "age", age: x };
       return;
     }
+    // Focus Commit 2 — "When could I buy?" varies the property's OWN
+    // purchase date, same "when, not how much" shape as goalTargetDate.
+    case "propertyPurchaseDate": {
+      const property = findById(clonedState.properties, vary.id);
+      property.purchaseAt = { kind: "age", age: x };
+      return;
+    }
     default:
       throw new Error(`solve.js: unknown vary.kind "${vary.kind}"`);
   }
