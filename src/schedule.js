@@ -333,6 +333,19 @@ export function buildSchedules(state) {
       withdrawals: new Float64Array(months), // gross REQUESTED amount; release-gated below (Commit 3)
     };
   }
+  // FHSSS-eligible contributions (Document Set Commit 3), keyed by the
+  // CONTRIBUTING person (not account — FHSSS eligibility is a
+  // per-person entitlement) and split concessional/non-concessional,
+  // the same split fhsss.js's release calculation needs. Only rows
+  // flagged fhsssEligible AND of an eligible type feed this — SG can
+  // never be eligible (voluntary contributions only) and spouse
+  // contributions are excluded too (not the contributing person's own
+  // voluntary contribution, per the ATO's FHSSS rules) even though
+  // both share the "nonConcessional" flow key above.
+  const fhsssFlows = {
+    client: { concessional: new Float64Array(months), nonConcessional: new Float64Array(months) },
+    partner: { concessional: new Float64Array(months), nonConcessional: new Float64Array(months) },
+  }
   const yearStartM = (y) => (y === 0 ? 0 : firstYearMonths + 12 * (y - 1));
   const yearEndM = (y) => firstYearMonths + 12 * y;
   const FLOW_KEY_BY_TYPE = {
@@ -503,6 +516,33 @@ export function buildSchedules(state) {
         }
       }
     }
+    // FHSSS-eligible tracking (Document Set Commit 3): reads the SAME
+    // gated `temp` array used for the real credit above, so a rejected
+    // FY (age/work-test) is excluded from FHSSS eligibility exactly
+    // like it's excluded from the real contribution. sg/spouse types
+    // are never eligible regardless of the row's own flag (input
+    // integrity — planState.js's clampSuperContribution forces the
+    // flag false for those, so this check is a defensive belt-and-
+    // braces, not the primary gate).
+    // Disclosed simplification: this reads the row's REQUESTED amount
+    // (post age/work-test gating, pre non-concessional-cap acceptance
+    // — that ratio is resolved later, in deterministic.js's year loop,
+    // using live carry-forward/bring-forward state this module doesn't
+    // have). A personalNonDeductible row that also exceeds the
+    // ORDINARY non-concessional cap would (rarely) overstate the
+    // FHSSS-eligible balance by its rejected excess. Not a money-
+    // creation bug either way — the eventual release still cannot
+    // exceed the real super account balance (withdrawFromSuper caps at
+    // it) — just a disclosed edge-case imprecision in FHSSS eligibility
+    // tracking specifically. Concessional rows have no equivalent gap:
+    // the FULL gross concessional amount always lands in the fund
+    // regardless of excess-cap status (see deterministic.js's
+    // `superBal[id] += (ccGross - ccTax) + nccAccepted`).
+    if (sc.fhsssEligible && sc.type !== "sg" && sc.type !== "spouse") {
+      const bucket = sc.type === "personalNonDeductible" ? "nonConcessional" : "concessional";
+      const owner = sc.owner === "partner" ? "partner" : "client";
+      for (let m = 0; m < months; m++) fhsssFlows[owner][bucket][m] += temp[m];
+    }
     for (let m = 0; m < months; m++) flows[key][m] += temp[m];
   }
 
@@ -555,6 +595,7 @@ export function buildSchedules(state) {
     expenses,
     assetFlows,
     superFlows,
+    fhsssFlows,
     toConcessionalCapRows,
     superWarnings,
     rowTotals,

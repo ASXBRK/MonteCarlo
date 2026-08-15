@@ -218,3 +218,32 @@ describe("excess concessional super contributions (Tier 1.2)", () => {
     expect(explicit).toEqual(base);
   });
 });
+
+describe("FHSSS taxable release (Document Set Commit 3)", () => {
+  it("the taxable release is taxed at the marginal rate, offset by 30%", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    const withRelease = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, fhsssTaxableRelease: 10000 });
+    expect(withRelease.taxableIncome).toBeCloseTo(base.taxableIncome + 10000, 6);
+    expect(withRelease.fhsssOffset).toBeCloseTo(3000, 6);
+    const marginalOnRelease = withRelease.incomeTax - base.incomeTax;
+    const medicareOnRelease = withRelease.medicare - base.medicare;
+    expect(withRelease.netIncomeTax - base.netIncomeTax).toBeCloseTo(marginalOnRelease + medicareOnRelease - 3000, 2);
+  });
+
+  it("the offset is non-refundable — capped at the tax payable, applied after LITO and the excess-CC offset", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 0, fhsssTaxableRelease: 5000 });
+    expect(a.fhsssOffset).toBeLessThanOrEqual(a.incomeTax);
+  });
+
+  it("stacks correctly alongside an excess-CC offset in the same year — both non-refundable, applied in sequence", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, excessConcessionalContributions: 5000, fhsssTaxableRelease: 10000 });
+    expect(a.excessCcOffset).toBeCloseTo(750, 6); // 15% of 5,000
+    expect(a.fhsssOffset).toBeCloseTo(3000, 6); // 30% of 10,000, unaffected by the CC offset since plenty of tax remains
+  });
+
+  it("zero release (the default) leaves every figure unchanged", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000 });
+    const explicit = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000, fhsssTaxableRelease: 0 });
+    expect(explicit).toEqual(base);
+  });
+});

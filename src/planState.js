@@ -590,14 +590,16 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
 
 export function clampProperty(p, plan) {
   const flow = (f) => ({ amount: clampNumber(f?.amount, 0), ...clampIndexation(f ?? {}) });
+  const propertyType = PROPERTY_TYPES.includes(p.propertyType) ? p.propertyType : "ppr";
+  const status = p.status === "planned" ? "planned" : "owned";
   return {
     id: typeof p.id === "string" && p.id ? p.id : uid("pr"),
     name: typeof p.name === "string" && p.name.trim() ? p.name : "Property",
     owner: ["client", "partner", "joint"].includes(p.owner) && (p.owner === "client" || plan.partner)
       ? p.owner : "client",
     state: PROPERTY_STATES.includes(p.state) ? p.state : "NSW",
-    propertyType: PROPERTY_TYPES.includes(p.propertyType) ? p.propertyType : "ppr",
-    status: p.status === "planned" ? "planned" : "owned",
+    propertyType,
+    status,
     currentValue: clampNumber(p.currentValue, 0),
     acquisitionDate: typeof p.acquisitionDate === "string" && !Number.isNaN(new Date(p.acquisitionDate).getTime())
       ? p.acquisitionDate : null,
@@ -617,6 +619,12 @@ export function clampProperty(p, plan) {
     expenses: flow(p.expenses),
     expensesDeductible: p.expensesDeductible !== false,
     depreciation: clampNumber(p.depreciation, 0),
+    // Document Set Commit 3 (FHSSS) — input integrity: releasing FHSSS
+    // only makes sense for a still-to-happen PPR purchase (the scheme
+    // exists to fund a first home), so the toggle is forced false for
+    // an owned property or an investment purchase rather than left to
+    // produce a silently-meaningless flag.
+    releaseFhsssAtPurchase: p.releaseFhsssAtPurchase === true && status === "planned" && propertyType === "ppr",
   };
 }
 
@@ -764,6 +772,14 @@ export function createSuperContribution(plan, superAccounts = [], owner = "clien
   };
 }
 
+// FHSSS-eligible types (Document Set Commit 3): voluntary contributions
+// only — salary sacrifice, personal deductible, personal non-deductible.
+// SG is never eligible (not voluntary) and spouse contributions are
+// excluded too (not the contributing person's own voluntary
+// contribution, per the ATO's FHSSS rules), even though a "toConcessional
+// Cap" fill or spouse row shares other machinery with the eligible types.
+export const FHSSS_ELIGIBLE_TYPES = ["salarySacrifice", "personalDeductible", "personalNonDeductible"];
+
 export function clampSuperContribution(sc, plan, superAccountOwnerById, incomeRowIds) {
   const owner = sc.owner === "partner" && plan.partner ? "partner" : "client";
   const type = SUPER_CONTRIBUTION_TYPES.includes(sc.type) ? sc.type : "salarySacrifice";
@@ -787,6 +803,13 @@ export function clampSuperContribution(sc, plan, superAccountOwnerById, incomeRo
     incomeRowId: incomeRowIds.has(sc.incomeRowId) ? sc.incomeRowId : null,
     frequency: sc.frequency === "annual" ? "annual" : "monthly",
     from, to,
+    // Input integrity: an SG row, a spouse row, or a dynamic
+    // "toConcessionalCap" fill (whose amount depends on the live
+    // carry-forward ledger, not a fixed dollar figure — see
+    // schedule.js's toConcessionalCapRows header) flagged FHSSS-
+    // eligible would be a state the engine can't act on faithfully, so
+    // it's forced false rather than silently ignored downstream.
+    fhsssEligible: sc.fhsssEligible === true && FHSSS_ELIGIBLE_TYPES.includes(type) && basis !== "toConcessionalCap",
     ...clampIndexation(sc),
   };
 }
@@ -880,7 +903,7 @@ export function defaultState(profiles = {}, now = new Date()) {
       hideEmptyRows: true,
       showIndividualCashflowItems: false,
     },
-    assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed" },
+    assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed", fhsssEarningsRate: 0.0794 },
   };
 }
 
@@ -1606,6 +1629,12 @@ export function hydrate(json, profiles = {}) {
         awote: clampNumber(raw.assumptions?.awote ?? 0.035, 0, 0.2),
         mortgageRate: clampNumber(raw.assumptions?.mortgageRate ?? 0.06, 0, 0.3),
         bracketMode: raw.assumptions?.bracketMode === "frozen" ? "frozen" : "indexed",
+        // Document Set Commit 3 (FHSSS) — the deemed rate associated
+        // earnings accrue at. Defaults to an indicative ATO shortfall
+        // interest rate (SIC); confirm the current quarterly rate
+        // before relying on this in client work (see build-log.md's
+        // Open Items).
+        fhsssEarningsRate: clampNumber(raw.assumptions?.fhsssEarningsRate ?? 0.0794, 0, 0.3),
       },
     };
     // Single households must not carry partner/joint owners.

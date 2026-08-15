@@ -12,11 +12,13 @@
 // (pre-reform discounted gains arrive already discounted; post-reform
 // gains get the 30% minimum-tax floor consistent with the engine's
 // simple_max application), and per-person capital-loss carry-forward.
-// HELP repayments are modelled separately (src/data/helpRates.js,
-// deterministic.js) since they depend on repayment income, not this
-// function's inputs. NOT modelled (disclosed in the Parameters modal):
-// SAPTO, Medicare levy surcharge, family Medicare thresholds. (Div 293
-// is also modelled separately — Tier 1.2 — this comment predates it.)
+// HELP repayments and the Medicare Levy Surcharge are modelled
+// separately (src/data/helpRates.js, src/data/mlsRates.js,
+// deterministic.js) since they depend on repayment/surcharge income,
+// not this function's inputs. NOT modelled (disclosed in the
+// Parameters modal): SAPTO, family Medicare thresholds beyond the
+// surcharge's own family bands. (Div 293 is also modelled separately —
+// Tier 1.2 — this comment predates it.)
 //
 // Everything is in REAL dollars. Bracket modes (locked decision 6):
 //   "indexed" (default) — brackets/Medicare/LITO held constant in real
@@ -114,6 +116,16 @@ export function assessPerson({
   // release-from-fund election is not modelled.
   excessConcessionalContributions = 0,
   excessConcessionalOffsetRate = 0.15,
+  // Document Set Commit 3 (FHSSS): the taxable component of a First
+  // Home Super Saver release — 85% of eligible concessional
+  // contributions plus all associated earnings (src/fhsss.js) — is
+  // assessable at the member's marginal rate with a 30% non-refundable
+  // offset. Same "add to income, credit back a flat offset" shape as
+  // excessConcessionalContributions above (a different source, a
+  // different rate), so it reuses the identical mechanism rather than
+  // a parallel one.
+  fhsssTaxableRelease = 0,
+  fhsssOffsetRate = 0.30,
 }) {
   const { key, k } = bracketSettings(fyStartYear, bracketMode, cpi);
   const nonResident = taxProfile?.residency === "nonResident";
@@ -132,7 +144,8 @@ export function assessPerson({
   // including for Medicare/LITO purposes). Excess deductions floor at
   // zero (revenue losses are not carried in this model).
   const excessCC = Math.max(0, excessConcessionalContributions);
-  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC);
+  const fhsssRelease = Math.max(0, fhsssTaxableRelease);
+  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease);
 
   // Capital losses: a net loss year adds to the carry-forward; a gain
   // year consumes carried losses before any tax (losses never offset
@@ -156,7 +169,11 @@ export function assessPerson({
   // whatever income tax remains) — the 15% already paid in the fund,
   // credited back against (not exempting) the marginal-rate tax on it.
   const excessCcOffset = Math.min(excessCC * excessConcessionalOffsetRate, Math.max(0, incomeTax - litoApplied));
-  const netIncomeTax = incomeTax - litoApplied - excessCcOffset + medicare - frankingCredits;
+  // FHSSS offset applies after both LITO and the excess-CC offset,
+  // non-refundable (capped at whatever income tax remains) — same
+  // "credited back, not exempting" shape as excessCcOffset.
+  const fhsssOffset = Math.min(fhsssRelease * fhsssOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset));
+  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset + medicare - frankingCredits;
 
   // CGT: the gain stacks on top of the income base. Marginal tax and
   // Medicare on the gain by differencing; post-reform (FY2027-28
@@ -175,6 +192,7 @@ export function assessPerson({
     medicare,
     lito: litoApplied,
     excessCcOffset,
+    fhsssOffset,
     frankingCredits,
     netIncomeTax,
     cgtTax,

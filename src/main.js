@@ -27,7 +27,7 @@ import {
   createSuperAccount, clampSuperAccount, normaliseSuperAccounts,
   createSuperContribution, normaliseSuperContributions,
   createSuperWithdrawal, normaliseSuperWithdrawals,
-  SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES,
+  SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, FHSSS_ELIGIBLE_TYPES,
   clampWorkingCash,
   INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
   incomeCategoryTaxTreatment,
@@ -307,6 +307,7 @@ function mountWorkspace(clientId, scenarioId) {
   els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
   awoteInput.value = ((state.assumptions.awote ?? 0.035) * 100).toFixed(1);
   mortgageRateInput.value = ((state.assumptions.mortgageRate ?? 0.06) * 100).toFixed(2);
+  fhsssEarningsRateInput.value = ((state.assumptions.fhsssEarningsRate ?? 0.0794) * 100).toFixed(2);
   syncBracketModeInputs();
   els.chartTreatmentSelects.forEach((sel) => { sel.value = state.display.chartTreatment[sel.dataset.treatment]; });
 }
@@ -1842,7 +1843,7 @@ const cfHeaders = {
   // No Indexation column — dropped to a second line beneath each row
   // (Cashflow sections: table layout, point 6) — this section alone
   // has too many columns to fit it on the same line at 1280px.
-  superContributions: () => `<th>Label</th><th>Type</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Account</th><th>Basis</th><th>Amount / detail</th><th>Freq</th><th>From</th><th>To</th>`,
+  superContributions: () => `<th>Label</th><th>Type</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Account</th><th>Basis</th><th>Amount / detail</th><th>Freq</th><th>From</th><th>To</th><th>FHSSS</th>`,
   superWithdrawals: () => `<th>Label</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Account</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
 };
 
@@ -2319,6 +2320,9 @@ function applyRowEdit(kind, row, field, el, commit) {
       break;
     case "sgApplies":
       row.sgApplies = el.checked;
+      break;
+    case "fhsssEligible":
+      row.fhsssEligible = el.checked;
       break;
     case "category": {
       if (kind === "income") {
@@ -2808,6 +2812,7 @@ function propertyCardHTML(p) {
             ${num("Duty override ($, blank = schedule)", "dutyOverride", p.dutyOverride ?? "", 'min="0" step="100"')}
             ${cell("First home buyer", `<label class="ptg-check"><input type="checkbox"${p.firstHomeBuyer ? " checked" : ""} data-pid="${p.id}" data-pfield="firstHomeBuyer" /><span>Yes</span></label>`)}
             ${cell("New build", `<label class="ptg-check"><input type="checkbox"${p.newBuild ? " checked" : ""} data-pid="${p.id}" data-pfield="newBuild" /><span>Yes</span></label>`)}
+            ${p.propertyType === "ppr" ? cell("Release FHSSS at purchase", `<label class="ptg-check"><input type="checkbox"${p.releaseFhsssAtPurchase ? " checked" : ""} data-pid="${p.id}" data-pfield="releaseFhsssAtPurchase" /><span>Yes</span></label>`) : ""}
           `}
           ${invest ? `
             ${flowCells("Rent", "rent", p.rent)}
@@ -2921,6 +2926,7 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field === "dutyOverride") p.dutyOverride = v === "" ? null : clampNumber(v, 0);
   else if (field === "firstHomeBuyer") p.firstHomeBuyer = e.target.checked;
   else if (field === "newBuild") p.newBuild = e.target.checked;
+  else if (field === "releaseFhsssAtPurchase") p.releaseFhsssAtPurchase = e.target.checked;
   else if (field === "expensesDeductible") p.expensesDeductible = e.target.checked;
   else if (field === "depreciation") p.depreciation = clampNumber(v, 0);
   else if (field.includes(".")) {
@@ -3177,6 +3183,12 @@ function superContributionRowHTML(sc) {
   const showAmount = sc.basis === "amount";
   const showPercent = sc.basis === "percentOfIncome";
   const showFillNote = sc.basis === "toConcessionalCap";
+  // FHSSS (Document Set Commit 3): only a voluntary contribution — not
+  // a spouse contribution, never a dynamic cap-fill (see
+  // planState.js's clampSuperContribution for why) — can be flagged
+  // eligible, so the checkbox is hidden rather than shown-and-clamped-
+  // away for a type/basis it can never apply to.
+  const fhsssEligibleAllowed = FHSSS_ELIGIBLE_TYPES.includes(sc.type) && !showFillNote;
   // The Amount/detail column's content varies by basis (a fixed $,
   // a %-of-income-row pair, or a plain note) — one column, contents
   // vary, same discipline as super contribution rows have always
@@ -3231,6 +3243,14 @@ function superContributionRowHTML(sc) {
       </td>
       <td class="cf-td-date">${dateRefControlHTML(sc.from, "client", `data-kind="superContributions" data-cfid="${sc.id}" data-field="from"`, 18, 120)}</td>
       <td class="cf-td-date">${dateRefControlHTML(sc.to, "client", `data-kind="superContributions" data-cfid="${sc.id}" data-field="to"`, 18, 120)}</td>
+      <td class="cf-td-fhsss">
+        ${fhsssEligibleAllowed
+          ? `<label class="ptg-check" title="Voluntary contribution eligible for First Home Super Saver release">
+               <input type="checkbox"${sc.fhsssEligible ? " checked" : ""}
+                      data-kind="superContributions" data-cfid="${sc.id}" data-field="fhsssEligible" />
+             </label>`
+          : ""}
+      </td>
       <td class="cf-td-remove">
         <button class="cf-remove" type="button" aria-label="Remove row"
                 data-action="remove-row" data-kind="superContributions" data-cfid="${sc.id}">×</button>
@@ -5559,6 +5579,8 @@ function buildTaxGroups() {
       { label: "HELP repayment", cell: (y) => -(td(y, p)?.helpRepayment ?? 0) },
       { label: "HELP balance (closing)", cell: (y) => td(y, p)?.helpBalanceClosing ?? 0 },
       { label: "Medicare levy surcharge", cell: (y) => -(td(y, p)?.medicareLevySurcharge ?? 0) },
+      { label: "FHSSS release (gross)", cell: (y) => td(y, p)?.fhsssRelease ?? 0 },
+      { label: "FHSSS tax offset (30%)", cell: (y) => td(y, p)?.fhsssOffset ?? 0 },
     ],
   });
   const groups = [personGroup("client", clientName())];
@@ -5570,6 +5592,7 @@ function buildTaxGroups() {
       { label: "Division 296 tax payable", cell: (y) => -yl[y].taxDetail.div296 },
       { label: "HELP repayment", cell: (y) => -(yl[y].taxDetail.helpRepayment ?? 0) },
       { label: "Medicare levy surcharge", cell: (y) => -(yl[y].taxDetail.medicareLevySurcharge ?? 0) },
+      { label: "FHSSS release (gross)", cell: (y) => yl[y].taxDetail.fhsssRelease ?? 0 },
       { label: "Total tax", cell: (y) => -yl[y].tax, cls: "tl-total" },
     ],
   });
@@ -5605,6 +5628,15 @@ function buildAssumptionsGroups() {
     { label: "CPI (% p.a.)", cell: () => cpi * 100, pct: true, always: true },
     { label: "Wage index (AWOTE, % p.a. nominal)", cell: () => (state.assumptions.awote ?? 0.035) * 100, pct: true, always: true },
   ];
+  // Shown only when FHSSS is actually in play — unlike CPI/AWOTE this
+  // rate is a constant % every year regardless of use, so it would
+  // never all-zero-hide on its own the way an unused per-row figure
+  // does (Outputs convention: all-zero rows hidden).
+  const fhsssInUse = (state.cashflows.superContributions ?? []).some((c) => c.fhsssEligible)
+    || (state.properties ?? []).some((p) => p.releaseFhsssAtPurchase);
+  if (fhsssInUse) {
+    economic.push({ label: "FHSSS associated earnings rate (% p.a. nominal)", cell: () => (state.assumptions.fhsssEarningsRate ?? 0.0794) * 100, pct: true, always: true });
+  }
   for (const a of included) {
     const { incomeNominal, growthNominal } = assetReturnComponents(a);
     const gross = incomeNominal + growthNominal;
@@ -5870,6 +5902,18 @@ awoteInput.addEventListener("change", () => {
   state.assumptions.awote = n / 100;
   saveState();
   refreshOutputs(); // wage-indexed rows re-derive
+});
+
+const fhsssEarningsRateInput = $("fhsssEarningsRateInput");
+fhsssEarningsRateInput.addEventListener("change", () => {
+  const n = Number(fhsssEarningsRateInput.value);
+  if (!Number.isFinite(n) || n < 0 || n > 30) {
+    fhsssEarningsRateInput.value = ((state.assumptions.fhsssEarningsRate ?? 0.0794) * 100).toFixed(2);
+    return;
+  }
+  state.assumptions.fhsssEarningsRate = n / 100;
+  saveState();
+  refreshOutputs();
 });
 
 // --- boot -----------------------------------------------------------------

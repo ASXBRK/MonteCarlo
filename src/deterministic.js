@@ -45,6 +45,7 @@ import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
+import { fhsssAcceptContribution, fhsssReleaseAmounts } from "./fhsss.js";
 import {
   processConcessionalCap, processNonConcessionalCap, div293Tax, availableCarryForward,
 } from "./Tax/superContributions.js";
@@ -483,6 +484,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     client: Math.max(0, state.plan.client?.helpBalance ?? 0),
     partner: Math.max(0, state.plan.partner?.helpBalance ?? 0),
   };
+  // Document Set Commit 3 — FHSSS running balances. Every projection
+  // starts fresh at zero (same disclosed simplification as the NCC
+  // bring-forward and concessional carry-forward's "no way to seed a
+  // real client's already-accrued state" — see Tax/superContributions.js's
+  // header): a real client's prior FHSSS contributions/releases aren't
+  // modelled. `released` is a one-shot flag — this build models a
+  // single lifetime release per person (the spec's own scope: "do not
+  // model... the maximum release request", i.e. multiple partial
+  // releases), so once true the balances stay zero for the rest of the
+  // projection even if further FHSSS-eligible contributions are made.
+  const fhsssBal = {
+    client: { concessional: 0, nonConcessional: 0, earnings: 0, lifetimeContributed: 0, released: false },
+    partner: { concessional: 0, nonConcessional: 0, earnings: 0, lifetimeContributed: 0, released: false },
+  };
+  const fhsssEarningsRateAssum = state.assumptions.fhsssEarningsRate ?? 0.0794;
+  // Fisher-deflated to the engine's real-terms convention, same as
+  // every other nominal assumption rate (mortgageRate, growthPct).
+  const fhsssAnnualReal = (1 + fhsssEarningsRateAssum) / (1 + cpi) - 1;
 
   const propsById = Object.fromEntries(props.map((p) => [p.id, p]));
   const liabsById = Object.fromEntries(liabs.map((l) => [l.id, l]));
@@ -536,7 +555,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     liabilitiesClosing: 0,
     // Per-property detail (D4), real dollars.
     properties: Object.fromEntries(props.map((p) => [p.id, {
-      value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0,
+      value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0, fhsssRelease: 0,
     }])),
     propertyClosing: 0,
     netAssets: 0,
@@ -594,7 +613,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   //   trackUnfunded — record into the projection-level shortfall trackers
   // Returns per-person income components + realised gains + months in
   // which each person's income arose.
-  function runYear(y, { taxOut, cgtDue, row, trackUnfunded, superOutcome, divReleaseFromSuper, divReleaseAccountId }) {
+  function runYear(y, { taxOut, cgtDue, row, trackUnfunded, superOutcome, divReleaseFromSuper, divReleaseAccountId, fhsssRelease }) {
     const fyStart = fy0 + y;
     // Condition of release (Tier 1.2, Commit 3): static for the whole
     // projection (retirementAge doesn't change), so cheap to recompute
@@ -609,7 +628,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     const acc = {};
     for (const p of persons) {
-      acc[p] = { ordinary: 0, franked: 0, unfranked: 0, deductions: 0, netCapitalGain: 0, incomeMonths: new Set() };
+      acc[p] = { ordinary: 0, franked: 0, unfranked: 0, deductions: 0, netCapitalGain: 0, incomeMonths: new Set(), fhsssTaxableRelease: 0 };
     }
     // Per-property net-rental tracking for the gearing rules (D4).
     acc._propNet = Object.fromEntries(props.map((p) => [p.id, {
@@ -898,7 +917,33 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             loanBal[pm.loanId] = liabsById[pm.loanId].balance; // drawdown
             if (row) row.liabilities[pm.loanId].drawdown += loanReal;
           }
-          const settle = realPrice - loanReal + dutyReal + costsReal - fhogReal;
+          // Document Set Commit 3 (FHSSS) — the GROSS release reduces
+          // settlement cash dollar for dollar (the ATO determination
+          // amount really does arrive as cash before tax time); the
+          // taxable component (85% of eligible concessional
+          // contributions + all associated earnings) is recorded
+          // against this FY's ordinary assessment instead of netted
+          // here — the true marginal rate depends on the WHOLE FY's
+          // income, most of which is still to come at a July
+          // settlement, so it settles through the same PAYG/refund
+          // mechanism as every other tax component in this engine
+          // (HELP, MLS, CGT, Division 293/296). The actual super-
+          // account debit is real-pass-only (gated on `row`, same
+          // convention as every other balance mutation) — this
+          // computation itself is deterministic and side-effect-free,
+          // safe to run in both the measure and real pass.
+          let fhsssReleasedHere = 0;
+          for (const per of persons) {
+            const rel = fhsssRelease?.[per];
+            if (!rel || rel.propertyId !== pid) continue;
+            fhsssReleasedHere += rel.grossRelease;
+            acc[per].fhsssTaxableRelease += rel.taxableComponent;
+            if (row) {
+              const accountId = superAccountsByOwner[per]?.[0];
+              if (accountId) withdrawFromSuper(accountId, rel.grossRelease);
+            }
+          }
+          const settle = realPrice - loanReal + dutyReal + costsReal - fhogReal - fhsssReleasedHere;
           settlementOut += settle;
           propVal[pid] = realPrice;
           if (pm.isCgt) {
@@ -907,6 +952,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           if (row) {
             row.properties[pid].settlement += settle;
             row.properties[pid].costBaseSeed = realPrice + dutyReal + costsReal;
+            row.properties[pid].fhsssRelease = fhsssReleasedHere;
           }
         } else if (propVal[pid] > 0) {
           propVal[pid] *= 1 + pm.rate;
@@ -1366,6 +1412,61 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       };
     }
 
+    // Document Set Commit 3 (FHSSS) — resolved once per FY, before
+    // either pass (same "year-sequential state" reasoning as the super
+    // cap outcome above): associated earnings accrue for the year on
+    // the OPENING balance, then this FY's FHSSS-eligible voluntary
+    // contributions (schedule.fhsssFlows) are accepted up to the
+    // combined $15,000/year, $50,000/lifetime cap.
+    for (const p of persons) {
+      const fb = fhsssBal[p];
+      if (fb.released) continue; // one lifetime release per person — nothing left to accrue
+      const opening = fb.concessional + fb.nonConcessional + fb.earnings;
+      fb.earnings += opening * fhsssAnnualReal;
+      let requestedConcessional = 0, requestedNonConcessional = 0;
+      for (let m = yearStart(y); m < yearEnd(y); m++) {
+        requestedConcessional += schedule.fhsssFlows[p].concessional[m];
+        requestedNonConcessional += schedule.fhsssFlows[p].nonConcessional[m];
+      }
+      const accept = fhsssAcceptContribution({
+        requestedConcessional, requestedNonConcessional, lifetimeContributed: fb.lifetimeContributed,
+      });
+      fb.concessional += accept.acceptedConcessional;
+      fb.nonConcessional += accept.acceptedNonConcessional;
+      fb.lifetimeContributed = accept.newLifetimeContributed;
+      if (accept.rejected > 1e-6) {
+        superWarnings.push({
+          fyLabel: schedule.fyLabels[y], owner: p, type: "fhsss",
+          reason: `Exceeds the FHSSS annual/lifetime cap — $${Math.round(accept.rejected)} not eligible for release`,
+        });
+      }
+    }
+
+    // FHSSS release at a planned property purchase: decided here (not
+    // inside runYear) so the amount is IDENTICAL and side-effect-free
+    // in both the measure and real pass — the same treatment the
+    // settlement price/duty/FHOG figures already get. Only the actual
+    // super-account debit (withdrawFromSuper, inside runYear) is
+    // deferred to the real pass, gated on `row`, same convention as
+    // every other real balance mutation.
+    const fhsssRelease = { client: null, partner: null };
+    for (const p of props) {
+      if (!p.releaseFhsssAtPurchase) continue;
+      const pm = propMeta[p.id];
+      if (pm.owned || pm.purchaseMonth !== yearStart(y)) continue;
+      for (const per of persons) {
+        if (!pm.shares[per]) continue; // not an owner of this property
+        const fb = fhsssBal[per];
+        if (fb.released) continue;
+        const amounts = fhsssReleaseAmounts({
+          concessionalBalance: fb.concessional, nonConcessionalBalance: fb.nonConcessional, earnings: fb.earnings,
+        });
+        if (amounts.grossRelease <= 0) continue;
+        fhsssRelease[per] = { ...amounts, propertyId: p.id };
+        fb.concessional = 0; fb.nonConcessional = 0; fb.earnings = 0; fb.released = true;
+      }
+    }
+
     // FY rollover: this-FY pool additions age into old money.
     for (const id of ids) if (meta[id].cgt) pools[id] = poolNewFy(pools[id]);
 
@@ -1382,7 +1483,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const wcaBalSnap = wcaBal;
     const measured = runYear(y, {
       taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome,
-      divReleaseFromSuper, divReleaseAccountId,
+      divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
     });
     Object.assign(bal, balSnap);
     pools = poolSnap;
@@ -1476,6 +1577,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         capitalLossCarryFwd: lossCarryFwd[p],
         taxProfile: state.plan[p]?.taxProfile ?? null,
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
+        fhsssTaxableRelease: measured[p].fhsssTaxableRelease ?? 0,
       });
       // Disclosed simplification: excludes this FY's own realised
       // capital gain, which this engine only ever assesses in a later,
@@ -1501,6 +1603,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         capitalLossCarryFwd: lossCarryFwd[p],
         taxProfile: state.plan[p]?.taxProfile ?? null,
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
+        fhsssTaxableRelease: measured[p].fhsssTaxableRelease ?? 0,
       });
       assessed[p] = a;
 
@@ -1596,7 +1699,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
     const real = runYear(y, {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
-      divReleaseFromSuper, divReleaseAccountId,
+      divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
     });
     row.closingBalance = combined[yearEnd(y)];
     row.wcaDetail.closing = wcaSeries[yearEnd(y)];
@@ -1724,6 +1827,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       helpBalanceClosing: helpBal[p],
       // Document Set Commit 2 — this FY's Medicare Levy Surcharge.
       medicareLevySurcharge: mlsDue[p],
+      // Document Set Commit 3 — this FY's FHSSS release, if any: the
+      // gross amount (already netted into the property's settlement
+      // figure above) and the resulting tax offset (30% of the taxable
+      // component), for the Tax view's visibility of "the tax benefit".
+      fhsssRelease: fhsssRelease?.[p]?.grossRelease ?? 0,
+      fhsssOffset: assessed[p].fhsssOffset,
     } : null;
     for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY
     row.taxDetail = {
@@ -1750,6 +1859,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       netCapitalGain: persons.reduce((s, p) => s + real[p].netCapitalGain, 0),
       helpRepayment: helpDue.client + helpDue.partner,
       medicareLevySurcharge: mlsDue.client + mlsDue.partner,
+      fhsssRelease: (fhsssRelease.client?.grossRelease ?? 0) + (fhsssRelease.partner?.grossRelease ?? 0),
     };
     yearly.push(row);
     pendingCgt = newPending;

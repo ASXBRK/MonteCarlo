@@ -3017,6 +3017,151 @@ describe("Medicare Levy Surcharge (Document Set Commit 2)", () => {
   });
 });
 
+describe("FHSSS (Document Set Commit 3)", () => {
+  const fhsssProp = (over = {}) => ({
+    id: "p1", name: "First home", owner: "client", state: "NSW",
+    propertyType: "ppr", status: "planned",
+    currentValue: 0, acquisitionDate: null, costBase: 0,
+    priceToday: 500000, purchaseAt: { kind: "age", age: 42 },
+    lvrPct: 0, firstHomeBuyer: false, newBuild: false,
+    purchaseCostsPct: 0, dutyOverride: 0, growthPct: 2.5, // = cpi, so real price stays exactly $500,000
+    rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expensesDeductible: true, depreciation: 0,
+    releaseFhsssAtPurchase: true,
+    ...over,
+  });
+
+  // Two years (ages 40-41) of $10,000/year eligible salary sacrifice —
+  // $20,000 total, well under both the $15,000/year and $50,000/
+  // lifetime caps — then a PPR purchase at 42 releases it. Earnings
+  // rate pinned to 0 so the release is an exact 85%-of-concessional
+  // hand calc, uncontaminated by compounding.
+  const baseState = (extra = {}) => ({
+    ...mkState({
+      endAge: 45,
+      assets: [],
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [employmentRow({ amount: 150000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 44 } })],
+        superContributions: [scRow({
+          type: "salarySacrifice", amount: 10000, frequency: "annual", fhsssEligible: true,
+          indexBasis: "cpi", // constant in real terms — both years are worth exactly $10,000
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 },
+        })],
+      },
+    }),
+    assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0 },
+    properties: [fhsssProp()],
+    liabilities: [],
+    ...extra,
+  });
+
+  it("known-value: 85% of eligible concessional contributions releases, reducing settlement cash dollar for dollar", () => {
+    const out = projectPlan(baseState());
+    const y2 = out.yearly[2];
+    // 2 × $10,000 = $20,000 eligible concessional; 85% released = $17,000.
+    expect(y2.properties.p1.fhsssRelease).toBeCloseTo(17000, 2);
+    expect(y2.properties.p1.settlement).toBeCloseTo(500000 - 17000, 2);
+  });
+
+  it("the 15% concessional remainder never releases — gross release is less than the raw contribution", () => {
+    const out = projectPlan(baseState());
+    expect(out.yearly[2].properties.p1.fhsssRelease).toBeLessThan(20000);
+  });
+
+  it("the taxable release (85% concessional + earnings) is taxed at the marginal rate less a 30% offset", () => {
+    const out = projectPlan(baseState());
+    expect(out.yearly[2].taxDetail.client.fhsssOffset).toBeCloseTo(17000 * 0.3, 2);
+  });
+
+  it("SG contributions never build an FHSSS balance, however large", () => {
+    const s = {
+      ...mkState({
+        endAge: 43, assets: [], plan: { superAccounts: [superAcct()] },
+        cashflows: {
+          income: [employmentRow({ amount: 200000, sgApplies: true, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
+        },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0 },
+      properties: [fhsssProp({ purchaseAt: { kind: "age", age: 42 } })],
+      liabilities: [],
+    };
+    const out = projectPlan(s);
+    expect(out.yearly[2].properties.p1.fhsssRelease).toBe(0);
+  });
+
+  it("the combined $15,000/year cap binds across concessional and non-concessional together, split proportionally", () => {
+    const s = {
+      ...mkState({
+        endAge: 43, assets: [], plan: { superAccounts: [superAcct()] },
+        cashflows: {
+          income: [employmentRow({ amount: 200000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+          superContributions: [
+            scRow({ id: "sc1", type: "salarySacrifice", amount: 12000, frequency: "annual", fhsssEligible: true, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+            scRow({ id: "sc2", type: "personalNonDeductible", amount: 6000, frequency: "annual", fhsssEligible: true, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+          ],
+        },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0 },
+      properties: [fhsssProp({ purchaseAt: { kind: "age", age: 41 } })],
+      liabilities: [],
+    };
+    const out = projectPlan(s);
+    // 12,000 + 6,000 = 18,000 requested; capped at 15,000 combined,
+    // split proportionally: 10,000 concessional + 5,000 non-concessional.
+    // Release = 0.85 × 10,000 + 5,000 = 13,500.
+    expect(out.yearly[1].properties.p1.fhsssRelease).toBeCloseTo(13500, 2);
+    expect(out.superWarnings.some((w) => w.type === "fhsss")).toBe(true);
+  });
+
+  it("the $50,000 lifetime cap binds even when each individual year is under the annual cap", () => {
+    const s = {
+      ...mkState({
+        endAge: 47, assets: [], plan: { superAccounts: [superAcct()] },
+        cashflows: {
+          income: [employmentRow({ amount: 200000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } })],
+          superContributions: [scRow({
+            type: "salarySacrifice", amount: 15000, frequency: "annual", fhsssEligible: true,
+            from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 }, // 4 × 15,000 = 60,000 requested
+          })],
+        },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0 },
+      properties: [fhsssProp({ purchaseAt: { kind: "age", age: 44 } })],
+      liabilities: [],
+    };
+    const out = projectPlan(s);
+    expect(out.yearly[4].properties.p1.fhsssRelease).toBeCloseTo(50000 * 0.85, 2);
+  });
+
+  it("associated earnings accrue on the balance before release", () => {
+    const withEarnings = projectPlan(baseState({ assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0.0794 } }));
+    const withoutEarnings = projectPlan(baseState());
+    expect(withEarnings.yearly[2].properties.p1.fhsssRelease)
+      .toBeGreaterThan(withoutEarnings.yearly[2].properties.p1.fhsssRelease);
+  });
+
+  it("regression gate: no FHSSS-eligible contributions and the toggle off leaves a rich purchase scenario untouched", () => {
+    const s = {
+      ...mkState({
+        endAge: 45, assets: [], plan: { superAccounts: [superAcct()] },
+        cashflows: {
+          income: [employmentRow({ amount: 150000, sgApplies: true, from: { kind: "age", age: 40 }, to: { kind: "age", age: 44 } })],
+        },
+      }),
+      properties: [fhsssProp({ releaseFhsssAtPurchase: false })],
+      liabilities: [],
+    };
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.properties.p1.fhsssRelease).toBe(0);
+      expect(row.taxDetail.client.fhsssOffset).toBe(0);
+      expect(row.taxDetail.fhsssRelease).toBe(0);
+    }
+  });
+});
+
 describe("Deductions (PAYG withholding, tax refund timing, and deductions)", () => {
   it("a deduction row reduces the owner's taxable income and actual tax payable, with no household cash effect", () => {
     const scenario = (deduction) => mkState({

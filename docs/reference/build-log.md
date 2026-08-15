@@ -53,8 +53,19 @@ by the workbook document-sense-check:
   and `dependentChildren` (household) inputs. Also fixed a latent bug: the
   Setup plan-bar's commit handler dropped `workingCash` from the next plan
   object, silently resetting the WCA to defaults on every Setup edit.
+- Commit 3, **FHSSS** — new `src/fhsss.js` (annual $15,000/lifetime $50,000
+  combined cap acceptance, 85%/100% release split); `fhsssEligible` flag per
+  voluntary super contribution row (SG/spouse always excluded); the taxable
+  release (85% of eligible concessional + all associated earnings) taxed at
+  MTR less a 30% offset via a new `assessPerson` parameter, mirroring the
+  existing excess-concessional-contributions offset shape; a planned PPR
+  purchase's "Release FHSSS at purchase" toggle credits the gross release
+  against settlement cash, with the tax settling through the normal FY
+  assessment/PAYG-refund mechanism rather than netted at settlement.
+  `assumptions.fhsssEarningsRate` (indicative ATO shortfall interest rate,
+  needs confirming — see Open Items).
 
-Roughly 571 tests, clean build.
+Roughly 593 tests, clean build.
 
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with nominal
@@ -175,3 +186,7 @@ Word merge to firm templates.
   reference before it is implemented.
 - **A real client scenario, run end to end**, once the contribution fix
   lands. Manual testing has found more than the test suite has.
+- **FHSSS associated earnings rate** (currently 7.94% nominal, an
+  indicative ATO shortfall interest rate) — confirm against the firm's
+  reference figures; it's user-adjustable in the meantime (Parameters
+  modal / Assumptions view).
