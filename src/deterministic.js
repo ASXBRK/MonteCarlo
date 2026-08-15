@@ -44,6 +44,7 @@ import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./sc
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
+import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
 import {
   processConcessionalCap, processNonConcessionalCap, div293Tax, availableCarryForward,
 } from "./Tax/superContributions.js";
@@ -1275,6 +1276,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // handed to runYear for crediting in the real pass only.
     const superRatesY = superRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     const helpRatesY = helpRatesFor(fyStart, bracketMode, cpi, awoteAssum);
+    const mlsRatesY = mlsRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     const superOutcome = { client: null, partner: null };
     // Cap headroom snapshot (Tier 1.2, Commit 4 UI): the cap and
     // carry-forward available BEFORE this FY's toConcessionalCap fills
@@ -1444,6 +1446,48 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // same PAYG-withheld-vs-actual settlement as income tax, landing as
     // part of the same FY t+1 refund/balancing figure.
     const helpDue = { client: 0, partner: 0 };
+    const mlsDue = { client: 0, partner: 0 };
+    // Document Set Commits 1/2 — "income for [HELP repayment / MLS
+    // surcharge] purposes": taxable income + reportable super
+    // contributions + net investment loss. The spec gives HELP a fifth
+    // component (reportable fringe benefits, exempt foreign employment
+    // income) neither of which this tool models, so the two figures
+    // are IDENTICAL here — computed once, used for both. Kept as two
+    // separately-named reads at the call site (not merged into one
+    // "surchargeableIncome" concept) since the spec defines them
+    // independently and a future refinement could diverge them.
+    //
+    // Computed in its OWN pass, before the main per-person loop below:
+    // MLS's family threshold needs BOTH persons' income at once (the
+    // ATO compares the COMBINED family income against one threshold,
+    // then applies the resulting rate to each uncovered person's own
+    // income separately) — which the main loop, processed one person
+    // at a time, can't see ahead of itself. assessPerson is pure and
+    // cheap; calling it here duplicates none of its side effects (there
+    // are none), just this one lightweight number.
+    const repaymentIncome = { client: 0, partner: 0 };
+    for (const p of persons) {
+      const pre = assessPerson({
+        fyStartYear: fyStart, bracketMode, cpi,
+        ordinaryIncome: measured[p].ordinary,
+        deductions: measured[p].deductions,
+        distributions: { franked: measured[p].franked, unfranked: measured[p].unfranked },
+        netCapitalGain: 0,
+        capitalLossCarryFwd: lossCarryFwd[p],
+        taxProfile: state.plan[p]?.taxProfile ?? null,
+        excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
+      });
+      // Disclosed simplification: excludes this FY's own realised
+      // capital gain, which this engine only ever assesses in a later,
+      // separately-timed block.
+      repaymentIncome[p] = pre.taxableIncome
+        + (superOutcome[p]?.reportableSuperContributions ?? 0)
+        + netInvestmentLoss[p];
+    }
+    const isFamily = persons.length > 1; // a couple — MLS family thresholds apply to both
+    const familyIncome = repaymentIncome.client + repaymentIncome.partner;
+    const dependentChildren = state.plan.dependentChildren ?? 0;
+
     taxOutArr.fill(0, yearStart(y), yearEnd(y));
     for (const p of persons) {
       const a = assessPerson({
@@ -1460,20 +1504,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       });
       assessed[p] = a;
 
-      // Repayment income = taxable income (this FY's ordinary
-      // assessment — disclosed simplification: excludes this FY's own
-      // realised capital gain, which this engine only ever assesses in
-      // a later, separately-timed block) + reportable super
-      // contributions (salary sacrifice + personal deductible ONLY —
-      // superOutcome's field already excludes SG, see Tier 1.2) + net
-      // investment loss (property negative gearing only — see the
-      // block above). Reportable fringe benefits and exempt foreign
-      // employment income are NOT modelled — disclosed in the
-      // Parameters modal.
-      const repaymentIncome = a.taxableIncome
-        + (superOutcome[p]?.reportableSuperContributions ?? 0)
-        + netInvestmentLoss[p];
-      helpDue[p] = Math.min(helpRepaymentAmount(repaymentIncome, helpRatesY), helpBal[p]);
+      helpDue[p] = Math.min(helpRepaymentAmount(repaymentIncome[p], helpRatesY), helpBal[p]);
+      // MLS: comparison income is the FAMILY total for a couple (both
+      // compare against the SAME family bands), or the person's own
+      // income when single; the surcharge itself, once triggered, is a
+      // % of THIS person's own income only — see mlsRates.js's header.
+      mlsDue[p] = mlsSurchargeAmount({
+        ownIncome: repaymentIncome[p],
+        comparisonIncome: isFamily ? familyIncome : repaymentIncome[p],
+        hasCover: (p === "partner" ? state.plan.partner : state.plan.client)?.privateHospitalCover !== false,
+        isFamily,
+        dependentChildren,
+        rates: mlsRatesY,
+      });
 
       // PAYG withholding, tax refund timing, and deductions: computed
       // on employment income ALONE — the tax-free threshold, Medicare
@@ -1503,14 +1546,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // income tax): estimated on employment income alone — a real
         // payroll system has no visibility into the super/investment-
         // loss add-backs — and capped at the opening balance, same as
-        // the actual repayment above.
+        // the actual repayment above. MLS withholding is estimated the
+        // same way, on employment income alone (a payroll system knows
+        // the employee's private-cover declaration but not their
+        // spouse's income, so this too is an approximation of the real
+        // family-income comparison).
         const helpWithheld = Math.min(helpRepaymentAmount(employmentIncomeFy, helpRatesY), helpBal[p]);
+        const mlsWithheld = mlsSurchargeAmount({
+          ownIncome: employmentIncomeFy,
+          comparisonIncome: isFamily ? familyIncome : employmentIncomeFy,
+          hasCover: (p === "partner" ? state.plan.partner : state.plan.client)?.privateHospitalCover !== false,
+          isFamily, dependentChildren, rates: mlsRatesY,
+        });
         for (let m = yearStart(y); m < yearEnd(y); m++) {
-          if (empArr[m] > 0) taxOutArr[m] += (paygWithheld[p] + helpWithheld) * (empArr[m] / employmentIncomeFy);
+          if (empArr[m] > 0) taxOutArr[m] += (paygWithheld[p] + helpWithheld + mlsWithheld) * (empArr[m] / employmentIncomeFy);
         }
-        newPendingRefund[p] = (paygWithheld[p] + helpWithheld) - (a.netIncomeTax + helpDue[p]);
+        newPendingRefund[p] = (paygWithheld[p] + helpWithheld + mlsWithheld) - (a.netIncomeTax + helpDue[p] + mlsDue[p]);
       } else {
-        spreadTax(a.netIncomeTax + helpDue[p], measured[p].incomeMonths, yearEnd(y) - 1);
+        spreadTax(a.netIncomeTax + helpDue[p] + mlsDue[p], measured[p].incomeMonths, yearEnd(y) - 1);
       }
       helpBal[p] -= helpDue[p];
     }
@@ -1669,6 +1722,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // and the Key figures table's HELP balance row.
       helpRepayment: helpDue[p],
       helpBalanceClosing: helpBal[p],
+      // Document Set Commit 2 — this FY's Medicare Levy Surcharge.
+      medicareLevySurcharge: mlsDue[p],
     } : null;
     for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY
     row.taxDetail = {
@@ -1694,6 +1749,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       frankingCredits: persons.reduce((s, p) => s + assessed[p].frankingCredits, 0),
       netCapitalGain: persons.reduce((s, p) => s + real[p].netCapitalGain, 0),
       helpRepayment: helpDue.client + helpDue.partner,
+      medicareLevySurcharge: mlsDue.client + mlsDue.partner,
     };
     yearly.push(row);
     pendingCgt = newPending;

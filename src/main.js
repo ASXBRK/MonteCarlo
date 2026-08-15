@@ -896,6 +896,15 @@ function personBlockHTML(prefix, person, title) {
                  data-plan-field="${prefix}HelpBalance" />
         </div>
         <div class="cf-cell">
+          <label>Private hospital cover
+            <span class="helper-inline">Suppresses the Medicare Levy Surcharge for this person entirely.</span>
+          </label>
+          <label class="ptg-check">
+            <input type="checkbox"${person.privateHospitalCover !== false ? " checked" : ""} data-plan-field="${prefix}PrivateHospitalCover" />
+            <span>Yes</span>
+          </label>
+        </div>
+        <div class="cf-cell">
           <label>Division 293 / 296 tax paid from
             <span class="helper-inline">The taxpayer may elect either; release from super is the common election.</span>
           </label>
@@ -1052,6 +1061,12 @@ function renderPlanBar() {
       </div>
     </div>
     <div class="plan-field">
+      <label>Dependent children
+        <span class="helper-inline">Raises the Medicare Levy Surcharge family threshold — $1,500 (indexed) per child after the first.</span>
+      </label>
+      <input type="number" min="0" max="20" step="1" value="${p.dependentChildren ?? 0}" data-plan-field="dependentChildren" />
+    </div>
+    <div class="plan-field">
       <label>Start</label>
       <div class="plan-start">
         <select data-plan-field="startMonth">
@@ -1112,6 +1127,7 @@ wireDeferredDateCommit(els.planBar, (e) => {
     currentAge: cur.currentAge, // fallback if the new DOB is invalid
     retirementAge: field === `${prefix}RetirementAge` ? e.target.value : cur.retirementAge,
     helpBalance: field === `${prefix}HelpBalance` ? e.target.value : cur.helpBalance,
+    privateHospitalCover: field === `${prefix}PrivateHospitalCover` ? e.target.checked : cur.privateHospitalCover,
     taxProfile: {
       residency: field === `${prefix}Residency` ? e.target.value : cur.taxProfile.residency,
       medicareExempt: field === `${prefix}Medicare` ? e.target.value === "exempt" : cur.taxProfile.medicareExempt,
@@ -1152,6 +1168,8 @@ wireDeferredDateCommit(els.planBar, (e) => {
     },
     keyDates: p.keyDates,
     superAccounts: p.superAccounts,
+    workingCash: p.workingCash,
+    dependentChildren: field === "dependentChildren" ? e.target.value : p.dependentChildren,
   };
   state.plan = clampPlan(next, PROFILES);
   state = clampAllToPlan(state, PROFILES);
@@ -5540,6 +5558,7 @@ function buildTaxGroups() {
       { label: "Quarantined rental losses (carried)", cell: (y) => td(y, p)?.quarantinedLossCarry ?? 0 },
       { label: "HELP repayment", cell: (y) => -(td(y, p)?.helpRepayment ?? 0) },
       { label: "HELP balance (closing)", cell: (y) => td(y, p)?.helpBalanceClosing ?? 0 },
+      { label: "Medicare levy surcharge", cell: (y) => -(td(y, p)?.medicareLevySurcharge ?? 0) },
     ],
   });
   const groups = [personGroup("client", clientName())];
@@ -5550,6 +5569,7 @@ function buildTaxGroups() {
       { label: "Division 293 tax payable", cell: (y) => -yl[y].taxDetail.div293 },
       { label: "Division 296 tax payable", cell: (y) => -yl[y].taxDetail.div296 },
       { label: "HELP repayment", cell: (y) => -(yl[y].taxDetail.helpRepayment ?? 0) },
+      { label: "Medicare levy surcharge", cell: (y) => -(yl[y].taxDetail.medicareLevySurcharge ?? 0) },
       { label: "Total tax", cell: (y) => -yl[y].tax, cls: "tl-total" },
     ],
   });

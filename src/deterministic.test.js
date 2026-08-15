@@ -2902,6 +2902,121 @@ describe("HELP repayments (Document Set Commit 1)", () => {
   });
 });
 
+describe("Medicare Levy Surcharge (Document Set Commit 2)", () => {
+  const singleScenario = (amount, over = {}) => mkState({
+    endAge: 41,
+    assets: [],
+    plan: {
+      client: { currentAge: 40, privateHospitalCover: false },
+      workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 }, // real-zero — see the HELP known-value test above
+      ...over,
+    },
+    cashflows: { income: [employmentRow({ amount, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })] },
+  });
+
+  it("known-value: singles, nil below $105,000", () => {
+    const out = projectPlan(singleScenario(100000));
+    expect(out.yearly[0].taxDetail.client.medicareLevySurcharge).toBe(0);
+  });
+
+  it("known-value: singles, tier 1 (1.00%) just above $105,000, WHOLE income not the excess", () => {
+    const out = projectPlan(singleScenario(105001));
+    // 105001 × 1.00% — NOT (105001 − 105000) × 1.00% = 0.01. A step
+    // function, same shape as the HELP cliff.
+    expect(out.yearly[0].taxDetail.client.medicareLevySurcharge).toBeCloseTo(105001 * 0.01, 2);
+  });
+
+  it("known-value: singles, tier 2 (1.25%) between $123,000 and $164,000", () => {
+    const out = projectPlan(singleScenario(130000));
+    expect(out.yearly[0].taxDetail.client.medicareLevySurcharge).toBeCloseTo(130000 * 0.0125, 2);
+  });
+
+  it("known-value: singles, tier 3 (1.50%) above $164,000", () => {
+    const out = projectPlan(singleScenario(170000));
+    expect(out.yearly[0].taxDetail.client.medicareLevySurcharge).toBeCloseTo(170000 * 0.015, 2);
+  });
+
+  it("private hospital cover suppresses the surcharge entirely, regardless of income", () => {
+    const out = projectPlan(singleScenario(170000, { client: { currentAge: 40, privateHospitalCover: true } }));
+    expect(out.yearly[0].taxDetail.client.medicareLevySurcharge).toBe(0);
+  });
+
+  it("couples compare against the COMBINED family income, but the surcharge is a % of each person's OWN income", () => {
+    const s = mkState({
+      endAge: 41,
+      assets: [],
+      plan: {
+        client: { currentAge: 40, privateHospitalCover: false },
+        partner: { currentAge: 40, privateHospitalCover: false },
+        workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 },
+      },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", amount: 150000, owner: "client", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } }),
+          employmentRow({ id: "i2", amount: 200000, owner: "partner", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    // Family income = 350,000 > $328,000 family tier-3 floor → 1.50% —
+    // even though neither person's OWN income alone crosses that band.
+    expect(out.yearly[0].taxDetail.client.medicareLevySurcharge).toBeCloseTo(150000 * 0.015, 2);
+    expect(out.yearly[0].taxDetail.partner.medicareLevySurcharge).toBeCloseTo(200000 * 0.015, 2);
+  });
+
+  it("dependent children (after the first) shift the family threshold up by $1,500 each", () => {
+    const family = (dependentChildren) => mkState({
+      endAge: 41,
+      assets: [],
+      plan: {
+        client: { currentAge: 40, privateHospitalCover: false },
+        partner: { currentAge: 40, privateHospitalCover: false },
+        dependentChildren,
+        workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 },
+      },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", amount: 105000, owner: "client", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } }),
+          employmentRow({ id: "i2", amount: 106000, owner: "partner", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } }),
+        ],
+      },
+    });
+    // Family income = 211,000. With ≤1 dependent child the family
+    // threshold stays at $210,000 → already in tier 1. With 3 children
+    // the step (+$1,500 × 2 = $3,000) lifts the threshold to $213,000,
+    // pushing the same family income back under it → nil.
+    const noStep = projectPlan(family(1));
+    const withStep = projectPlan(family(3));
+    expect(noStep.yearly[0].taxDetail.client.medicareLevySurcharge).toBeCloseTo(105000 * 0.01, 2);
+    expect(withStep.yearly[0].taxDetail.client.medicareLevySurcharge).toBe(0);
+    expect(withStep.yearly[0].taxDetail.partner.medicareLevySurcharge).toBe(0);
+  });
+
+  it("PAYG withholding includes MLS — household cash flow actually differs, not just the tax-detail report", () => {
+    const base = (hasCover) => singleScenario(170000, { client: { currentAge: 40, privateHospitalCover: hasCover } });
+    const withMls = projectPlan(base(false));
+    const withoutMls = projectPlan(base(true));
+    const gap = withMls.yearly[0].tax - withoutMls.yearly[0].tax;
+    expect(gap).toBeCloseTo(withMls.yearly[0].taxDetail.client.medicareLevySurcharge, 2);
+  });
+
+  it("regression gate: default private hospital cover (true) leaves a rich scenario's MLS at zero throughout", () => {
+    const s = mkState({
+      endAge: 42,
+      plan: { superAccounts: [superAcct()] }, // privateHospitalCover omitted — defaults to true
+      cashflows: {
+        income: [employmentRow({ amount: 250000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 } })],
+        superContributions: [scRow({ type: "salarySacrifice", amount: 10000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
+      },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.taxDetail.client.medicareLevySurcharge).toBe(0);
+      expect(row.taxDetail.medicareLevySurcharge).toBe(0);
+    }
+  });
+});
+
 describe("Deductions (PAYG withholding, tax refund timing, and deductions)", () => {
   it("a deduction row reduces the owner's taxable income and actual tax payable, with no household cash effect", () => {
     const scenario = (deduction) => mkState({

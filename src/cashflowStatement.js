@@ -107,7 +107,8 @@ export function taxSums(row) {
   const partner = row.taxDetail?.partner ?? {};
   const incomeTax = (client.grossTax ?? 0) + (partner.grossTax ?? 0);
   const medicareLevy = (client.medicare ?? 0) + (partner.medicare ?? 0);
-  const medicareLevySurcharge = 0; // [zero]
+  // Document Set Commit 2.
+  const medicareLevySurcharge = row.taxDetail?.medicareLevySurcharge ?? 0;
   // Document Set Commit 1 — compulsory HELP repayment, assessed per
   // person and summed (row.taxDetail.helpRepayment already sums both).
   const helpRepayment = row.taxDetail?.helpRepayment ?? 0;

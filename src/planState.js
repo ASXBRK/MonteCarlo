@@ -140,6 +140,11 @@ function clampPerson(raw, start) {
     // Held constant in real terms (see src/data/helpRates.js's header);
     // reduced only by actual dollar repayments in deterministic.js.
     helpBalance: clampNumber(raw?.helpBalance, 0),
+    // Document Set Commit 2 — private hospital cover suppresses the
+    // Medicare Levy Surcharge entirely for this person. Default TRUE
+    // (MLS off unless the user says otherwise) — the safer default for
+    // an advice tool, per the spec.
+    privateHospitalCover: raw?.privateHospitalCover !== false,
   };
 }
 
@@ -1111,7 +1116,11 @@ export function clampPlan(plan, profiles = {}) {
   const superAccounts = normaliseSuperAccounts(plan.superAccounts, { client, partner }, profiles);
   const workingCash = clampWorkingCash(plan.workingCash);
 
-  return { household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash };
+  // Document Set Commit 2 — household-level dependent children, for
+  // the Medicare Levy Surcharge family threshold (+$1,500/indexed per
+  // child after the first — see src/data/mlsRates.js).
+  const dependentChildren = clampInt(plan.dependentChildren ?? 0, 0, 20);
+  return { household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash, dependentChildren };
 }
 
 // --- Working Cash Account ---------------------------------------------------
