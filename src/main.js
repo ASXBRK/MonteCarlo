@@ -137,6 +137,7 @@ const els = {
   viewSuperBalances: $("viewSuperBalances"),
   viewLiabilitiesBalances: $("viewLiabilitiesBalances"),
   viewCashflowBars: $("viewCashflowBars"),
+  viewMoneyDecomposition: $("viewMoneyDecomposition"),
   viewKeyFigures: $("viewKeyFigures"),
   keyFiguresTable: $("keyFiguresTable"),
   showAssetsToggle: $("showAssetsToggle"),
@@ -371,6 +372,7 @@ const OUTPUT_NAV = {
     { id: "monte-carlo", label: "Monte Carlo" },
     { id: "super-balances", label: "Super balances" },
     { id: "liabilities-balances", label: "Liabilities" },
+    { id: "money-decomposition", label: "Where the money went" },
   ],
   Tables: [
     { id: "key-figures", label: "Key figures" },
@@ -4421,6 +4423,7 @@ const VIEW_MOUNTS = {
   "super-balances": () => els.viewSuperBalances,
   "liabilities-balances": () => els.viewLiabilitiesBalances,
   "cashflow-bars": () => els.viewCashflowBars,
+  "money-decomposition": () => els.viewMoneyDecomposition,
   "key-figures": () => els.viewKeyFigures,
   cashflow: () => els.viewCashflow,
   assets: () => els.viewAssets,
@@ -4468,6 +4471,7 @@ function renderActiveView() {
   else if (activeView === "super-balances") renderSuperBalancesChart();
   else if (activeView === "liabilities-balances") renderLiabilitiesBalancesChart();
   else if (activeView === "cashflow-bars") renderCashflowBarsChart();
+  else if (activeView === "money-decomposition") renderMoneyDecompositionView();
   else if (activeView === "key-figures") renderKeyFiguresView();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
@@ -5470,6 +5474,141 @@ function renderCashflowBarsChart() {
     font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
   }, { displayModeBar: false, responsive: true });
 }
+
+// --- View: Where the money went (Implementation/Rates spec, Commit 4) -------
+//
+// Every figure below is read straight off `projection.yearly[y].decomposition`
+// / `.cumulativeDecomposition` — deterministic.js's own post-pass, itself
+// built from conservationCheck.js's decomposeNetWorthChange (the SAME
+// terms the conservation invariant asserts over). Never re-derived here.
+
+// The engine reports each year's OWN opening/closing net worth via
+// `netAssets`, but not the very first year's opening figure as a named
+// field (it's implicit in the year-0 row's own components) — same
+// derivation deterministic.js's post-pass and its own test use.
+function openingNetWorthAt(y) {
+  const row = projection.yearly[y];
+  if (y > 0) return projection.yearly[y - 1].netAssets;
+  return row.openingBalance + row.wcaDetail.opening
+    + Object.values(row.superDetail).reduce((s, v) => s + v.opening, 0)
+    - Object.values(row.liabilities).reduce((s, v) => s + v.opening, 0);
+}
+
+function buildMoneyDecompositionGroups() {
+  const walk = [
+    { label: "Opening net worth", cell: (y) => openingNetWorthAt(y), always: true },
+    { label: "+ Income", cell: (y) => projection.yearly[y].decomposition.income },
+    { label: "+ Investment growth", cell: (y) => projection.yearly[y].decomposition.growth },
+    { label: "− Tax", cell: (y) => -projection.yearly[y].decomposition.tax },
+    { label: "− Expenses", cell: (y) => -projection.yearly[y].decomposition.expenses },
+    { label: "− Interest", cell: (y) => -projection.yearly[y].decomposition.interest },
+    { label: "− Fees", cell: (y) => -projection.yearly[y].decomposition.fees },
+    { label: "± One-offs (property costs/FHOG, goals)", cell: (y) => projection.yearly[y].decomposition.oneOffs },
+    { label: "Closing net worth", cell: (y) => projection.yearly[y].netAssets, always: true, cls: "tl-total" },
+  ];
+  const cumulative = [
+    { label: "Cumulative income", cell: (y) => projection.yearly[y].cumulativeDecomposition.income },
+    { label: "Cumulative investment growth", cell: (y) => projection.yearly[y].cumulativeDecomposition.growth },
+    { label: "Cumulative tax", cell: (y) => -projection.yearly[y].cumulativeDecomposition.tax },
+    { label: "Cumulative expenses", cell: (y) => -projection.yearly[y].cumulativeDecomposition.expenses },
+    { label: "Cumulative interest", cell: (y) => -projection.yearly[y].cumulativeDecomposition.interest },
+    { label: "Cumulative fees", cell: (y) => -projection.yearly[y].cumulativeDecomposition.fees },
+    { label: "Cumulative one-offs", cell: (y) => projection.yearly[y].cumulativeDecomposition.oneOffs },
+  ];
+  return [
+    { title: "This year's change in net worth", rows: walk },
+    { title: "Cumulative since the projection started", rows: cumulative },
+  ];
+}
+
+function moneyWentCaptionHTML() {
+  const parts = [];
+  if (projection.wealthCrossoverYear != null) {
+    parts.push(`Cumulative investment growth first overtakes cumulative income in ${escapeHTML(yearHeaderText(projection.wealthCrossoverYear))} — the point a long accumulation starts compounding faster than it's being fed.`);
+  }
+  parts.push("Platform/ICR fees are already netted into each asset's own return rate at the source and can't be separately broken out — they're absorbed into growth here, not double-counted, a disclosed simplification.");
+  return `<p class="chart-note-inline">${parts.join(" ")}</p>`;
+}
+
+// The waterfall year — index into projection.yearly. Reset whenever it
+// falls outside the currently selected (period-thinned) range, same
+// convention as focusDebtPayoffLoanId resetting when its own list changes.
+let moneyDecompositionYear = null;
+
+function renderMoneyDecompositionView() {
+  const yearIdxs = selectedYearIndices();
+  if (yearIdxs.length === 0) {
+    els.viewMoneyDecomposition.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Nothing to show for this scenario yet.</p>`;
+    return;
+  }
+  if (moneyDecompositionYear == null || !yearIdxs.includes(moneyDecompositionYear)) {
+    moneyDecompositionYear = yearIdxs[yearIdxs.length - 1];
+  }
+  const yearOptions = yearIdxs.map((y) =>
+    `<option value="${y}"${y === moneyDecompositionYear ? " selected" : ""}>${escapeHTML(yearHeaderText(y))}</option>`
+  ).join("");
+  els.viewMoneyDecomposition.innerHTML = `
+    <div class="focus-section">
+      <h3>Net worth walk, projection start → selected year</h3>
+      <label>Through
+        <select id="moneyDecompositionYearSelect">${yearOptions}</select>
+      </label>
+      <div id="moneyDecompositionChart"></div>
+    </div>
+    <div id="moneyDecompositionTable"></div>
+  `;
+  renderMoneyDecompositionChart();
+  renderTransposed($("moneyDecompositionTable"), buildMoneyDecompositionGroups(), moneyWentCaptionHTML());
+}
+
+function renderMoneyDecompositionChart() {
+  const el = $("moneyDecompositionChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const y = moneyDecompositionYear;
+  const factor = displayFactor(endMonthOfYear(y));
+  const c = projection.yearly[y].cumulativeDecomposition;
+  const opening = openingNetWorthAt(0) * factor;
+  const closing = projection.yearly[y].netAssets * factor;
+
+  Plotly.react(el, [{
+    type: "waterfall",
+    x: ["Opening", "Income", "Growth", "Tax", "Expenses", "Interest", "Fees", "One-offs", "Closing"],
+    measure: ["absolute", "relative", "relative", "relative", "relative", "relative", "relative", "relative", "total"],
+    y: [
+      opening,
+      c.income * factor, c.growth * factor,
+      -c.tax * factor, -c.expenses * factor, -c.interest * factor, -c.fees * factor,
+      c.oneOffs * factor,
+      closing,
+    ],
+    connector: { line: { color: "rgba(0,0,0,0.25)" } },
+    decreasing: { marker: { color: "#dc5a28" } },
+    increasing: { marker: { color: "#1c5ab4" } },
+    totals: { marker: { color: "#222" } },
+    hovertemplate: "%{x}<br>%{y:$,.0f}<extra></extra>",
+  }], {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    showlegend: false,
+    yaxis: {
+      title: { text: `Net worth (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function exportMoneyDecompositionCSV() {
+  exportTransposedCSV("money-decomposition", buildMoneyDecompositionGroups());
+}
+
+els.viewMoneyDecomposition.addEventListener("change", (e) => {
+  if (e.target.id !== "moneyDecompositionYearSelect") return;
+  moneyDecompositionYear = Number(e.target.value);
+  renderMoneyDecompositionChart();
+  renderTransposed($("moneyDecompositionTable"), buildMoneyDecompositionGroups(), moneyWentCaptionHTML());
+});
 
 // --- transposed table infrastructure (shared by every table view) ------------
 //
@@ -7796,6 +7935,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "liabilities-balances") exportChartPNG("chartLiabilitiesBalances", "liabilities-balances");
   else if (activeView === "cashflow-bars") exportChartPNG("chartCashflowBars", "cashflow-bars");
   else if (activeView === "monte-carlo") exportChartPNG("chartMonteCarlo", "monte-carlo");
+  else if (activeView === "money-decomposition") exportMoneyDecompositionCSV();
   else if (activeView === "key-figures") exportTransposedCSV("key-figures", buildKeyFiguresGroups());
   else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));

@@ -177,10 +177,30 @@
 // doesn't, the shock injection broke the engine's bookkeeping, not the
 // invariant's accounting.
 //
-// Throws on violation (rather than returning a boolean) so a caller
-// can drop it straight into a loop without adding its own assertion —
-// see monteCarlo.test.js's per-path spot check for the pattern.
-export function checkYearConservation(out, y, ctx) {
+// computeYearFlows(out, y) — every NAMED term the invariant above
+// reasons about, as a plain object. Extracted (Implementation/Rates
+// spec, Commit 4, "Where the money went") so the net-worth-decomposition
+// feature can read the SAME figures checkYearConservation asserts over,
+// rather than re-deriving them a second time — "a second copy is how an
+// invariant meant to catch drift quietly drifts itself" (see header).
+// This is a PURE, bit-identical extraction: checkYearConservation below
+// is now a thin wrapper that calls this and asserts.
+//
+// One deliberate change in shape, not value: the single scaffolding
+// term `propertyAcquisitionCosts` (duty+costs-FHOG for a purchasing
+// property, blended with ordinary organic growth for an already-owned
+// one — see the header's "Properties" section) is split into two here:
+//   propertyOneOffCost = -duty -costs +fhog        (zero unless a
+//                         purchase actually fires this property this year)
+//   propertyGrowth     = propertyAcquisitionCosts - propertyOneOffCost
+//                         (whatever's left — organic growth of
+//                         already-owned properties, plus any growth
+//                         accrued after settlement within a purchase
+//                         year itself, a disclosed simplification)
+// The two sum back to exactly propertyAcquisitionCosts, so every caller
+// that only wants the invariant's own `expected` figure is unaffected;
+// the decomposition (below) is the only consumer that needs them apart.
+export function computeYearFlows(out, y) {
   const row = out.yearly[y];
   const prev = y > 0 ? out.yearly[y - 1] : null;
   const sumVals = (obj, key) => Object.values(obj).reduce((s, v) => s + v[key], 0);
@@ -240,20 +260,13 @@ export function checkYearConservation(out, y, ctx) {
   // removing the two Document Set flows this task specifically names.
   const propertyResidual = propertyValueDelta - drawdown - settlementCash;
   const propertyAcquisitionCosts = propertyResidual - fhsssRelease + lmiPremium;
+  const propertyOneOffCost = -sumProps("duty") - sumProps("costs") + sumProps("fhog");
+  const propertyGrowth = propertyAcquisitionCosts - propertyOneOffCost;
 
-  // --- FHSSS release (Document Set Commit 3) — a TRANSFER, asserted
-  // explicitly to net to zero across its two pockets, not just assumed.
+  // --- FHSSS release (Document Set Commit 3) — a TRANSFER between two
+  // pockets, sourced independently from each side; the gap between them
+  // is asserted (not just assumed) by checkYearConservation below.
   const fhsssSuperDebit = sumVals(row.superDetail, "fhsssRelease");
-  const fhsssGap = Math.abs(fhsssRelease - fhsssSuperDebit);
-  const fhsssTol = Math.max(0.05, Math.abs(fhsssRelease) * 1e-6);
-  if (fhsssGap > fhsssTol) {
-    throw new Error(
-      `FHSSS release doesn't net to zero across super and settlement cash — gap ${fhsssGap.toFixed(4)} ` +
-      `(tol ${fhsssTol.toFixed(4)}) at ${ctx}: settlement was credited ${fhsssRelease.toFixed(2)}, ` +
-      `super was debited ${fhsssSuperDebit.toFixed(2)}. A transfer must move the SAME amount both ways — ` +
-      `if the super account couldn't cover the full release, the settlement credit must be capped to match.`
-    );
-  }
 
   // --- Goals (Document Set Commit 6) — a leak; see header.
   const goalSpend = Object.values(row.goals ?? {}).reduce((s, g) => s + (g.contribution ?? 0), 0);
@@ -309,20 +322,99 @@ export function checkYearConservation(out, y, ctx) {
     adviserFeesUpfront.outsideCash + (adviserFeesUpfront.requestedFromSuper - adviserFeesUpfront.paidFromSuper)
     + adviserFeesOngoing.outsideCash + (adviserFeesOngoing.requestedFromSuper - adviserFeesOngoing.paidFromSuper);
 
-  const expected =
-    income + growth + sgInflow
-    - row.expenses - row.tax - contributionsTax - liabilityInterest
-    - row.surplusSpent + row.unfundedCashflow - divReleaseFromSuper
-    + propertyAcquisitionCosts + fhsssRelease - fhsssSuperDebit - lmiPremium
-    - goalSpend + helpRepayment - adviserFeeFromSuper - adviserFeeCash;
+  return {
+    openingN, closingN, delta: closingN - openingN,
+    income, growth, sgInflow,
+    expenses: row.expenses, tax: row.tax, contributionsTax, liabilityInterest,
+    surplusSpent: row.surplusSpent, unfundedCashflow: row.unfundedCashflow,
+    divReleaseFromSuper,
+    propertyGrowth, propertyOneOffCost,
+    fhsssRelease, fhsssSuperDebit,
+    lmiPremium,
+    goalSpend,
+    helpRepayment,
+    adviserFeeFromSuper, adviserFeeCash,
+  };
+}
 
-  const delta = closingN - openingN;
-  const gap = delta - expected;
-  const tol = Math.max(0.05, Math.abs(closingN) * 1e-6);
+// Throws on violation (rather than returning a boolean) so a caller
+// can drop it straight into a loop without adding its own assertion —
+// see monteCarlo.test.js's per-path spot check for the pattern.
+export function checkYearConservation(out, y, ctx) {
+  const f = computeYearFlows(out, y);
+
+  // --- FHSSS release (Document Set Commit 3) — a TRANSFER, asserted
+  // explicitly to net to zero across its two pockets, not just assumed.
+  const fhsssGap = Math.abs(f.fhsssRelease - f.fhsssSuperDebit);
+  const fhsssTol = Math.max(0.05, Math.abs(f.fhsssRelease) * 1e-6);
+  if (fhsssGap > fhsssTol) {
+    throw new Error(
+      `FHSSS release doesn't net to zero across super and settlement cash — gap ${fhsssGap.toFixed(4)} ` +
+      `(tol ${fhsssTol.toFixed(4)}) at ${ctx}: settlement was credited ${f.fhsssRelease.toFixed(2)}, ` +
+      `super was debited ${f.fhsssSuperDebit.toFixed(2)}. A transfer must move the SAME amount both ways — ` +
+      `if the super account couldn't cover the full release, the settlement credit must be capped to match.`
+    );
+  }
+
+  const expected =
+    f.income + f.growth + f.sgInflow
+    - f.expenses - f.tax - f.contributionsTax - f.liabilityInterest
+    - f.surplusSpent + f.unfundedCashflow - f.divReleaseFromSuper
+    + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
+    - f.goalSpend + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash;
+
+  const gap = f.delta - expected;
+  const tol = Math.max(0.05, Math.abs(f.closingN) * 1e-6);
   if (Math.abs(gap) > tol) {
     throw new Error(
       `Conservation invariant violated by ${gap.toFixed(4)} (tol ${tol.toFixed(4)}) at ${ctx}: ` +
-      `delta=${delta.toFixed(2)} expected=${expected.toFixed(2)}`
+      `delta=${f.delta.toFixed(2)} expected=${expected.toFixed(2)}`
     );
   }
+}
+
+// decomposeNetWorthChange(out, y) — the SAME terms above, regrouped
+// into the 7 buckets docs/specs/13-implementation-rates-equity-
+// comparison.md's Commit 4 ("Where the money went") shows as a
+// waterfall: income, growth, tax, expenses, interest, fees, oneOffs.
+// Built from computeYearFlows so the feature and the invariant can
+// never silently disagree about what a given dollar is. The FHSSS
+// transfer (~0 net, but not exactly 0 until checkYearConservation's own
+// tolerance is applied) is folded into oneOffs rather than dropped, so
+// this reconciles to closingN EXACTLY, not just within tolerance —
+// verified by a dedicated test over randomScenario()-generated plans.
+//
+//   opening net worth
+//     + income bucket        (income + sgInflow)
+//     + growth bucket        (asset/super/property growth, net of tax;
+//                             HELP's PAYG-withheld repayment folded in —
+//                             see computeYearFlows' own comment)
+//     − tax bucket            (income/CGT tax, contributions tax, Div293/296)
+//     − expenses bucket       (expenses + the FY-end spend sweep, net of
+//                             any recorded-but-unfunded shortfall)
+//     − interest bucket       (liability interest)
+//     − fees bucket           (LMI + adviser fees, from super and cash)
+//     ± one-offs bucket       (property duty/costs/FHOG, goal spend, the
+//                             FHSSS transfer)
+//   = closing net worth
+//
+// ICR/platform fees are NOT separately extractable — they're already
+// netted into each asset's return rate at the source (assetReturnComponents),
+// with no separate ledger field — so they're absorbed into growth
+// (understated, not double-counted), a disclosed limitation, not
+// re-derived from the monthly loop.
+export function decomposeNetWorthChange(out, y) {
+  const f = computeYearFlows(out, y);
+  return {
+    openingN: f.openingN,
+    closingN: f.closingN,
+    delta: f.delta,
+    income: f.income + f.sgInflow,
+    growth: f.growth + f.propertyGrowth + f.helpRepayment,
+    tax: f.tax + f.contributionsTax + f.divReleaseFromSuper,
+    expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,
+    interest: f.liabilityInterest,
+    fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash,
+    oneOffs: f.propertyOneOffCost - f.goalSpend + f.fhsssRelease - f.fhsssSuperDebit,
+  };
 }

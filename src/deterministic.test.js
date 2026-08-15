@@ -2590,6 +2590,47 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
     }
   });
+
+  // "Where the money went" (Implementation/Rates spec, Commit 4) reuses
+  // the SAME terms this invariant asserts over (conservationCheck.js's
+  // computeYearFlows), regrouped into the 7 waterfall buckets — so it
+  // must reconcile to closingN EXACTLY (not just within the invariant's
+  // own tolerance) for the same reason and over the same randomised
+  // scenarios as the invariant itself, per CLAUDE.md's "assert as a
+  // test over randomised scenarios rather than a single case." The
+  // final year is excluded for the same reason checkYearConservation
+  // excludes it: the final FY's CGT/Div293/296 assessment is an
+  // accrued liability, not yet a cashflow (see header).
+  it("net worth decomposition reconciles exactly to closing net worth across randomly generated scenarios", () => {
+    const RUNS = 300;
+    for (let i = 0; i < RUNS; i++) {
+      const state = randomScenario();
+      const out = projectPlan(state);
+      const years = out.yearly.length;
+      for (let y = 0; y < years - 1; y++) {
+        const row = out.yearly[y];
+        const d = row.decomposition;
+        const prevNet = y > 0 ? out.yearly[y - 1].netAssets : row.openingBalance + row.wcaDetail.opening
+          + Object.values(row.superDetail).reduce((s, v) => s + v.opening, 0)
+          - Object.values(row.liabilities).reduce((s, v) => s + v.opening, 0);
+        const reconciled = prevNet + d.income + d.growth - d.tax - d.expenses - d.interest - d.fees + d.oneOffs;
+        const gap = Math.abs(reconciled - row.netAssets);
+        const tol = Math.max(0.05, Math.abs(row.netAssets) * 1e-6);
+        expect(gap, `scenario ${i}, year ${y}: decomposition ${reconciled.toFixed(2)} vs actual ${row.netAssets.toFixed(2)}`)
+          .toBeLessThanOrEqual(tol);
+      }
+    }
+  });
+
+  it("cumulative decomposition sums each bucket's per-year increments (running totals)", () => {
+    const state = randomScenario();
+    const out = projectPlan(state);
+    let cum = { income: 0, growth: 0, tax: 0, expenses: 0, interest: 0, fees: 0, oneOffs: 0 };
+    for (const row of out.yearly) {
+      for (const k of Object.keys(cum)) cum[k] += row.decomposition[k];
+      for (const k of Object.keys(cum)) expect(row.cumulativeDecomposition[k]).toBeCloseTo(cum[k], 6);
+    }
+  });
 });
 
 // --- Division 296 (Super thresholds Commit 2) — engine wiring. The
@@ -4355,5 +4396,69 @@ describe("Property depreciation (PAYG withholding, tax refund timing, and deduct
     expect(withDep.properties.p1.depreciation).toBeCloseTo(6000, 2);
     // Never a household cash outflow — it's a non-cash deduction.
     expect(withDep.wcaClosing).toBeCloseTo(without.wcaClosing, 2);
+  });
+});
+
+// --- Where the money went: net worth decomposition (Implementation/
+// Rates spec, Commit 4). The randomised, exact-reconciliation test
+// lives inside the "Conservation invariant" describe block above (it
+// reuses that block's randomScenario() generator, per CLAUDE.md's rule
+// that a decomposition of this kind gets the same discipline as the
+// conservation invariant it's built from). These are the known-value
+// and crossover-annotation tests.
+describe("Where the money went: net worth decomposition (Implementation/Rates spec, Commit 4)", () => {
+  it("known-value: a single growth-only, non-CGT asset with no other flows — decomposition.growth equals the asset's own real growth, every other bucket is zero, and it reconciles exactly", () => {
+    // growthPct = 5% real (incomePct 0, cgtAsset false → no tax event,
+    // no distribution) — the only money flow in this scenario at all.
+    const asset = mkAsset({
+      balance: 100000, cgtAsset: false,
+      allocation: { mode: "custom", incomePct: 0, growthPct: 5, frankingPct: 0, volBasis: "Balanced" },
+    });
+    const out = projectPlan(mkState({ endAge: 42, assets: [asset], fundingOrder: [] }));
+    const row = out.yearly[0];
+    const expectedGrowth = row.growth; // the engine's own already-reported figure
+    expect(expectedGrowth).toBeGreaterThan(0);
+    expect(row.decomposition.growth).toBeCloseTo(expectedGrowth, 6);
+    expect(row.decomposition.income).toBeCloseTo(0, 6);
+    expect(row.decomposition.tax).toBeCloseTo(0, 6);
+    expect(row.decomposition.expenses).toBeCloseTo(0, 6);
+    expect(row.decomposition.interest).toBeCloseTo(0, 6);
+    expect(row.decomposition.fees).toBeCloseTo(0, 6);
+    expect(row.decomposition.oneOffs).toBeCloseTo(0, 6);
+    const openingN = row.openingBalance;
+    const reconciled = openingN + row.decomposition.income + row.decomposition.growth
+      - row.decomposition.tax - row.decomposition.expenses - row.decomposition.interest
+      - row.decomposition.fees + row.decomposition.oneOffs;
+    expect(reconciled).toBeCloseTo(row.netAssets, 2);
+  });
+
+  it("cumulative totals accumulate the per-year bucket exactly (a flat, zero-growth asset never touched again — cumulative income/growth stay at their year-0 values)", () => {
+    const asset = mkAsset({
+      balance: 50000, cgtAsset: false,
+      allocation: { mode: "custom", incomePct: 0, growthPct: 2.5, frankingPct: 0, volBasis: "Balanced" }, // = cpi → real 0
+    });
+    const out = projectPlan(mkState({ endAge: 45, assets: [asset], fundingOrder: [] }));
+    for (const row of out.yearly) {
+      expect(row.decomposition.growth).toBeCloseTo(0, 2);
+      expect(row.cumulativeDecomposition.growth).toBeCloseTo(0, 2);
+    }
+  });
+
+  it("annotates the year cumulative growth first overtakes cumulative income — a long, high-growth accumulation with small ongoing contributions", () => {
+    const asset = mkAsset({
+      balance: 20000, cgtAsset: false,
+      allocation: { mode: "custom", incomePct: 0, growthPct: 12, frankingPct: 0, volBasis: "Balanced" },
+    });
+    const income = [cf({ id: "salary", assetId: null, amount: 500, frequency: "monthly", fromAge: 40, toAge: 120 })];
+    const out = projectPlan({
+      ...mkState({ endAge: 65, assets: [asset], fundingOrder: [], cashflows: { income } }),
+    });
+    expect(out.wealthCrossoverYear).not.toBeNull();
+    const y = out.wealthCrossoverYear;
+    expect(out.yearly[y].cumulativeDecomposition.growth).toBeGreaterThan(out.yearly[y].cumulativeDecomposition.income);
+    if (y > 0) {
+      expect(out.yearly[y - 1].cumulativeDecomposition.growth)
+        .toBeLessThanOrEqual(out.yearly[y - 1].cumulativeDecomposition.income);
+    }
   });
 });

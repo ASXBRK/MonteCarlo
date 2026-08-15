@@ -336,10 +336,38 @@ shortfall, not as a shortfall-by-date the client just hasn't reached yet.
   spec's own "be explicit about what this is not" disclosure
   prominently, not buried: a security constraint, not a serviceability
   assessment.
+- Commit 4, **Where the money went: net worth decomposition** —
+  `conservationCheck.js`'s `checkYearConservation` refactored into a
+  pure `computeYearFlows(out, y)` (every named term, unchanged
+  behaviour — bit-identical, re-verified against the full suite and the
+  invariant's own randomised stress test) plus a new
+  `decomposeNetWorthChange(out, y)` that regroups those same terms into
+  the spec's 7 waterfall buckets (income, growth, tax, expenses,
+  interest, fees, oneOffs), with the FHSSS transfer folded into oneOffs
+  rather than dropped so the decomposition reconciles to closing net
+  worth EXACTLY, not just within the invariant's own tolerance. The
+  single scaffolding term `propertyAcquisitionCosts` splits into
+  `propertyOneOffCost` (duty+costs−FHOG, zero outside a purchase year)
+  and `propertyGrowth` (the residual — organic growth of already-owned
+  properties) — the two still sum to exactly what they replaced.
+  `deterministic.js` runs this in a post-pass (a pure read of
+  already-computed per-year figures, no new money flow, so no
+  conservation-invariant change) to populate `row.decomposition` (this
+  year's own bucket increments) and `row.cumulativeDecomposition`
+  (running totals since projection start) on every yearly row, plus a
+  top-level `wealthCrossoverYear` — the first year cumulative investment
+  growth overtakes cumulative income, per the spec's own "point" this
+  view exists to show. New Graphs view (**Where the money went**): a
+  waterfall chart (opening net worth → cumulative buckets → closing net
+  worth) for a selectable year, plus a transposed table of both the
+  per-year walk and the cumulative totals, CSV export. Tested with a
+  known-value growth-only fixture, a crossover-annotation fixture, and —
+  per CLAUDE.md's rule for a decomposition of this kind — a dedicated
+  test asserting exact reconciliation to closing net worth across
+  `randomScenario()`-generated scenarios (not a single case).
 
 ### In flight
-Spec 13 Commits 4–6 (
-net worth decomposition, fortnightly transfer schedule, scenario
+Spec 13 Commits 5–6 (fortnightly transfer schedule, scenario
 comparison); super threshold
 indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
 then Division 296, then Monte Carlo over the full scenario.

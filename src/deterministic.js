@@ -55,6 +55,7 @@ import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
+import { decomposeNetWorthChange } from "./conservationCheck.js";
 import {
   createPool, poolAdd, poolConsume, poolNewFy,
   poolDeemedReacquisition, preReformTaxableGain,
@@ -2531,6 +2532,36 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
   }
 
+  // --- Where the money went (Implementation/Rates spec, Commit 4) —
+  // per-year decomposition of the change in net worth into 7 named
+  // buckets, PLUS running cumulative totals, both derived from the
+  // engine's own per-year figures via conservationCheck.js's
+  // decomposeNetWorthChange (the SAME terms the conservation invariant
+  // itself asserts over — never a second, independently-derived copy).
+  // A pure read: no new money moves, so no new conservation term.
+  const outSoFar = { yearly };
+  let cumIncome = 0, cumGrowth = 0, cumTax = 0, cumExpenses = 0, cumInterest = 0, cumFees = 0, cumOneOffs = 0;
+  let wealthCrossoverYear = null;
+  for (let y = 0; y < yearly.length; y++) {
+    const d = decomposeNetWorthChange(outSoFar, y);
+    yearly[y].decomposition = {
+      income: d.income, growth: d.growth, tax: d.tax, expenses: d.expenses,
+      interest: d.interest, fees: d.fees, oneOffs: d.oneOffs,
+    };
+    cumIncome += d.income; cumGrowth += d.growth; cumTax += d.tax;
+    cumExpenses += d.expenses; cumInterest += d.interest; cumFees += d.fees; cumOneOffs += d.oneOffs;
+    yearly[y].cumulativeDecomposition = {
+      income: cumIncome, growth: cumGrowth, tax: cumTax, expenses: cumExpenses,
+      interest: cumInterest, fees: cumFees, oneOffs: cumOneOffs,
+    };
+    // The point the spec calls out: for a long accumulation, cumulative
+    // investment growth eventually overtakes cumulative income/
+    // contributions received — the year that first happens, once and
+    // never reverting back (a single crossing is what the spec means by
+    // "annotate the year that happens", not every fluctuation around it).
+    if (wealthCrossoverYear == null && cumGrowth > cumIncome) wealthCrossoverYear = y;
+  }
+
   // Document Set Commit 6 — per-goal outcome: achieved in full, or
   // short by the target date. The "reached instead" date extrapolates
   // the goal's OWN average funding rate achieved so far forward at the
@@ -2593,5 +2624,6 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     liabilityRepaymentStats,
     liabilityRollovers,
     goalStats,
+    wealthCrossoverYear,
   };
 }

@@ -19,6 +19,7 @@ export const DEFAULT_INPUT_SECTION = "setup";
 // grouping is a sidebar presentation concern, not a routing one.
 export const OUTPUT_VIEWS = [
   "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars", "monte-carlo",  // Graphs
+  "money-decomposition",                                                                                                                                      // Graphs (docs/specs/13-implementation-rates-equity-comparison.md, Commit 4)
   "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "monte-carlo-table", "assumptions",                                        // Tables
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
   "focus-equity",                                                                                                                                              // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
