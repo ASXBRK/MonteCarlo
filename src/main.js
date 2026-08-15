@@ -16,7 +16,7 @@ import {
   nearestVolBasis, normaliseSettings, normaliseFundingOrder,
   partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
   removeAsset, ownerWindow, fyLabelForAge,
-  clampInt, clampNumber, serialize, hydrate,
+  clampInt, clampNumber, serialize, hydrate, ageAtDate,
   planSummaryText, allocationSummary, ALLOC_PCT_MAX,
   tableLumpSumFor, upsertTableLumpSum, canEditOneOffYear,
   personDisplayName, resolveEndBasis,
@@ -2619,6 +2619,7 @@ function propertyHelperText(p) {
       if (!Number.isNaN(acq.getTime()) && acq > planStart) {
         return {
           warn: true,
+          action: "convertToPlanned",
           text: `Acquisition date is in the future, but status is "Owned" — an owned property (and its rent, if any) is included in the projection from the very first month regardless of acquisition date; the date only affects CGT grandfathering. To model a future purchase, switch status to "Planned purchase" and set "Purchase at" instead.`,
         };
       }
@@ -2709,7 +2710,11 @@ function propertyCardHTML(p) {
             ${num("Depreciation ($ p.a., deductible)", "depreciation", p.depreciation ?? 0)}
           ` : ""}
         </div>
-        ${helper.text ? `<p class="${helper.warn ? "helper-warning" : "helper-text"}">${escapeHTML(helper.text)}</p>` : ""}
+        ${helper.text ? `<p class="${helper.warn ? "helper-warning" : "helper-text"}">${escapeHTML(helper.text)}${
+          helper.action === "convertToPlanned"
+            ? ` <button class="btn-text" type="button" data-prop-action="convertToPlanned" data-pid="${p.id}">Switch to planned purchase</button>`
+            : ""
+        }</p>` : ""}
       </div>
     </div>
   `;
@@ -2803,10 +2808,27 @@ els.propertySection.addEventListener("click", (e) => {
     state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
   } else if (btn.dataset.propAction === "status") {
     p.status = btn.dataset.value === "planned" ? "planned" : "owned";
+  } else if (btn.dataset.propAction === "convertToPlanned") {
+    if (!window.confirm(
+      `Switch "${p.name}" to a planned purchase? This changes how the property is modelled: ` +
+      `its acquisition date becomes the purchase date, and its current value becomes today's price ` +
+      `to grow from until then.`
+    )) return;
+    const acq = new Date(p.acquisitionDate);
+    const age = ageAtDate(state.plan.client.dob, acq.getFullYear(), acq.getMonth() + 1);
+    p.status = "planned";
+    p.priceToday = p.currentValue;
+    p.purchaseAt = {
+      kind: "age",
+      age: clampInt(age ?? state.plan.client.currentAge, state.plan.client.currentAge, state.plan.endAge),
+    };
+    state.properties = normaliseProperties(state.properties, state.plan);
+    state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
   }
   saveState();
   refreshOutputs();
   renderProperties();
+  renderLiabilities();
 });
 
 // --- super section (Tier 1.2, Commit 4) -------------------------------------
