@@ -158,6 +158,11 @@ const els = {
   inflationInput: $("inflationInput"),
   unitsToggle: document.querySelector(".display-toggle"),
   periodSelect: $("periodSelect"),
+  viewFocusDeposit: $("viewFocusDeposit"),
+  viewFocusFhsss: $("viewFocusFhsss"),
+  viewFocusSalarySacrifice: $("viewFocusSalarySacrifice"),
+  viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
+  viewFocusLookups: $("viewFocusLookups"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -362,6 +367,17 @@ const OUTPUT_NAV = {
     { id: "monte-carlo-table", label: "Monte Carlo" },
     { id: "assumptions", label: "Assumptions" },
   ],
+  // Focus (docs/specs/12-focus-views.md) — one question, one page, read
+  // from the SAME projectPlan() output every other view reads. Never a
+  // separate calculation (the governing principle) — see each
+  // renderFocusXView() for how it reuses the engine's own figures.
+  Focus: [
+    { id: "focus-deposit", label: "Deposit & home purchase" },
+    { id: "focus-fhsss", label: "FHSSS" },
+    { id: "focus-salary-sacrifice", label: "Salary sacrifice" },
+    { id: "focus-debt-payoff", label: "Debt payoff" },
+    { id: "focus-lookups", label: "Stamp duty & LMI" },
+  ],
 };
 const SECTION_LABELS = Object.fromEntries([
   ...INPUT_NAV.map((n) => [n.id, n.label]),
@@ -389,6 +405,8 @@ function renderSideNav() {
     ${OUTPUT_NAV.Graphs.map((n) => item(n, true)).join("")}
     <div class="nav-subgroup-label">Tables</div>
     ${OUTPUT_NAV.Tables.map((n) => item(n, true)).join("")}
+    <div class="nav-subgroup-label">Focus</div>
+    ${OUTPUT_NAV.Focus.map((n) => item(n, true)).join("")}
   `;
 }
 
@@ -4117,6 +4135,11 @@ const VIEW_MOUNTS = {
   snapshot: () => els.viewSnapshot,
   "monte-carlo-table": () => els.viewMonteCarloTable,
   assumptions: () => els.viewAssumptions,
+  "focus-deposit": () => els.viewFocusDeposit,
+  "focus-fhsss": () => els.viewFocusFhsss,
+  "focus-salary-sacrifice": () => els.viewFocusSalarySacrifice,
+  "focus-debt-payoff": () => els.viewFocusDebtPayoff,
+  "focus-lookups": () => els.viewFocusLookups,
 };
 const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
@@ -4135,8 +4158,11 @@ function renderActiveView() {
   // The Snapshot view picks its own years (up to six DateRef
   // selectors) rather than the thinned report-period range every other
   // table/chart uses, so the shared period-select controls are
-  // meaningless here and would just be confusing clutter.
-  els.periodSelect.hidden = activeView === "snapshot";
+  // meaningless here and would just be confusing clutter. Focus views
+  // (docs/specs/12-focus-views.md) are one-question pages built around
+  // their own relevant date (a purchase date, a release date, a payoff
+  // date) rather than the household's whole report period — same reason.
+  els.periodSelect.hidden = activeView === "snapshot" || activeView.startsWith("focus-");
   if (activeView === "projection") renderProjectionChart();
   else if (activeView === "composite") renderCompositeChart();
   else if (activeView === "net-assets") renderNetAssetsChart();
@@ -4155,6 +4181,11 @@ function renderActiveView() {
   else if (activeView === "snapshot") renderSnapshotView();
   else if (activeView === "monte-carlo-table") renderMonteCarloTableView();
   else if (activeView === "assumptions") renderAssumptionsView();
+  else if (activeView === "focus-deposit") renderFocusDepositView();
+  else if (activeView === "focus-fhsss") renderFocusFhsssView();
+  else if (activeView === "focus-salary-sacrifice") renderFocusSalarySacrificeView();
+  else if (activeView === "focus-debt-payoff") renderFocusDebtPayoffView();
+  else if (activeView === "focus-lookups") renderFocusLookupsView();
 }
 
 const isNominal = () => state.display.units === "nominal";
@@ -6322,6 +6353,89 @@ function buildAssumptionsGroups() {
 function renderAssumptionsView() {
   const caption = `<p class="chart-note-inline">Under “Indexed”, threshold rows are flat in today's dollars — that is what CPI-indexed tax settings mean. Under “No indexation” they shrink in real terms each year after FY2027–28 (bracket creep). Future dollars shows the nominal picture. The bracket mode is set in Parameters.</p>`;
   renderTransposed(els.viewAssumptions, buildAssumptionsGroups(), caption);
+}
+
+// --- View: Focus (docs/specs/12-focus-views.md) -----------------------------
+//
+// The governing principle: a Focus view is a VIEW, never a separate
+// calculation. Every figure below is read straight off `projection`
+// (the SAME projectPlan() output every Graphs/Tables view reads) or
+// computed via src/solve.js, which itself only ever runs the real
+// engine against a cloned plan — never a shortcut formula, never an
+// input that bypasses the plan. Six commits build these out in order;
+// each view falls back to this same one-line empty state (what it
+// answers, what input it needs) until its own commit lands, and again
+// afterwards whenever the plan genuinely has nothing for it to show.
+
+// A Focus view's empty state names what it answers and, where the
+// answer needs plan input that doesn't exist yet, offers a direct hop
+// to the input section that would add it — one click, not "go find the
+// Property page yourself". `inputSection` is null for a view (like the
+// standalone lookups) that takes no plan input at all.
+function focusEmptyStateHTML(sentence, inputSection) {
+  return pageEmptyHTML(
+    sentence,
+    inputSection
+      ? `<button class="btn-text" type="button" data-focus-action="go-to-input" data-input-section="${inputSection}">Go to ${escapeHTML(SECTION_LABELS[inputSection] ?? "input")}</button>`
+      : ""
+  );
+}
+
+els.outputCanvas.addEventListener("click", (e) => {
+  const btn = e.target.closest('[data-focus-action="go-to-input"]');
+  if (!btn) return;
+  const { client, scenario } = findActive(workspace);
+  navigate({ page: "workspace", clientId: client.id, scenarioId: scenario.id, area: "input", section: btn.dataset.inputSection });
+});
+
+// COMMIT 2 fills this in: target price, required-at-settlement
+// breakdown, accumulating funds vs required cash, and the two solver
+// actions ("What would I need to save?" / "When could I buy?").
+function renderFocusDepositView() {
+  els.viewFocusDeposit.innerHTML = focusEmptyStateHTML(
+    "How much cash a planned property purchase needs at settlement, and whether the client is on track to have it — add a planned property purchase to see it.",
+    "property"
+  );
+}
+
+// COMMIT 3 fills this in: FHSSS contributions/earnings/release/tax by
+// year, and the inside-vs-outside-super comparison that justifies the
+// strategy.
+function renderFocusFhsssView() {
+  els.viewFocusFhsss.innerHTML = focusEmptyStateHTML(
+    "What the First Home Super Saver scheme actually gains a client, compared with saving the same dollars outside super — add an FHSSS-eligible super contribution to see it.",
+    "super"
+  );
+}
+
+// COMMIT 4 fills this in: sacrifice vs not, tax/HELP/Division 293/net
+// position compared side by side, amount adjustable in the view.
+function renderFocusSalarySacrificeView() {
+  els.viewFocusSalarySacrifice.innerHTML = focusEmptyStateHTML(
+    "Whether salary sacrifice is worth it for this client — income tax saved, HELP repayment unchanged, super gained net of contributions tax — add a salary sacrifice super contribution to see it.",
+    "super"
+  );
+}
+
+// COMMIT 5 fills this in: per-loan payoff date, lifetime interest, and
+// the effect of extra repayments, with a solver for "what extra
+// repayment clears this by [date]?"
+function renderFocusDebtPayoffView() {
+  els.viewFocusDebtPayoff.innerHTML = focusEmptyStateHTML(
+    "When each loan clears, how much interest extra repayments actually save, and what it would take to clear one sooner — add a liability to see it.",
+    "liabilities"
+  );
+}
+
+// COMMIT 6 fills this in: standalone stamp duty and LMI calculators —
+// the one deliberate exception to the governing principle (a lookup,
+// not a projection, so it can't contradict the plan). Takes no plan
+// input, so there is no "add X to see it" action.
+function renderFocusLookupsView() {
+  els.viewFocusLookups.innerHTML = focusEmptyStateHTML(
+    "Stamp duty, First Home Owner Grant and LMI for a hypothetical purchase — state, price and buyer flags, no client required.",
+    null
+  );
 }
 
 // --- exports -----------------------------------------------------------------

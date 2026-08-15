@@ -20,6 +20,7 @@ export const DEFAULT_INPUT_SECTION = "setup";
 export const OUTPUT_VIEWS = [
   "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars", "monte-carlo",  // Graphs
   "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "monte-carlo-table", "assumptions",                                        // Tables
+  "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
 ];
 export const DEFAULT_OUTPUT_VIEW = "composite"; // the composite chart is the default Graphs view (D5)
 
