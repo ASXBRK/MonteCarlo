@@ -614,6 +614,13 @@ export function clampProperty(p, plan) {
     newBuild: p.newBuild === true,
     purchaseCostsPct: clampNumber(p.purchaseCostsPct ?? 2, 0, 10),
     dutyOverride: p.dutyOverride == null ? null : clampNumber(p.dutyOverride, 0),
+    // Document Set Commit 4 (LMI / First Home Guarantee) — input
+    // integrity: the FHBG waiver only makes sense for a still-to-happen
+    // first-home purchase, so it's forced off otherwise, same pattern
+    // as releaseFhsssAtPurchase above.
+    firstHomeGuarantee: p.firstHomeGuarantee === true && status === "planned" && p.firstHomeBuyer === true,
+    lmiOverride: p.lmiOverride == null ? null : clampNumber(p.lmiOverride, 0),
+    lmiPayAtSettlement: p.lmiPayAtSettlement === true,
     growthPct: clampNumber(p.growthPct ?? 5, -10, 30),
     rent: flow(p.rent),
     expenses: flow(p.expenses),

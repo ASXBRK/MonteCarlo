@@ -35,6 +35,8 @@ import {
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
+import { lmiPremium } from "./data/lmiRates.js";
+import { fhbgPriceCapExceeded, FHBG_PRICE_CAPS } from "./data/fhbgCaps.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
@@ -2752,11 +2754,28 @@ function propertyHelperText(p) {
     ? p.dutyOverride
     : dutyWithConcessions(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
   const fhog = fhogAmount(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
-  const cash = nominalPrice * (1 - p.lvrPct / 100) + duty + (p.purchaseCostsPct / 100) * nominalPrice - fhog;
+  const loanNominal = (p.lvrPct / 100) * nominalPrice;
+  const lmi = p.lmiOverride != null ? p.lmiOverride : (p.firstHomeGuarantee ? 0 : lmiPremium(p.lvrPct, loanNominal));
+  const lmiCash = p.lvrPct > 80 && p.lmiPayAtSettlement ? lmi : 0;
+  const cash = nominalPrice * (1 - p.lvrPct / 100) + duty + (p.purchaseCostsPct / 100) * nominalPrice - fhog + lmiCash;
+  const capExceeded = p.firstHomeGuarantee && fhbgPriceCapExceeded(p.state, nominalPrice);
+  const lmiNote = lmi > 0
+    ? ` · LMI ≈ ${fmtMoney(lmi)}${p.lmiPayAtSettlement ? " (paid at settlement)" : " (capitalised into the loan)"}`
+    : (p.lvrPct > 80 && p.firstHomeGuarantee ? " · LMI waived (First Home Guarantee)" : "");
+  if (capExceeded) {
+    return {
+      warn: true,
+      text: `Projected price at purchase (age ${resolved.age}, ${resolved.fyLabel}): ` +
+        `${fmtMoney(nominalPrice)} · duty ≈ ${fmtMoney(duty)}${fhog ? ` · FHOG ${fmtMoney(fhog)}` : ""}` +
+        `${lmiNote} · cash required ≈ ${fmtMoney(cash)}. Exceeds the ${p.state} First Home Guarantee price cap ` +
+        `(≈ ${fmtMoney(FHBG_PRICE_CAPS[p.state])}, indicative — confirm current eligibility); LMI is still shown ` +
+        `waived here but a real application may be refused.`,
+    };
+  }
   return {
     warn: false,
     text: `Projected price at purchase (age ${resolved.age}, ${resolved.fyLabel}): ` +
-      `${fmtMoney(nominalPrice)} · duty ≈ ${fmtMoney(duty)}${fhog ? ` · FHOG ${fmtMoney(fhog)}` : ""} · cash required ≈ ${fmtMoney(cash)}`,
+      `${fmtMoney(nominalPrice)} · duty ≈ ${fmtMoney(duty)}${fhog ? ` · FHOG ${fmtMoney(fhog)}` : ""}${lmiNote} · cash required ≈ ${fmtMoney(cash)}`,
   };
 }
 
@@ -2813,6 +2832,9 @@ function propertyCardHTML(p) {
             ${cell("First home buyer", `<label class="ptg-check"><input type="checkbox"${p.firstHomeBuyer ? " checked" : ""} data-pid="${p.id}" data-pfield="firstHomeBuyer" /><span>Yes</span></label>`)}
             ${cell("New build", `<label class="ptg-check"><input type="checkbox"${p.newBuild ? " checked" : ""} data-pid="${p.id}" data-pfield="newBuild" /><span>Yes</span></label>`)}
             ${p.propertyType === "ppr" ? cell("Release FHSSS at purchase", `<label class="ptg-check"><input type="checkbox"${p.releaseFhsssAtPurchase ? " checked" : ""} data-pid="${p.id}" data-pfield="releaseFhsssAtPurchase" /><span>Yes</span></label>`) : ""}
+            ${p.firstHomeBuyer ? cell("First Home Guarantee (waives LMI)", `<label class="ptg-check"><input type="checkbox"${p.firstHomeGuarantee ? " checked" : ""} data-pid="${p.id}" data-pfield="firstHomeGuarantee" /><span>Yes</span></label>`) : ""}
+            ${p.lvrPct > 80 ? num("LMI override ($, blank = table)", "lmiOverride", p.lmiOverride ?? "", 'min="0" step="100"') : ""}
+            ${p.lvrPct > 80 ? cell("Pay LMI at settlement (default: capitalised)", `<label class="ptg-check"><input type="checkbox"${p.lmiPayAtSettlement ? " checked" : ""} data-pid="${p.id}" data-pfield="lmiPayAtSettlement" /><span>Yes</span></label>`) : ""}
           `}
           ${invest ? `
             ${flowCells("Rent", "rent", p.rent)}
@@ -2927,6 +2949,9 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field === "firstHomeBuyer") p.firstHomeBuyer = e.target.checked;
   else if (field === "newBuild") p.newBuild = e.target.checked;
   else if (field === "releaseFhsssAtPurchase") p.releaseFhsssAtPurchase = e.target.checked;
+  else if (field === "firstHomeGuarantee") p.firstHomeGuarantee = e.target.checked;
+  else if (field === "lmiOverride") p.lmiOverride = v === "" ? null : clampNumber(v, 0);
+  else if (field === "lmiPayAtSettlement") p.lmiPayAtSettlement = e.target.checked;
   else if (field === "expensesDeductible") p.expensesDeductible = e.target.checked;
   else if (field === "depreciation") p.depreciation = clampNumber(v, 0);
   else if (field.includes(".")) {

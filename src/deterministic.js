@@ -46,11 +46,13 @@ import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
 import { fhsssAcceptContribution, fhsssReleaseAmounts } from "./fhsss.js";
+import { lmiPremium } from "./data/lmiRates.js";
 import {
   processConcessionalCap, processNonConcessionalCap, div293Tax, availableCarryForward,
 } from "./Tax/superContributions.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
+import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
 import {
@@ -264,6 +266,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // spreadTax accrual entirely (see the assessment loop below).
   let pendingRefund = { client: 0, partner: 0 };
   const superWarnings = [...schedule.superWarnings]; // age/work-test rejections, resolved in schedule.js
+  // Document Set Commit 4 — flagged (never blocking, since price caps
+  // change) when a First Home Guarantee purchase's price exceeds the
+  // embedded state cap at settlement time.
+  const propertyWarnings = [];
 
   // --- properties (D4) -------------------------------------------------------
   //
@@ -317,6 +323,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // depreciation isn't money leaving the household).
       depreciationMonthly: (p.depreciation ?? 0) / 12,
       loanId: null,
+      // Document Set Commit 4 (LMI / FHBG) — filled in below when a
+      // purchase loan exists; used by the settlement-month block for
+      // the pay-at-settlement case (capitalised LMI is folded straight
+      // into the loan's drawdown balance instead, right below).
+      lmiNominal: 0,
+      lmiCapitalised: p.lmiPayAtSettlement !== true,
     };
     propVal[p.id] = owned ? p.currentValue : 0;
     if (!owned && purchaseMonth != null && p.lvrPct > 0) {
@@ -325,11 +337,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // upfront — the projection is deterministic).
       const nominalPrice = p.priceToday * Math.pow(1 + p.growthPct / 100, purchaseMonth / 12);
       const loanNominal = (p.lvrPct / 100) * nominalPrice;
+      // LMI (Document Set Commit 4): a manual override always wins
+      // (same precedence as dutyOverride — entered in NOMINAL dollars
+      // of the purchase year, deflated at the ledger below); otherwise
+      // the First Home Guarantee waives it entirely for an eligible
+      // first-home buyer, otherwise it's looked up from the embedded
+      // LVR × loan-size table (0 at or below 80% LVR).
+      const lmiNominal = p.lmiOverride != null
+        ? p.lmiOverride
+        : p.firstHomeGuarantee ? 0 : lmiPremium(p.lvrPct, loanNominal);
+      propMeta[p.id].lmiNominal = lmiNominal;
       derivedLoans.push({
         id: `prop-${p.id}`,
         name: `${p.name} loan`,
         owner: p.owner,
-        balance: loanNominal,
+        // Capitalised by default (the norm): the premium is added
+        // straight to the drawn balance rather than paid as cash.
+        balance: loanNominal + (propMeta[p.id].lmiCapitalised ? lmiNominal : 0),
         interestRatePct: mortgageRateAssum * 100,
         termYears: 30,
         repayment: "pi",
@@ -555,7 +579,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     liabilitiesClosing: 0,
     // Per-property detail (D4), real dollars.
     properties: Object.fromEntries(props.map((p) => [p.id, {
-      value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0, fhsssRelease: 0,
+      value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0, fhsssRelease: 0, lmi: 0,
     }])),
     propertyClosing: 0,
     netAssets: 0,
@@ -910,12 +934,26 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             ? p.dutyOverride
             : dutyWithConcessions(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild });
           const dutyReal = dutyNominal / infl;
+          if (row && p.firstHomeGuarantee && fhbgPriceCapExceeded(p.state, nominalPrice)) {
+            propertyWarnings.push({
+              propertyId: pid, type: "fhbgPriceCap",
+              reason: `Purchase price $${Math.round(nominalPrice).toLocaleString()} exceeds the ${p.state} First Home Guarantee price cap — confirm current eligibility`,
+            });
+          }
           const costsReal = (p.purchaseCostsPct / 100) * realPrice;
           const fhogReal = fhogAmount(p.state, nominalPrice, { firstHomeBuyer: p.firstHomeBuyer, newBuild: p.newBuild }) / infl;
           const loanReal = pm.loanId ? (p.lvrPct / 100) * realPrice : 0;
+          // LMI (Document Set Commit 4), real-dollar equivalent of the
+          // nominal premium fixed at loan setup above. Capitalised: the
+          // lender actually advances loanReal + lmiReal, so the
+          // reported drawdown must include it (settlement cash is
+          // untouched — the extra borrowing pays for itself). Paid at
+          // settlement: the loan itself is unaffected, but the buyer
+          // needs lmiReal of extra cash at settlement instead.
+          const lmiReal = pm.lmiNominal / infl;
           if (pm.loanId) {
-            loanBal[pm.loanId] = liabsById[pm.loanId].balance; // drawdown
-            if (row) row.liabilities[pm.loanId].drawdown += loanReal;
+            loanBal[pm.loanId] = liabsById[pm.loanId].balance; // drawdown, already includes capitalised LMI if any
+            if (row) row.liabilities[pm.loanId].drawdown += loanReal + (pm.lmiCapitalised ? lmiReal : 0);
           }
           // Document Set Commit 3 (FHSSS) — the GROSS release reduces
           // settlement cash dollar for dollar (the ATO determination
@@ -943,7 +981,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               if (accountId) withdrawFromSuper(accountId, rel.grossRelease);
             }
           }
-          const settle = realPrice - loanReal + dutyReal + costsReal - fhogReal - fhsssReleasedHere;
+          const lmiCash = pm.lmiCapitalised ? 0 : lmiReal;
+          const settle = realPrice - loanReal + dutyReal + costsReal - fhogReal - fhsssReleasedHere + lmiCash;
           settlementOut += settle;
           propVal[pid] = realPrice;
           if (pm.isCgt) {
@@ -953,6 +992,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             row.properties[pid].settlement += settle;
             row.properties[pid].costBaseSeed = realPrice + dutyReal + costsReal;
             row.properties[pid].fhsssRelease = fhsssReleasedHere;
+            row.properties[pid].lmi = lmiReal;
           }
         } else if (propVal[pid] > 0) {
           propVal[pid] *= 1 + pm.rate;
@@ -1898,5 +1938,6 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // household) can't be settled inside the projection either.
     accruedRefundAtEnd: pendingRefund.client + pendingRefund.partner,
     superWarnings,
+    propertyWarnings,
   };
 }

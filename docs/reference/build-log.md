@@ -64,8 +64,16 @@ by the workbook document-sense-check:
   assessment/PAYG-refund mechanism rather than netted at settlement.
   `assumptions.fhsssEarningsRate` (indicative ATO shortfall interest rate,
   needs confirming — see Open Items).
+- Commit 4, **LMI and First Home Guarantee** — new `src/data/lmiRates.js`
+  (indicative LVR × loan-size premium table, applies above 80% LVR) and
+  `src/data/fhbgCaps.js` (indicative per-state price caps, flagged not
+  blocked when exceeded); both need firm confirmation — see Open Items.
+  Per-purchase `lmiOverride` (nominal $, same precedence as `dutyOverride`),
+  `lmiPayAtSettlement` (default false = capitalised into the loan
+  drawdown), and `firstHomeGuarantee` (waives LMI; forced off unless
+  `firstHomeBuyer` and a planned purchase).
 
-Roughly 593 tests, clean build.
+Roughly 616 tests, clean build.
 
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with nominal
@@ -190,3 +198,7 @@ Word merge to firm templates.
   indicative ATO shortfall interest rate) — confirm against the firm's
   reference figures; it's user-adjustable in the meantime (Parameters
   modal / Assumptions view).
+- **LMI premium table and FHBG price caps** (`src/data/lmiRates.js`,
+  `src/data/fhbgCaps.js`) — both indicative, built from the general shape
+  of published figures rather than a live rate card; per-purchase LMI
+  override exists as the precision escape hatch in the meantime.
