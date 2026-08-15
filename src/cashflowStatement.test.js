@@ -90,6 +90,13 @@ describe("deductionSums", () => {
     expect(d.propertyInterestDeductions).toBe(0);
   });
 
+  it("HELP-as-liability follow-up fix: a help_<person> entry is never deductible interest — it isn't in state.liabilities at all, so treating it as one would be a silent lookup miss, not a deliberate zero", () => {
+    const row = mkRow({ liabilities: { help_client: { interest: 0, principal: 4570.80 } } });
+    const d = deductionSums(row, { properties: [], liabilities: [], y: 0 });
+    expect(d.investmentPortfolioInterest).toBe(0);
+    expect(d.propertyInterestDeductions).toBe(0);
+  });
+
   it("category rows aggregate correctly and the total sums every field", () => {
     const row = mkRow();
     const deductionRows = [
@@ -176,6 +183,14 @@ describe("expenseSums", () => {
     const e = expenseSums(row, { properties: [], y: 0 });
     expect(e.otherLoanRepayments).toBe(1000);
     expect(e.mortgageRepayments).toBe(0);
+  });
+
+  it("HELP-as-liability follow-up fix: a help_<person> entry contributes NOTHING here — its repayment is already the Tax section's own helpRepayment line (taxSums), so counting it again as Other Loan Repayments would double it", () => {
+    const row = mkRow({ liabilities: { help_client: { interest: 0, principal: 4570.80, opening: 50000, closing: 45429.20, indexation: 0 } } });
+    const e = expenseSums(row, { properties: [], liabilities: [], y: 0 });
+    expect(e.otherLoanRepayments).toBe(0);
+    expect(e.mortgageRepayments).toBe(0);
+    expect(e.total).toBe(0);
   });
 
   it("investment property expenses reconcile to the property module directly", () => {
@@ -390,6 +405,23 @@ describe("per-owner breakdown (Document Set Commit 7 — Snapshot view)", () => 
     expect(eClient.discretionary).toBe(5000);
     expect(ePartner.discretionary).toBe(0);
     expect(eClient.total + ePartner.total).toBeCloseTo(eTotal.total, 6);
+  });
+
+  it("HELP-as-liability follow-up fix: a help_client balance doesn't break the Client + Partner = Total identity on deductionSums/expenseSums — it isn't owner-attributed via shareOf at all (undefined itemOwner), so a naive read would silently count it once for Total (shareOf(undefined,null)=1) but zero for either named owner (shareOf(undefined,'client'|'partner')=0), breaking reconciliation", () => {
+    const row = mkRow({ liabilities: { help_client: { interest: 0, principal: 4570.80 } } });
+    const liabilities = [];
+    const dCtx = { liabilities, y: 0 };
+    const eCtx = { liabilities, y: 0 };
+    const dClient = deductionSums(row, dCtx, "client");
+    const dPartner = deductionSums(row, dCtx, "partner");
+    const dTotal = deductionSums(row, dCtx, null);
+    expect(dClient.total + dPartner.total).toBeCloseTo(dTotal.total, 6);
+    expect(dTotal.investmentPortfolioInterest).toBe(0);
+    const eClient = expenseSums(row, eCtx, "client");
+    const ePartner = expenseSums(row, eCtx, "partner");
+    const eTotal = expenseSums(row, eCtx, null);
+    expect(eClient.total + ePartner.total).toBeCloseTo(eTotal.total, 6);
+    expect(eTotal.otherLoanRepayments).toBe(0); // already counted once via taxSums().helpRepayment — see isHelpLiability
   });
 
   it("Client + Partner reconciles to Total on cashReceivedSums", () => {

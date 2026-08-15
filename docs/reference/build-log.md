@@ -108,6 +108,33 @@ by the workbook document-sense-check:
 Roughly 653 tests, clean build. **All seven Document Set commits
 (docs/specs/11-document-set.md) are now landed.**
 
+**Conservation invariant coverage** — `randomScenario()` extended to
+generate every Document Set money flow (goals, FHSSS + a paired planned
+property, extra/one-off loan repayments, LMI with/without FHBG, HELP/MLS-
+triggering incomes) and `conservationCheck.js` extended with a named term
+for each, including an explicit net-to-zero assertion for the FHSSS
+transfer. Found and fixed a genuine money-creation bug in the process: the
+FHSSS release call site discarded `withdrawFromSuper`'s return value, so
+settlement cash could be credited more than the super account actually
+gave up.
+
+**HELP as a liability** — a HELP/HECS balance was tracked and repaid
+correctly but invisible to net worth: `helpBal` never joined
+`liabilitiesClosing`, so a client with a $60,000 balance and one with none
+reported identical `netAssets`. Folded into `row.liabilities` (the same
+map ordinary loans use) so it's covered by the Liabilities table/chart and
+netAssets for free, plus genuine annual indexation at the lower of CPI and
+AWOTE (AWOTE proxying WPI, the post-1 June 2023 "lesser of" legislative
+basis — confirm against the firm reference). Input moved from Setup into
+its own block in the Liabilities section (Xplan's own structure: no
+interest rate, term or repayment schedule, so a Liability object's field
+set didn't fit). Fixed a related latent double-count: HELP's compulsory
+repayment is already reported per-owner via `taxSums()`'s `helpRepayment`
+figure, so `cashflowStatement.js`'s generic per-liability expense loop
+would have counted it a second time as "Other Loan Repayments" — excluded
+explicitly (`isHelpLiability`), with a regression test proving the bug
+would have broken the Client + Partner = Total identity.
+
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with nominal
 rounding), then Division 296, then Monte Carlo over the full scenario.
@@ -235,3 +262,7 @@ Word merge to firm templates.
   `src/data/fhbgCaps.js`) — both indicative, built from the general shape
   of published figures rather than a live rate card; per-purchase LMI
   override exists as the precision escape hatch in the meantime.
+- **HELP/HECS balance indexation basis** — this build indexes the balance
+  annually at the lower of CPI and AWOTE (AWOTE proxying WPI, the post-1
+  June 2023 "lesser of CPI or WPI" legislative basis). Confirm against the
+  firm reference before relying on this for advice.

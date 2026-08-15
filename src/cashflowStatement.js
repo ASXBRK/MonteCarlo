@@ -69,6 +69,18 @@ function isPropertyLoan(lid, properties) {
   return properties.some((p) => `prop-${p.id}` === lid);
 }
 
+// HELP-as-liability follow-up fix: help_<person> entries in row.liabilities
+// are NOT ordinary loans (deterministic.js) — no interest rate, no
+// repayment schedule of their own, and not in state.liabilities at all
+// (so `liabilities.find(...)` below would silently return undefined for
+// one). Their cash impact is already reported per-owner via taxSums()'s
+// own helpRepayment figure (row.taxDetail.<owner>.helpRepayment) — folding
+// them into otherLoanRepayments here too would double-count the same
+// dollar as both a tax line and an expense line.
+function isHelpLiability(lid) {
+  return lid === "help_client" || lid === "help_partner";
+}
+
 export function assessableIncome(row, ctx, forOwner = null) {
   const { incomeRows = [], rowTotalsIncome = {}, properties = [], y = 0 } = ctx;
   const byCat = (cat) => sumByCategory(incomeRows, rowTotalsIncome, cat, y, forOwner);
@@ -108,6 +120,7 @@ export function deductionSums(row, ctx, forOwner = null) {
   let propertyInterestDeductions = 0;
   let investmentPortfolioInterest = 0;
   for (const lid of Object.keys(row.liabilities ?? {})) {
+    if (isHelpLiability(lid)) continue; // see isHelpLiability's header
     const interest = row.liabilities[lid].interest;
     const liab = liabilities.find((l) => l.id === lid);
     if (isPropertyLoan(lid, properties)) {
@@ -204,6 +217,7 @@ export function expenseSums(row, ctx, forOwner = null) {
   const investmentProps = properties.filter((p) => p.propertyType === "investment");
   let mortgageRepayments = 0, otherLoanRepayments = 0;
   for (const lid of Object.keys(row.liabilities ?? {})) {
+    if (isHelpLiability(lid)) continue; // see isHelpLiability's header
     const service = row.liabilities[lid].interest + row.liabilities[lid].principal;
     if (isPropertyLoan(lid, properties)) {
       const prop = properties.find((p) => `prop-${p.id}` === lid);

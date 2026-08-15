@@ -903,13 +903,6 @@ function personBlockHTML(prefix, person, title) {
                  data-plan-field="${prefix}OpeningLosses" />
         </div>
         <div class="cf-cell">
-          <label>HELP/HECS balance ($)
-            <span class="helper-inline">Compulsory repayments come out of take-home pay via PAYG and reduce this each year.</span>
-          </label>
-          <input type="number" min="0" step="1000" value="${person.helpBalance}"
-                 data-plan-field="${prefix}HelpBalance" />
-        </div>
-        <div class="cf-cell">
           <label>Private hospital cover
             <span class="helper-inline">Suppresses the Medicare Levy Surcharge for this person entirely.</span>
           </label>
@@ -1140,7 +1133,10 @@ wireDeferredDateCommit(els.planBar, (e) => {
     sex: field === `${prefix}Sex` ? e.target.value : cur.sex,
     currentAge: cur.currentAge, // fallback if the new DOB is invalid
     retirementAge: field === `${prefix}RetirementAge` ? e.target.value : cur.retirementAge,
-    helpBalance: field === `${prefix}HelpBalance` ? e.target.value : cur.helpBalance,
+    // HELP-as-liability follow-up fix: edited in the Liabilities section
+    // now (its own block, see renderLiabilities), not here — carried
+    // through unchanged by every OTHER Setup field edit.
+    helpBalance: cur.helpBalance,
     privateHospitalCover: field === `${prefix}PrivateHospitalCover` ? e.target.checked : cur.privateHospitalCover,
     taxProfile: {
       residency: field === `${prefix}Residency` ? e.target.value : cur.taxProfile.residency,
@@ -3723,11 +3719,47 @@ function liabilityRepaymentPlansHTML(l) {
   `;
 }
 
+// HELP-as-liability follow-up fix — its own block, not a Liability
+// object: no interest rate, term, repayment schedule, offset or
+// drawdown, so most of a loan card's field set would just be disabled.
+// Matches Xplan's own structure (HECS-HELP under Liabilities as a
+// distinct screen, not a loan row). Fields are just: per person,
+// opening balance — everything else (indexation, compulsory repayment,
+// closing balance) is the engine's output, shown in the Liabilities
+// table below, not entered here.
+function helpBlockHTML() {
+  const rows = [
+    { owner: "client", label: clientName(), person: state.plan.client },
+    ...(isCouple() ? [{ owner: "partner", label: partnerName(), person: state.plan.partner }] : []),
+  ];
+  return `
+    <div class="pcard" data-help-block="1">
+      <div class="pcard-head">
+        <span class="pcard-name">HELP/HECS</span>
+        <span class="pcard-meta">Compulsory repayments come out of take-home pay via PAYG each year</span>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          ${rows.map((r) => `
+            <div class="cf-cell">
+              <label>${escapeHTML(r.label)} — opening balance ($)</label>
+              <input type="number" min="0" step="1000" value="${r.person?.helpBalance ?? 0}"
+                     data-help-owner="${r.owner}" />
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderLiabilities() {
   const cards = (state.liabilities ?? []).map(liabilityCardHTML).join("");
+  const helpHTML = helpBlockHTML();
   els.liabilitiesSection.innerHTML = cards === ""
     ? `
       <h2 class="section-heading">Liabilities</h2>
+      ${helpHTML}
       ${pageEmptyHTML(
         "Add loans and mortgages to project repayments, interest and net assets.",
         `<button class="add-row-btn" type="button" data-liab-action="add">+ Add liability</button>`
@@ -3735,6 +3767,7 @@ function renderLiabilities() {
     `
     : `
       <h2 class="section-heading">Liabilities</h2>
+      ${helpHTML}
       <div id="liabilities" class="portfolio-stack">${cards}</div>
       <div class="portfolio-actions">
         <button class="btn-text" type="button" data-liab-action="add">+ Add liability</button>
@@ -3747,6 +3780,20 @@ function findLiability(lid) {
 }
 
 els.liabilitiesSection.addEventListener("change", (e) => {
+  const helpOwner = e.target.dataset.helpOwner;
+  if (helpOwner === "client" || helpOwner === "partner") {
+    const person = helpOwner === "partner" ? state.plan.partner : state.plan.client;
+    if (!person) return;
+    state.plan = clampPlan({
+      ...state.plan,
+      [helpOwner]: { ...person, helpBalance: clampNumber(e.target.value, 0) },
+    }, PROFILES);
+    state = clampAllToPlan(state, PROFILES);
+    saveState();
+    refreshOutputs();
+    renderLiabilities();
+    return;
+  }
   const l = findLiability(e.target.dataset.lid);
   if (!l) return;
   const field = e.target.dataset.lfield;
@@ -5223,6 +5270,13 @@ const accruedDiv293Footer = () => {
 // Liabilities view/chart: a liability id is either a user-entered
 // liability or a property-purchase-derived loan ("prop-<propertyId>").
 function loanName(lid) {
+  // HELP-as-liability follow-up fix: HELP/HECS entries aren't Liability
+  // objects (state.liabilities) or purchase loans (state.properties) —
+  // they're their own kind of row, keyed help_<person> in the engine's
+  // output only (see deterministic.js). Real names, same as everywhere
+  // else in this file.
+  if (lid === "help_client") return `${clientName()} — HELP/HECS`;
+  if (lid === "help_partner") return `${partnerName()} — HELP/HECS`;
   return (state.liabilities ?? []).find((l) => l.id === lid)?.name
     ?? ((state.properties ?? []).find((pr) => `prop-${pr.id}` === lid)
       ? `${(state.properties ?? []).find((pr) => `prop-${pr.id}` === lid).name} loan`
@@ -5828,12 +5882,17 @@ function renderSuperTableView() {
 
 // --- View: Liabilities (fix batch, item 5) ----------------------------------
 
-function liabilityDetailRows(get) {
+function liabilityDetailRows(get, opts = {}) {
   return [
     { label: "Opening balance", cell: (y) => get(y).opening, always: true },
     { label: "Drawdowns", cell: (y) => get(y).drawdown },
     { label: "Interest", cell: (y) => -get(y).interest },
-    { label: "Principal repaid", cell: (y) => -get(y).principal },
+    // HELP-as-liability follow-up fix: a liability increase with no cash
+    // movement — always 0 (and hidden by the all-zero-rows convention)
+    // for an ordinary loan, since its nominal balance is never indexed;
+    // genuinely populated only for HELP/HECS.
+    { label: "Indexation", cell: (y) => get(y).indexation ?? 0 },
+    { label: opts.help ? "Compulsory repayment" : "Principal repaid", cell: (y) => -get(y).principal },
     // Document Set Commit 5 — extra and one-off (lump-sum) repayments,
     // combined into the same figure the engine already applies against
     // the balance each month. Zero (and so hidden by the all-zero-rows
@@ -5863,7 +5922,7 @@ function liabilitiesPayoffFooter(liabIds) {
 function buildLiabilitiesGroups(entity) {
   const yl = projection.yearly;
   const liabIds = Object.keys(yl[0]?.liabilities ?? {});
-  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0 };
+  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0 };
 
   if (entity === "all") {
     const combined = liabilityDetailRows((y) => liabIds.reduce((s, lid) => {
@@ -5882,7 +5941,7 @@ function buildLiabilitiesGroups(entity) {
   }
 
   const name = loanName(entity);
-  const rows = liabilityDetailRows((y) => yl[y].liabilities[entity] ?? zero);
+  const rows = liabilityDetailRows((y) => yl[y].liabilities[entity] ?? zero, { help: entity.startsWith("help_") });
   rows.push({ label: "Closing balance", cell: (y) => (yl[y].liabilities[entity] ?? zero).closing, always: true, cls: "tl-total" });
   return [{ title: name, rows }];
 }

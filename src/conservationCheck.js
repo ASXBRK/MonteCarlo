@@ -96,6 +96,17 @@
 //           the model, whether pulled from an asset via sell() or
 //           diverted from surplus before it reaches the WCA — a leak,
 //           the same shape as an ordinary expense)
+//         + helpRepayment (HELP-as-liability follow-up fix: HELP/HECS
+//           now lives in row.liabilities like any other debt, so its
+//           balance is inside openingN/closingN and its indexation nets
+//           out of liabilityRevaluation for free — see that term's own
+//           comment below. But its REPAYMENT isn't like an ordinary
+//           loan's principal: the cash is withheld from PAYG before it
+//           ever reaches the household, already counted once as a leak
+//           via `row.tax`. The dollar withheld would otherwise have
+//           become take-home pay and an asset; instead it extinguishes
+//           debt — a real gain `-row.tax` alone doesn't credit back, so
+//           it's added back here, the same shape as `salarySacrificed`)
 //
 // Properties (Document Set Commits 3/4): brought into scope
 // specifically to test FHSSS release and LMI, which only ever fire
@@ -222,9 +233,32 @@ export function checkYearConservation(out, y, ctx) {
   // --- Goals (Document Set Commit 6) — a leak; see header.
   const goalSpend = Object.values(row.goals ?? {}).reduce((s, g) => s + (g.contribution ?? 0), 0);
 
-  // --- HELP repayment (Document Set Commit 1) — named for the record;
-  // already inside row.tax (see header), so NOT added again below.
+  // --- HELP/HECS (HELP-as-liability follow-up fix) — folded into the
+  // SAME row.liabilities map as ordinary loans (deterministic.js), so
+  // its opening/closing are already inside openingN/closingN and its
+  // (always-zero) interest is already inside liabilityInterest above.
+  // Its indexation nets out of the liabilityRevaluation derivation
+  // above for free, exactly like an ordinary loan's own `principal` term
+  // does — closing = opening + indexation − principal, so
+  // opening − closing − principal ≡ −indexation regardless of the
+  // repayment amount — named here for the record, not summed again.
   // eslint-disable-next-line no-unused-vars
+  const helpIndexation = sumVals(row.liabilities, "indexation");
+  // Repayment is NOT the same shape as an ordinary loan's principal,
+  // though: that cash is drawn from an asset pocket already inside
+  // netAssets (so reducing the liability by $X exactly cancels the $X
+  // the household would otherwise still have as an asset — no term
+  // needed, see liabilityRevaluation's own derivation above). HELP's
+  // compulsory repayment is instead withheld from PAYG BEFORE it ever
+  // reaches the household — folded into `row.tax` (already subtracted
+  // as a leak in `expected` below) the same way ordinary income tax is,
+  // per row.tax's own header note. That withheld dollar would otherwise
+  // have become take-home pay and eventually an asset; instead it
+  // extinguishes debt — a real gain to net worth that `-row.tax` alone
+  // doesn't credit back. Added back explicitly, the same shape as
+  // `salarySacrificed` being added back to `income` above for the same
+  // reason (real value redirected somewhere `row.tax`/`row.income`
+  // can't see, but already reflected in `closingN` via liabilitiesClosing).
   const helpRepayment = row.taxDetail?.helpRepayment ?? 0;
 
   const expected =
@@ -232,7 +266,7 @@ export function checkYearConservation(out, y, ctx) {
     - row.expenses - row.tax - contributionsTax - liabilityInterest
     - row.surplusSpent + row.unfundedCashflow - divReleaseFromSuper
     + propertyAcquisitionCosts + fhsssRelease - fhsssSuperDebit - lmiPremium
-    - goalSpend;
+    - goalSpend + helpRepayment;
 
   const delta = closingN - openingN;
   const gap = delta - expected;

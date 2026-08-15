@@ -30,12 +30,15 @@
 //
 // The HELP BALANCE itself (plan.<person>.helpBalance, stored real $) is
 // a separate indexation question from the thresholds above. This build
-// holds it constant in real terms (equivalent to indexing it at exactly
-// CPI, which was HELP's own legislated basis before the 2023 lower-of-
-// CPI-or-WPI amendment) — the simplest defensible choice in a real-
-// terms engine, since a real-dollar balance indexed at CPI needs no
-// extra growth applied at all; it only ever changes via actual dollar
-// repayments (deterministic.js). Disclosed in the Parameters modal.
+// indexes it annually at the LOWER of CPI and AWOTE (deterministic.js's
+// per-year loop, "HELP/HECS annual indexation") — the post-1 June 2023
+// legislated basis is the lower of CPI or WPI; AWOTE stands in for WPI,
+// the same proxy used for the threshold indexation above. When AWOTE ≥
+// CPI (the typical case), this is equivalent to indexing at exactly CPI
+// — a real-dollar balance needs no extra growth applied to hold flat —
+// so the indexation figure reported on the Liabilities table is usually
+// (not always) zero. CONFIRM against the firm reference before relying
+// on this for advice; disclosed in the Parameters modal.
 
 import { taxFromBrackets } from "../Tax/engine.js";
 

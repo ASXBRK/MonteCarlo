@@ -541,14 +541,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   };
   let pendingCgt = { client: 0, partner: 0 }; // assessed in FY t, payable July t+1
   const quarantineCarry = { client: 0, partner: 0 }; // D4 quarantined rental losses
-  // Document Set Commit 1 — HELP/HECS outstanding balance, real $. Held
-  // constant in real terms except for actual dollar repayments below
-  // (see src/data/helpRates.js's header for why); the loan ends when
-  // this reaches zero.
+  // Document Set Commit 1 — HELP/HECS outstanding balance, real $.
+  // Indexed annually and reduced by actual dollar repayments below (see
+  // the indexation step later in the per-year loop, and src/data/
+  // helpRates.js's header for the indexation basis); the loan ends when
+  // this reaches zero. Surfaced on the balance sheet as its own
+  // liabilities-table entry (see helpLiabPersons) — a real debt, not
+  // just a Tax-view memo figure.
   const helpBal = {
     client: Math.max(0, state.plan.client?.helpBalance ?? 0),
     partner: Math.max(0, state.plan.partner?.helpBalance ?? 0),
   };
+  // Which persons actually carry a HELP debt at plan start — gates
+  // whether a help_<person> entry exists in row.liabilities at all,
+  // same convention as ordinary liabilities' own `balance > 0` filter
+  // (liabs, above) so a client with no HELP balance never sees a phantom
+  // zero row or a phantom entry in the Liabilities entity selector.
+  const helpLiabPersons = persons.filter((p) => helpBal[p] > 0);
   // Document Set Commit 3 — FHSSS running balances. Every projection
   // starts fresh at zero (same disclosed simplification as the NCC
   // bring-forward and concessional carry-forward's "no way to seed a
@@ -614,9 +623,30 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // purchases only — v1 has no other way to originate a loan mid-
     // projection). offsetApplied is a year-end snapshot (like closing,
     // not a sum) of how much of the balance is currently offset.
-    liabilities: Object.fromEntries(liabs.map((l) => [l.id, {
-      opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0,
-    }])),
+    // indexation: a liability's own balance growing with no cash
+    // movement — always 0 for an ordinary loan (nominal balance is
+    // fixed, not indexed; its real erosion is the DIFFERENT
+    // liabilityRevaluation effect the conservation invariant derives
+    // separately) but genuinely populated for a HELP entry below, so
+    // opening + indexation − principal = closing reconciles for either
+    // kind of row through the same generic table renderer.
+    //
+    // help_<person> (HELP/HECS follow-up fix): folded into this SAME
+    // map, not a separate structure, so it's covered by the ordinary
+    // Liabilities table/chart/liabilitiesClosing code for free — it has
+    // no interest, term, drawdown or offset, so those fields simply stay
+    // 0 (and are hidden by the all-zero-rows convention). `principal`
+    // holds the FY's compulsory repayment (see helpDue below) — reusing
+    // the field name that "reduces the balance via an actual repayment"
+    // already means for an ordinary loan.
+    liabilities: Object.fromEntries([
+      ...liabs.map((l) => [l.id, {
+        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0,
+      }]),
+      ...helpLiabPersons.map((p) => [`help_${p}`, {
+        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0,
+      }]),
+    ]),
     liabilitiesClosing: 0,
     // Per-goal detail (Document Set Commit 6), real dollars — this
     // FY's contribution only (summed across years for the lifetime
@@ -1665,6 +1695,32 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     propPools = propPoolSnap;
     wcaBal = wcaBalSnap;
 
+    // HELP/HECS annual indexation (HELP-as-liability follow-up fix):
+    // applied ONCE per FY, before this year's compulsory repayment below
+    // — matching the real program's 1 June indexation date. The two
+    // orderings give an identical closing balance regardless (compulsory
+    // repayment is a fixed % of INCOME, never of the balance), but
+    // indexing first means the repayment cap a few lines down is
+    // measured against the balance HELP itself would actually cap
+    // against. Basis: the LOWER of CPI and the wage-index proxy AWOTE —
+    // the post-1 June 2023 "lesser of CPI or WPI" legislative basis;
+    // AWOTE stands in for WPI, the same proxy helpRatesFor already uses
+    // for threshold indexation (data/helpRates.js's header). CONFIRM
+    // against the firm reference before relying on this for advice —
+    // see Open Items (build-log.md). Captured as an explicit, reported
+    // per-person amount (helpIndexation) — not just applied silently —
+    // so the Liabilities table and the conservation invariant can both
+    // show opening + indexation − repayment = closing exactly, the
+    // mirror of the liabilityRevaluation term ordinary (un-indexed)
+    // liabilities already get for free from nominal/real conversion.
+    const helpOpening = { client: helpBal.client, partner: helpBal.partner };
+    const helpIndexRate = Math.min(cpi, awoteAssum);
+    const helpIndexation = { client: 0, partner: 0 };
+    for (const p of persons) {
+      helpIndexation[p] = helpOpening[p] * ((1 + helpIndexRate) / (1 + cpi) - 1);
+      helpBal[p] += helpIndexation[p];
+    }
+
     // Negative gearing rules (D4): a net rental loss offsets other
     // income only when the loss year is pre-FY2027-28, the property is
     // a new build, or it was acquired before 12 May 2026
@@ -1868,6 +1924,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     row.openingBalance = combined[yearStart(y)];
     row.wcaDetail.opening = wcaSeries[yearStart(y)];
     for (const l of liabs) row.liabilities[l.id].opening = liabSeries[l.id][yearStart(y)];
+    // HELP-as-liability follow-up fix: opening/indexation/repayment were
+    // all fully resolved above (before Pass 2 even starts), so they're
+    // set here alongside ordinary liabilities' own opening; closing is
+    // set later, alongside liabilitiesClosing, since that's the existing
+    // convention for every liability.
+    for (const p of helpLiabPersons) {
+      const hid = `help_${p}`;
+      row.liabilities[hid].opening = helpOpening[p];
+      row.liabilities[hid].indexation = helpIndexation[p];
+      row.liabilities[hid].principal = helpDue[p];
+    }
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
     const real = runYear(y, {
@@ -1911,6 +1978,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       const closingReal = liabSeries[l.id][yearEnd(y)];
       row.liabilities[l.id].closing = closingReal;
       row.liabilitiesClosing += closingReal;
+    }
+    // HELP-as-liability follow-up fix: a real debt, so it belongs in
+    // liabilitiesClosing (and therefore netAssets) the same as any other
+    // liability — previously tracked (helpBal) and repaid correctly but
+    // invisible to net worth, the Liabilities table and both charts.
+    for (const p of helpLiabPersons) {
+      row.liabilities[`help_${p}`].closing = helpBal[p];
+      row.liabilitiesClosing += helpBal[p];
     }
     for (const pid in propMeta) {
       row.properties[pid].value = propVal[pid];

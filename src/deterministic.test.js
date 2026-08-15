@@ -38,7 +38,7 @@ function mkState(over = {}) {
       surplus: over.surplus ?? { mode: "spend", assetId: null },
       fundingOrder: over.fundingOrder ?? assets.filter((a) => a.include).map((a) => a.id),
     },
-    assumptions: { cpi: over.cpi ?? 0.025, bracketMode: over.bracketMode ?? "indexed" },
+    assumptions: { cpi: over.cpi ?? 0.025, bracketMode: over.bracketMode ?? "indexed", awote: over.awote },
     display: { units: "real" },
   };
 }
@@ -3024,6 +3024,97 @@ describe("HELP repayments (Document Set Commit 1)", () => {
       expect(row.taxDetail.client.helpRepayment).toBe(0);
       expect(row.taxDetail.client.helpBalanceClosing).toBe(0);
       expect(row.taxDetail.helpRepayment).toBe(0);
+      // HELP-as-liability follow-up fix: no balance at all means no
+      // phantom help_client row/entity — mirrors ordinary liabilities'
+      // own `balance > 0` filter (liabs).
+      expect(row.liabilities.help_client).toBeUndefined();
+    }
+  });
+});
+
+// --- HELP-as-liability follow-up fix ----------------------------------------
+//
+// HELP/HECS was tracked and repaid correctly (above) but was invisible to
+// net worth: helpBal never joined liabilitiesClosing, so a client with a
+// $60,000 balance and one with none reported identical netAssets. Folded
+// into row.liabilities (same map ordinary loans use, see deterministic.js)
+// so it's covered by the Liabilities table/chart and netAssets for free,
+// plus genuine annual indexation (previously implicit/undocumented) at
+// the lower of CPI and AWOTE (the post-1 June 2023 "lesser of CPI or WPI"
+// basis; AWOTE stands in for WPI, same proxy as the threshold indexation).
+describe("HELP as a liability (HELP-as-liability follow-up fix)", () => {
+  it("net assets fall by exactly the opening HELP balance (no income → no repayment; awote = cpi → no indexation)", () => {
+    const base = (helpBalance) => mkState({
+      endAge: 41,
+      awote: 0.025, // matches cpi exactly, so indexation is exactly zero — isolates the balance itself
+      plan: { client: { currentAge: 40, helpBalance } },
+    });
+    const withHelp = projectPlan(base(60000));
+    const withoutHelp = projectPlan(base(0));
+    expect(withHelp.yearly[0].netAssets).toBeCloseTo(withoutHelp.yearly[0].netAssets - 60000, 2);
+    // ...and it's a real liabilities-table entry, not just a subtraction.
+    expect(withHelp.yearly[0].liabilities.help_client.opening).toBeCloseTo(60000, 2);
+    expect(withHelp.yearly[0].liabilities.help_client.closing).toBeCloseTo(60000, 2);
+    expect(withHelp.yearly[0].liabilitiesClosing).toBeCloseTo(60000, 2);
+  });
+
+  it("the Liabilities-table row reconciles: opening + indexation − repayment = closing", () => {
+    const s = mkState({
+      endAge: 43,
+      cpi: 0.05, awote: 0.025, // deliberately different — exercises a genuinely nonzero indexation term
+      assets: [],
+      plan: { client: { currentAge: 40, helpBalance: 80000 } },
+      cashflows: { income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } })] },
+    });
+    const out = projectPlan(s);
+    let sawNonzeroIndexation = false;
+    for (const row of out.yearly) {
+      const h = row.liabilities.help_client;
+      expect(h.opening + h.indexation - h.principal).toBeCloseTo(h.closing, 6);
+      if (Math.abs(h.indexation) > 1) sawNonzeroIndexation = true;
+    }
+    // Confirms the reconciliation above isn't vacuously true over an
+    // all-zero indexation column.
+    expect(sawNonzeroIndexation).toBe(true);
+  });
+
+  it("the balance reaches zero and the liability closes out — never negative, never re-appears", () => {
+    const s = mkState({
+      endAge: 43,
+      assets: [],
+      plan: { client: { currentAge: 40, helpBalance: 3000 } }, // well under one year's computed repayment
+      cashflows: { income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].liabilities.help_client.closing).toBeCloseTo(0, 6);
+    expect(out.yearly[0].liabilitiesClosing).toBeCloseTo(0, 6);
+    for (let y = 1; y < out.yearly.length; y++) {
+      expect(out.yearly[y].liabilities.help_client.opening).toBe(0);
+      expect(out.yearly[y].liabilities.help_client.indexation).toBe(0);
+      expect(out.yearly[y].liabilities.help_client.principal).toBe(0);
+      expect(out.yearly[y].liabilities.help_client.closing).toBe(0);
+    }
+  });
+
+  it("the conservation invariant holds across a HELP-heavy scenario — indexation and repayment both active, for a couple", () => {
+    const s = mkState({
+      endAge: 45,
+      cpi: 0.05, awote: 0.02, // both well apart from cpi, so indexation is genuinely nonzero for both persons
+      assets: [],
+      plan: {
+        partner: { currentAge: 38, helpBalance: 40000 },
+        client: { currentAge: 40, helpBalance: 90000 },
+      },
+      cashflows: {
+        income: [
+          employmentRow({ owner: "client", amount: 150000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 45 } }),
+          employmentRow({ owner: "partner", amount: 80000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 45 } }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) {
+      checkYearConservation(out, y, `HELP-heavy couple scenario, year ${y}`);
     }
   });
 });
