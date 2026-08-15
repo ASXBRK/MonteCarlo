@@ -52,6 +52,7 @@ import {
 } from "./focusDeposit.js";
 import { eligibleFhsssPersons, buildFhsssFocus, buildFhsssComparison } from "./focusFhsss.js";
 import { FHSSS_ANNUAL_CAP, FHSSS_LIFETIME_CAP } from "./fhsss.js";
+import { eligibleSalarySacrificeRows, buildSalarySacrificeFocus } from "./focusSalarySacrifice.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -6745,14 +6746,115 @@ function renderFocusFhsssChart(f, factor) {
   }, { displayModeBar: false, responsive: true });
 }
 
-// COMMIT 4 fills this in: sacrifice vs not, tax/HELP/Division 293/net
-// position compared side by side, amount adjustable in the view.
+// --- Commit 4: Salary sacrifice ---------------------------------------------
+//
+// Both arms come from a real projectPlan() run (src/focusSalarySacrifice.js)
+// — the "without" arm is the SAME plan with the sacrifice row deleted
+// outright. Amount is adjustable live in the view (a what-if, not an
+// edit to the real row) via focusSalarySacrificeAmount, reusing the
+// existing concessional-cap headroom display (superCapHeadroomHTML)
+// exactly as the input panel shows it.
+let focusSalarySacrificeRowId = null;
+let focusSalarySacrificeAmount = null;
+
 function renderFocusSalarySacrificeView() {
-  els.viewFocusSalarySacrifice.innerHTML = focusEmptyStateHTML(
-    "Whether salary sacrifice is worth it for this client — income tax saved, HELP repayment unchanged, super gained net of contributions tax — add a salary sacrifice super contribution to see it.",
-    "super"
-  );
+  const rows = eligibleSalarySacrificeRows(state);
+  if (rows.length === 0) {
+    els.viewFocusSalarySacrifice.innerHTML = focusEmptyStateHTML(
+      "Whether salary sacrifice is worth it for this client — income tax saved, HELP repayment unchanged, super gained net of contributions tax — add a salary sacrifice super contribution to see it.",
+      "super"
+    );
+    return;
+  }
+  if (!rows.some((r) => r.id === focusSalarySacrificeRowId)) {
+    focusSalarySacrificeRowId = rows[0].id;
+    focusSalarySacrificeAmount = null;
+  }
+  const row = rows.find((r) => r.id === focusSalarySacrificeRowId);
+  if (focusSalarySacrificeAmount == null) focusSalarySacrificeAmount = row.amount;
+  const f = buildSalarySacrificeFocus({ state, contributionId: focusSalarySacrificeRowId, amount: focusSalarySacrificeAmount });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const y0 = f.byYear[0];
+  const ownerLabel = f.owner === "partner" ? partnerName() : clientName();
+
+  els.viewFocusSalarySacrifice.innerHTML = `
+    <h2 class="section-heading">Salary sacrifice</h2>
+    ${rows.length > 1 ? `<div id="focusSacrificeEntity" class="seg-toggle entity-select" role="tablist" aria-label="Contribution"></div>` : ""}
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>Amount — ${escapeHTML(ownerLabel)}</h3>
+        <div class="focus-solver-row">
+          <label>Annual sacrifice ($)
+            <input type="number" id="focusSacrificeAmount" min="0" step="500" value="${focusSalarySacrificeAmount}" />
+          </label>
+        </div>
+        ${superCapHeadroomHTML(row)}
+      </div>
+      <div class="focus-section">
+        <h3>This year's effect (${escapeHTML(y0.fyLabel)})</h3>
+        <div class="summary-strip">
+          <div class="stat"><div class="stat-label">Income tax saved</div><div class="stat-value">${fmtMoney(y0.incomeTaxSaved * factor(0))}</div></div>
+          <div class="stat"><div class="stat-label">Super gained (net of 15%)</div><div class="stat-value">${fmtMoney(y0.superGainedNet * factor(0))}</div></div>
+          <div class="stat"><div class="stat-label">Household cash reduced</div><div class="stat-value">${fmtMoney(y0.cashReduced * factor(0))}</div></div>
+          <div class="stat stat-headline"><div class="stat-label">Net position, this year</div><div class="stat-value">${fmtMoney((y0.netAssetsWith - y0.netAssetsWithout) * factor(0))}</div></div>
+        </div>
+        <p class="helper-text"><strong>HELP repayment unchanged:</strong> ${fmtMoney(y0.helpWith * factor(0))} either way — reportable super contributions add the sacrificed amount straight back into repayment income, the single most commonly misunderstood interaction with this strategy.</p>
+        ${y0.div293With > y0.div293Without
+          ? `<p class="helper-warning">Division 293 is ${y0.div293Without > 0 ? "higher" : "triggered"} by this contribution: ${fmtMoney(y0.div293With * factor(0))} versus ${fmtMoney(y0.div293Without * factor(0))} without it.</p>`
+          : ""}
+      </div>
+      <div class="focus-section">
+        <h3>Net position over time</h3>
+        <div id="focusSacrificeChart"></div>
+      </div>
+    </div>
+  `;
+  if (rows.length > 1) {
+    renderEntitySelector(
+      $("focusSacrificeEntity"),
+      rows.map((r) => ({ id: r.id, label: r.label })),
+      focusSalarySacrificeRowId,
+      (id) => { focusSalarySacrificeRowId = id; focusSalarySacrificeAmount = null; renderFocusSalarySacrificeView(); }
+    );
+  }
+  renderFocusSacrificeChart(f, factor);
 }
+
+function renderFocusSacrificeChart(f, factor) {
+  const el = $("focusSacrificeChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = f.byYear.map((r) => r.age);
+  Plotly.react(el, [
+    {
+      x: ages, y: f.byYear.map((r) => r.netAssetsWith * factor(r.year)), name: "With sacrifice",
+      type: "scatter", mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>With sacrifice</extra>",
+    },
+    {
+      x: ages, y: f.byYear.map((r) => r.netAssetsWithout * factor(r.year)), name: "Without sacrifice",
+      type: "scatter", mode: "lines", line: { color: "rgb(217, 90, 40)", width: 2, dash: "dash" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Without sacrifice</extra>",
+    },
+  ], {
+    margin: { l: 70, r: 20, t: 24, b: 40 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+els.viewFocusSalarySacrifice.addEventListener("change", (e) => {
+  if (e.target.id !== "focusSacrificeAmount") return;
+  focusSalarySacrificeAmount = clampNumber(e.target.value, 0);
+  renderFocusSalarySacrificeView();
+});
 
 // COMMIT 5 fills this in: per-loan payoff date, lifetime interest, and
 // the effect of extra repayments, with a solver for "what extra

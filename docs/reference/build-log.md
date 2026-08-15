@@ -182,12 +182,26 @@ separate calculation.
   rows into an ordinary asset using the linked super account's own
   allocation (isolating the tax-wrapper difference from the investment
   mix), per the spec's explicit requirement not to hand-roll either arm.
+- Commit 4, **Salary sacrifice** — `src/focusSalarySacrifice.js`. Both
+  arms from a real `projectPlan()` run: "without" is the same plan with
+  the sacrifice row deleted outright — no redirection needed, unlike
+  FHSSS's comparison, since the extra take-home pay just flows through
+  the household's own existing surplus handling. Per year: income tax
+  saved, HELP repayment shown explicitly unchanged across both arms
+  (the single most commonly misunderstood interaction), Division 293
+  triggered/increased, super gained net of the 15% contributions tax,
+  household cash reduced (financial assets AND the Working Cash
+  Account — a household on "accumulate" never invests surplus into a
+  named asset at all), and net position charted over time. Amount is
+  adjustable live in the view as a what-if (not an edit to the real
+  row); cap headroom reuses the input panel's own
+  `superCapHeadroomHTML` display verbatim, per the spec's explicit
+  instruction not to re-derive it.
 
 ### In flight
-Focus Commits 4–6 (salary sacrifice, debt payoff, standalone lookups);
-super threshold indexation per figure (AWOTE / CPI / unindexed, with
-nominal rounding), then Division 296, then Monte Carlo over the full
-scenario.
+Focus Commits 5–6 (debt payoff, standalone lookups); super threshold
+indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
+then Division 296, then Monte Carlo over the full scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary
