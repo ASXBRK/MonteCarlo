@@ -164,11 +164,29 @@ separate calculation.
   but left the new loan's own first-year repayments unfunded — fixed by
   switching both solvers to the engine's actual `unfundedCashflow`
   ground truth, with a regression test.
+- Commit 3, **First Home Super Saver** — `src/focusFhsss.js`. The
+  engine tracked FHSSS running balances (`fhsssBal`) purely internally;
+  a new `row.fhsssDetail[person]` (contribution accepted/rejected,
+  associated earnings accrued, running concessional/non-concessional/
+  earnings balance, lifetime contributed) exposes the same accrual step
+  already computed each year, and `row.taxDetail[person]` gained
+  `fhsssTaxableComponent`/`fhsssTaxFreeComponent` alongside the existing
+  gross release/offset. Cap headroom (annual $15,000, lifetime $50,000)
+  is derived from that exposure against the fhsss.js constants — the
+  engine itself has no headroom concept, only acceptance/rejection.
+  "Eligible release" reuses `fhsssReleaseAmounts()` directly (never
+  reimplemented) against the latest tracked balance when no release has
+  fired yet. The comparison that justifies the strategy — the same
+  dollars inside FHSSS versus saved outside super — runs a second real
+  `projectPlan()` on a clone that redirects the eligible contribution
+  rows into an ordinary asset using the linked super account's own
+  allocation (isolating the tax-wrapper difference from the investment
+  mix), per the spec's explicit requirement not to hand-roll either arm.
 
 ### In flight
-Focus Commits 3–6 (FHSSS, salary sacrifice, debt payoff, standalone
-lookups); super threshold indexation per figure (AWOTE / CPI / unindexed,
-with nominal rounding), then Division 296, then Monte Carlo over the full
+Focus Commits 4–6 (salary sacrifice, debt payoff, standalone lookups);
+super threshold indexation per figure (AWOTE / CPI / unindexed, with
+nominal rounding), then Division 296, then Monte Carlo over the full
 scenario.
 
 ### BLOCKING — not landed

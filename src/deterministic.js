@@ -716,6 +716,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }])),
     superClosing: 0,
     superCapUsage: { client: null, partner: null },
+    // Focus Commit 3 (docs/specs/12-focus-views.md) follow-on: the
+    // FHSSS running-balance snapshot (src/fhsss.js's fhsssBal) was
+    // tracked internally but never exposed — a Focus view showing
+    // "contributions by year, associated earnings" would otherwise have
+    // to re-derive the whole accrual/cap-acceptance sequence itself.
+    // null once a person has already released (nothing left to accrue —
+    // mirrors fhsssBal.released's own early-exit).
+    fhsssDetail: { client: null, partner: null },
     // Working Cash Account detail: opening + interest + netFlow +
     // sweptToCash − sweptInvested − sweptSpent = closing (the top-up-
     // from-assets draws are reported under deficitFundedFromAssets
@@ -1617,11 +1625,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // the OPENING balance, then this FY's FHSSS-eligible voluntary
     // contributions (schedule.fhsssFlows) are accepted up to the
     // combined $15,000/year, $50,000/lifetime cap.
+    //
+    // fhsssYearDetail (Focus Commit 3 follow-on): the same figures,
+    // captured for row.fhsssDetail below — written onto the row in Pass
+    // 2 (deterministic, side-effect-free arithmetic, safe to compute
+    // once here like superCapUsage). Captured BEFORE the release block
+    // further down deliberately: it reports the accrual step alone, not
+    // this year's release (which is already fully reported via
+    // row.superDetail[...].fhsssRelease / row.properties[pid].fhsssRelease
+    // / row.taxDetail[p].fhsssRelease+fhsssOffset).
+    const fhsssYearDetail = { client: null, partner: null };
     for (const p of persons) {
       const fb = fhsssBal[p];
       if (fb.released) continue; // one lifetime release per person — nothing left to accrue
       const opening = fb.concessional + fb.nonConcessional + fb.earnings;
-      fb.earnings += opening * fhsssAnnualReal;
+      const earningsAccrued = opening * fhsssAnnualReal;
+      fb.earnings += earningsAccrued;
       let requestedConcessional = 0, requestedNonConcessional = 0;
       for (let m = yearStart(y); m < yearEnd(y); m++) {
         requestedConcessional += schedule.fhsssFlows[p].concessional[m];
@@ -1639,6 +1658,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           reason: `Exceeds the FHSSS annual/lifetime cap — $${Math.round(accept.rejected)} not eligible for release`,
         });
       }
+      fhsssYearDetail[p] = {
+        contributionAccepted: accept.acceptedConcessional + accept.acceptedNonConcessional,
+        contributionRejected: accept.rejected,
+        earningsAccrued,
+        concessionalBalance: fb.concessional,
+        nonConcessionalBalance: fb.nonConcessional,
+        earningsBalance: fb.earnings,
+        lifetimeContributed: fb.lifetimeContributed,
+      };
     }
 
     // FHSSS release at a planned property purchase: decided here (not
@@ -1940,6 +1968,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // Pass 2 — the real year, with the PAYG spread applied.
     const row = mkYearRow(y);
     row.superCapUsage = superCapUsage;
+    row.fhsssDetail = fhsssYearDetail;
     row.openingBalance = combined[yearStart(y)];
     row.wcaDetail.opening = wcaSeries[yearStart(y)];
     for (const l of liabs) row.liabilities[l.id].opening = liabSeries[l.id][yearStart(y)];
@@ -2102,8 +2131,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // Document Set Commit 3 — this FY's FHSSS release, if any: the
       // gross amount (already netted into the property's settlement
       // figure above) and the resulting tax offset (30% of the taxable
-      // component), for the Tax view's visibility of "the tax benefit".
+      // component, capped at remaining tax — see assessPerson), for the
+      // Tax view's visibility of "the tax benefit". taxableComponent/
+      // taxFreeComponent (Focus Commit 3 follow-on): the same capped
+      // split already computed for the release decision itself (see
+      // fhsssRelease[per], above) — exposed so a Focus view can show
+      // "tax on release" without re-deriving the 85%/100% split.
       fhsssRelease: fhsssRelease?.[p]?.grossRelease ?? 0,
+      fhsssTaxableComponent: fhsssRelease?.[p]?.taxableComponent ?? 0,
+      fhsssTaxFreeComponent: fhsssRelease?.[p]?.taxFreeComponent ?? 0,
       fhsssOffset: assessed[p].fhsssOffset,
     } : null;
     for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY

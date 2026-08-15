@@ -50,6 +50,8 @@ import { buildSnapshotColumns, buildSnapshotTable, snapshotToHTML, snapshotToCSV
 import {
   eligibleDepositProperties, buildDepositFocus, solveDepositContribution, solveWhenCouldIBuy,
 } from "./focusDeposit.js";
+import { eligibleFhsssPersons, buildFhsssFocus, buildFhsssComparison } from "./focusFhsss.js";
+import { FHSSS_ANNUAL_CAP, FHSSS_LIFETIME_CAP } from "./fhsss.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -6608,14 +6610,139 @@ els.viewFocusDeposit.addEventListener("click", (e) => {
   refreshOutputs();
 });
 
-// COMMIT 3 fills this in: FHSSS contributions/earnings/release/tax by
-// year, and the inside-vs-outside-super comparison that justifies the
-// strategy.
+// --- Commit 3: First Home Super Saver ---------------------------------------
+//
+// Every figure below is read straight off `projection` via
+// src/focusFhsss.js's buildFhsssFocus/buildFhsssComparison — this file
+// only renders it. The comparison is a real second projectPlan() run
+// (via buildFhsssComparison), not a hand-rolled tax calculation.
+let focusFhsssPerson = null;
+
+function focusFhsssReleaseHTML(f, factor) {
+  if (f.actualRelease) {
+    const r = f.actualRelease;
+    return `
+      <table class="focus-table">
+        <tr><td>Gross release (${escapeHTML(r.fyLabel)})</td><td>${fmtMoney(r.grossRelease * factor(r.year))}</td></tr>
+        <tr><td>— taxable component (85% concessional + earnings)</td><td>${fmtMoney(r.taxableComponent * factor(r.year))}</td></tr>
+        <tr><td>— tax-free component (non-concessional)</td><td>${fmtMoney(r.taxFreeComponent * factor(r.year))}</td></tr>
+        <tr><td>30% tax offset on the taxable component</td><td>${fmtMoney(r.offset * factor(r.year))}</td></tr>
+      </table>
+    `;
+  }
+  if (f.eligibleReleaseNow && f.eligibleReleaseNow.grossRelease > 0) {
+    const r = f.eligibleReleaseNow;
+    return `<p class="helper-text">No release triggered yet. If released today (${escapeHTML(r.fyLabel)}), this would be worth ${fmtMoney(r.grossRelease * factor(r.year))} gross (${fmtMoney(r.taxableComponent * factor(r.year))} taxable, ${fmtMoney(r.taxFreeComponent * factor(r.year))} tax-free).</p>`;
+  }
+  return `<p class="helper-text">No release triggered, and no balance yet to release.</p>`;
+}
+
+function focusFhsssComparisonHTML(comparison, factor) {
+  if (!comparison) return "";
+  const f = factor(comparison.comparisonYear);
+  const better = comparison.difference >= 0 ? "FHSSS" : "saving outside super";
+  return `
+    <table class="focus-table">
+      <tr><td>Inside FHSSS, at ${escapeHTML(comparison.fyLabel)}</td><td>${fmtMoney(comparison.insideValue * f)}</td></tr>
+      <tr><td>The same dollars saved outside super instead</td><td>${fmtMoney(comparison.outsideValue * f)}</td></tr>
+      <tr class="tl-total"><td>Difference</td><td>${fmtMoney(Math.abs(comparison.difference) * f)} in favour of ${better}</td></tr>
+    </table>
+    <p class="helper-text">The drivers: 15% contributions tax on the way in (versus this client's marginal rate outside super), concessional earnings tax while it's inside the fund, and a 30% offset on release that ordinary savings never get.</p>
+  `;
+}
+
 function renderFocusFhsssView() {
-  els.viewFocusFhsss.innerHTML = focusEmptyStateHTML(
-    "What the First Home Super Saver scheme actually gains a client, compared with saving the same dollars outside super — add an FHSSS-eligible super contribution to see it.",
-    "super"
-  );
+  const persons = eligibleFhsssPersons(state);
+  if (persons.length === 0) {
+    els.viewFocusFhsss.innerHTML = focusEmptyStateHTML(
+      "What the First Home Super Saver scheme actually gains a client, compared with saving the same dollars outside super — add an FHSSS-eligible super contribution to see it.",
+      "super"
+    );
+    return;
+  }
+  if (!persons.includes(focusFhsssPerson)) focusFhsssPerson = persons[0];
+  const f = buildFhsssFocus({ out: projection, state, person: focusFhsssPerson });
+  if (!f) {
+    els.viewFocusFhsss.innerHTML = focusEmptyStateHTML(
+      "What the First Home Super Saver scheme actually gains a client, compared with saving the same dollars outside super — add an FHSSS-eligible super contribution to see it.",
+      "super"
+    );
+    return;
+  }
+  const comparison = buildFhsssComparison({ state, person: focusFhsssPerson });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const personLabel = focusFhsssPerson === "partner" ? partnerName() : clientName();
+
+  els.viewFocusFhsss.innerHTML = `
+    <h2 class="section-heading">First Home Super Saver</h2>
+    ${persons.length > 1 ? `<div id="focusFhsssEntity" class="seg-toggle entity-select" role="tablist" aria-label="Person"></div>` : ""}
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>Cap headroom — ${escapeHTML(personLabel)}, as at ${escapeHTML(projection.schedule.fyLabels[f.capHeadroom.year])}</h3>
+        <div class="summary-strip">
+          <div class="stat"><div class="stat-label">Used this year</div><div class="stat-value">${fmtMoney(f.capHeadroom.annualUsed)}</div></div>
+          <div class="stat"><div class="stat-label">Annual cap remaining</div><div class="stat-value">${fmtMoney(f.capHeadroom.annualRemaining)} of ${fmtMoney(FHSSS_ANNUAL_CAP)}</div></div>
+          <div class="stat"><div class="stat-label">Lifetime contributed</div><div class="stat-value">${fmtMoney(f.capHeadroom.lifetimeContributed)}</div></div>
+          <div class="stat stat-headline"><div class="stat-label">Lifetime cap remaining</div><div class="stat-value">${fmtMoney(f.capHeadroom.lifetimeRemaining)} of ${fmtMoney(FHSSS_LIFETIME_CAP)}</div></div>
+        </div>
+        ${f.capHeadroom.rejectedThisYear > 0 ? `<p class="helper-warning">${fmtMoney(f.capHeadroom.rejectedThisYear)} of this year's contribution exceeded the cap and isn't FHSSS-eligible (it's still credited to super as an ordinary contribution).</p>` : ""}
+      </div>
+      <div class="focus-section">
+        <h3>Contributions and associated earnings by year</h3>
+        <div id="focusFhsssChart"></div>
+      </div>
+      <div class="focus-section">
+        <h3>Release</h3>
+        ${focusFhsssReleaseHTML(f, factor)}
+      </div>
+      <div class="focus-section">
+        <h3>FHSSS versus saving outside super</h3>
+        ${comparison
+          ? focusFhsssComparisonHTML(comparison, factor)
+          : `<p class="helper-text">Not enough information to compare yet.</p>`}
+      </div>
+    </div>
+  `;
+  if (persons.length > 1) {
+    renderEntitySelector(
+      $("focusFhsssEntity"),
+      persons.map((p) => ({ id: p, label: p === "partner" ? partnerName() : clientName() })),
+      focusFhsssPerson,
+      (id) => { focusFhsssPerson = id; renderFocusFhsssView(); }
+    );
+  }
+  renderFocusFhsssChart(f, factor);
+}
+
+function renderFocusFhsssChart(f, factor) {
+  const el = $("focusFhsssChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = f.byYear.map((r) => r.age);
+  Plotly.react(el, [
+    {
+      x: ages, y: f.byYear.map((r) => r.contributionAccepted * factor(r.year)), name: "Contribution accepted",
+      type: "bar", marker: { color: "rgb(28, 90, 180)" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Contribution accepted</extra>",
+    },
+    {
+      x: ages, y: f.byYear.map((r) => r.earningsAccrued * factor(r.year)), name: "Associated earnings",
+      type: "bar", marker: { color: "rgb(107, 142, 35)" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Associated earnings</extra>",
+    },
+  ], {
+    barmode: "stack",
+    margin: { l: 70, r: 20, t: 24, b: 40 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: 1 },
+    yaxis: {
+      title: { text: `${isNominal() ? "Future" : "Today's"} dollars`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
 }
 
 // COMMIT 4 fills this in: sacrifice vs not, tax/HELP/Division 293/net

@@ -3302,6 +3302,14 @@ describe("FHSSS (Document Set Commit 3)", () => {
     // 2 × $10,000 = $20,000 eligible concessional; 85% released = $17,000.
     expect(y2.properties.p1.fhsssRelease).toBeCloseTo(17000, 2);
     expect(y2.properties.p1.settlement).toBeCloseTo(500000 - 17000, 2);
+    // Focus Commit 3 follow-on: the taxable/tax-free split behind that
+    // same $17,000 — no non-concessional contributions here, so the
+    // whole release is taxable (85% concessional + a small associated-
+    // earnings sliver), tax-free is exactly zero.
+    expect(y2.taxDetail.client.fhsssTaxableComponent).toBeCloseTo(17000, 0);
+    expect(y2.taxDetail.client.fhsssTaxFreeComponent).toBe(0);
+    expect(y2.taxDetail.client.fhsssTaxableComponent + y2.taxDetail.client.fhsssTaxFreeComponent)
+      .toBeCloseTo(y2.taxDetail.client.fhsssRelease, 6);
   });
 
   it("the 15% concessional remainder never releases — gross release is less than the raw contribution", () => {
@@ -3312,6 +3320,32 @@ describe("FHSSS (Document Set Commit 3)", () => {
   it("the taxable release (85% concessional + earnings) is taxed at the marginal rate less a 30% offset", () => {
     const out = projectPlan(baseState());
     expect(out.yearly[2].taxDetail.client.fhsssOffset).toBeCloseTo(17000 * 0.3, 2);
+  });
+
+  it("row.fhsssDetail (Focus Commit 3 follow-on) reports contributions/earnings/running-balance by year, and goes null once released", () => {
+    const out = projectPlan(baseState());
+    // Year 0: opening balance zero, $10,000 concessional accepted (well
+    // under both caps), a small associated-earnings sliver.
+    const d0 = out.yearly[0].fhsssDetail.client;
+    expect(d0.contributionAccepted).toBeCloseTo(10000, 2);
+    expect(d0.contributionRejected).toBe(0);
+    expect(d0.concessionalBalance).toBeCloseTo(10000, 2);
+    expect(d0.nonConcessionalBalance).toBe(0);
+    expect(d0.lifetimeContributed).toBeCloseTo(10000, 2);
+    // Year 1: another $10,000 accepted on top, running balance $20,000
+    // (plus whatever the prior year's balance earned in the meantime).
+    const d1 = out.yearly[1].fhsssDetail.client;
+    expect(d1.contributionAccepted).toBeCloseTo(10000, 2);
+    expect(d1.lifetimeContributed).toBeCloseTo(20000, 2);
+    expect(d1.concessionalBalance).toBeCloseTo(20000 + d0.earningsAccrued, 2);
+    // Year 2: the purchase year itself — the release fires LATER in the
+    // same year's processing (see deterministic.js's own ordering
+    // comment), so this year's accrual step still runs normally first,
+    // reporting the PRE-release running balance the release then draws on.
+    expect(out.yearly[2].fhsssDetail.client.concessionalBalance).toBeCloseTo(20000, 2);
+    // Year 3: the year AFTER release — released, so nothing left to
+    // accrue (mirrors fhsssBal.released's own early-exit in deterministic.js).
+    expect(out.yearly[3].fhsssDetail.client).toBeNull();
   });
 
   it("SG contributions never build an FHSSS balance, however large", () => {
