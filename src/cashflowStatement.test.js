@@ -150,6 +150,47 @@ describe("cashReceivedSums", () => {
     expect(c.regularTakeHomePay).toBe(90000 - 15000);
   });
 
+  // Worked-example validation follow-up: HELP and MLS are withheld
+  // through the SAME PAYG mechanism as income tax (deterministic.js's
+  // own comment where these are computed) — take-home pay must net
+  // off all three, or it overstates what actually lands in the
+  // account for anyone with a HELP debt or an MLS liability. Found by
+  // reconciling a real firm-produced worked example against the
+  // Snapshot view, where the gap was the full $21,815 HELP repayment.
+  it("Regular take home pay ALSO nets off HELP withheld, not just income tax", () => {
+    const row = mkRow({ taxDetail: { client: { paygWithheld: 15000, helpWithheld: 5000 }, partner: {} } });
+    const incomeRows = [{ id: "i1", category: "salary" }];
+    const rowTotalsIncome = { i1: [90000] };
+    const c = cashReceivedSums(row, { incomeRows, rowTotalsIncome, y: 0 });
+    expect(c.regularTakeHomePay).toBe(90000 - 15000 - 5000);
+  });
+
+  it("Regular take home pay ALSO nets off MLS withheld", () => {
+    const row = mkRow({ taxDetail: { client: { paygWithheld: 15000, mlsWithheld: 1200 }, partner: {} } });
+    const incomeRows = [{ id: "i1", category: "salary" }];
+    const rowTotalsIncome = { i1: [90000] };
+    const c = cashReceivedSums(row, { incomeRows, rowTotalsIncome, y: 0 });
+    expect(c.regularTakeHomePay).toBe(90000 - 15000 - 1200);
+  });
+
+  it("nets off HELP/MLS withheld for BOTH persons in the household total, and per-person when forOwner is given", () => {
+    const row = mkRow({
+      taxDetail: {
+        client: { paygWithheld: 15000, helpWithheld: 5000, mlsWithheld: 0 },
+        partner: { paygWithheld: 8000, helpWithheld: 0, mlsWithheld: 600 },
+      },
+    });
+    const incomeRows = [
+      { id: "i1", category: "salary", owner: "client" },
+      { id: "i2", category: "salary", owner: "partner" },
+    ];
+    const rowTotalsIncome = { i1: [90000], i2: [50000] };
+    const ctx = { incomeRows, rowTotalsIncome, y: 0 };
+    expect(cashReceivedSums(row, ctx, "client").regularTakeHomePay).toBe(90000 - 15000 - 5000);
+    expect(cashReceivedSums(row, ctx, "partner").regularTakeHomePay).toBe(50000 - 8000 - 600);
+    expect(cashReceivedSums(row, ctx, null).regularTakeHomePay).toBe((90000 + 50000) - (15000 + 5000 + 8000 + 600));
+  });
+
   it("Anticipated tax return is the amount actually settling THIS year (refundSettled)", () => {
     const row = mkRow({ taxDetail: { client: {}, partner: {}, refundSettled: 3793 } });
     const c = cashReceivedSums(row, { y: 0 });

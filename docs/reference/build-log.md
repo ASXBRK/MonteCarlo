@@ -807,6 +807,46 @@ This closes all three commits of docs/specs/15-input-usability.md.
   passed for the wrong reason at first — the real-engine reconciliation
   test caught it); headline figures reconcile to the plotted series.
 
+- **Worked example: validated against the firm's advice document.** The
+  tool had never been checked against an independently-produced correct
+  answer. `docs/reference/workbook-document-sense-check.md` analysed a
+  real advice document the firm produced by hand; this exercise builds
+  that client as a committed test fixture (`src/workedExample.test.js`,
+  runs in CI, never a saved localStorage scenario) and asserts the
+  Snapshot view's year-one column against the document's own five
+  figures. Reconstruction: household composition, gross salary, age and
+  HELP opening balance are all UNSTATED in the sense-check summary (we
+  don't have the source workbook) — taxable income ($218,150) is
+  DERIVED, not invented, from the fact that $21,815 is EXACTLY 10% of it
+  (spec 11's own literal HELP cliff formula, which predates this
+  exercise); gross salary follows from that plus the given $6,547
+  deduction; household composition defaults to a single client since
+  composition isn't stated and splitting the figures across an invented
+  second income would itself be "inventing a value to make a line
+  reconcile." Result: HELP ($21,815) and the deduction ($6,547) match
+  exactly; take-home pay is within 0.25%; the Anticipated Tax Return gap
+  is a disclosed timing convention (refunds settle in the FOLLOWING FY,
+  so a scenario's first year always shows $0 here — the underlying
+  accrual figure, $3,731.79, is within 1.6% of the document's $3,793);
+  NET INCOME carries a genuine, unexplained ~4.7% discrepancy, reported
+  with two named-but-unconfirmed hypotheses (a different tax-bracket
+  vintage in the source document; the single-vs-couple assumption
+  above) rather than forced to reconcile. Full line-by-line reasoning in
+  `docs/reference/worked-example.md`.
+
+  **A real bug was found and fixed in the same commit, independent of
+  the document:** `cashReceivedSums`'s "Regular Take Home Pay" netted
+  off income-tax PAYG withholding only, never HELP or MLS withholding,
+  even though both are withheld through the identical mechanism (the
+  engine's own comment where they're computed already said so) —
+  overstating take-home pay by the client's full $21,815 HELP repayment
+  before the fix (17.5% high; 0.25% high after). `deterministic.js` now
+  exposes `helpWithheld`/`mlsWithheld` per person on `taxDetail`
+  (computed already, previously discarded at function exit);
+  `cashReceivedSums` nets off all three. Display-layer only — the actual
+  household cash movement already correctly included HELP/MLS
+  withholding every month, so no conservation-invariant change needed.
+
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with
 nominal rounding), then Division 296, then Monte Carlo over the full

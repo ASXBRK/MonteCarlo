@@ -198,10 +198,17 @@ export function cashReceivedSums(row, ctx, forOwner = null) {
   const byCat = (cat) => sumByCategory(incomeRows, rowTotalsIncome, cat, y, forOwner);
   const client = row.taxDetail?.client ?? {};
   const partner = row.taxDetail?.partner ?? {};
-  const paygWithheld = forOwner == null
-    ? (client.paygWithheld ?? 0) + (partner.paygWithheld ?? 0)
-    : (row.taxDetail?.[forOwner]?.paygWithheld ?? 0);
-  const regularTakeHomePay = byCat("salary") - paygWithheld;
+  // Worked-example validation follow-up: HELP and MLS are ALSO
+  // withheld through PAYG, same mechanism as income tax
+  // (deterministic.js's own comment where these are computed) — this
+  // used to net off paygWithheld alone, overstating take-home pay by
+  // the full HELP/MLS withholding for anyone with either. Found by
+  // reconciling a real worked example, not assumed.
+  const withheldOf = (person) => (person.paygWithheld ?? 0) + (person.helpWithheld ?? 0) + (person.mlsWithheld ?? 0);
+  const totalWithheld = forOwner == null
+    ? withheldOf(client) + withheldOf(partner)
+    : withheldOf(row.taxDetail?.[forOwner] ?? {});
+  const regularTakeHomePay = byCat("salary") - totalWithheld;
   const anticipatedTaxReturn = forOwner == null
     ? (row.taxDetail?.refundSettled ?? 0)
     : (row.taxDetail?.[forOwner]?.refundSettled ?? 0);

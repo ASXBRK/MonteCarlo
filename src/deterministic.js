@@ -2103,6 +2103,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // assessable here too — same treatment as ordinary income.
     const assessed = {};
     const paygWithheld = { client: 0, partner: 0 };
+    // Worked-example validation follow-up: HELP and MLS are ALSO
+    // withheld through PAYG (same mechanism as income tax — the
+    // comment below this block always said so), but only paygWithheld
+    // was ever exposed on taxDetail; cashflowStatement.js's "regular
+    // take home pay" therefore never netted either off, overstating
+    // take-home pay by the full HELP/MLS withholding every FY a person
+    // has one. Hoisted into per-person accumulators (same shape as
+    // paygWithheld) so they survive past the loop below and can be
+    // exposed on taxDetail alongside it.
+    const helpWithheld = { client: 0, partner: 0 };
+    const mlsWithheld = { client: 0, partner: 0 };
     const newPendingRefund = { client: 0, partner: 0 };
     // Document Set Commit 1 — HELP repayment for THIS FY, capped at the
     // opening balance (never below zero). Assessed and applied to the
@@ -2221,17 +2232,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // the employee's private-cover declaration but not their
         // spouse's income, so this too is an approximation of the real
         // family-income comparison).
-        const helpWithheld = Math.min(helpRepaymentAmount(employmentIncomeFy, helpRatesY), helpBal[p]);
-        const mlsWithheld = mlsSurchargeAmount({
+        helpWithheld[p] = Math.min(helpRepaymentAmount(employmentIncomeFy, helpRatesY), helpBal[p]);
+        mlsWithheld[p] = mlsSurchargeAmount({
           ownIncome: employmentIncomeFy,
           comparisonIncome: isFamily ? familyIncome : employmentIncomeFy,
           hasCover: (p === "partner" ? state.plan.partner : state.plan.client)?.privateHospitalCover !== false,
           isFamily, dependentChildren, rates: mlsRatesY,
         });
         for (let m = yearStart(y); m < yearEnd(y); m++) {
-          if (empArr[m] > 0) taxOutArr[m] += (paygWithheld[p] + helpWithheld + mlsWithheld) * (empArr[m] / employmentIncomeFy);
+          if (empArr[m] > 0) taxOutArr[m] += (paygWithheld[p] + helpWithheld[p] + mlsWithheld[p]) * (empArr[m] / employmentIncomeFy);
         }
-        newPendingRefund[p] = (paygWithheld[p] + helpWithheld + mlsWithheld) - (a.netIncomeTax + helpDue[p] + mlsDue[p]);
+        newPendingRefund[p] = (paygWithheld[p] + helpWithheld[p] + mlsWithheld[p]) - (a.netIncomeTax + helpDue[p] + mlsDue[p]);
       } else {
         spreadTax(a.netIncomeTax + helpDue[p] + mlsDue[p], measured[p].incomeMonths, yearEnd(y) - 1);
       }
@@ -2399,6 +2410,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // taxDetail.refundSettled below for the amount actually hitting
       // cash THIS year (last year's figure).
       paygWithheld: paygWithheld[p],
+      // Worked-example validation follow-up: HELP/MLS are withheld
+      // through the SAME PAYG mechanism (see the comment where these
+      // are computed, above) — exposed here so cashReceivedSums's
+      // "regular take home pay" can net all three off, not just income
+      // tax. Both 0 for a no-employment-income person, same reason
+      // paygWithheld is.
+      helpWithheld: helpWithheld[p],
+      mlsWithheld: mlsWithheld[p],
       actualTaxPayable: assessed[p].netIncomeTax,
       // Reuses newPendingRefund[p] rather than recomputing — that value
       // is already 0 for a no-employment-income person (their tax
