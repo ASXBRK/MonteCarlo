@@ -73,3 +73,49 @@ export function buildDeltas(base, shocked) {
   });
   return { byYear, headline: { base: headlineFor(base), shocked: headlineFor(shocked) } };
 }
+
+// --- Commit 2: Interest rate shocks -----------------------------------------
+//
+// The behaviour that makes this worth building: a VARIABLE loan's rate
+// moves immediately (it always does, in reality); a FIXED loan's
+// contracted rate cannot move before its own rollover date — only the
+// rate it rolls INTO can. Shocking every loan uniformly would erase
+// that differential, which is the entire point of the view (a fixed
+// loan shields a client from a rate rise until rollover; a shock that
+// doesn't show that teaches nothing). No engine change is needed for
+// either shock — deterministic.js already switches a fixed loan's rate
+// at its own rolloverMonth (Implementation/Rates spec, Commit 1); both
+// shocks below just move the INPUT fields that switch already reads.
+//
+// revertRatePct is nullable (defaults to assumptions.mortgageRate — see
+// planState.js's clampLiability and deterministic.js's own resolution)
+// — resolving it to a concrete number BEFORE adding the shock is what
+// makes the shock apply even to a loan that has never had its own
+// revert rate overridden.
+function resolvedRevertPct(l, assumptions) {
+  return l.revertRatePct != null ? l.revertRatePct : (assumptions.mortgageRate ?? 0.06) * 100;
+}
+
+export function eligibleRateShockLoans(state) {
+  return (state.liabilities ?? []).filter((l) => l.balance > 0);
+}
+
+function applyRateShock(clone, shock) {
+  for (const l of clone.liabilities ?? []) {
+    if (l.rateType === "fixed") {
+      l.revertRatePct = resolvedRevertPct(l, clone.assumptions) + shock.deltaPct;
+    } else {
+      l.interestRatePct = (l.interestRatePct ?? 0) + shock.deltaPct;
+    }
+  }
+}
+
+function applyRevertRateShock(clone, shock) {
+  for (const l of clone.liabilities ?? []) {
+    if (l.rateType !== "fixed") continue; // leaves the current rate alone, and has nothing to act on for a variable loan
+    l.revertRatePct = resolvedRevertPct(l, clone.assumptions) + shock.deltaPct;
+  }
+}
+
+registerShockKind("rateShock", applyRateShock);
+registerShockKind("revertRateShock", applyRevertRateShock);

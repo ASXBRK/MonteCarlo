@@ -62,6 +62,7 @@ import {
 import { eligibleEquityProperties, buildEquityFocus } from "./focusEquity.js";
 import { buildTransferScheduleFocus, defaultTransferScheduleYear, perFortnight, perMonth } from "./focusTransferSchedule.js";
 import { planWindowsMatch, keyFigureValuesAtYear, keyFigureComparisonRows } from "./scenarioComparison.js";
+import { buildRateShockView, RATE_SHOCK_DELTAS, eligibleRateShockLoans } from "./whatIfRateShock.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -183,6 +184,7 @@ const els = {
   viewFocusEquity: $("viewFocusEquity"),
   viewFocusTransferSchedule: $("viewFocusTransferSchedule"),
   viewFocusCompareScenarios: $("viewFocusCompareScenarios"),
+  viewWhatIfRateShock: $("viewWhatIfRateShock"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -411,6 +413,7 @@ const OUTPUT_NAV = {
   WhatIf: [
     { id: "monte-carlo", label: "Monte Carlo (fan chart)" },
     { id: "monte-carlo-table", label: "Monte Carlo (percentile table)" },
+    { id: "whatif-rate-shock", label: "Interest rate shocks" },
   ],
 };
 const SECTION_LABELS = Object.fromEntries([
@@ -4458,6 +4461,7 @@ const VIEW_MOUNTS = {
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
   "focus-compare-scenarios": () => els.viewFocusCompareScenarios,
+  "whatif-rate-shock": () => els.viewWhatIfRateShock,
 };
 const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
@@ -4508,6 +4512,7 @@ function renderActiveView() {
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
   else if (activeView === "focus-compare-scenarios") renderFocusCompareScenariosView();
+  else if (activeView === "whatif-rate-shock") renderWhatIfRateShockView();
 }
 
 const isNominal = () => state.display.units === "nominal";
@@ -8405,6 +8410,154 @@ els.viewFocusCompareScenarios.addEventListener("click", (e) => {
   }
 });
 
+// --- What if: Interest rate shocks (docs/specs/14-what-if.md, Commit 2) ----
+//
+// Every figure below is read straight off whatIfRateShock.js's
+// buildRateShockView — itself built on whatIf.js's runShock (a real
+// projectPlan() clone-and-compare, never a shortcut) and
+// focusDebtPayoff.js's own per-loan reader, called once against the
+// base output and once against the shocked one. One shock at a time
+// against the base — shocks are never stacked or combined (the spec's
+// own rule for this whole group).
+let whatIfRateShockKind = "rateShock"; // "rateShock" | "revertRateShock"
+let whatIfRateShockDelta = 1;
+
+function renderWhatIfRateShockView() {
+  const loans = eligibleRateShockLoans(state);
+  if (loans.length === 0) {
+    els.viewWhatIfRateShock.innerHTML = focusEmptyStateHTML(
+      "What a rate move does to repayments and affordability — immediately for a variable loan, from rollover for a fixed one — add a liability to see it.",
+      "liabilities"
+    );
+    return;
+  }
+  const view = buildRateShockView({ state, shockKind: whatIfRateShockKind, deltaPct: whatIfRateShockDelta });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const hasFixed = loans.some((l) => l.rateType === "fixed");
+  const lastY = view.deltas.byYear.length - 1;
+
+  const deltaOptions = RATE_SHOCK_DELTAS.map((d) =>
+    `<option value="${d}"${d === whatIfRateShockDelta ? " selected" : ""}>${d > 0 ? "+" : ""}${d}pp</option>`
+  ).join("");
+
+  const baseUnfunded = view.deltas.headline.base.totalUnfunded;
+  const shockedUnfunded = view.deltas.headline.shocked.totalUnfunded;
+  const unfundedIntro = shockedUnfunded > baseUnfunded
+    ? `<p class="helper-warning">${baseUnfunded === 0 ? "This shock introduces unfunded cashflow" : "Unfunded cashflow grows under this shock"} — ${fmtMoney(shockedUnfunded)}${view.deltas.headline.shocked.firstShortfallAge != null ? ` starting at age ${view.deltas.headline.shocked.firstShortfallAge}` : ""} the plan can't actually cover, versus ${fmtMoney(baseUnfunded)} in the base case.</p>`
+    : `<p class="helper-text">No unfunded cashflow introduced by this shock.</p>`;
+
+  const loanRows = view.perLoan.map((l) => `
+    <tr>
+      <td>${escapeHTML(l.name)} <span class="helper-text">(${l.rateType})</span></td>
+      <td class="tl-num">${fmtMoney(l.base.totalInterest)}</td>
+      <td class="tl-num">${fmtMoney(l.shocked.totalInterest)}</td>
+      <td class="tl-num">${l.base.rollover ? `${fmtMoney(l.base.rollover.repaymentBefore)} → ${fmtMoney(l.base.rollover.repaymentAfter)}` : "—"}</td>
+      <td class="tl-num">${l.shocked.rollover ? `${fmtMoney(l.shocked.rollover.repaymentBefore)} → ${fmtMoney(l.shocked.rollover.repaymentAfter)}` : "—"}</td>
+    </tr>
+  `).join("");
+
+  els.viewWhatIfRateShock.innerHTML = `
+    <h2 class="section-heading">Interest rate shocks</h2>
+    <p class="helper-text">One shock at a time against the base — shocks aren't stacked or combined.</p>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <div id="whatIfRateShockKindToggle" class="seg-toggle" role="tablist" aria-label="Shock type"></div>
+        <label>Magnitude
+          <select id="whatIfRateShockDeltaSelect">${deltaOptions}</select>
+        </label>
+        ${whatIfRateShockKind === "revertRateShock" && !hasFixed ? `<p class="helper-text">No fixed-rate loans in this plan — a revert-rate shock has nothing to act on.</p>` : ""}
+      </div>
+      <div class="focus-section">
+        <h3>Affordability</h3>
+        ${unfundedIntro}
+        <div class="summary-strip">
+          <div class="stat"><div class="stat-label">Change in surplus over the projection</div><div class="stat-value">${fmtMoney(view.deltas.byYear.reduce((s, y) => s + y.surplus, 0))}</div></div>
+          <div class="stat"><div class="stat-label">End net assets — base</div><div class="stat-value">${fmtMoney(view.deltas.headline.base.endNetAssets * factor(lastY))}</div></div>
+          <div class="stat"><div class="stat-label">End net assets — shocked</div><div class="stat-value">${fmtMoney(view.deltas.headline.shocked.endNetAssets * factor(lastY))}</div></div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Loan balances, base vs shocked</h3>
+        <div id="whatIfRateShockChart"></div>
+      </div>
+      <div class="focus-section">
+        <h3>Repayments and total interest over the life of each loan</h3>
+        <table class="focus-table">
+          <thead><tr><th></th><th>Interest (base)</th><th>Interest (shocked)</th><th>Repayment before → after (base)</th><th>Repayment before → after (shocked)</th></tr></thead>
+          <tbody>${loanRows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  renderEntitySelector(
+    $("whatIfRateShockKindToggle"),
+    [{ id: "rateShock", label: "Rate shock" }, { id: "revertRateShock", label: "Revert-rate shock" }],
+    whatIfRateShockKind,
+    (id) => { whatIfRateShockKind = id; renderWhatIfRateShockView(); }
+  );
+  renderWhatIfRateShockChart(view, factor);
+}
+
+function renderWhatIfRateShockChart(view, factor) {
+  const el = $("whatIfRateShockChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const palette = ["#1c5ab4", "#dc5a28", "#6b8e23", "#5e60ce", "#2e8a8a"];
+  const traces = [];
+  view.perLoan.forEach((l, i) => {
+    const color = palette[i % palette.length];
+    const ages = l.base.balanceSeries.map((r) => r.age);
+    traces.push({
+      x: ages, y: l.base.balanceSeries.map((r) => r.actual * factor(r.year)),
+      name: `${l.name} — base`, type: "scatter", mode: "lines",
+      line: { color, width: 2 },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(l.name)} — base</extra>`,
+    });
+    traces.push({
+      x: ages, y: l.shocked.balanceSeries.map((r) => r.actual * factor(r.year)),
+      name: `${l.name} — shocked`, type: "scatter", mode: "lines",
+      line: { color, width: 2, dash: "dash" },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(l.name)} — shocked</extra>`,
+    });
+  });
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false },
+    yaxis: {
+      title: { text: `Loan balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function exportWhatIfRateShockCSV() {
+  const view = buildRateShockView({ state, shockKind: whatIfRateShockKind, deltaPct: whatIfRateShockDelta });
+  if (!view) return;
+  const lines = [csvEsc(`Interest rate shock: ${whatIfRateShockKind}, ${whatIfRateShockDelta > 0 ? "+" : ""}${whatIfRateShockDelta}pp`)];
+  lines.push("");
+  lines.push(["Loan", "Rate type", "Total interest (base)", "Total interest (shocked)"].map(csvEsc).join(","));
+  for (const l of view.perLoan) {
+    lines.push([l.name, l.rateType, l.base.totalInterest.toFixed(2), l.shocked.totalInterest.toFixed(2)]
+      .map((v) => csvEsc(String(v))).join(","));
+  }
+  lines.push("");
+  lines.push(["Year", "Net assets delta", "Closing balance delta", "Tax delta", "Surplus delta", "Unfunded cashflow delta"].map(csvEsc).join(","));
+  for (const y of view.deltas.byYear) {
+    lines.push([y.year, y.netAssets.toFixed(2), y.closingBalance.toFixed(2), y.totalTax.toFixed(2), y.surplus.toFixed(2), y.unfundedCashflow.toFixed(2)].join(","));
+  }
+  downloadCSV("whatif-rate-shock", lines);
+}
+
+els.viewWhatIfRateShock.addEventListener("change", (e) => {
+  if (e.target.id !== "whatIfRateShockDeltaSelect") return;
+  whatIfRateShockDelta = Number(e.target.value);
+  renderWhatIfRateShockView();
+});
+
 // --- exports -----------------------------------------------------------------
 
 function exportNameBase() {
@@ -8466,6 +8619,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-equity") exportFocusEquityCSV();
   else if (activeView === "focus-transfer-schedule") exportFocusTransferScheduleCSV();
   else if (activeView === "focus-compare-scenarios") exportFocusCompareScenariosCSV();
+  else if (activeView === "whatif-rate-shock") exportWhatIfRateShockCSV();
 });
 
 els.showAssetsToggle.addEventListener("change", () => {

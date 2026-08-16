@@ -461,12 +461,39 @@ This closes all six commits of docs/specs/13-implementation-rates-equity-compari
   flat (router.js's own documented convention) — no nested route
   segment, matching how Focus was actually built despite its own spec
   prose describing a "Focus → " path.
+- Commit 2 of docs/specs/14-what-if.md, **What if: interest rate
+  shocks** — two shock kinds self-registered into `whatIf.js`:
+  `rateShock` (moves a VARIABLE loan's rate immediately; moves only a
+  FIXED loan's REVERT rate, leaving its contracted rate untouched until
+  its own rollover — no engine change needed, since deterministic.js
+  already switches a fixed loan's rate at its own rolloverMonth,
+  Implementation/Rates spec Commit 1, and both shocks just move the
+  input fields that switch already reads) and `revertRateShock` (the
+  same revert-rate move alone, leaving variable loans and the current
+  fixed rate completely untouched — "what if you roll off into 8%
+  instead of 6.5%"). `revertRatePct`'s null-means-assumptions-default
+  is resolved to a concrete number BEFORE the shock is added, so a
+  loan that's never had its own revert rate overridden still shocks
+  correctly. New `src/whatIfRateShock.js` (pure): reuses
+  `focusDebtPayoff.js`'s own `buildDebtPayoffFocus` against BOTH the
+  base and shocked outputs for every loan's total interest, rollover
+  before/after repayment, and balance path — never a second, re-derived
+  copy of that logic. New **Interest rate shocks** What-if view:
+  shock-type toggle, magnitude selector (−2/−1/+1/+2/+3pp, base always
+  shown), loan balance paths overlaid (base solid, shocked dashed), an
+  affordability callout naming whether the shock introduces or grows
+  unfunded cashflow, per-loan interest/repayment table, CSV export.
+  Tested: a variable loan's interest changes from month one; a fixed
+  loan's rate is unchanged until its own rollover and changes after
+  (rateShock); a revert-rate shock leaves the fixed period AND every
+  variable loan untouched; a shock sized to break affordability
+  produces unfunded cashflow in the shocked run only.
 
 ### In flight
-Spec 14 Commits 2-5 (interest rate shocks; market crash timing; income
-interruption and expense shock; Monte Carlo rate uncertainty driven by
-the simulated CPI path); super threshold indexation per figure (AWOTE /
-CPI / unindexed, with nominal rounding), then Division 296, then Monte
+Spec 14 Commits 3-5 (market crash timing; income interruption and
+expense shock; Monte Carlo rate uncertainty driven by the simulated CPI
+path); super threshold indexation per figure (AWOTE / CPI / unindexed,
+with nominal rounding), then Division 296, then Monte
 Carlo over the full scenario.
 
 ### BLOCKING — not landed

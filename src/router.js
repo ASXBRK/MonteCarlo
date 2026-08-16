@@ -29,6 +29,7 @@ export const OUTPUT_VIEWS = [
   // unchanged (Commit 1) — a simulation is the probabilistic form of
   // exactly this question.
   "monte-carlo", "monte-carlo-table",
+  "whatif-rate-shock",
 ];
 export const DEFAULT_OUTPUT_VIEW = "composite"; // the composite chart is the default Graphs view (D5)
 
