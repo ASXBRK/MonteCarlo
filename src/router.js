@@ -18,11 +18,17 @@ export const DEFAULT_INPUT_SECTION = "setup";
 // Output view ids are flat (not nested by Graphs/Tables group) — the
 // grouping is a sidebar presentation concern, not a routing one.
 export const OUTPUT_VIEWS = [
-  "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars", "monte-carlo",  // Graphs
+  "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars",  // Graphs
   "money-decomposition",                                                                                                                                      // Graphs (docs/specs/13-implementation-rates-equity-comparison.md, Commit 4)
-  "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "monte-carlo-table", "assumptions",                                        // Tables
+  "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "assumptions",                                                             // Tables
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
   "focus-equity", "focus-transfer-schedule", "focus-compare-scenarios",                                                                                       // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
+  // What if (docs/specs/14-what-if.md) — "what if the world is different"
+  // (uncontrolled shocks), as opposed to Focus's "what if I did something
+  // different" (levers the client controls). Monte Carlo relocated here
+  // unchanged (Commit 1) — a simulation is the probabilistic form of
+  // exactly this question.
+  "monte-carlo", "monte-carlo-table",
 ];
 export const DEFAULT_OUTPUT_VIEW = "composite"; // the composite chart is the default Graphs view (D5)
 

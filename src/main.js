@@ -373,7 +373,6 @@ const OUTPUT_NAV = {
     { id: "net-assets", label: "Net assets" },
     { id: "asset-balances", label: "Asset balances" },
     { id: "asset-allocation", label: "Asset allocation" },
-    { id: "monte-carlo", label: "Monte Carlo" },
     { id: "super-balances", label: "Super balances" },
     { id: "liabilities-balances", label: "Liabilities" },
     { id: "money-decomposition", label: "Where the money went" },
@@ -386,7 +385,6 @@ const OUTPUT_NAV = {
     { id: "super", label: "Super" },
     { id: "liabilities", label: "Liabilities" },
     { id: "snapshot", label: "Snapshot" },
-    { id: "monte-carlo-table", label: "Monte Carlo" },
     { id: "assumptions", label: "Assumptions" },
   ],
   // Focus (docs/specs/12-focus-views.md) — one question, one page, read
@@ -402,6 +400,17 @@ const OUTPUT_NAV = {
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
     { id: "focus-compare-scenarios", label: "Compare scenarios" },
+  ],
+  // What if (docs/specs/14-what-if.md) — "what if the WORLD is
+  // different" (uncontrolled shocks: rates, markets, inflation, income
+  // interruption), the mirror image of Focus's "what if I did something
+  // different" (levers the client controls). Monte Carlo moved here
+  // unchanged (Commit 1) — a simulation is the probabilistic form of
+  // exactly this question, and it no longer makes sense split across
+  // Graphs (fan chart) and Tables (percentile table).
+  WhatIf: [
+    { id: "monte-carlo", label: "Monte Carlo (fan chart)" },
+    { id: "monte-carlo-table", label: "Monte Carlo (percentile table)" },
   ],
 };
 const SECTION_LABELS = Object.fromEntries([
@@ -432,6 +441,8 @@ function renderSideNav() {
     ${OUTPUT_NAV.Tables.map((n) => item(n, true)).join("")}
     <div class="nav-subgroup-label">Focus</div>
     ${OUTPUT_NAV.Focus.map((n) => item(n, true)).join("")}
+    <div class="nav-subgroup-label">What if</div>
+    ${OUTPUT_NAV.WhatIf.map((n) => item(n, true)).join("")}
   `;
 }
 

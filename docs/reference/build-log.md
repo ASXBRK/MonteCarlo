@@ -433,10 +433,41 @@ shortfall, not as a shortfall-by-date the client just hasn't reached yet.
 
 This closes all six commits of docs/specs/13-implementation-rates-equity-comparison.md.
 
+- Commit 1 of docs/specs/14-what-if.md, **What if: group scaffold, shock
+  runner, Monte Carlo relocation** — new `src/whatIf.js` (pure):
+  `runShock(state, shock)` clones the caller's state via
+  `structuredClone` (never mutating it — asserted directly in tests via
+  a before/after JSON snapshot), applies the shock to the clone only,
+  and runs `projectPlan()` on both the untouched original and the
+  modified clone. Shock kinds self-register via `registerShockKind`
+  rather than growing one switch statement across five commits — each
+  later commit registers its own kind at the module that owns its
+  logic. `buildDeltas(base, shocked)` — exported and tested
+  independently of any shock kind — is "the delta shape" itself: per
+  plan year, the shocked-minus-base change in net assets, closing
+  balance, tax, surplus, and unfunded cashflow, plus headline figures
+  (end net assets, first shortfall age, total unfunded) for BOTH runs,
+  since a shock "introducing unfunded cashflow where there was none" is
+  itself often the headline the two-runs-plus-delta framing exists to
+  show. New **What if** sidebar/output group (Graphs, Tables, Focus,
+  What if): the organising distinction is Focus answers "what if I did
+  something different" (levers the client controls), What if answers
+  "what if the world is different" (things they don't control). Monte
+  Carlo relocated here unchanged — the fan chart out of Graphs, the
+  percentile table out of Tables, same ids, same render functions, same
+  behaviour, only the sidebar grouping and labels moved (disambiguated
+  as "Monte Carlo (fan chart)"/"Monte Carlo (percentile table)" now
+  that both sit under one group instead of two). Output view ids stay
+  flat (router.js's own documented convention) — no nested route
+  segment, matching how Focus was actually built despite its own spec
+  prose describing a "Focus → " path.
+
 ### In flight
-Super threshold indexation per figure (AWOTE / CPI / unindexed, with
-nominal rounding), then Division 296, then Monte Carlo over the full
-scenario.
+Spec 14 Commits 2-5 (interest rate shocks; market crash timing; income
+interruption and expense shock; Monte Carlo rate uncertainty driven by
+the simulated CPI path); super threshold indexation per figure (AWOTE /
+CPI / unindexed, with nominal rounding), then Division 296, then Monte
+Carlo over the full scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary

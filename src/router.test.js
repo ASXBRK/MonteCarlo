@@ -136,11 +136,12 @@ describe("known section/view ids", () => {
 
   it("exposes the output view list", () => {
     expect(OUTPUT_VIEWS).toEqual([
-      "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars", "monte-carlo",
+      "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars",
       "money-decomposition",
-      "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "monte-carlo-table", "assumptions",
+      "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "assumptions",
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
       "focus-equity", "focus-transfer-schedule", "focus-compare-scenarios",
+      "monte-carlo", "monte-carlo-table",
     ]);
     expect(DEFAULT_OUTPUT_VIEW).toBe("composite");
   });
