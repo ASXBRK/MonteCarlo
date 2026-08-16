@@ -38,12 +38,18 @@ import { describe, it, expect } from "vitest";
 import { projectPlan } from "./deterministic.js";
 import { cashflowStatement } from "./cashflowStatement.js";
 import { buildSnapshotTable } from "./snapshot.js";
+import { HELP_RATES_BASE, helpRepaymentAmount } from "./data/helpRates.js";
 
 const GROSS_SALARY = 224_697;       // derived — see header
 const WORK_RELATED_DEDUCTION = 6_547; // given directly
 const HELP_OPENING_BALANCE = 100_000; // unstated — set clear of the repayment
 
-function buildWorkedExampleState() {
+// startYear parameterises the FY-vintage check below (Follow-up §3):
+// plan.start.year drives which bracket table src/Tax/annual.js's
+// bracketSettings() selects (fyStartYear <= 2025 → "2025-26",
+// fyStartYear === 2026 → "2026-27"). Everything else about the
+// reconstruction is unchanged between the two runs.
+function buildWorkedExampleState(startYear = 2026) {
   return {
     plan: {
       household: "single", // ASSUMPTION — see header; not stated in the analysis
@@ -54,7 +60,7 @@ function buildWorkedExampleState() {
       },
       partner: null,
       endAge: 36, // only year 1 (plan year 0) is asserted
-      start: { year: 2026, month: 7 }, // FY2026–27, matching the "AS AT FY2026/27" figures throughout docs/specs/11
+      start: { year: startYear, month: 7 },
       superAccounts: [],
       workingCash: { balance: 5000, minimumBalance: 0, ratePct: 2.5 }, // ratePct = cpi: zero REAL WCA interest, so it can't leak into assessable income
     },
@@ -92,8 +98,11 @@ function snapshotRowValue(table, label) {
   return row.cells[0].total;
 }
 
-describe("Worked example: docs/reference/workbook-document-sense-check.md's client, year one", () => {
-  const state = buildWorkedExampleState();
+// Runs the reconstruction for a given FY-start year and returns
+// everything the assertions below need — shared by the FY2026-27
+// (primary) and FY2025-26 (Follow-up §3 hypothesis test) runs.
+function assessYearOne(startYear = 2026) {
+  const state = buildWorkedExampleState(startYear);
   const out = projectPlan(state);
   const row = out.yearly[0];
   const ctx = {
@@ -104,6 +113,11 @@ describe("Worked example: docs/reference/workbook-document-sense-check.md's clie
   };
   const stmt = cashflowStatement(row, ctx, null);
   const table = buildSnapshotTable([{ y: 0, client: stmt, partner: null, total: stmt }], { hideEmptyRows: false });
+  return { state, out, row, stmt, table };
+}
+
+describe("Worked example: docs/reference/workbook-document-sense-check.md's client, year one", () => {
+  const { row, stmt, table } = assessYearOne(2026);
 
   // Sanity check on the derivation itself, before comparing to the
   // document: confirms the reconstructed inputs actually produce the
@@ -152,5 +166,73 @@ describe("Worked example: docs/reference/workbook-document-sense-check.md's clie
   it("NET INCOME is within $6,500 (4.8%) of the document's $134,215 — a real, disclosed, unexplained gap (see worked-example.md), not hidden by a tighter number", () => {
     const netIncome = snapshotRowValue(table, "NET INCOME");
     expect(Math.abs(netIncome - 134_215)).toBeLessThan(6_500);
+  });
+});
+
+// --- Follow-up: is the workbook just a year out of date? --------------------
+//
+// The workbook is a hand-built spreadsheet from the PRIOR financial
+// year. Hypothesis: if it used FY2025-26 tax brackets (16% second
+// bracket, not FY2026-27's legislated 15% cut — src/Tax/engine.js's
+// own LEG.brackets table, cross-checked against the ATO's published
+// FY2025-26/FY2026-27 resident rates), that alone might explain the
+// $134,215 net income figure.
+//
+// It doesn't. FY2025-26 rates are HIGHER, not lower, than FY2026-27's
+// (the legislated cut runs 16% → 15% → 14% over FY2025-26/26-27/27-28)
+// — so assessing this exact client under FY2025-26 rates produces a
+// SMALLER net income, moving further from the document's figure, not
+// closer. This rejects the stale-threshold hypothesis outright: no
+// financial year on this multi-year tax-cut schedule assesses this
+// client's $218,150 taxable income at a net income anywhere near
+// $134,215 — every year AFTER FY2026-27 only cuts rates FURTHER
+// (moving the same direction as the FY2026-27 case, away from the
+// document), and every year BEFORE it taxes MORE, not less.
+describe("Follow-up: the FY2025-26 hypothesis (the workbook predates this FY) is rejected", () => {
+  const fy2526 = assessYearOne(2025);
+  const fy2627 = assessYearOne(2026);
+
+  it("FY2025-26's 16% second bracket taxes this client $268 more than FY2026-27's 15% — exactly the width of the bracket cut ($26,800 × 1pp)", () => {
+    const diff = fy2526.stmt.tax.incomeTax - fy2627.stmt.tax.incomeTax;
+    expect(diff).toBeCloseTo(268, 2);
+  });
+
+  it("HELP is UNCHANGED across both years for this client — $218,150 repayment income clears both years' cliff threshold ($179,286 in 2025-26 per the ATO, $186,052 in 2026-27 per our own data), so the HELP match doesn't discriminate between the two hypotheses at all", () => {
+    expect(fy2526.stmt.tax.helpRepayment).toBeCloseTo(fy2627.stmt.tax.helpRepayment, 2);
+    expect(fy2526.stmt.tax.helpRepayment).toBeCloseTo(21_815, 2);
+  });
+
+  it("net income under FY2025-26 rates is FURTHER from the document's $134,215 than FY2026-27's, not closer — the stale-threshold hypothesis is rejected", () => {
+    const gap2526 = Math.abs(fy2526.stmt.netIncome - 134_215);
+    const gap2627 = Math.abs(fy2627.stmt.netIncome - 134_215);
+    expect(gap2526).toBeGreaterThan(gap2627);
+  });
+});
+
+// --- Follow-up: is $134,215 reachable at all for a single earner? ----------
+//
+// HELP's own bracket shape makes $21,815 a UNIQUE result: it can only
+// arise from the flat 10%-of-total cliff, never from either marginal
+// bracket below it, because both marginal brackets cap out well short
+// of $21,815 at their own ceiling. That pins repayment income (and, in
+// this single-income reconstruction with no reportable-super-
+// contribution add-back, taxable income) to exactly $218,150 — there
+// is no OTHER taxable income a single earner could have and still
+// report this exact HELP figure.
+describe("Follow-up: $21,815 HELP uniquely determines $218,150 repayment income — no other single-earner reconstruction is possible", () => {
+  it("the marginal bracket below the cliff caps out at $9,028.35 — far short of $21,815", () => {
+    const maxBracket2 = helpRepaymentAmount(129_717, HELP_RATES_BASE);
+    expect(maxBracket2).toBeCloseTo(9_028.35, 1);
+    expect(maxBracket2).toBeLessThan(21_815);
+  });
+
+  it("the marginal bracket just below the flat cliff caps out at ~$18,605 — still short of $21,815", () => {
+    const maxBracket3 = helpRepaymentAmount(HELP_RATES_BASE.cliffThreshold - 1, HELP_RATES_BASE);
+    expect(maxBracket3).toBeLessThan(21_815);
+    expect(maxBracket3).toBeGreaterThan(18_000);
+  });
+
+  it("only the flat 10% cliff can produce $21,815, and it does so at exactly $218,150 — confirming the reconstruction's taxable income is the UNIQUE solution, not a choice among several", () => {
+    expect(helpRepaymentAmount(218_150, HELP_RATES_BASE)).toBeCloseTo(21_815, 2);
   });
 });

@@ -847,6 +847,36 @@ This closes all three commits of docs/specs/15-input-usability.md.
   household cash movement already correctly included HELP/MLS
   withholding every month, so no conservation-invariant change needed.
 
+- **Worked example follow-up: net income discrepancy resolved against
+  primary sources, not the workbook.** The prior entry left NET INCOME
+  as an open ~4.7% discrepancy with two unconfirmed hypotheses. Both
+  now investigated directly, no engine change made (per the standing
+  note added to the top of `docs/reference/worked-example.md`: our
+  figure stands where it traces to a primary source, the workbook is a
+  second opinion, not a reference implementation). (1) First-principles
+  derivation with every rate cited — `src/Tax/engine.js`'s FY2026–27
+  bracket table and `src/data/helpRates.js`'s HELP thresholds,
+  independently cross-checked against the ATO's own published FY2026–27
+  figures during this investigation — reproduces $127,934.50 exactly;
+  defensible from primary sources. (2) Searched for a single-earner
+  input set reproducing all five of the document's figures at once:
+  HELP's own bracket shape makes $218,150 the *unique* taxable income
+  consistent with $21,815 (the two marginal brackets below the cliff
+  cap out at $9,028 and $18,605 respectively, both short of $21,815),
+  and lowering it further via reportable-super-contribution add-backs
+  only ever reduces net income more — no single-earner set reaches
+  $134,215. A second-earner household reconciles it exactly instead
+  ($6,280.50 net, plausible below the tax-free threshold) — a
+  demonstrated-consistent candidate, not a confirmed one. (3) Tested
+  the "workbook predates this FY" hypothesis directly by re-running the
+  identical reconstruction under FY2025–26 brackets (16% vs FY2026–27's
+  legislated 15% cut, both tables already in `LEG.brackets`): net income
+  comes out $268 LOWER, not higher — the prior year taxed MORE, so this
+  moves further from the document's figure, not closer. Hypothesis
+  rejected, cleanly and by direct test, not by assumption. New tests in
+  `src/workedExample.test.js` (FY2025–26 rerun; HELP-uniqueness proof)
+  lock all three findings in as regression-tested claims, not prose.
+
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with
 nominal rounding), then Division 296, then Monte Carlo over the full
