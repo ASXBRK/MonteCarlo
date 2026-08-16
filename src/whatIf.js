@@ -17,8 +17,14 @@ import { PROFILES } from "./profiles.js";
 const SHOCK_APPLIERS = new Map();
 
 // registerShockKind(kind, applyFn) — applyFn(clonedState, shock) mutates
-// the clone IN PLACE according to the shock's own parameters. Never
-// called with the caller's real state (see runShock).
+// the clone IN PLACE according to the shock's own parameters, and may
+// optionally RETURN an mc-shaped object ({shockFor(holdingId, m), ...}
+// — deterministic.js's own documented Monte Carlo overlay parameter)
+// when the shock needs a side-channel return-path override rather than
+// a state field change (Commit 3's market crash: no liability/asset
+// field changes at all, only a one-off return injected via the same
+// mechanism Monte Carlo already uses). Never called with the caller's
+// real state (see runShock).
 export function registerShockKind(kind, applyFn) {
   SHOCK_APPLIERS.set(kind, applyFn);
 }
@@ -33,9 +39,9 @@ export function runShock(state, shock) {
   const applyFn = SHOCK_APPLIERS.get(shock?.kind);
   if (!applyFn) throw new Error(`Unknown shock kind: ${shock?.kind}`);
   const clone = structuredClone(state);
-  applyFn(clone, shock);
+  const mc = applyFn(clone, shock) || null;
   const base = projectPlan(state, PROFILES);
-  const shocked = projectPlan(clone, PROFILES);
+  const shocked = projectPlan(clone, PROFILES, mc);
   return { base, shocked, deltas: buildDeltas(base, shocked) };
 }
 

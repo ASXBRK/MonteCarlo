@@ -63,6 +63,7 @@ import { eligibleEquityProperties, buildEquityFocus } from "./focusEquity.js";
 import { buildTransferScheduleFocus, defaultTransferScheduleYear, perFortnight, perMonth } from "./focusTransferSchedule.js";
 import { planWindowsMatch, keyFigureValuesAtYear, keyFigureComparisonRows } from "./scenarioComparison.js";
 import { buildRateShockView, RATE_SHOCK_DELTAS, eligibleRateShockLoans } from "./whatIfRateShock.js";
+import { buildCrashTimingView, eligibleCrashHoldings } from "./whatIfCrash.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -185,6 +186,7 @@ const els = {
   viewFocusTransferSchedule: $("viewFocusTransferSchedule"),
   viewFocusCompareScenarios: $("viewFocusCompareScenarios"),
   viewWhatIfRateShock: $("viewWhatIfRateShock"),
+  viewWhatIfCrash: $("viewWhatIfCrash"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -414,6 +416,7 @@ const OUTPUT_NAV = {
     { id: "monte-carlo", label: "Monte Carlo (fan chart)" },
     { id: "monte-carlo-table", label: "Monte Carlo (percentile table)" },
     { id: "whatif-rate-shock", label: "Interest rate shocks" },
+    { id: "whatif-crash", label: "Market crash timing" },
   ],
 };
 const SECTION_LABELS = Object.fromEntries([
@@ -4462,6 +4465,7 @@ const VIEW_MOUNTS = {
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
   "focus-compare-scenarios": () => els.viewFocusCompareScenarios,
   "whatif-rate-shock": () => els.viewWhatIfRateShock,
+  "whatif-crash": () => els.viewWhatIfCrash,
 };
 const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
@@ -4513,6 +4517,7 @@ function renderActiveView() {
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
   else if (activeView === "focus-compare-scenarios") renderFocusCompareScenariosView();
   else if (activeView === "whatif-rate-shock") renderWhatIfRateShockView();
+  else if (activeView === "whatif-crash") renderWhatIfCrashView();
 }
 
 const isNominal = () => state.display.units === "nominal";
@@ -8558,6 +8563,148 @@ els.viewWhatIfRateShock.addEventListener("change", (e) => {
   renderWhatIfRateShockView();
 });
 
+// --- What if: Market crash timing (docs/specs/14-what-if.md, Commit 3) -----
+//
+// Every figure below is read straight off whatIfCrash.js's
+// buildCrashTimingView — itself built on sequenceRisk.js's real crash
+// injection (deterministic.js's own mc.shockFor hook, no engine
+// change). The SAME shock at three representative ages against the
+// SAME base: identical magnitude, radically different outcome. This
+// is the deterministic what-if; Monte Carlo (also in this group)
+// models the same sequence-of-returns risk probabilistically.
+const CRASH_DROP_OPTIONS = [10, 20, 30, 40, 50];
+const CRASH_RECOVERY_OPTIONS = [0, 1, 2, 3, 5, 7];
+let whatIfCrashDropPct = 30;
+let whatIfCrashRecoveryYears = 0;
+
+function renderWhatIfCrashView() {
+  const emptyMsg = "How the SAME market crash at different points in your plan produces very different outcomes — add a growth-exposed financial asset or super account to see it.";
+  if (eligibleCrashHoldings(state).length === 0) {
+    els.viewWhatIfCrash.innerHTML = focusEmptyStateHTML(emptyMsg, "financial-assets");
+    return;
+  }
+  const view = buildCrashTimingView({ state, dropPct: whatIfCrashDropPct, recoveryYears: whatIfCrashRecoveryYears });
+  if (!view) {
+    els.viewWhatIfCrash.innerHTML = focusEmptyStateHTML(emptyMsg, "financial-assets");
+    return;
+  }
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lastY = view.base.yearly.length - 1;
+
+  const dropOptions = CRASH_DROP_OPTIONS.map((d) =>
+    `<option value="${d}"${d === whatIfCrashDropPct ? " selected" : ""}>${d}%</option>`
+  ).join("");
+  const recoveryOptions = CRASH_RECOVERY_OPTIONS.map((y) =>
+    `<option value="${y}"${y === whatIfCrashRecoveryYears ? " selected" : ""}>${y === 0 ? "No recovery" : `${y} year${y > 1 ? "s" : ""}`}</option>`
+  ).join("");
+
+  const baseEnd = view.base.yearly[lastY].netAssets;
+  const rows = view.ages.map((a) => {
+    if (!a.out) {
+      return `<tr><td>${escapeHTML(a.label)} (age ${a.age})</td><td colspan="2" class="helper-text">Not resolvable this plan year</td></tr>`;
+    }
+    const shockedEnd = a.out.yearly[lastY].netAssets;
+    return `
+      <tr>
+        <td>${escapeHTML(a.label)} (age ${a.age})</td>
+        <td class="tl-num">${fmtMoney(shockedEnd * factor(lastY))}</td>
+        <td class="tl-num">${fmtMoney((shockedEnd - baseEnd) * factor(lastY))}</td>
+      </tr>`;
+  }).join("");
+
+  els.viewWhatIfCrash.innerHTML = `
+    <h2 class="section-heading">Market crash timing</h2>
+    <p class="helper-text">This is a deterministic what-if — the SAME shock applied at three different points in time, never combined. The Monte Carlo view (also in this group) models this same sequence-of-returns risk probabilistically, across thousands of random paths, rather than at one chosen moment.</p>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <label>Crash size
+          <select id="whatIfCrashDropSelect">${dropOptions}</select>
+        </label>
+        <label>Recovery period
+          <select id="whatIfCrashRecoverySelect">${recoveryOptions}</select>
+        </label>
+      </div>
+      <div class="focus-section">
+        <h3>Net assets over time</h3>
+        <div id="whatIfCrashChart"></div>
+      </div>
+      <div class="focus-section">
+        <h3>End net assets by crash timing</h3>
+        <table class="focus-table">
+          <thead><tr><th>Crash at</th><th>End net assets</th><th>Δ vs base</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  renderWhatIfCrashChart(view, factor);
+}
+
+function renderWhatIfCrashChart(view, factor) {
+  const el = $("whatIfCrashChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = view.base.schedule.clientAges;
+  const palette = ["#1c5ab4", "#dc5a28", "#6b8e23"];
+  const traces = [{
+    x: ages, y: view.base.yearly.map((row, y) => row.netAssets * factor(y)),
+    name: "Base (no crash)", type: "scatter", mode: "lines",
+    line: { color: "#222", width: 2.5, dash: "dot" },
+    hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Base</extra>",
+  }];
+  view.ages.forEach((a, i) => {
+    if (!a.out) return;
+    traces.push({
+      x: ages, y: a.out.yearly.map((row, y) => row.netAssets * factor(y)),
+      name: `${a.label} (age ${a.age})`, type: "scatter", mode: "lines",
+      line: { color: palette[i % palette.length], width: 2 },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(a.label)}</extra>`,
+    });
+  });
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function exportWhatIfCrashCSV() {
+  const view = buildCrashTimingView({ state, dropPct: whatIfCrashDropPct, recoveryYears: whatIfCrashRecoveryYears });
+  if (!view) return;
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const ages = view.base.schedule.clientAges;
+  const lines = [csvEsc(`Market crash timing: ${whatIfCrashDropPct}% drop, ${whatIfCrashRecoveryYears} year(s) recovery`)];
+  lines.push("");
+  const header = ["Age", "Base", ...view.ages.map((a) => `${a.label} (age ${a.age})`)];
+  lines.push(header.map(csvEsc).join(","));
+  for (let y = 0; y < view.base.yearly.length; y++) {
+    const row = [
+      ages[y],
+      (view.base.yearly[y].netAssets * factor(y)).toFixed(2),
+      ...view.ages.map((a) => (a.out ? (a.out.yearly[y].netAssets * factor(y)).toFixed(2) : "")),
+    ];
+    lines.push(row.map((v) => csvEsc(String(v))).join(","));
+  }
+  downloadCSV("whatif-crash", lines);
+}
+
+els.viewWhatIfCrash.addEventListener("change", (e) => {
+  if (e.target.id === "whatIfCrashDropSelect") {
+    whatIfCrashDropPct = Number(e.target.value);
+    renderWhatIfCrashView();
+  } else if (e.target.id === "whatIfCrashRecoverySelect") {
+    whatIfCrashRecoveryYears = Number(e.target.value);
+    renderWhatIfCrashView();
+  }
+});
+
 // --- exports -----------------------------------------------------------------
 
 function exportNameBase() {
@@ -8620,6 +8767,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-transfer-schedule") exportFocusTransferScheduleCSV();
   else if (activeView === "focus-compare-scenarios") exportFocusCompareScenariosCSV();
   else if (activeView === "whatif-rate-shock") exportWhatIfRateShockCSV();
+  else if (activeView === "whatif-crash") exportWhatIfCrashCSV();
 });
 
 els.showAssetsToggle.addEventListener("change", () => {

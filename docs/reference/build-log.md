@@ -488,13 +488,46 @@ This closes all six commits of docs/specs/13-implementation-rates-equity-compari
   (rateShock); a revert-rate shock leaves the fixed period AND every
   variable loan untouched; a shock sized to break affordability
   produces unfunded cashflow in the shocked run only.
+- Commit 3 of docs/specs/14-what-if.md, **What if: market crash timing
+  and sequence risk** — `src/sequenceRisk.js` REWRITTEN entirely (per
+  the spec's own instruction: "read it, salvage what is useful... do
+  not simply re-enable it"). Nothing from the old dormant single-
+  portfolio "Path A vs Path B" DOM visualiser survived — it generated
+  its own synthetic normal-distributed returns and manipulated the DOM
+  directly, both patterns this codebase moved away from before this
+  file went dormant. The crash is injected via the SAME
+  `mc.shockFor(holdingId, m)` hook Monte Carlo already uses
+  (deterministic.js's own documented overlay parameter) — no engine
+  change needed: at the crash month, each holding's growth return is
+  cut by `dropPct` scaled by its own growth-sleeve weight
+  (`classWeights` — the Australian/international equity + property
+  split the Asset class allocation chart already derives, excluding
+  fixed interest and cash entirely, matching allocation.js's own scope);
+  an optional recovery period applies a constant above-trend monthly
+  return that exactly reverses that holding's own proportional loss by
+  the end of the period. `whatIf.js`'s `runShock` gained the ability
+  for an applier to return an `mc` override (rather than only mutating
+  a cloned state) — backward compatible, Commit 2's shocks are
+  unaffected — since a crash needs no liability/asset FIELD changed at
+  all. New `src/whatIfCrash.js` (pure): runs the identical crash at
+  three representative ages (early/mid-career/near-retirement, spread
+  across the accumulation phase) against the same base. New **Market
+  crash timing** What-if view: crash-size and recovery-period
+  selectors, net assets over time (base + three age lines), an
+  end-net-assets-by-timing table, an explicit note that this is the
+  deterministic counterpart to the (also relocated) Monte Carlo view,
+  CSV export. Tested: the balance drop matches dropPct × growth
+  fraction exactly; a 100%-cash holding is completely unaffected; a
+  recovery period restores the balance to trend exactly on schedule;
+  the identical crash produces materially different end outcomes at
+  different ages; the crash self-registers with `runShock`'s generic
+  registry, producing identical figures to calling it directly.
 
 ### In flight
-Spec 14 Commits 3-5 (market crash timing; income interruption and
-expense shock; Monte Carlo rate uncertainty driven by the simulated CPI
-path); super threshold indexation per figure (AWOTE / CPI / unindexed,
-with nominal rounding), then Division 296, then Monte
-Carlo over the full scenario.
+Spec 14 Commits 4-5 (income interruption and expense shock; Monte
+Carlo rate uncertainty driven by the simulated CPI path); super
+threshold indexation per figure (AWOTE / CPI / unindexed, with nominal
+rounding), then Division 296, then Monte Carlo over the full scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary
