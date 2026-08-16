@@ -1420,6 +1420,12 @@ html, body {
   gap: 2px;
 }
 
+.side-nav-review-btn {
+  align-self: flex-start;
+  margin: 0 0 10px 10px;
+  font-size: 12.5px;
+}
+
 .nav-group-label {
   font-size: 10.5px;
   font-weight: 700;
@@ -1470,6 +1476,16 @@ html, body {
   flex: 0 0 auto;
 }
 .nav-item.active .nav-badge { color: var(--accent); background: var(--accent-soft); }
+
+/* Input Usability spec, Commit 2 — sidebar "has untouched fields"
+   indicator, a subtle dot alongside the existing count badge. Status,
+   not error: muted amber, not red. */
+.nav-badge-unreviewed {
+  font-size: 9px;
+  color: #b8860b;
+  flex: 0 0 auto;
+  line-height: 1;
+}
 
 .workspace-canvas {
   flex: 1 1 auto;
@@ -1846,6 +1862,54 @@ html, body {
 @media (max-width: 700px) {
   .identity-grid { grid-template-columns: 1fr; }
 }
+
+/* --- Input Usability spec, Commit 2: distinguish entered values from
+   defaults. Muted, not alarming — this is a status, not an error. */
+.cf-cell.field-untouched, .plan-field.field-untouched { position: relative; }
+.cf-cell.field-untouched label, .plan-field.field-untouched label,
+.cf-cell.field-untouched input, .plan-field.field-untouched input,
+.cf-cell.field-untouched select, .plan-field.field-untouched select {
+  color: var(--ink-soft);
+  opacity: 0.7;
+}
+.field-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  margin: 0 6px 2px 0;
+  border: none;
+  border-radius: 50%;
+  background: #b8860b;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.field-dot:hover { background: var(--accent); }
+.mark-all-reviewed {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+}
+
+.review-section { margin-bottom: 20px; }
+.review-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+.review-field-list { list-style: none; padding: 0; margin: 0; }
+.review-field-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+.review-jump { flex: 1 1 auto; text-align: left; }
+.review-field-value { color: var(--ink-soft); font-size: 12.5px; flex: 0 0 auto; }
+.muted { color: var(--ink-soft); }
 
 .cf-index-extra { position: relative; }
 

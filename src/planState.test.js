@@ -26,6 +26,7 @@ import {
   clampSnapshotYears, MAX_SNAPSHOT_YEARS,
   defaultAdviserFees, clampAdviserFees, defaultImplementation,
   clampImplementationBasic, refineImplementationAllocations, createAllocation,
+  clampTouched,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -577,6 +578,43 @@ describe("schema v4 migration (C3)", () => {
   it("Input Usability spec, Commit 1: centrelinkEligible is dropped entirely, even if present in raw input", () => {
     expect(clampTaxProfile({ residency: "resident", medicareExempt: false, centrelinkEligible: true, openingCapitalLosses: 0 }))
       .not.toHaveProperty("centrelinkEligible");
+  });
+});
+
+describe("Input Usability spec, Commit 2 — touched-field tracking", () => {
+  it("a new scenario starts fully untouched", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.meta).toEqual({ touched: [] });
+  });
+
+  it("clampTouched dedupes and drops non-string/empty junk", () => {
+    expect(clampTouched(null)).toEqual([]);
+    expect(clampTouched("not-an-array")).toEqual([]);
+    expect(clampTouched(["a", "b", "a", "", 5, null, "c"])).toEqual(["a", "b", "c"]);
+  });
+
+  it("touched paths survive a serialize/hydrate round trip", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.meta.touched = ["plan.client.retirementAge", "assets.a1.balance"];
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.meta.touched.sort()).toEqual(["assets.a1.balance", "plan.client.retirementAge"]);
+  });
+
+  it("a pre-Commit-2 scenario (no meta at all) hydrates with nothing marked touched — honest, not guessed", () => {
+    const s = defaultState(PROFILES, NOW);
+    const raw = JSON.parse(serialize(s));
+    delete raw.meta;
+    raw.schemaVersion = 14; // pre-Commit-2 shape, migrates forward
+    const back = hydrate(JSON.stringify(raw), PROFILES);
+    expect(back).not.toBeNull();
+    expect(back.meta).toEqual({ touched: [] });
+  });
+
+  it("clampAllToPlan preserves meta.touched untouched (not a plan/asset/cashflow field, passed through as-is)", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.meta.touched = ["plan.client.retirementAge"];
+    const clamped = clampAllToPlan(s, PROFILES);
+    expect(clamped.meta.touched).toEqual(["plan.client.retirementAge"]);
   });
 });
 

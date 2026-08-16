@@ -173,6 +173,8 @@ const els = {
   chartTreatmentSelects: document.querySelectorAll("[data-treatment]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
+  reviewDefaultsModal: $("reviewDefaultsModal"),
+  reviewDefaultsBody: $("reviewDefaultsBody"),
   assetRemoveModal: $("assetRemoveModal"),
   assetRemoveModalBody: $("assetRemoveModalBody"),
   paramAssetTable: $("paramAssetTable"),
@@ -431,20 +433,38 @@ const SECTION_LABELS = Object.fromEntries([
   ...Object.values(OUTPUT_NAV).flat().map((n) => [n.id, n.label]),
 ]);
 
+// Input Usability spec, Commit 2 — a section "has untouched fields" if
+// its (always-mounted) DOM contains at least one trackable control
+// whose path isn't in state.meta.touched yet. Read straight off the
+// live DOM rather than re-deriving section membership from state, so
+// it can never drift from what decorateTouchedFields() itself counts.
+function sectionHasUntouched(sectionId) {
+  const section = els.workspaceCanvas.querySelector(`[data-section="${sectionId}"]`);
+  if (!section) return false;
+  for (const el of section.querySelectorAll(TOUCHED_FIELD_SELECTOR)) {
+    const path = computeFieldPath(el);
+    if (path && !isTouched(path)) return true;
+  }
+  return false;
+}
+
 function renderSideNav() {
   const counts = sectionCounts(state);
   const badge = (id) => (counts[id] ? `<span class="nav-badge">${counts[id]}</span>` : "");
   const item = (n, sub = false) => {
     const area = INPUT_NAV.includes(n) ? "input" : "output";
     const active = currentRoute?.area === area && currentRoute?.section === n.id;
+    const unreviewed = area === "input" && sectionHasUntouched(n.id)
+      ? `<span class="nav-badge-unreviewed" title="Contains fields not yet reviewed">●</span>` : "";
     return `
       <button class="nav-item${sub ? " nav-item-sub" : ""}${active ? " active" : ""}" type="button"
               data-nav-area="${area}" data-nav-section="${n.id}">
-        <span>${escapeHTML(n.label)}</span>${badge(n.id)}
+        <span>${escapeHTML(n.label)}</span>${unreviewed}${badge(n.id)}
       </button>
     `;
   };
   els.sideNav.innerHTML = `
+    <button type="button" id="reviewDefaultsBtn" class="btn-text side-nav-review-btn">Review defaults</button>
     <div class="nav-group-label">Input</div>
     ${INPUT_NAV.map((n) => item(n)).join("")}
     <div class="nav-group-label">Output</div>
@@ -903,6 +923,325 @@ function wireTooltips() {
   });
 }
 wireTooltips();
+
+// --- Touched-field tracking (Input Usability spec, Commit 2) ---------------
+//
+// state.meta.touched holds the dotted path of every field the user has
+// attended to — changed, or explicitly confirmed via the tick
+// affordance / "mark all reviewed". Paths reuse the state's own
+// identifiers (see planState.js) and are computed generically from
+// each control's existing data-* attributes, so this needed no new
+// markup at any of the ~150 field call sites: one delegated listener
+// plus one lookup table per naming convention covers the whole app.
+
+// Person-prefixed data-plan-field suffixes (e.g. "clientRetirementAge",
+// "partnerDivTaxPaidFrom") → the path under plan.<person>.
+const PERSON_PLAN_FIELD_SUFFIX = {
+  FirstName: "firstName",
+  Surname: "surname",
+  Dob: "dob",
+  Sex: "sex",
+  RetirementAge: "retirementAge",
+  Residency: "taxProfile.residency",
+  Medicare: "taxProfile.medicareExempt",
+  WorkTestMet: "super.workTestMet",
+  OpeningLosses: "taxProfile.openingCapitalLosses",
+  PrivateHospitalCover: "privateHospitalCover",
+  DivTaxPaidFrom: "super.divTaxPaidFrom",
+  DivTaxReleaseAccountId: "super.divTaxReleaseAccountId",
+};
+// Static (non-person) data-plan-field codes.
+const STATIC_PLAN_FIELD_PATH = {
+  startYear: "plan.start.year",
+  startMonth: "plan.start.month",
+  endMode: "plan.endBasis.mode",
+  endFixedAge: "plan.endBasis.fixedAge",
+  endFixedYears: "plan.endBasis.fixedYears",
+  dependentChildren: "plan.dependentChildren",
+};
+const IMPL_FIELD_PATH = {
+  upfrontTotal: "plan.adviserFees.upfront.total",
+  upfrontFromSuper: "plan.adviserFees.upfront.fromSuperAmount",
+  upfrontSuperAccount: "plan.adviserFees.upfront.superAccountId",
+  ongoingAnnual: "plan.adviserFees.ongoing.annualAmount",
+  ongoingFromSuper: "plan.adviserFees.ongoing.fromSuperAmount",
+  ongoingSuperAccount: "plan.adviserFees.ongoing.superAccountId",
+  ongoingIndexBasis: "plan.adviserFees.ongoing.indexBasis",
+  totalCashAvailable: "plan.implementation.totalCashAvailable",
+  emergencyFundTarget: "plan.implementation.emergencyFundTarget",
+};
+const SETTINGS_FIELD_PATH = {
+  wcaBalance: "plan.workingCash.balance",
+  wcaMinimum: "plan.workingCash.minimumBalance",
+  wcaRate: "plan.workingCash.ratePct",
+  surplusMode: "settings.surplus.mode",
+  surplusAsset: "settings.surplus.assetId",
+};
+
+function computePlanFieldPath(field) {
+  if (STATIC_PLAN_FIELD_PATH[field]) return STATIC_PLAN_FIELD_PATH[field];
+  for (const prefix of ["client", "partner"]) {
+    if (field.startsWith(prefix)) {
+      const suffix = PERSON_PLAN_FIELD_SUFFIX[field.slice(prefix.length)];
+      if (suffix) return `plan.${prefix}.${suffix}`;
+    }
+  }
+  return null;
+}
+
+// Selector for every element carrying a computable field path — kept
+// in one place so the capture-phase listener, the decoration pass, and
+// "mark all remaining as reviewed" all enumerate the identical set.
+const TOUCHED_FIELD_SELECTOR = [
+  "[data-plan-field]",
+  "[data-kind][data-cfid][data-field]",
+  "[data-aid][data-field]",
+  "[data-said][data-sfield]",
+  "[data-lid][data-erid][data-erfield]",
+  "[data-lid][data-orid][data-orfield]",
+  "[data-lid][data-lfield]",
+  "[data-pid][data-pfield]",
+  "[data-gid][data-gfield]",
+  "[data-alid][data-alfield]",
+  "[data-impl-field]",
+  "[data-settings-field]",
+  "[data-kd-id][data-kd-field]",
+].join(",");
+
+// One dotted path per element, driven entirely by which data-*
+// attributes it carries — never by which section it lives in, so a
+// field moved between sections (as Commit 1 just did) needs no update
+// here. Order matters where attributes co-occur: a liability's
+// extra/one-off repayment sub-rows carry data-lid alongside their own
+// data-erid/orid, so those checks come before the plain data-lfield one.
+function computeFieldPath(el) {
+  const ds = el.dataset;
+  if (ds.lid && ds.erid && ds.erfield) return `liabilities.${ds.lid}.extraRepayments.${ds.erid}.${ds.erfield}`;
+  if (ds.lid && ds.orid && ds.orfield) return `liabilities.${ds.lid}.oneOffRepayments.${ds.orid}.${ds.orfield}`;
+  if (ds.lid && ds.lfield) return `liabilities.${ds.lid}.${ds.lfield}`;
+  if (ds.kind && ds.cfid && ds.field) return `cashflows.${ds.kind}.${ds.cfid}.${ds.field}`;
+  if (ds.aid && ds.field) return `assets.${ds.aid}.${ds.field}`;
+  if (ds.said && ds.sfield) return `plan.superAccounts.${ds.said}.${ds.sfield}`;
+  if (ds.pid && ds.pfield) return `properties.${ds.pid}.${ds.pfield}`;
+  if (ds.gid && ds.gfield) return `goals.${ds.gid}.${ds.gfield}`;
+  if (ds.alid && ds.alfield) return `plan.implementation.allocations.${ds.alid}.${ds.alfield}`;
+  if (ds.implField) return IMPL_FIELD_PATH[ds.implField] ?? null;
+  if (ds.settingsField) return SETTINGS_FIELD_PATH[ds.settingsField] ?? null;
+  if (ds.kdId && ds.kdField) return `plan.keyDates.${ds.kdId}.${ds.kdField}`;
+  if (ds.planField) return computePlanFieldPath(ds.planField);
+  return null;
+}
+
+function isTouched(path) {
+  return (state.meta?.touched ?? []).includes(path);
+}
+
+function markTouched(path) {
+  if (!path) return;
+  if (!state.meta) state.meta = { touched: [] };
+  if (!state.meta.touched.includes(path)) state.meta.touched.push(path);
+}
+
+// Fired in the CAPTURE phase on the whole canvas, ahead of every
+// section's own bubble-phase handler — so by the time that handler
+// calls saveState()+renderAll(), state.meta.touched already reflects
+// this edit and the re-render picks it up in one pass. No extra
+// saveState() call needed here for that reason. Dates are deferred to
+// focusout the same way wireDeferredDateCommit treats them, so a date
+// field isn't marked touched on every intermediate keystroke commit.
+function handleTouchMarkingEvent(e) {
+  if (e.target.type === "date" ? e.type !== "focusout" : e.type !== "change") return;
+  const el = e.target.closest?.(TOUCHED_FIELD_SELECTOR) ?? (e.target.matches?.(TOUCHED_FIELD_SELECTOR) ? e.target : null);
+  if (!el) return;
+  markTouched(computeFieldPath(el));
+}
+els.workspaceCanvas.addEventListener("change", handleTouchMarkingEvent, true);
+els.workspaceCanvas.addEventListener("focusout", handleTouchMarkingEvent, true);
+
+// Mark every currently-untouched field inside `container` (a
+// [data-section] root, or the whole canvas for "mark all reviewed"
+// from the review panel) as reviewed, without changing any value.
+function markAllReviewedIn(container) {
+  let changed = false;
+  for (const el of container.querySelectorAll(TOUCHED_FIELD_SELECTOR)) {
+    const path = computeFieldPath(el);
+    if (path && !isTouched(path)) { markTouched(path); changed = true; }
+  }
+  if (changed) { saveState(); renderAll(); }
+}
+
+// Post-render decoration pass: mutes untouched fields' label/control,
+// gives each a small dot that doubles as the "confirm without
+// changing" tick affordance, and appends the tooltip's "Not yet
+// reviewed" line. Runs once at the end of renderAll() over the whole
+// canvas — every [data-section] is always mounted (showSection only
+// toggles `hidden`), so this reaches every section regardless of which
+// one is currently visible.
+function decorateTouchedFields() {
+  for (const el of els.workspaceCanvas.querySelectorAll(TOUCHED_FIELD_SELECTOR)) {
+    const path = computeFieldPath(el);
+    if (!path) continue;
+    const untouched = !isTouched(path);
+    const container = el.closest(".cf-cell") || el.closest(".plan-field");
+    const target = container || el;
+    target.classList.toggle("field-untouched", untouched);
+    const bubble = container?.querySelector(".tt-bubble");
+    if (bubble) {
+      const existingNote = bubble.querySelector(".tt-unreviewed");
+      if (untouched && !existingNote) {
+        bubble.insertAdjacentHTML("beforeend", `<span class="tt-unreviewed">Not yet reviewed — this is a default.</span>`);
+      } else if (!untouched && existingNote) {
+        existingNote.remove();
+      }
+    }
+  }
+  // The tick/dot is per CONTAINER, not per field: a couple of fields
+  // (Setup's month+year "Start" pair, for one) share a single .cf-cell/
+  // .plan-field, so a dot keyed to just one of their paths would leave
+  // the other permanently unconfirmable. Recompute per container from
+  // its own live children instead — one dot, click marks every path
+  // still untouched inside it (see the click handler below).
+  for (const container of els.workspaceCanvas.querySelectorAll(".cf-cell, .plan-field")) {
+    const ownFields = container.querySelectorAll(TOUCHED_FIELD_SELECTOR);
+    const anyUntouched = [...ownFields].some((el) => {
+      const p = computeFieldPath(el);
+      return p && !isTouched(p);
+    });
+    let dot = container.querySelector(":scope > .field-dot");
+    if (anyUntouched && ownFields.length > 0) {
+      if (!dot) {
+        dot = document.createElement("button");
+        dot.type = "button";
+        dot.className = "field-dot";
+        dot.setAttribute("aria-label", "Mark as reviewed");
+        dot.title = "Not yet reviewed — click to mark reviewed";
+        container.insertBefore(dot, container.firstChild);
+      }
+    } else if (dot) {
+      dot.remove();
+    }
+  }
+  // Section-level "Mark all remaining as reviewed" — inserted once per
+  // populated [data-section] root that still has untouched fields.
+  for (const section of els.workspaceCanvas.querySelectorAll("[data-section]")) {
+    const fields = section.querySelectorAll(TOUCHED_FIELD_SELECTOR);
+    const untouchedCount = [...fields].filter((el) => {
+      const p = computeFieldPath(el);
+      return p && !isTouched(p);
+    }).length;
+    let btn = section.querySelector(":scope > .mark-all-reviewed");
+    if (untouchedCount > 0) {
+      if (!btn) {
+        btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "mark-all-reviewed btn-text";
+        section.insertBefore(btn, section.firstChild);
+      }
+      btn.textContent = `Mark all remaining as reviewed (${untouchedCount})`;
+    } else if (btn) {
+      btn.remove();
+    }
+  }
+}
+
+els.workspaceCanvas.addEventListener("click", (e) => {
+  const dot = e.target.closest(".field-dot");
+  if (dot) {
+    markAllReviewedIn(dot.parentElement); // just this one .cf-cell/.plan-field
+    return;
+  }
+  const markAllBtn = e.target.closest(".mark-all-reviewed");
+  if (markAllBtn) {
+    markAllReviewedIn(markAllBtn.closest("[data-section]"));
+  }
+});
+
+// --- Review defaults panel ---------------------------------------------------
+//
+// "The pre-advice check: what in this plan has nobody looked at?" —
+// every untouched field, grouped by section, with its current value
+// and a jump-to link. Reads the same value straight off its live DOM
+// control, so it never falls out of sync with what clamping actually
+// produced.
+function fieldDisplayValue(el) {
+  if (el.type === "checkbox") return el.checked ? "Yes" : "No";
+  if (el.tagName === "SELECT") return el.options[el.selectedIndex]?.text ?? el.value;
+  return el.value || "(blank)";
+}
+
+function fieldLabelText(el) {
+  const cell = el.closest(".cf-cell") || el.closest(".plan-field");
+  const label = cell?.querySelector("label");
+  if (label) return label.textContent.replace(/\s+/g, " ").trim();
+  return el.getAttribute("aria-label") || el.placeholder || el.dataset.field || el.dataset.lfield
+    || el.dataset.pfield || el.dataset.gfield || el.dataset.alfield || el.dataset.sfield
+    || el.dataset.kdField || el.dataset.implField || el.dataset.settingsField || "Field";
+}
+
+function renderReviewDefaults() {
+  const bySection = new Map();
+  for (const section of els.workspaceCanvas.querySelectorAll("[data-section]")) {
+    const sectionId = section.dataset.section;
+    for (const el of section.querySelectorAll(TOUCHED_FIELD_SELECTOR)) {
+      const path = computeFieldPath(el);
+      if (!path || isTouched(path)) continue;
+      if (!bySection.has(sectionId)) bySection.set(sectionId, []);
+      bySection.get(sectionId).push({ path, label: fieldLabelText(el), value: fieldDisplayValue(el) });
+    }
+  }
+  if (bySection.size === 0) {
+    els.reviewDefaultsBody.innerHTML = `<p class="muted">Every field in this scenario has been reviewed.</p>`;
+    return;
+  }
+  els.reviewDefaultsBody.innerHTML = [...bySection.entries()].map(([sectionId, fields]) => `
+    <section class="review-section">
+      <h3>${escapeHTML(SECTION_LABELS[sectionId] ?? sectionId)} <span class="nav-badge">${fields.length}</span></h3>
+      <ul class="review-field-list">
+        ${fields.map((f) => `
+          <li>
+            <button type="button" class="btn-text review-jump" data-jump-section="${sectionId}">${escapeHTML(f.label)}</button>
+            <span class="review-field-value">${escapeHTML(String(f.value))}</span>
+            <button type="button" class="btn-text review-mark" data-mark-path="${escapeHTML(f.path)}">Mark reviewed</button>
+          </li>
+        `).join("")}
+      </ul>
+    </section>
+  `).join("");
+}
+
+function openReviewDefaultsModal() {
+  renderReviewDefaults();
+  els.reviewDefaultsModal.showModal();
+}
+// Delegated, not a one-time addEventListener: renderSideNav() rebuilds
+// #sideNav's innerHTML (and this button with it) on every save.
+els.sideNav.addEventListener("click", (e) => {
+  if (e.target.closest("#reviewDefaultsBtn")) openReviewDefaultsModal();
+});
+els.reviewDefaultsModal.querySelector(".modal-close").addEventListener("click", () => els.reviewDefaultsModal.close());
+els.reviewDefaultsModal.addEventListener("click", (e) => {
+  if (e.target === els.reviewDefaultsModal) { els.reviewDefaultsModal.close(); return; }
+  const jump = e.target.closest(".review-jump");
+  if (jump) {
+    els.reviewDefaultsModal.close();
+    const { client, scenario } = findActive(workspace);
+    navigate({ page: "workspace", clientId: client.id, scenarioId: scenario.id, area: "input", section: jump.dataset.jumpSection });
+    return;
+  }
+  const mark = e.target.closest(".review-mark");
+  if (mark) {
+    markTouched(mark.dataset.markPath);
+    saveState();
+    renderAll();
+    renderReviewDefaults(); // stays open, list shrinks by one
+    return;
+  }
+  const markAllEverywhere = e.target.closest("#reviewDefaultsMarkAll");
+  if (markAllEverywhere) {
+    markAllReviewedIn(els.workspaceCanvas);
+    renderReviewDefaults();
+  }
+});
 
 // Today's date (real-world, not plan-relative), ISO — used to bound an
 // "Owned" property's acquisition date input (input integrity: you
@@ -9272,6 +9611,7 @@ function renderAll() {
   renderSuper(); // after refreshOutputs — the cap-headroom display reads the projection
   renderGoals(); // after refreshOutputs — goalStats read the projection
   renderImplementation(); // after refreshOutputs — the fee cap/shortfall display reads the projection
+  decorateTouchedFields(); // Input Usability spec, Commit 2 — after every section has its final DOM
 }
 
 window.addEventListener("hashchange", handleRoute);

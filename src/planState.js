@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -1038,6 +1038,17 @@ function nextAssetNumber(existing) {
   return Math.max(max, existing.length) + 1;
 }
 
+// Input Usability spec, Commit 2 — "touched" field paths, i.e. fields
+// the user has attended to (entered a value, or explicitly confirmed a
+// default via the tick affordance / "mark all reviewed"). A plain
+// array of dotted paths (`plan.client.retirementAge`,
+// `assets.<id>.balance`, …); deduped and filtered to non-empty strings
+// so junk in a hand-edited import can't corrupt the review panel.
+export function clampTouched(raw) {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((p) => typeof p === "string" && p.length > 0))];
+}
+
 export function defaultState(profiles = {}, now = new Date()) {
   const plan = defaultPlan(now);
   const asset = createAsset(plan, [], profiles);
@@ -1071,6 +1082,9 @@ export function defaultState(profiles = {}, now = new Date()) {
       showIndividualCashflowItems: false,
     },
     assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed", fhsssEarningsRate: 0.0794 },
+    // A newly created scenario starts fully untouched — correct, since
+    // nobody has reviewed it yet (Input Usability spec, Commit 2).
+    meta: { touched: [] },
   };
 }
 
@@ -1904,6 +1918,16 @@ function migrateV13toV14(raw) {
   return { ...raw, schemaVersion: 14 };
 }
 
+// v14 → v15 (Input Usability spec, Commit 2): state gains `meta.touched`,
+// the list of field paths the user has attended to (entered or
+// explicitly confirmed). An existing scenario has no such data — mark
+// nothing, which is the honest reading ("nobody has reviewed this
+// yet"), not an unsafe one; hydrate() defaults the field itself, so
+// this is again just the version gate.
+function migrateV14toV15(raw) {
+  return { ...raw, schemaVersion: 15 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -1924,6 +1948,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 11) raw = migrateV11toV12(raw);
     if (raw.schemaVersion === 12) raw = migrateV12toV13(raw);
     if (raw.schemaVersion === 13) raw = migrateV13toV14(raw);
+    if (raw.schemaVersion === 14) raw = migrateV14toV15(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -1980,6 +2005,10 @@ export function hydrate(json, profiles = {}) {
         // Open Items).
         fhsssEarningsRate: clampNumber(raw.assumptions?.fhsssEarningsRate ?? 0.0794, 0, 0.3),
       },
+      // Existing saved scenarios have no touched data — mark nothing
+      // rather than guessing; showing everything as unreviewed is the
+      // honest state (Input Usability spec, Commit 2).
+      meta: { touched: clampTouched(raw.meta?.touched) },
     };
     // Single households must not carry partner/joint owners.
     if (plan.household === "single") {

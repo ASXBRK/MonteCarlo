@@ -649,11 +649,61 @@ This closes all five commits of docs/specs/14-what-if.md.
   construction — every moved field still lives in the exact same state
   shape, just rendered from a different container.
 
+- Commit 2 of docs/specs/15-input-usability.md, **Input UX: distinguish
+  entered values from defaults** — `state.meta.touched`, the dotted
+  path of every field the user has attended to (changed, or explicitly
+  confirmed); SCHEMA_VERSION 14→15, version-gate migration (`hydrate()`
+  defaults an absent `meta` to `{ touched: [] }` — an existing scenario
+  shows everything as unreviewed, the honest reading, not a guessed
+  one). Path computation is fully generic (`computeFieldPath` in
+  main.js), driven by which `data-*` attributes an element carries, not
+  by which section renders it — one lookup table per existing naming
+  convention (`data-plan-field`, `data-kind`+`data-cfid`+`data-field`,
+  `data-aid`, `data-said`, `data-lid`(+`data-erid`/`data-orid`),
+  `data-pid`, `data-gid`, `data-alid`, `data-impl-field`,
+  `data-settings-field`, `data-kd-id`) plus explicit maps for the
+  person-prefixed and static Setup/Tax-details codes. This covers every
+  field in the app with zero per-field markup changes: a single
+  capture-phase `change`/`focusout` listener on `.workspace-canvas`
+  marks a path touched before that section's own bubble-phase handler
+  re-renders, so the muted styling is never a render behind. Rendering:
+  a post-render decoration pass (`decorateTouchedFields`, called once
+  at the end of `renderAll()`) mutes untouched fields' `.cf-cell`/
+  `.plan-field` container and gives it a small amber dot; the dot is
+  per CONTAINER, not per field, since a couple of fields (Setup's
+  month+year "Start" pair) share one — clicking it confirms every path
+  still untouched inside that container in one action, so the tick
+  never leaves a sibling field permanently unconfirmable. Tooltips gain
+  "Not yet reviewed — this is a default." (the `unreviewedNote` param
+  built into `tooltipHTML` back in Commit 1). Each populated
+  `[data-section]` gets a "Mark all remaining as reviewed (N)" button
+  when it has untouched fields; the sidebar gets a subtle amber dot
+  badge alongside the existing count badge
+  (`sectionHasUntouched`/`renderSideNav`). New **Review defaults**
+  modal (mirrors the Parameters `<dialog>` pattern, triggered from a
+  button above the sidebar so it's reachable from any input section):
+  every untouched field grouped by section with its live value, a
+  jump-to-section link, a per-field "Mark reviewed," and a global "Mark
+  all as reviewed." Scenario duplication/export round-trip
+  `meta.touched` for free — both copy the serialized blob verbatim, and
+  `serialize()` already spreads the whole state object. Regression gate
+  (touched state has no effect on projection output) verified directly:
+  `projectPlan()` on the same randomised scenario with an empty vs a
+  garbage-filled `meta.touched` produces byte-identical output
+  (`deterministic.test.js`). Scope note: the tick/mute visual treatment
+  covers every `.cf-cell`/`.plan-field`-wrapped field (the large
+  majority of the app — Setup, Tax details, Super, Financial/Lifestyle
+  assets, Liabilities, Properties, Goals, Implementation); table-row
+  cashflow fields (Income/Expenses/Deductions/Contributions/
+  Withdrawals/Super contributions/Super withdrawals — no per-cell
+  label to mute) are tracked identically in the data model and listed
+  in the Review panel, but get no inline dot — a disclosed, not silent,
+  limitation.
+
 ### In flight
-Spec 15 Commits 2-3 (distinguish entered values from defaults;
-children and education funding); super threshold indexation per figure
-(AWOTE / CPI / unindexed, with nominal rounding), then Division 296,
-then Monte Carlo over the full scenario.
+Spec 15 Commit 3 (children and education funding); super threshold
+indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
+then Division 296, then Monte Carlo over the full scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary

@@ -2591,6 +2591,21 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     }
   });
 
+  // Input Usability spec, Commit 2 — state.meta.touched records which
+  // fields a user has reviewed, purely for display (muted styling, the
+  // review panel, sidebar badges). It must never reach the engine: a
+  // scenario with nothing marked touched and one with everything (or
+  // garbage paths) marked touched project identically.
+  it("Input Usability spec, Commit 2: state.meta.touched has no effect on projection output (regression gate)", () => {
+    const state = randomScenario();
+    const baseline = projectPlan(state);
+    const withNoise = projectPlan({
+      ...state,
+      meta: { touched: ["plan.client.retirementAge", "assets.bogus-id.balance", "not.a.real.path"] },
+    });
+    expect(withNoise).toEqual(baseline);
+  });
+
   // "Where the money went" (Implementation/Rates spec, Commit 4) reuses
   // the SAME terms this invariant asserts over (conservationCheck.js's
   // computeYearFlows), regrouped into the 7 waterfall buckets — so it
