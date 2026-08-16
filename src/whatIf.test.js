@@ -47,6 +47,7 @@ describe("buildDeltas — the delta shape, independent of any shock kind", () =>
   const fakeOut = (netAssetsSeries, shortfall = null) => ({
     yearly: netAssetsSeries.map((netAssets, i) => ({
       netAssets, closingBalance: netAssets * 0.5, tax: 100 + i, surplusOrDeficit: 50 + i, unfundedCashflow: i === 2 ? 200 : 0,
+      wcaClosing: 1000 + i * 10, deficitFundedFromAssets: i === 2 ? 300 : 0,
     })),
     shortfall,
   });
@@ -56,8 +57,22 @@ describe("buildDeltas — the delta shape, independent of any shock kind", () =>
     const shocked = fakeOut([900, 950, 1000]);
     const d = buildDeltas(base, shocked);
     expect(d.byYear).toHaveLength(3);
-    expect(d.byYear[0]).toEqual({ year: 0, netAssets: -100, closingBalance: -50, totalTax: 0, surplus: 0, unfundedCashflow: 0 });
+    expect(d.byYear[0]).toEqual({
+      year: 0, netAssets: -100, closingBalance: -50, totalTax: 0, surplus: 0, unfundedCashflow: 0,
+      wcaClosing: { base: 1000, shocked: 1000 }, deficitFunded: { base: 0, shocked: 0 },
+    });
     expect(d.byYear[2].unfundedCashflow).toBe(0); // both have 200 at y=2 in this fixture — delta is 0
+  });
+
+  it("wcaClosing and deficitFunded carry BASE AND SHOCKED absolute values, not a delta — the cashflow lens plots both as their own lines", () => {
+    const base = fakeOut([1000, 1100, 1200]);
+    const shocked = fakeOut([900, 950, 1000]);
+    // Give the shocked run its own distinct wcaClosing/deficitFundedFromAssets
+    // so base and shocked genuinely differ, not just netAssets.
+    shocked.yearly[1] = { ...shocked.yearly[1], wcaClosing: 5000, deficitFundedFromAssets: 750 };
+    const d = buildDeltas(base, shocked);
+    expect(d.byYear[1].wcaClosing).toEqual({ base: base.yearly[1].wcaClosing, shocked: 5000 });
+    expect(d.byYear[1].deficitFunded).toEqual({ base: 0, shocked: 750 });
   });
 
   it("carries headline figures for BOTH runs, not just the delta", () => {

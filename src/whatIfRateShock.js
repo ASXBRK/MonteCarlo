@@ -36,6 +36,7 @@ export function buildRateShockView({ state, shockKind, deltaPct }) {
     shockKind, deltaPct,
     perLoan,
     deltas,
+    base, shocked,
     schedule: base.schedule,
   };
 }

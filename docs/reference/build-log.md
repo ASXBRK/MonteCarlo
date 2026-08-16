@@ -768,6 +768,45 @@ This closes all five commits of docs/specs/14-what-if.md.
 
 This closes all three commits of docs/specs/15-input-usability.md.
 
+- **What if: cashflow as the primary lens for cashflow shocks** —
+  three of the four What-if shocks (income gap, expense shock, rate
+  shock) perturb CASHFLOW, not asset values; the views led with net
+  assets anyway. For an income gap the client's real question is "do
+  we get through it?" — the surplus line and the working cash balance
+  — not net worth in 2060. `buildDeltas` (whatIf.js) gains
+  `wcaClosing`/`deficitFunded` per year, each carrying BASE AND
+  SHOCKED absolute values (not a delta — these plot as two lines, a
+  difference alone answers the wrong question); every existing series
+  is unchanged. New pure module `whatIfCashflowLens.js`: `bufferBreach`
+  detects the first year money had to be drawn from other assets to
+  keep the working cash account topped up, or a genuine shortfall —
+  deliberately NOT "did the reported WCA balance dip below its
+  minimum," which this engine's own "balances never go negative"
+  convention means can never fire (an unfundable month sets the
+  balance back UP to its minimum rather than letting it go negative;
+  discovered by a failing reconciliation test, not assumed).
+  `incomeGapHeadline`/`expenseShockHeadline`/`rateShockHeadline` read
+  straight off `base`/`shocked`/`deltas` for the headline figures the
+  spec calls for — total cash drawn (the shock's own INCREMENTAL draw,
+  not the shocked run's whole total), permanent cost, first year
+  surplus turns negative, total additional spending, and — for rate
+  shocks — the first plan year household repayments actually differ
+  (discovered from the engine's own per-year loan figures, so it's
+  correct for any mix of variable/fixed loans without hand-coding
+  either type's timing) plus total additional interest. Each of the
+  three cashflow-primary views now defaults to a "Cashflow" lens (two
+  new shared charts: surplus + working cash with a minimum-balance
+  reference line that itself scales under the nominal/real toggle;
+  unfunded cashflow + deficit-funded-from-assets as bars, highlighted
+  where non-zero) with "Net assets" one toggle away; the crash view is
+  unchanged as primary net-assets but gains the same cashflow charts as
+  its own secondary toggle, reusing the identical chart functions
+  against its base + 3 age-lines. Tests: the new series match their
+  engine sources for both runs; buffer-breach detection fires in the
+  right year, verified against the real engine (a fixture-only test
+  passed for the wrong reason at first — the real-engine reconciliation
+  test caught it); headline figures reconcile to the plotted series.
+
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with
 nominal rounding), then Division 296, then Monte Carlo over the full

@@ -56,6 +56,12 @@ export function runShock(state, shock) {
 // framing) and a delta of two zeros vs a delta of two non-zeros both
 // read as "0" without the underlying figures alongside them.
 //
+// wcaClosing and deficitFunded (What-if cashflow-lens follow-up) carry
+// BASE AND SHOCKED absolute values, not a delta — unlike the other
+// series, the cashflow lens plots both as their own lines (does the
+// buffer hold; what's being sold to bridge a gap), where a single
+// difference number would answer the wrong question.
+//
 // Exported and tested independently of any shock kind — this is "the
 // delta shape" the spec's Commit 1 is about, and it never depends on
 // what produced `shocked` (a rate shock, a crash, an income gap, or a
@@ -72,6 +78,8 @@ export function buildDeltas(base, shocked) {
       totalTax: s.tax - b.tax,
       surplus: s.surplusOrDeficit - b.surplusOrDeficit,
       unfundedCashflow: s.unfundedCashflow - b.unfundedCashflow,
+      wcaClosing: { base: b.wcaClosing, shocked: s.wcaClosing },
+      deficitFunded: { base: b.deficitFundedFromAssets, shocked: s.deficitFundedFromAssets },
     });
   }
   const headlineFor = (out) => ({

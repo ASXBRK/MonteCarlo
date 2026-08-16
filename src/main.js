@@ -66,6 +66,7 @@ import { planWindowsMatch, keyFigureValuesAtYear, keyFigureComparisonRows } from
 import { buildRateShockView, RATE_SHOCK_DELTAS, eligibleRateShockLoans } from "./whatIfRateShock.js";
 import { buildCrashTimingView, eligibleCrashHoldings } from "./whatIfCrash.js";
 import { runShock } from "./whatIf.js";
+import { bufferBreach, incomeGapHeadline, expenseShockHeadline, rateShockHeadline } from "./whatIfCashflowLens.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -9044,6 +9045,7 @@ els.viewFocusCompareScenarios.addEventListener("click", (e) => {
 // own rule for this whole group).
 let whatIfRateShockKind = "rateShock"; // "rateShock" | "revertRateShock"
 let whatIfRateShockDelta = 1;
+let whatIfRateShockLens = "cashflow";
 
 function renderWhatIfRateShockView() {
   const loans = eligibleRateShockLoans(state);
@@ -9058,6 +9060,8 @@ function renderWhatIfRateShockView() {
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const hasFixed = loans.some((l) => l.rateType === "fixed");
   const lastY = view.deltas.byYear.length - 1;
+  const minimumBalance = state.plan.workingCash?.minimumBalance ?? 0;
+  const h = rateShockHeadline({ base: view.base, shocked: view.shocked, deltas: view.deltas });
 
   const deltaOptions = RATE_SHOCK_DELTAS.map((d) =>
     `<option value="${d}"${d === whatIfRateShockDelta ? " selected" : ""}>${d > 0 ? "+" : ""}${d}pp</option>`
@@ -9068,6 +9072,13 @@ function renderWhatIfRateShockView() {
   const unfundedIntro = shockedUnfunded > baseUnfunded
     ? `<p class="helper-warning">${baseUnfunded === 0 ? "This shock introduces unfunded cashflow" : "Unfunded cashflow grows under this shock"} — ${fmtMoney(shockedUnfunded)}${view.deltas.headline.shocked.firstShortfallAge != null ? ` starting at age ${view.deltas.headline.shocked.firstShortfallAge}` : ""} the plan can't actually cover, versus ${fmtMoney(baseUnfunded)} in the base case.</p>`
     : `<p class="helper-text">No unfunded cashflow introduced by this shock.</p>`;
+
+  const headlineHTML = `
+    <p class="helper-text">${h.firstAffectedYear != null
+      ? `Change in annual repayments from age ${view.base.schedule.clientAges[h.firstAffectedYear]}: <b>${fmtMoney(h.changeInRepayments * factor(h.firstAffectedYear))}</b>.`
+      : "Repayments never actually differ from base under this shock."}</p>
+    <p class="helper-text">Total additional interest over the life of the loan(s): <b>${fmtMoney(h.totalAdditionalInterest)}</b>.</p>
+  `;
 
   const loanRows = view.perLoan.map((l) => `
     <tr>
@@ -9092,17 +9103,18 @@ function renderWhatIfRateShockView() {
       </div>
       <div class="focus-section">
         <h3>Affordability</h3>
+        ${headlineHTML}
         ${unfundedIntro}
-        <div class="summary-strip">
-          <div class="stat"><div class="stat-label">Change in surplus over the projection</div><div class="stat-value">${fmtMoney(view.deltas.byYear.reduce((s, y) => s + y.surplus, 0))}</div></div>
-          <div class="stat"><div class="stat-label">End net assets — base</div><div class="stat-value">${fmtMoney(view.deltas.headline.base.endNetAssets * factor(lastY))}</div></div>
-          <div class="stat"><div class="stat-label">End net assets — shocked</div><div class="stat-value">${fmtMoney(view.deltas.headline.shocked.endNetAssets * factor(lastY))}</div></div>
-        </div>
       </div>
       <div class="focus-section">
-        <h3>Loan balances, base vs shocked</h3>
-        <div id="whatIfRateShockChart"></div>
+        ${lensToggleHTML("whatIfRateShockLensToggle")}
       </div>
+      ${whatIfRateShockLens === "cashflow" ? cashflowLensSectionHTML("whatIfRateShock") : `
+        <div class="focus-section">
+          <h3>Loan balances, base vs shocked</h3>
+          <div id="whatIfRateShockChart"></div>
+        </div>
+      `}
       <div class="focus-section">
         <h3>Repayments and total interest over the life of each loan</h3>
         <table class="focus-table">
@@ -9118,6 +9130,14 @@ function renderWhatIfRateShockView() {
     whatIfRateShockKind,
     (id) => { whatIfRateShockKind = id; renderWhatIfRateShockView(); }
   );
+  wireLensToggle("whatIfRateShockLensToggle", whatIfRateShockLens, (id) => { whatIfRateShockLens = id; renderWhatIfRateShockView(); });
+  if (whatIfRateShockLens === "cashflow") {
+    renderCashflowLensSection("whatIfRateShock", [
+      { label: "Base", out: view.base, color: "#222", dash: "dot" },
+      { label: "Shocked", out: view.shocked, color: "#dc5a28" },
+    ], factor, minimumBalance);
+    return;
+  }
   renderWhatIfRateShockChart(view, factor);
 }
 
@@ -9194,6 +9214,10 @@ const CRASH_DROP_OPTIONS = [10, 20, 30, 40, 50];
 const CRASH_RECOVERY_OPTIONS = [0, 1, 2, 3, 5, 7];
 let whatIfCrashDropPct = 30;
 let whatIfCrashRecoveryYears = 0;
+// A crash genuinely IS an asset-value event, so net assets stays
+// primary here (unlike the three cashflow shocks) — cashflow is only
+// a secondary toggle, for consistency.
+let whatIfCrashLens = "net-assets";
 
 function renderWhatIfCrashView() {
   const emptyMsg = "How the SAME market crash at different points in your plan produces very different outcomes — add a growth-exposed financial asset or super account to see it.";
@@ -9208,6 +9232,7 @@ function renderWhatIfCrashView() {
   }
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const lastY = view.base.yearly.length - 1;
+  const minimumBalance = state.plan.workingCash?.minimumBalance ?? 0;
 
   const dropOptions = CRASH_DROP_OPTIONS.map((d) =>
     `<option value="${d}"${d === whatIfCrashDropPct ? " selected" : ""}>${d}%</option>`
@@ -9243,18 +9268,32 @@ function renderWhatIfCrashView() {
         </label>
       </div>
       <div class="focus-section">
-        <h3>Net assets over time</h3>
-        <div id="whatIfCrashChart"></div>
+        ${lensToggleHTML("whatIfCrashLensToggle")}
       </div>
-      <div class="focus-section">
-        <h3>End net assets by crash timing</h3>
-        <table class="focus-table">
-          <thead><tr><th>Crash at</th><th>End net assets</th><th>Δ vs base</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
+      ${whatIfCrashLens === "cashflow" ? cashflowLensSectionHTML("whatIfCrash") : `
+        <div class="focus-section">
+          <h3>Net assets over time</h3>
+          <div id="whatIfCrashChart"></div>
+        </div>
+        <div class="focus-section">
+          <h3>End net assets by crash timing</h3>
+          <table class="focus-table">
+            <thead><tr><th>Crash at</th><th>End net assets</th><th>Δ vs base</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `}
     </div>
   `;
+  wireLensToggle("whatIfCrashLensToggle", whatIfCrashLens, (id) => { whatIfCrashLens = id; renderWhatIfCrashView(); });
+  if (whatIfCrashLens === "cashflow") {
+    const palette = ["#1c5ab4", "#dc5a28", "#6b8e23"];
+    renderCashflowLensSection("whatIfCrash", [
+      { label: "Base", out: view.base, color: "#222", dash: "dot" },
+      ...view.ages.map((a, i) => ({ label: `${a.label} (age ${a.age})`, out: a.out, color: palette[i % palette.length] })),
+    ], factor, minimumBalance);
+    return;
+  }
   renderWhatIfCrashChart(view, factor);
 }
 
@@ -9371,6 +9410,146 @@ function renderBaseVsShockedChart(elId, base, shocked, factor, shockedLabel) {
   }, { displayModeBar: false, responsive: true });
 }
 
+// --- Cashflow lens (What if: cashflow as the primary lens follow-up) -------
+//
+// Three of the four shocks (income gap, expense shock, rate shock)
+// perturb CASHFLOW, not asset values — for these, "do we get through
+// it?" is answered by the surplus line and the working cash balance,
+// not net worth decades away. Net assets is the consequence; cashflow
+// is the experience. A crash genuinely IS an asset-value event, so it
+// keeps net assets as its primary lens, but gets this same cashflow
+// view as a secondary toggle, for consistency.
+//
+// `runs` is generic ([{label, out, color, dash}]) so these two chart
+// functions serve both the simple base-vs-shocked views (2 runs) and
+// crash's secondary toggle (base + 3 ages, 4 runs) without duplication.
+// A run with `out: null` (crash's own "not resolvable this plan year"
+// case) is skipped, not plotted as zeros.
+
+function renderSurplusWcaChart(elId, runs, factor, minimumBalance) {
+  const el = $(elId);
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const live = runs.filter((r) => r.out);
+  const ages = live[0]?.out.schedule.clientAges ?? [];
+  const traces = [];
+  for (const r of live) {
+    traces.push({
+      x: ages, y: r.out.yearly.map((row, y) => row.surplusOrDeficit * factor(y)),
+      name: `${r.label} — surplus/(deficit)`, type: "scatter", mode: "lines",
+      line: { color: r.color, width: 2.5, dash: r.dash },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(r.label)} — surplus/(deficit)</extra>`,
+    });
+    traces.push({
+      x: ages, y: r.out.yearly.map((row, y) => row.wcaClosing * factor(y)),
+      name: `${r.label} — working cash`, type: "scatter", mode: "lines",
+      line: { color: r.color, width: 1.5, dash: r.dash === "dot" ? "dot" : "dashdot" },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(r.label)} — working cash</extra>`,
+    });
+  }
+  // The minimum balance (emergency fund target) is a plan-level
+  // constant in REAL dollars — plotted as its own line (not a fixed
+  // Plotly shape) so it scales under the nominal/"future dollars"
+  // toggle exactly the way the plan's own target actually would,
+  // year by year, rather than reading as a flat nominal line.
+  if (minimumBalance > 0 && ages.length) {
+    traces.push({
+      x: ages, y: ages.map((_, y) => minimumBalance * factor(y)),
+      name: "Minimum balance (target)", type: "scatter", mode: "lines",
+      line: { color: "#888", width: 1.5, dash: "dash" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Minimum balance</extra>",
+    });
+  }
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.25, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Cashflow (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Unfunded cashflow and deficit funded from assets — both normally
+// zero, so bars (highlighted wherever non-zero) read better than lines
+// that would otherwise sit invisibly on the axis for most of the plan.
+function renderUnfundedDeficitChart(elId, runs, factor) {
+  const el = $(elId);
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const live = runs.filter((r) => r.out);
+  const ages = live[0]?.out.schedule.clientAges ?? [];
+  const traces = [];
+  for (const r of live) {
+    const isBase = r.dash === "dot";
+    traces.push({
+      x: ages, y: r.out.yearly.map((row, y) => row.unfundedCashflow * factor(y)),
+      name: `${r.label} — unfunded cashflow`, type: "bar",
+      marker: { color: "#780000", opacity: isBase ? 0.3 : 0.9 },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(r.label)} — unfunded cashflow</extra>`,
+    });
+    traces.push({
+      x: ages, y: r.out.yearly.map((row, y) => row.deficitFundedFromAssets * factor(y)),
+      name: `${r.label} — deficit funded from assets`, type: "bar",
+      marker: { color: "#dc5a28", opacity: isBase ? 0.3 : 0.75 },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(r.label)} — deficit funded from assets</extra>`,
+    });
+  }
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    barmode: "group",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.25, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Cashflow (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Both charts share the same mount markup wherever they're used —
+// "Surplus and working cash" plus "Unfunded cashflow and deficit
+// funded from assets" — one heading pair, two chart ids derived from
+// a shared id prefix.
+function cashflowLensSectionHTML(idPrefix) {
+  return `
+    <div class="focus-section">
+      <h3>Surplus and working cash, base vs shocked</h3>
+      <div id="${idPrefix}SurplusWca"></div>
+    </div>
+    <div class="focus-section">
+      <h3>Unfunded cashflow and deficit funded from assets</h3>
+      <div id="${idPrefix}UnfundedDeficit"></div>
+    </div>
+  `;
+}
+function renderCashflowLensSection(idPrefix, runs, factor, minimumBalance) {
+  renderSurplusWcaChart(`${idPrefix}SurplusWca`, runs, factor, minimumBalance);
+  renderUnfundedDeficitChart(`${idPrefix}UnfundedDeficit`, runs, factor);
+}
+
+// The lens toggle itself — identical markup/behaviour everywhere it
+// appears, wired via renderEntitySelector like every other segmented
+// control in this codebase.
+function lensToggleHTML(toggleElId) {
+  return `<div id="${toggleElId}" class="seg-toggle" role="tablist" aria-label="Lens"></div>`;
+}
+function wireLensToggle(toggleElId, current, onChange) {
+  renderEntitySelector(
+    $(toggleElId),
+    [{ id: "cashflow", label: "Cashflow" }, { id: "net-assets", label: "Net assets" }],
+    current,
+    onChange
+  );
+}
+
 function unfundedCalloutHTML(deltas) {
   const base = deltas.headline.base.totalUnfunded;
   const shocked = deltas.headline.shocked.totalUnfunded;
@@ -9382,6 +9561,10 @@ let whatIfIncomeGapOwner = "client";
 let whatIfIncomeGapAge = null;
 let whatIfIncomeGapMonths = 6;
 let whatIfIncomeGapReplacementPct = 0;
+// Cashflow primary: "do we get through it?" is the surplus line and
+// the working cash balance, not net worth in 2060. Net assets stays
+// one toggle away.
+let whatIfIncomeGapLens = "cashflow";
 
 function renderWhatIfIncomeGapView() {
   const hasSalary = (state.cashflows.income ?? []).some((r) => r.category === "salary");
@@ -9400,7 +9583,16 @@ function renderWhatIfIncomeGapView() {
   const { base, shocked, deltas } = runShock(state, shock);
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const lastY = deltas.byYear.length - 1;
-  const minWca = (out) => Math.min(...out.yearly.map((r, y) => r.wcaClosing * factor(y)));
+  const minimumBalance = state.plan.workingCash?.minimumBalance ?? 0;
+  const h = incomeGapHeadline({ shocked, deltas });
+
+  const headlineHTML = `
+    <p class="helper-text">Total cash drawn from other assets to bridge the gap: <b>${fmtMoney(h.totalCashDrawn * factor(lastY))}</b>.</p>
+    ${h.bufferHeld
+      ? `<p class="helper-text">The working cash buffer held throughout — nothing else needed to be sold to keep it topped up.</p>`
+      : `<p class="helper-warning">The buffer didn't hold on its own — other assets were drawn down starting at age ${base.schedule.clientAges[h.breachYear]}.</p>`}
+    <p class="helper-text">Permanent cost at the end of the projection: <b>${fmtMoney(h.permanentCost * factor(lastY))}</b> — larger than the cash drawn, because the compounding on it is lost too.</p>
+  `;
 
   els.viewWhatIfIncomeGap.innerHTML = `
     <h2 class="section-heading">Income interruption</h2>
@@ -9419,18 +9611,19 @@ function renderWhatIfIncomeGapView() {
         </label>
       </div>
       <div class="focus-section">
-        <h3>Affordability</h3>
+        <h3>Does the buffer hold?</h3>
+        ${headlineHTML}
         ${unfundedCalloutHTML(deltas)}
-        <div class="summary-strip">
-          <div class="stat"><div class="stat-label">Permanent cost (end net assets)</div><div class="stat-value">${fmtMoney((deltas.headline.shocked.endNetAssets - deltas.headline.base.endNetAssets) * factor(lastY))}</div></div>
-          <div class="stat"><div class="stat-label">Lowest working cash — base</div><div class="stat-value">${fmtMoney(minWca(base))}</div></div>
-          <div class="stat"><div class="stat-label">Lowest working cash — shocked</div><div class="stat-value">${fmtMoney(minWca(shocked))}</div></div>
-        </div>
       </div>
       <div class="focus-section">
-        <h3>Net assets over time</h3>
-        <div id="whatIfIncomeGapChart"></div>
+        ${lensToggleHTML("whatIfIncomeGapLensToggle")}
       </div>
+      ${whatIfIncomeGapLens === "cashflow" ? cashflowLensSectionHTML("whatIfIncomeGap") : `
+        <div class="focus-section">
+          <h3>Net assets over time</h3>
+          <div id="whatIfIncomeGapChart"></div>
+        </div>
+      `}
     </div>
   `;
   if (couple) {
@@ -9440,6 +9633,14 @@ function renderWhatIfIncomeGapView() {
       whatIfIncomeGapOwner,
       (id) => { whatIfIncomeGapOwner = id; renderWhatIfIncomeGapView(); }
     );
+  }
+  wireLensToggle("whatIfIncomeGapLensToggle", whatIfIncomeGapLens, (id) => { whatIfIncomeGapLens = id; renderWhatIfIncomeGapView(); });
+  if (whatIfIncomeGapLens === "cashflow") {
+    renderCashflowLensSection("whatIfIncomeGap", [
+      { label: "Base", out: base, color: "#222", dash: "dot" },
+      { label: "During gap", out: shocked, color: "#dc5a28" },
+    ], factor, minimumBalance);
+    return;
   }
   renderBaseVsShockedChart("whatIfIncomeGapChart", base, shocked, factor, "During gap");
 }
@@ -9474,6 +9675,7 @@ els.viewWhatIfIncomeGap.addEventListener("change", (e) => {
 });
 
 let whatIfExpenseShockPct = 10;
+let whatIfExpenseShockLens = "cashflow";
 
 function renderWhatIfExpenseShockView() {
   if ((state.cashflows.expenses ?? []).length === 0) {
@@ -9486,6 +9688,17 @@ function renderWhatIfExpenseShockView() {
   const { base, shocked, deltas } = runShock(state, { kind: "expenseShock", pct: whatIfExpenseShockPct });
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const lastY = deltas.byYear.length - 1;
+  const minimumBalance = state.plan.workingCash?.minimumBalance ?? 0;
+  const h = expenseShockHeadline({ base, shocked, deltas });
+  const shockedLabel = `${whatIfExpenseShockPct > 0 ? "+" : ""}${whatIfExpenseShockPct}% expenses`;
+
+  const headlineHTML = `
+    ${h.firstNegativeSurplusYear != null
+      ? `<p class="helper-warning">Surplus first turns negative at age ${base.schedule.clientAges[h.firstNegativeSurplusYear]} under this shock.</p>`
+      : `<p class="helper-text">Surplus never turns negative under this shock.</p>`}
+    <p class="helper-text">Total additional spending over the projection: <b>${fmtMoney(h.totalAdditionalSpending * factor(lastY))}</b>.</p>
+    <p class="helper-text">Permanent cost at the end of the projection: <b>${fmtMoney(h.permanentCost * factor(lastY))}</b>.</p>
+  `;
 
   els.viewWhatIfExpenseShock.innerHTML = `
     <h2 class="section-heading">Expense shock</h2>
@@ -9498,18 +9711,29 @@ function renderWhatIfExpenseShockView() {
       </div>
       <div class="focus-section">
         <h3>Affordability</h3>
+        ${headlineHTML}
         ${unfundedCalloutHTML(deltas)}
-        <div class="summary-strip">
-          <div class="stat"><div class="stat-label">Change in end net assets</div><div class="stat-value">${fmtMoney((deltas.headline.shocked.endNetAssets - deltas.headline.base.endNetAssets) * factor(lastY))}</div></div>
-        </div>
       </div>
       <div class="focus-section">
-        <h3>Net assets over time</h3>
-        <div id="whatIfExpenseShockChart"></div>
+        ${lensToggleHTML("whatIfExpenseShockLensToggle")}
       </div>
+      ${whatIfExpenseShockLens === "cashflow" ? cashflowLensSectionHTML("whatIfExpenseShock") : `
+        <div class="focus-section">
+          <h3>Net assets over time</h3>
+          <div id="whatIfExpenseShockChart"></div>
+        </div>
+      `}
     </div>
   `;
-  renderBaseVsShockedChart("whatIfExpenseShockChart", base, shocked, factor, `${whatIfExpenseShockPct > 0 ? "+" : ""}${whatIfExpenseShockPct}% expenses`);
+  wireLensToggle("whatIfExpenseShockLensToggle", whatIfExpenseShockLens, (id) => { whatIfExpenseShockLens = id; renderWhatIfExpenseShockView(); });
+  if (whatIfExpenseShockLens === "cashflow") {
+    renderCashflowLensSection("whatIfExpenseShock", [
+      { label: "Base", out: base, color: "#222", dash: "dot" },
+      { label: shockedLabel, out: shocked, color: "#dc5a28" },
+    ], factor, minimumBalance);
+    return;
+  }
+  renderBaseVsShockedChart("whatIfExpenseShockChart", base, shocked, factor, shockedLabel);
 }
 
 function exportWhatIfExpenseShockCSV() {
