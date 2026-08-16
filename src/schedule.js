@@ -29,6 +29,7 @@
 
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
+import { childEducationPlanYearBounds } from "./planState.js";
 
 // Age 75 limit (member/spouse contributions — SG is exempt) and the
 // personal-deductible work test (ages 67–74, gated by the person's own
@@ -277,6 +278,35 @@ export function buildSchedules(state) {
   for (const row of state.cashflows.expenses) {
     rowTotals.expenses[row.id] = new Float64Array(planYears);
     applyRegular(row, "client", expenses, rowTotals.expenses[row.id]);
+  }
+
+  // Education funding (Input Usability spec, Commit 3) — household
+  // expenses, same as the loop above, just anchored to each child's OWN
+  // age rather than the client's (see childEducationPlanYearBounds's
+  // header for why that's a self-contained shift rather than a
+  // resolveRef owner). Annual only (school fees are paid yearly), fires
+  // in July like every other annual row (convention 5); a not-yet-born
+  // child's window simply lands later, with no special-case clamp.
+  rowTotals.education = {};
+  for (const child of state.plan.children ?? []) {
+    for (const block of child.education ?? []) {
+      rowTotals.education[block.id] = new Float64Array(planYears);
+      if (block.annualAmount <= 0) continue;
+      const bounds = childEducationPlanYearBounds(child, plan, block.fromAge, block.toAge);
+      // realAmountAt reads .amount, not .annualAmount — the field is
+      // named annualAmount on the block itself (spec's own model) since
+      // "amount" alone reads ambiguously for something that only ever
+      // fires once a year; this reshapes it at the one call site that needs it.
+      const asRow = { amount: block.annualAmount, indexBasis: block.indexBasis, indexExtraPct: block.indexExtraPct };
+      for (let y = 0; y < planYears; y++) {
+        if (!activeInPlanYear(bounds, y)) continue;
+        const jm = julyMonthIndex(plan, y);
+        if (jm == null) continue;
+        const v = realAmountAt(asRow, jm, cpi, awote);
+        expenses[jm] += v;
+        rowTotals.education[block.id][y] += v;
+      }
+    }
   }
   for (const row of state.cashflows.deductions ?? []) {
     rowTotals.deductions[row.id] = new Float64Array(planYears);

@@ -212,8 +212,17 @@ export function cashReceivedSums(row, ctx, forOwner = null) {
 }
 
 export function expenseSums(row, ctx, forOwner = null) {
-  const { expenseRows = [], rowTotalsExpenses = {}, properties = [], liabilities = [], y = 0 } = ctx;
+  const {
+    expenseRows = [], rowTotalsExpenses = {}, properties = [], liabilities = [], y = 0,
+    educationBlocks = [], rowTotalsEducation = {},
+  } = ctx;
   const byCat = (cat) => sumByCategory(expenseRows, rowTotalsExpenses, cat, y, forOwner);
+  // Education fees are a household cost, not owned by either parent
+  // individually (children aren't owned by a specific parent in this
+  // model) — split 50/50 for a per-owner view, same disclosed
+  // simplification as Working Cash Account interest, full total when
+  // forOwner is omitted.
+  const education = educationBlocks.reduce((s, b) => s + (rowTotalsEducation[b.id]?.[y] ?? 0), 0) * shareOf("joint", forOwner);
   const investmentProps = properties.filter((p) => p.propertyType === "investment");
   let mortgageRepayments = 0, otherLoanRepayments = 0;
   for (const lid of Object.keys(row.liabilities ?? {})) {
@@ -237,10 +246,10 @@ export function expenseSums(row, ctx, forOwner = null) {
   const homeMaintenance = byCat("homeMaintenance");
   const other = byCat("other");
   const total = mortgageRepayments + otherLoanRepayments + nonDiscretionary + discretionary + groceryFuel
-    + holidays + insurance + investmentPropertyExpenses + homeMaintenance + other;
+    + holidays + insurance + investmentPropertyExpenses + homeMaintenance + other + education;
   return {
     mortgageRepayments, otherLoanRepayments, nonDiscretionary, discretionary, groceryFuel, holidays,
-    insurance, investmentPropertyExpenses, homeMaintenance, other, total,
+    insurance, investmentPropertyExpenses, homeMaintenance, other, education, total,
   };
 }
 

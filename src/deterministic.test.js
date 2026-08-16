@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { projectPlan, assetMonthlyRate, assetReturnComponents } from "./deterministic.js";
-import { hydrate, SCHEMA_VERSION } from "./planState.js";
+import { hydrate, SCHEMA_VERSION, synthDob } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 import { checkYearConservation } from "./conservationCheck.js";
 import { lmiPremium } from "./data/lmiRates.js";
@@ -16,6 +16,15 @@ function mkAsset(over = {}) {
     icrPct: 0, cgtAsset: false, costBase: null,
     ...over,
   };
+}
+
+// `n` children, all comfortably under 21 as of mkState's default plan
+// start (FY2026–27) — enough to exercise the MLS family-threshold step
+// without needing individually-tuned DOBs.
+function childrenOfCount(n, start = { year: 2026, month: 7 }) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `ch${i}`, name: `Child ${i}`, dateOfBirth: synthDob(10, start), education: [],
+  }));
 }
 
 function mkState(over = {}) {
@@ -2528,7 +2537,22 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // children shifting the family threshold.
     const client = { currentAge: 40, helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5 };
     const partner = couple ? { currentAge: 40, helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5 } : null;
-    const dependentChildren = couple ? randInt(0, 3) : 0;
+
+    // Children + education funding (Input Usability spec, Commit 3) —
+    // ages spanning not-yet-born (negative) through already-aged-out
+    // (>21), so the derived dependent count, the MLS threshold it
+    // drives, and the education expense window all get exercised
+    // across a real spread of scenarios, not just the hand-picked ones
+    // in the dedicated tests below.
+    const planStart = { year: 2026, month: 7 };
+    const children = Array.from({ length: randInt(0, 3) }, (_, i) => ({
+      id: `ch${i}`, name: `Child ${i}`,
+      dateOfBirth: synthDob(randInt(-2, 24), planStart),
+      education: Math.random() < 0.6 ? [{
+        id: `ed${i}`, label: "Primary", annualAmount: rand(3000, 20000),
+        fromAge: 5, toAge: 12, indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: rand(0, 3),
+      }] : [],
+    }));
 
     const surplusMode = pick(["accumulate", "invest", "spend"]);
     const surplus = { mode: surplusMode, assetId: surplusMode === "invest" ? assets[0].id : null };
@@ -2565,7 +2589,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         endAge, cpi: rand(0.02, 0.04), assets,
         plan: {
           household: couple ? "couple" : "single",
-          client, partner, dependentChildren,
+          client, partner, children,
           superAccounts, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees,
         },
@@ -3294,13 +3318,13 @@ describe("Medicare Levy Surcharge (Document Set Commit 2)", () => {
   });
 
   it("dependent children (after the first) shift the family threshold up by $1,500 each", () => {
-    const family = (dependentChildren) => mkState({
+    const family = (n) => mkState({
       endAge: 41,
       assets: [],
       plan: {
         client: { currentAge: 40, privateHospitalCover: false },
         partner: { currentAge: 40, privateHospitalCover: false },
-        dependentChildren,
+        children: childrenOfCount(n),
         workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 },
       },
       cashflows: {
@@ -3319,6 +3343,44 @@ describe("Medicare Levy Surcharge (Document Set Commit 2)", () => {
     expect(noStep.yearly[0].taxDetail.client.medicareLevySurcharge).toBeCloseTo(105000 * 0.01, 2);
     expect(withStep.yearly[0].taxDetail.client.medicareLevySurcharge).toBe(0);
     expect(withStep.yearly[0].taxDetail.partner.medicareLevySurcharge).toBe(0);
+  });
+
+  it("Input Usability spec, Commit 3: the derived dependent-children count steps down as a child turns 21, and the MLS family threshold follows within a single projection", () => {
+    // Family income held flat at $212,000 across the whole projection.
+    // 2 children stay comfortably dependent throughout; a 3rd is
+    // exactly 20 at plan start and turns 21 at the first 1 July tick —
+    // dependentChildrenCountInFY must step 3 → 2 exactly then.
+    // Threshold with 3 dependents: $210,000 + (3-1)×$1,500 = $213,000
+    // (family income $212,000 stays under it → no surcharge).
+    // Threshold with 2 dependents: $210,000 + (2-1)×$1,500 = $211,500
+    // (family income $212,000 now exceeds it → 1% surcharge applies).
+    const start = { year: 2026, month: 7 };
+    const children = [
+      { id: "young1", name: "Young 1", dateOfBirth: synthDob(10, start), education: [] },
+      { id: "young2", name: "Young 2", dateOfBirth: synthDob(10, start), education: [] },
+      { id: "agingOut", name: "Aging out", dateOfBirth: synthDob(20, start), education: [] },
+    ];
+    const s = mkState({
+      endAge: 42,
+      awote: 0.025, // matches cpi exactly, so the AWOTE-indexed MLS thresholds stay flat in real terms across years
+      assets: [],
+      plan: {
+        client: { currentAge: 40, privateHospitalCover: false },
+        partner: { currentAge: 40, privateHospitalCover: false },
+        children,
+        workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 },
+      },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", amount: 106000, owner: "client", from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } }),
+          employmentRow({ id: "i2", amount: 106000, owner: "partner", from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].taxDetail.client.medicareLevySurcharge).toBe(0); // 3 dependents, under threshold
+    expect(out.yearly[1].taxDetail.client.medicareLevySurcharge).toBeCloseTo(106000 * 0.01, 2); // 2 dependents, over
+    expect(out.yearly[2].taxDetail.client.medicareLevySurcharge).toBeCloseTo(106000 * 0.01, 2); // still 2 (and still 2 in year 2, the 20-year-old having long since aged out)
   });
 
   it("PAYG withholding includes MLS — household cash flow actually differs, not just the tax-detail report", () => {
@@ -3343,6 +3405,50 @@ describe("Medicare Levy Surcharge (Document Set Commit 2)", () => {
       expect(row.taxDetail.client.medicareLevySurcharge).toBe(0);
       expect(row.taxDetail.medicareLevySurcharge).toBe(0);
     }
+  });
+});
+
+describe("Children and education funding (Input Usability spec, Commit 3)", () => {
+  it("education fees flow only in the years the child's own age falls within [fromAge, toAge]", () => {
+    const start = { year: 2026, month: 7 };
+    // Age 5 at plan start; block covers ages 5-7 (3 plan years: 0, 1, 2).
+    const children = [{
+      id: "c1", name: "Kid", dateOfBirth: synthDob(5, start),
+      education: [{ id: "ed1", label: "Primary", annualAmount: 10000, fromAge: 5, toAge: 7, indexBasis: "cpi", indexExtraPct: 0 }],
+    }];
+    const s = mkState({ endAge: 45, plan: { children } }); // 5 plan years (40..45 → indices 0..4)
+    const out = projectPlan(s);
+    const fees = out.schedule.rowTotals.education.ed1;
+    expect(Array.from(fees.slice(0, 3))).toEqual([10000, 10000, 10000]);
+    expect(Array.from(fees.slice(3))).toEqual(new Array(fees.length - 3).fill(0)); // years 3+ : the child has aged out
+  });
+
+  it("a not-yet-born child's education fees start only once they exist — never before, no special-case clamp needed", () => {
+    const start = { year: 2026, month: 7 };
+    // Age -2 at plan start (born 2 plan years in); block covers ages
+    // 5-6, so fees should start at plan year 2+5=7.
+    const children = [{
+      id: "c1", name: "Not yet born", dateOfBirth: synthDob(-2, start),
+      education: [{ id: "ed1", label: "Primary", annualAmount: 8000, fromAge: 5, toAge: 6, indexBasis: "cpi", indexExtraPct: 0 }],
+    }];
+    const s = mkState({ endAge: 50, plan: { children } }); // 10 plan years (40..50)
+    const out = projectPlan(s);
+    const fees = out.schedule.rowTotals.education.ed1;
+    expect(Array.from(fees.slice(0, 7))).toEqual(new Array(7).fill(0)); // years 0-6: not old enough (or not born) yet
+    expect(fees[7]).toBeCloseTo(8000, 2);
+    expect(fees[8]).toBeCloseTo(8000, 2);
+    expect(fees[9]).toBeCloseTo(0, 2); // aged out of the block after year 8
+  });
+
+  it("education fees are ordinary household expenses — they land in the engine's own row.expenses, not a side channel", () => {
+    const start = { year: 2026, month: 7 };
+    const children = [{
+      id: "c1", name: "Kid", dateOfBirth: synthDob(5, start),
+      education: [{ id: "ed1", label: "Primary", annualAmount: 10000, fromAge: 5, toAge: 12, indexBasis: "none", indexExtraPct: 0 }],
+    }];
+    const withFees = projectPlan(mkState({ endAge: 41, plan: { children } }));
+    const withoutFees = projectPlan(mkState({ endAge: 41 }));
+    expect(withFees.yearly[0].expenses - withoutFees.yearly[0].expenses).toBeCloseTo(10000, 2);
   });
 });
 

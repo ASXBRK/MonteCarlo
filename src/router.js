@@ -10,7 +10,7 @@
 //   #/clients/<cid>/scenarios/<sid>/output/<view>     → an output graph or table
 
 export const INPUT_SECTIONS = [
-  "setup", "tax-details", "implementation", "income", "deductions", "expenses", "financial-assets", "lifestyle-assets",
+  "setup", "tax-details", "children", "implementation", "income", "deductions", "expenses", "financial-assets", "lifestyle-assets",
   "property", "super", "liabilities", "goals", "investment-cashflows", "settings",
 ];
 export const DEFAULT_INPUT_SECTION = "setup";

@@ -75,7 +75,16 @@ export function incomeCategorySums(row, incomeRows, rowTotalsIncome, properties,
 //
 // expenseRows: state.cashflows.expenses (each needs .id)
 // rowTotalsExpenses: projection.schedule.rowTotals.expenses
-export function expenseCategorySums(row, expenseRows, rowTotalsExpenses, properties, oneOffsByAssetYear, financialAssetIds, superAccounts, y) {
+// educationBlocks: flatEducationBlocks(state.plan) (Commit 3) — every
+// child's education block, flattened; rowTotalsEducation:
+// projection.schedule.rowTotals.education, keyed by block id. Its own
+// category (not folded into "living") — one of the largest cashflow
+// items this client base faces, per the spec, so it gets its own band
+// rather than being buried in living expenses.
+export function expenseCategorySums(
+  row, expenseRows, rowTotalsExpenses, properties, oneOffsByAssetYear, financialAssetIds, superAccounts, y,
+  educationBlocks = [], rowTotalsEducation = {}
+) {
   const living = expenseRows.reduce((s, r) => s + (rowTotalsExpenses[r.id]?.[y] ?? 0), 0);
   const investmentProps = (properties ?? []).filter((p) => p.propertyType === "investment");
   const propExpenses = investmentProps.reduce((s, p) => s + (row.properties?.[p.id]?.expenses ?? 0), 0);
@@ -85,10 +94,12 @@ export function expenseCategorySums(row, expenseRows, rowTotalsExpenses, propert
   const liabIds = Object.keys(row.liabilities ?? {});
   const loanInterest = liabIds.reduce((s, lid) => s + row.liabilities[lid].interest, 0);
   const loanPrincipal = liabIds.reduce((s, lid) => s + row.liabilities[lid].principal, 0);
+  const education = educationBlocks.reduce((s, b) => s + (rowTotalsEducation[b.id]?.[y] ?? 0), 0);
   return {
     living,
     investmentExpenses: propExpenses + oneOffOut + settlement,
     loanInterest, loanPrincipal,
+    education,
     tax: row.tax,
     superContributions: personalSuperContributionsCash(row, superAccounts),
   };

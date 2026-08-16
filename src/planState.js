@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -82,6 +82,130 @@ export function synthDob(currentAge, start) {
 export function personDisplayName(person, fallback) {
   const n = `${person?.firstName ?? ""} ${person?.surname ?? ""}`.trim();
   return n || fallback;
+}
+
+// --- children + education funding (Input Usability spec, Commit 3) --------
+//
+// plan.children replaces the old flat dependentChildren count. Each
+// child ages independently off their own DOB — a THIRD age basis
+// alongside client/partner, but deliberately NOT wired into the
+// general owner/DateRef/anchor system that income, expenses, goals,
+// key dates etc. all share (client/partner only): education blocks are
+// the only thing anchored to a child's age, they use plain fromAge/
+// toAge (not a DateRef), and childEducationPlanYearBounds below is a
+// self-contained arithmetic shift, not a new resolveRef owner. Wiring
+// "child" into the shared anchor system would touch every one of those
+// features for a need only education funding actually has.
+//
+// A child's age in any plan year is an affine function of the plan
+// year index (ages tick each 1 July, same as everywhere else): age at
+// plan year y = (age at plan start) + y. That holds even when "age at
+// plan start" is negative (a child not yet born) — the arithmetic
+// still lands the window in the correct later plan year with no
+// special-case clamp needed.
+
+export function createEducationBlock(existing = []) {
+  return {
+    id: uid("ed"),
+    label: existing.length === 0 ? "Primary" : `Education ${existing.length + 1}`,
+    annualAmount: 0,
+    fromAge: 5,
+    toAge: 12,
+    indexBasis: "cpi",
+    // School fees have historically outrun CPI — default an extra 2%,
+    // visible and editable (not buried), since it does real work over
+    // a fifteen-year schooling window.
+    indexExtraPct: 2.0,
+  };
+}
+
+function clampEducationBlock(raw) {
+  const fromAge = clampInt(raw?.fromAge ?? 5, 0, 25);
+  const toAge = Math.max(fromAge, clampInt(raw?.toAge ?? 12, 0, 25));
+  const indexation = clampIndexation({
+    indexBasis: raw?.indexBasis ?? "cpi",
+    indexExtraPct: raw?.indexExtraPct ?? 2.0,
+  });
+  return {
+    id: typeof raw?.id === "string" && raw.id ? raw.id : uid("ed"),
+    label: typeof raw?.label === "string" && raw.label.trim() ? raw.label.trim().slice(0, 40) : "Education",
+    annualAmount: clampNumber(raw?.annualAmount, 0),
+    fromAge, toAge,
+    ...indexation,
+  };
+}
+
+export function createChild(existing = [], plan) {
+  return {
+    id: uid("ch"),
+    name: `Child ${existing.length + 1}`,
+    dateOfBirth: synthDob(5, plan.start), // a plausible starting point, not a guess at a real age
+    education: [],
+  };
+}
+
+// A DOB is plausible for a child if it resolves to an age between "up
+// to 3 years from being born" (parents planning ahead) and 40 (a
+// generous upper bound — the model doesn't otherwise care once they're
+// past dependency age). Anything else falls back to the same default
+// createChild uses, exactly like clampPerson's own DOB fallback.
+function clampChildDob(raw, start) {
+  const age = typeof raw === "string" ? ageAtDate(raw, start.year, start.month) : null;
+  return age !== null && age >= -3 && age <= 40 ? raw : synthDob(5, start);
+}
+
+function clampChild(raw, start) {
+  return {
+    id: typeof raw?.id === "string" && raw.id ? raw.id : uid("ch"),
+    name: typeof raw?.name === "string" && raw.name.trim() ? raw.name.trim().slice(0, 40) : "Child",
+    dateOfBirth: clampChildDob(raw?.dateOfBirth, start),
+    education: Array.isArray(raw?.education) ? raw.education.map(clampEducationBlock) : [],
+  };
+}
+
+export function normaliseChildren(raw, start) {
+  return (Array.isArray(raw) ? raw : []).map((c) => clampChild(c, start));
+}
+
+// Derived current age for display — "each child: name, date of birth,
+// derived current age." A not-yet-born child (negative raw age) would
+// display as a nonsensical negative number; input integrity says that
+// must be visibly flagged, not silently shown, so this clamps the
+// shown age to 0 and reports the FY they arrive in instead.
+export function childCurrentAgeInfo(child, plan) {
+  const age = ageAtDate(child.dateOfBirth, plan.start.year, plan.start.month);
+  if (age === null || age >= 0) return { age: age ?? 0, notYetBorn: false };
+  const baseFYStart = plan.start.month >= 7 ? plan.start.year : plan.start.year - 1;
+  const bornFYStart = baseFYStart - age; // age is negative, so this ADDS the distance to birth
+  return { age: 0, notYetBorn: true, bornFYLabel: `FY${bornFYStart}–${String((bornFYStart + 1) % 100).padStart(2, "0")}` };
+}
+
+// The count of children under 21 as of 1 July of `fyStartYear` — the
+// Medicare Levy Surcharge family threshold steps down as each child
+// ages out, rather than being a fixed number for the life of the
+// projection. The under-25-and-studying alternative is disclosed as
+// not modelled (spec: Deferred).
+export function dependentChildrenCountInFY(children, fyStartYear) {
+  return (children ?? []).filter((c) => {
+    const age = ageAtDate(c.dateOfBirth, fyStartYear, 7);
+    return age !== null && age >= 0 && age < 21;
+  }).length;
+}
+
+// A child's own fromAge/toAge window, converted to the [from, to]
+// plan-year bounds applyRegular()-style scheduling expects — see this
+// section's header for why this is a self-contained shift rather than
+// a resolveRef call.
+export function childEducationPlanYearBounds(child, plan, fromAge, toAge) {
+  const ageAtStart = ageAtDate(child.dateOfBirth, plan.start.year, plan.start.month) ?? 0;
+  return { from: fromAge - ageAtStart, to: toAge - ageAtStart };
+}
+
+// Every education block across every child, flattened — the shape the
+// Cashflow table/bars chart's category sums need (they only care about
+// the blocks' ids and rowTotals, not which child owns them).
+export function flatEducationBlocks(plan) {
+  return (plan.children ?? []).flatMap((c) => c.education ?? []);
 }
 
 // Default Retirement key date basis (Tier 1.1) — every person defaults
@@ -200,6 +324,7 @@ export function defaultPlan(now = new Date()) {
     workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
     adviserFees: defaultAdviserFees(),
     implementation: defaultImplementation(),
+    children: [],
   };
 }
 
@@ -1352,12 +1477,13 @@ export function clampPlan(plan, profiles = {}) {
     ...(implementation.emergencyFundTarget > 0 ? { minimumBalance: implementation.emergencyFundTarget } : {}),
   };
 
-  // Document Set Commit 2 — household-level dependent children, for
-  // the Medicare Levy Surcharge family threshold (+$1,500/indexed per
-  // child after the first — see src/data/mlsRates.js).
-  const dependentChildren = clampInt(plan.dependentChildren ?? 0, 0, 20);
+  // Children (Input Usability spec, Commit 3) — replaces the flat
+  // dependentChildren count; the Medicare Levy Surcharge family
+  // threshold is now derived per FY from each child's own DOB (see
+  // dependentChildrenCountInFY, used in deterministic.js).
+  const children = normaliseChildren(plan.children, start);
   return {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash, dependentChildren,
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash, children,
     adviserFees, implementation,
   };
 }
@@ -1928,6 +2054,29 @@ function migrateV14toV15(raw) {
   return { ...raw, schemaVersion: 15 };
 }
 
+// v15 → v16 (Input Usability spec, Commit 3): the flat
+// plan.dependentChildren count becomes plan.children, one placeholder
+// per previously-counted child, each with an unknown (synthesised)
+// DOB. Real ages are genuinely unknown at migration time — that's
+// exactly what Commit 2's touched-tracking is for: nothing here is
+// added to state.meta.touched, so every placeholder child surfaces in
+// the Review panel as needing a real name and DOB. Age 8 keeps them
+// dependent immediately post-migration (matching whatever MLS
+// treatment the scenario already had) without claiming to know more
+// than the old count ever recorded.
+function migrateV15toV16(raw) {
+  const n = clampInt(raw?.plan?.dependentChildren ?? 0, 0, 20);
+  const start = raw?.plan?.start && typeof raw.plan.start.year === "number"
+    ? raw.plan.start : { year: 2026, month: 7 };
+  const children = Array.from({ length: n }, (_, i) => ({
+    id: uid("ch"),
+    name: `Child ${i + 1}`,
+    dateOfBirth: synthDob(8, start),
+    education: [],
+  }));
+  return { ...raw, schemaVersion: 16, plan: { ...raw.plan, children } };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -1949,6 +2098,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 12) raw = migrateV12toV13(raw);
     if (raw.schemaVersion === 13) raw = migrateV13toV14(raw);
     if (raw.schemaVersion === 14) raw = migrateV14toV15(raw);
+    if (raw.schemaVersion === 15) raw = migrateV15toV16(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 

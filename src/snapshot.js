@@ -76,6 +76,7 @@ export const SNAPSHOT_ROWS = [
   { section: "Expenses", label: "Investment Property Expenses", path: (s) => -s.expenses.investmentPropertyExpenses },
   { section: "Expenses", label: "Home Maintenance Expenses", path: (s) => -s.expenses.homeMaintenance },
   { section: "Expenses", label: "Other", path: (s) => -s.expenses.other },
+  { section: "Expenses", label: "Education Fees", path: (s) => -s.expenses.education },
   { section: "Expenses", label: "Total Expenses", path: (s) => -s.expenses.total, total: true },
   { section: "Expenses", label: "SURPLUS INCOME", path: (s) => s.surplusIncome, total: true },
 ];

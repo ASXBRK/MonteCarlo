@@ -27,6 +27,8 @@ import {
   defaultAdviserFees, clampAdviserFees, defaultImplementation,
   clampImplementationBasic, refineImplementationAllocations, createAllocation,
   clampTouched,
+  createChild, createEducationBlock, childCurrentAgeInfo, dependentChildrenCountInFY,
+  childEducationPlanYearBounds, normaliseChildren, flatEducationBlocks,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -615,6 +617,117 @@ describe("Input Usability spec, Commit 2 — touched-field tracking", () => {
     s.meta.touched = ["plan.client.retirementAge"];
     const clamped = clampAllToPlan(s, PROFILES);
     expect(clamped.meta.touched).toEqual(["plan.client.retirementAge"]);
+  });
+});
+
+describe("Input Usability spec, Commit 3 — children and education funding", () => {
+  const start = { year: 2026, month: 7 };
+
+  it("a new scenario has no children; defaultPlan/clampPlan both default to an empty array", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.plan.children).toEqual([]);
+  });
+
+  it("createChild seeds a plausible placeholder DOB (age 5), not a guess at a real one", () => {
+    const c = createChild([], { start });
+    expect(c.name).toBe("Child 1");
+    expect(ageAtDate(c.dateOfBirth, start.year, start.month)).toBe(5);
+    expect(c.education).toEqual([]);
+  });
+
+  it("createEducationBlock defaults to CPI + 2% — school fees have historically outrun CPI", () => {
+    const e = createEducationBlock([]);
+    expect(e.indexBasis).toBe("cpi");
+    expect(e.indexExtraPct).toBe(2.0);
+    expect(e.fromAge).toBeLessThan(e.toAge);
+  });
+
+  it("normaliseChildren clamps junk: an invalid DOB falls back to the same placeholder createChild uses, toAge can never precede fromAge", () => {
+    const raw = [{
+      id: "ch1", name: "  ", dateOfBirth: "not-a-date",
+      education: [{ fromAge: 12, toAge: 5, annualAmount: -100 }],
+    }];
+    const [c] = normaliseChildren(raw, start);
+    expect(c.name).toBe("Child"); // blank name falls back
+    expect(ageAtDate(c.dateOfBirth, start.year, start.month)).toBe(5);
+    expect(c.education[0].toAge).toBeGreaterThanOrEqual(c.education[0].fromAge);
+    expect(c.education[0].annualAmount).toBe(0);
+  });
+
+  it("dependentChildrenCountInFY steps down as a child passes 21 — the real correctness improvement over a fixed count", () => {
+    // Born 1 July 2005: age 21 exactly at 1 July 2026 (ages tick 1
+    // July), so FY2025–26 (still 20) counts them; FY2026–27 (turns 21)
+    // does not.
+    const child = { dateOfBirth: "2005-07-01" };
+    expect(dependentChildrenCountInFY([child], 2025)).toBe(1);
+    expect(dependentChildrenCountInFY([child], 2026)).toBe(0);
+  });
+
+  it("dependentChildrenCountInFY excludes a not-yet-born child (negative age), not counts them as a phantom dependent", () => {
+    const child = { dateOfBirth: "2030-01-01" };
+    expect(dependentChildrenCountInFY([child], 2026)).toBe(0);
+  });
+
+  it("childCurrentAgeInfo clamps a not-yet-born child's display age to 0 and flags it, rather than showing a negative age", () => {
+    const child = { dateOfBirth: "2029-01-01" };
+    const info = childCurrentAgeInfo(child, { start });
+    expect(info.notYetBorn).toBe(true);
+    expect(info.age).toBe(0);
+    expect(info.bornFYLabel).toBe("FY2029–30");
+  });
+
+  it("childCurrentAgeInfo reports a plain age for an already-born child", () => {
+    const child = { dateOfBirth: "2020-01-01" };
+    expect(childCurrentAgeInfo(child, { start })).toEqual({ age: 6, notYetBorn: false });
+  });
+
+  it("childEducationPlanYearBounds shifts a child's own fromAge/toAge into plan-year bounds — an already-5-year-old child's ages-5-12 block is active from plan year 0", () => {
+    const child = { dateOfBirth: "2021-07-01" }; // age 5 at plan start
+    const bounds = childEducationPlanYearBounds(child, { start }, 5, 12);
+    expect(bounds).toEqual({ from: 0, to: 7 });
+  });
+
+  it("childEducationPlanYearBounds pushes the window later for a not-yet-born child — never before they exist", () => {
+    const child = { dateOfBirth: "2029-07-01" }; // age -3 at plan start (born 3 plan years in)
+    const bounds = childEducationPlanYearBounds(child, { start }, 5, 12);
+    expect(bounds).toEqual({ from: 8, to: 15 }); // fromAge(5) - (-3) = 8
+  });
+
+  it("flatEducationBlocks flattens every child's education blocks, in order", () => {
+    const plan = {
+      children: [
+        { id: "c1", education: [{ id: "e1" }, { id: "e2" }] },
+        { id: "c2", education: [{ id: "e3" }] },
+        { id: "c3" }, // no education field at all
+      ],
+    };
+    expect(flatEducationBlocks(plan).map((b) => b.id)).toEqual(["e1", "e2", "e3"]);
+  });
+
+  it("migration (v15→v16): an existing dependentChildren count becomes that many placeholder children, none marked touched", () => {
+    const s = defaultState(PROFILES, NOW);
+    const raw = JSON.parse(serialize(s));
+    delete raw.plan.children;
+    raw.plan.dependentChildren = 3;
+    raw.schemaVersion = 15;
+    const back = hydrate(JSON.stringify(raw), PROFILES);
+    expect(back).not.toBeNull();
+    expect(back.plan.children).toHaveLength(3);
+    expect(back.plan.children.map((c) => c.name)).toEqual(["Child 1", "Child 2", "Child 3"]);
+    // Placeholders are genuinely unknown ages — flagged untouched per
+    // Commit 2 by simply never being added to state.meta.touched.
+    expect(back.meta.touched).toEqual([]);
+    // dependentChildren itself is gone, not carried through as a stray field.
+    expect(back.plan).not.toHaveProperty("dependentChildren");
+  });
+
+  it("migration (v15→v16): dependentChildren of 0 (or absent) migrates to no children at all", () => {
+    const s = defaultState(PROFILES, NOW);
+    const raw = JSON.parse(serialize(s));
+    delete raw.plan.children;
+    raw.schemaVersion = 15;
+    const back = hydrate(JSON.stringify(raw), PROFILES);
+    expect(back.plan.children).toEqual([]);
   });
 });
 

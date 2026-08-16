@@ -35,6 +35,7 @@ import {
   createAllocation,
   INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
   incomeCategoryTaxTreatment,
+  createChild, createEducationBlock, childCurrentAgeInfo, flatEducationBlocks,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -104,6 +105,7 @@ const els = {
   pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
   taxDetailsSection: $("taxDetailsSection"),
+  childrenSection: $("childrenSection"),
   implementationSection: $("implementationSection"),
   assets: $("assets"),
   lifestyleSection: $("lifestyleSection"),
@@ -363,6 +365,7 @@ function mountWorkspace(clientId, scenarioId) {
 const INPUT_NAV = [
   { id: "setup", label: "Setup" },
   { id: "tax-details", label: "Tax details" },
+  { id: "children", label: "Children" },
   { id: "implementation", label: "Implementation" },
   { id: "income", label: "Income" },
   { id: "deductions", label: "Deductions" },
@@ -516,7 +519,7 @@ function persistLastVisited(area, section) {
 function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
-  for (const el of [els.planBar, els.taxDetailsSection, els.implementationSection, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
+  for (const el of [els.planBar, els.taxDetailsSection, els.childrenSection, els.implementationSection, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
                     els.lifestyleSection, els.liabilitiesSection, els.goalsSection, els.propertySection,
                     els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
@@ -957,7 +960,6 @@ const STATIC_PLAN_FIELD_PATH = {
   endMode: "plan.endBasis.mode",
   endFixedAge: "plan.endBasis.fixedAge",
   endFixedYears: "plan.endBasis.fixedYears",
-  dependentChildren: "plan.dependentChildren",
 };
 const IMPL_FIELD_PATH = {
   upfrontTotal: "plan.adviserFees.upfront.total",
@@ -1000,6 +1002,8 @@ const TOUCHED_FIELD_SELECTOR = [
   "[data-lid][data-erid][data-erfield]",
   "[data-lid][data-orid][data-orfield]",
   "[data-lid][data-lfield]",
+  "[data-chid][data-edid][data-edfield]",
+  "[data-chid][data-cfield]",
   "[data-pid][data-pfield]",
   "[data-gid][data-gfield]",
   "[data-alid][data-alfield]",
@@ -1019,6 +1023,8 @@ function computeFieldPath(el) {
   if (ds.lid && ds.erid && ds.erfield) return `liabilities.${ds.lid}.extraRepayments.${ds.erid}.${ds.erfield}`;
   if (ds.lid && ds.orid && ds.orfield) return `liabilities.${ds.lid}.oneOffRepayments.${ds.orid}.${ds.orfield}`;
   if (ds.lid && ds.lfield) return `liabilities.${ds.lid}.${ds.lfield}`;
+  if (ds.chid && ds.edid && ds.edfield) return `plan.children.${ds.chid}.education.${ds.edid}.${ds.edfield}`;
+  if (ds.chid && ds.cfield) return `plan.children.${ds.chid}.${ds.cfield}`;
   if (ds.kind && ds.cfid && ds.field) return `cashflows.${ds.kind}.${ds.cfid}.${ds.field}`;
   if (ds.aid && ds.field) return `assets.${ds.aid}.${ds.field}`;
   if (ds.said && ds.sfield) return `plan.superAccounts.${ds.said}.${ds.sfield}`;
@@ -1137,7 +1143,14 @@ function decorateTouchedFields() {
         btn.className = "mark-all-reviewed btn-text";
         section.insertBefore(btn, section.firstChild);
       }
-      btn.textContent = `Mark all remaining as reviewed (${untouchedCount})`;
+      // A write here is a mutation whether or not the string actually
+      // changed (textContent always replaces the text node) — this
+      // function is driven by a MutationObserver on this same canvas,
+      // so an unconditional write would re-trigger itself forever.
+      // Guard on the value actually differing so a settled canvas
+      // truly settles.
+      const label = `Mark all remaining as reviewed (${untouchedCount})`;
+      if (btn.textContent !== label) btn.textContent = label;
     } else if (btn) {
       btn.remove();
     }
@@ -1155,6 +1168,19 @@ els.workspaceCanvas.addEventListener("click", (e) => {
     markAllReviewedIn(markAllBtn.closest("[data-section]"));
   }
 });
+
+// Most sections re-render narrowly after their own edits (e.g.
+// renderLiabilities(), not a full renderAll()), so decoration can't
+// simply be called once at the end of renderAll() — it would only ever
+// see Setup/Tax details, the two sections whose handler happens to
+// call renderAll() directly. A MutationObserver on the whole canvas
+// catches every section's innerHTML replacement uniformly, wherever it
+// comes from, present or future, without each render function needing
+// to remember to call decorateTouchedFields() itself. Decoration's own
+// DOM writes (the dot, the mark-all button) re-trigger this once more,
+// but it's idempotent — the second pass finds nothing left to change.
+new MutationObserver(() => decorateTouchedFields())
+  .observe(els.workspaceCanvas, { childList: true, subtree: true });
 
 // --- Review defaults panel ---------------------------------------------------
 //
@@ -1329,9 +1355,7 @@ function personIdentityHTML(prefix, person, title) {
 
 // New Tax details section (Input Usability spec, Commit 1) — Xplan's
 // own "Tax Details" division: residency, Medicare, work test, opening
-// capital losses, private hospital cover. Household dependentChildren
-// also lives in this section (renderTaxDetails, below) until Commit 3
-// replaces it with a real Children model.
+// capital losses, private hospital cover.
 function personTaxDetailsHTML(prefix, person, title) {
   const tp = person.taxProfile;
   return `
@@ -1569,22 +1593,164 @@ function renderPlanBar() {
   `;
 }
 
-// New Tax details section (Input Usability spec, Commit 1) — household
-// dependentChildren (until Commit 3 replaces it with a real Children
-// model) plus each person's tax-details block.
+// New Tax details section (Input Usability spec, Commit 1) — each
+// person's tax-details block.
 function renderTaxDetails() {
   const p = state.plan;
   const couple = isCouple();
   els.taxDetailsSection.innerHTML = `
     <h2 class="section-heading">Tax details</h2>
-    <div class="plan-field">
-      <label>Dependent children ${tooltipHTML("Raises the Medicare Levy Surcharge family threshold — $1,500 (indexed) per child after the first.")}</label>
-      <input type="number" min="0" max="20" step="1" value="${p.dependentChildren ?? 0}" data-plan-field="dependentChildren" />
-    </div>
     ${personTaxDetailsHTML("client", p.client, couple ? `Client — ${clientName()}` : clientName())}
     ${couple ? personTaxDetailsHTML("partner", p.partner, `Partner — ${partnerName()}`) : ""}
   `;
 }
+
+// --- Children + education funding (Input Usability spec, Commit 3) --------
+//
+// dependentChildren is now DERIVED (dependentChildrenCountInFY, read by
+// deterministic.js) from each child's own DOB — no field here sets it
+// directly. Education blocks are household expenses that flow through
+// the normal cashflow mechanism (schedule.js), anchored to the child's
+// own age rather than client/partner.
+
+function findChild(chid) {
+  return (state.plan.children ?? []).find((c) => c.id === chid) ?? null;
+}
+
+function educationRowHTML(chid, ed) {
+  return `
+    <tr class="cf-tr">
+      <td class="cf-td-label">
+        <input type="text" value="${escapeHTML(ed.label)}" maxlength="40" data-chid="${chid}" data-edid="${ed.id}" data-edfield="label" />
+      </td>
+      <td class="cf-td-amount">
+        <input type="number" min="0" step="100" value="${ed.annualAmount}" data-chid="${chid}" data-edid="${ed.id}" data-edfield="annualAmount" />
+      </td>
+      <td class="cf-td-date">
+        <input type="number" min="0" max="25" step="1" value="${ed.fromAge}" aria-label="From (child's age)" data-chid="${chid}" data-edid="${ed.id}" data-edfield="fromAge" />
+      </td>
+      <td class="cf-td-date">
+        <input type="number" min="0" max="25" step="1" value="${ed.toAge}" aria-label="To (child's age)" data-chid="${chid}" data-edid="${ed.id}" data-edfield="toAge" />
+      </td>
+      <td class="cf-td-index">
+        <select data-chid="${chid}" data-edid="${ed.id}" data-edfield="indexBasis" aria-label="Index basis">
+          <option value="none"${ed.indexBasis === "none" ? " selected" : ""}>None</option>
+          <option value="cpi"${ed.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
+          <option value="awote"${ed.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+        </select>
+        <input type="number" min="-10" max="10" step="0.1" value="${ed.indexExtraPct}" aria-label="Additional %"
+               data-chid="${chid}" data-edid="${ed.id}" data-edfield="indexExtraPct" />
+      </td>
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove education funding"
+                data-child-action="remove-education" data-chid="${chid}" data-edid="${ed.id}">×</button>
+      </td>
+    </tr>
+  `;
+}
+
+function childCardHTML(c) {
+  const info = childCurrentAgeInfo(c, state.plan);
+  const ageMeta = info.notYetBorn
+    ? `Not yet born — arrives ${info.bornFYLabel}`
+    : `Age ${info.age}`;
+  return `
+    <div class="pcard" data-chid="${c.id}">
+      <div class="pcard-head">
+        <span class="pcard-name">${escapeHTML(c.name)}</span>
+        <span class="pcard-meta">${ageMeta}</span>
+        <button class="pcard-remove" type="button" data-child-action="remove" data-chid="${c.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Name</label>
+            <input type="text" maxlength="40" value="${escapeHTML(c.name)}" data-chid="${c.id}" data-cfield="name" />
+          </div>
+          <div class="cf-cell">
+            <label>Date of birth <span class="live-age">· ${ageMeta}</span></label>
+            <input type="date" value="${c.dateOfBirth}" data-chid="${c.id}" data-cfield="dateOfBirth" />
+          </div>
+        </div>
+        <div class="cf-subsection">
+          <div class="cf-section-title">Education funding ${tooltipHTML("Household expenses anchored to this child's own age (e.g. Primary ages 5–12), not the client's. Defaults to CPI + 2% — school fees have historically outrun CPI.")}</div>
+          ${(c.education ?? []).length === 0 ? "" : `
+            <table class="cf-table">
+              <thead><tr><th>Label</th><th>Amount ($/yr, today's)</th><th>From (age)</th><th>To (age)</th><th>Indexation</th><th></th></tr></thead>
+              <tbody>${c.education.map((ed) => educationRowHTML(c.id, ed)).join("")}</tbody>
+            </table>
+          `}
+          <button class="add-row-btn" type="button" data-child-action="add-education" data-chid="${c.id}">+ Add education funding</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderChildren() {
+  const children = state.plan.children ?? [];
+  els.childrenSection.innerHTML = `
+    <h2 class="section-heading">Children</h2>
+    <p class="helper-inline">Drives the Medicare Levy Surcharge family threshold, which steps down as each child turns 21 — a fixed count is never entered directly.</p>
+    <div class="portfolio-stack">${children.map(childCardHTML).join("")}</div>
+    <div class="portfolio-actions">
+      <button id="addChildBtn" class="btn-text" type="button" data-child-action="add">+ Add child</button>
+    </div>
+  `;
+}
+
+els.childrenSection.addEventListener("change", (e) => {
+  const c = findChild(e.target.dataset.chid);
+  if (!c) return;
+  const field = e.target.dataset.cfield;
+  const edField = e.target.dataset.edfield;
+  if (field) {
+    if (field === "name") c.name = e.target.value.trim() || c.name;
+    else if (field === "dateOfBirth") c.dateOfBirth = e.target.value || c.dateOfBirth;
+  } else if (edField) {
+    const ed = (c.education ?? []).find((x) => x.id === e.target.dataset.edid);
+    if (!ed) return;
+    if (edField === "label") ed.label = e.target.value.trim() || ed.label;
+    else if (edField === "annualAmount") ed.annualAmount = clampNumber(e.target.value, 0);
+    else if (edField === "fromAge") ed.fromAge = clampInt(e.target.value, 0, 25);
+    else if (edField === "toAge") ed.toAge = clampInt(e.target.value, 0, 25);
+    else if (edField === "indexBasis") ed.indexBasis = e.target.value;
+    else if (edField === "indexExtraPct") ed.indexExtraPct = clampNumber(e.target.value, -10, 10);
+  } else {
+    return;
+  }
+  state.plan = clampPlan({ ...state.plan, children: state.plan.children }, PROFILES);
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+  renderChildren();
+});
+
+els.childrenSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-child-action]");
+  if (!btn) return;
+  if (btn.dataset.childAction === "add") {
+    state.plan.children = [...(state.plan.children ?? []), createChild(state.plan.children ?? [], state.plan)];
+  } else {
+    const c = findChild(btn.dataset.chid);
+    if (!c) return;
+    if (btn.dataset.childAction === "remove") {
+      if (!window.confirm(`Remove "${c.name}"?`)) return;
+      state.plan.children = state.plan.children.filter((x) => x.id !== c.id);
+    } else if (btn.dataset.childAction === "add-education") {
+      c.education = [...(c.education ?? []), createEducationBlock(c.education ?? [])];
+    } else if (btn.dataset.childAction === "remove-education") {
+      c.education = (c.education ?? []).filter((x) => x.id !== btn.dataset.edid);
+    } else {
+      return;
+    }
+  }
+  state.plan = clampPlan({ ...state.plan, children: state.plan.children }, PROFILES);
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+  renderChildren();
+});
 
 // The workspace client's name follows the client's full name until the
 // user renames it themselves (auto-names look like "Client 3").
@@ -1665,7 +1831,7 @@ function handlePlanFieldChange(e) {
     keyDates: p.keyDates,
     superAccounts: p.superAccounts,
     workingCash: p.workingCash,
-    dependentChildren: field === "dependentChildren" ? e.target.value : p.dependentChildren,
+    children: p.children,
   };
   state.plan = clampPlan(next, PROFILES);
   state = clampAllToPlan(state, PROFILES);
@@ -5891,6 +6057,9 @@ const CASHFLOW_INCOME_SEGMENTS = [
 const CASHFLOW_EXPENSE_SEGMENTS = [
   { key: "living", name: "Living expenses", color: "#dc5a28" },
   { key: "investmentExpenses", name: "Investment/property expenses", color: "#d97b2f" },
+  // Its own band, not folded into "living" — one of the largest
+  // cashflow items this client base faces (spec's own words).
+  { key: "education", name: "Education", color: "#4a6fa5" },
   { key: "loanInterest", name: "Loan interest", color: "#9a031e" },
   { key: "loanPrincipal", name: "Loan principal", color: "#c1121f" },
   { key: "tax", name: "Tax", color: "#780000" },
@@ -6299,7 +6468,8 @@ function expenseCategorySums(y, ctx = { state, projection }) {
   return expenseCategorySumsPure(
     p.yearly[y], s.cashflows.expenses, p.schedule.rowTotals.expenses,
     s.properties, p.schedule.oneOffsByAssetYear, financialAssetIds(s),
-    s.plan.superAccounts, y
+    s.plan.superAccounts, y,
+    flatEducationBlocks(s.plan), p.schedule.rowTotals.education
   );
 }
 
@@ -6396,6 +6566,7 @@ function buildCashflowGroups() {
     expenseRows, rowTotalsExpenses: rt.expenses,
     deductionRows, rowTotalsDeductions: rt.deductions,
     properties, liabilities, superAccounts, y,
+    educationBlocks: flatEducationBlocks(state.plan), rowTotalsEducation: rt.education,
   });
 
   const ownerLabel = (r) => couple ? `${r.label} (${r.owner === "partner" ? partnerName() : clientName()})` : r.label;
@@ -6478,6 +6649,7 @@ function buildCashflowGroups() {
     { label: "Investment Property expenses", cell: (y) => -stmt(y).expenses.investmentPropertyExpenses },
     ...catRow(expenseRows, rt.expenses, "homeMaintenance", "Home Maintenance expenses", (y) => stmt(y).expenses.homeMaintenance).map(negate),
     ...catRow(expenseRows, rt.expenses, "other", "Other", (y) => stmt(y).expenses.other).map(negate),
+    { label: "Education Fees", cell: (y) => -stmt(y).expenses.education },
   ];
   expenseSectionRows.push({ label: "Total Expenses", always: true, cls: "tl-total", cell: (y) => -stmt(y).expenses.total });
   expenseSectionRows.push({ label: "SURPLUS INCOME", always: true, cls: "tl-total", cell: (y) => stmt(y).surplusIncome });
@@ -6985,6 +7157,7 @@ function snapshotCtxFor(y) {
     deductionRows: state.cashflows.deductions ?? [], rowTotalsDeductions: rt.deductions,
     properties: state.properties ?? [], liabilities: state.liabilities ?? [],
     superAccounts: state.plan.superAccounts ?? [], y,
+    educationBlocks: flatEducationBlocks(state.plan), rowTotalsEducation: rt.education,
   };
 }
 
@@ -8574,6 +8747,7 @@ function snapshotCtxForScenario(s, p, y) {
     deductionRows: s.cashflows.deductions ?? [], rowTotalsDeductions: rt.deductions,
     properties: s.properties ?? [], liabilities: s.liabilities ?? [],
     superAccounts: s.plan.superAccounts ?? [], y,
+    educationBlocks: flatEducationBlocks(s.plan), rowTotalsEducation: rt.education,
   };
 }
 
@@ -9602,6 +9776,7 @@ function renderAll() {
   recomputeProjection();
   renderPlanBar();
   renderTaxDetails();
+  renderChildren();
   renderAssets();
   renderCashflows();
   renderSettings();
@@ -9611,7 +9786,11 @@ function renderAll() {
   renderSuper(); // after refreshOutputs — the cap-headroom display reads the projection
   renderGoals(); // after refreshOutputs — goalStats read the projection
   renderImplementation(); // after refreshOutputs — the fee cap/shortfall display reads the projection
-  decorateTouchedFields(); // Input Usability spec, Commit 2 — after every section has its final DOM
+  // decorateTouchedFields() itself is driven by the canvas-wide
+  // MutationObserver below, not called directly here — most sections
+  // re-render themselves narrowly (e.g. renderLiabilities(), not a
+  // full renderAll()) after their own edits, and a direct call here
+  // would miss every one of those.
 }
 
 window.addEventListener("hashchange", handleRoute);

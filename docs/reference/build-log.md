@@ -700,10 +700,78 @@ This closes all five commits of docs/specs/14-what-if.md.
   in the Review panel, but get no inline dot — a disclosed, not silent,
   limitation.
 
+  Follow-up fix landed in the same push: the decoration pass (dots,
+  mute, mark-all button) was only ever wired into renderAll(), but
+  Setup/Tax details are the ONLY sections whose own edit handler calls
+  renderAll() — every other section (Liabilities, Assets, Goals,
+  Properties, Super) re-renders itself narrowly (e.g. renderLiabilities()),
+  so their fields never actually got decorated after an edit, only at
+  initial mount. Replaced the direct call with a MutationObserver on
+  the whole canvas, so any section's innerHTML replacement — present or
+  future — triggers decoration uniformly. Its own DOM writes re-trigger
+  it once more, which surfaced a genuine infinite loop: the mark-all
+  button's `textContent` was written unconditionally every pass (a
+  mutation regardless of whether the string changed), so the observer
+  re-fired forever and hung the tab. Fixed by writing only when the
+  label actually differs.
+
+- Commit 3 of docs/specs/15-input-usability.md, **Children and
+  education funding** — `plan.children = [{ id, name, dateOfBirth,
+  education }]` replaces the flat `dependentChildren` count entirely;
+  SCHEMA_VERSION 15→16, migration converts an existing count into that
+  many placeholder children (synthDob'd to age 8 — a plausible, not
+  guessed, starting point) with unknown real DOBs, surfaced in the
+  Review panel simply by never being added to `state.meta.touched`
+  (Commit 2's own "mark nothing on migration" already covers this for
+  free). `dependentChildrenCountInFY(children, fyStartYear)` derives
+  the MLS family-threshold count per FY from each child's own DOB — the
+  threshold now genuinely steps down as a child turns 21, verified with
+  a 3-year engine-level test where family income sits between the
+  3-dependents and 2-dependents thresholds and the surcharge switches
+  on exactly at the tick. New **Children** section (sidebar, after Tax
+  details): each child a card (name, DOB, derived current age); a
+  not-yet-born child's age would display as a nonsensical negative
+  number, so `childCurrentAgeInfo` clamps the shown age to 0 and flags
+  "Not yet born — arrives FYxx–yy" instead (the same input-integrity
+  principle as the property acquisition-date bug — a wrong-looking
+  value must never render unflagged). Per-child **education funding**
+  blocks (`{ label, annualAmount, fromAge, toAge, indexBasis,
+  indexExtraPct }`, default CPI + 2% — school fees have historically
+  outrun CPI) anchor to the CHILD's own age, a third age basis besides
+  client/partner — deliberately NOT wired into the shared owner/
+  DateRef/anchor system every other cashflow row uses (income,
+  expenses, goals, key dates): that system is keyed to "client"/
+  "partner" throughout schedule.js's per-owner age arrays, and
+  extending it for a feature that only needs its own two plain numbers
+  would have touched every one of those features for no shared benefit.
+  Instead, `childEducationPlanYearBounds` is a self-contained affine
+  shift (a child's age in plan year y = age-at-start + y, even when
+  age-at-start is negative for a not-yet-born child — the window simply
+  lands later, no special-case clamp required, verified directly).
+  Education fees flow through the EXACT SAME mechanism as any flat
+  expense row (schedule.js's `expenses[]` array, annual, fires in July)
+  — genuinely not a new money flow, so no new conservation-invariant
+  term, but `randomScenario()` now generates children + education
+  anyway (ages spanning not-yet-born through aged-out) so the
+  conservation invariant actually exercises the code path; this is also
+  what caught a real bug before it shipped — the schedule.js loop
+  originally read `block.amount` where the model calls the field
+  `annualAmount`, producing NaN expenses for every scenario with an
+  education block (300-run conservation test caught it on run 5).
+  Outputs: "Education Fees" is its own line in the Cashflow table's
+  Expenses section and its own band in the cashflow-bars chart (not
+  folded into Living expenses) — one of the largest cashflow items this
+  client base faces, per the spec. Deferred per the spec's own list:
+  childcare/CCS, Family Tax Benefit, the under-25-studying dependency
+  condition, child death benefit pensions, education savings vehicles,
+  per-child asset ownership.
+
+This closes all three commits of docs/specs/15-input-usability.md.
+
 ### In flight
-Spec 15 Commit 3 (children and education funding); super threshold
-indexation per figure (AWOTE / CPI / unindexed, with nominal rounding),
-then Division 296, then Monte Carlo over the full scenario.
+Super threshold indexation per figure (AWOTE / CPI / unindexed, with
+nominal rounding), then Division 296, then Monte Carlo over the full
+scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary

@@ -56,6 +56,7 @@ import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
 import { decomposeNetWorthChange } from "./conservationCheck.js";
+import { dependentChildrenCountInFY } from "./planState.js";
 import {
   createPool, poolAdd, poolConsume, poolNewFy,
   poolDeemedReacquisition, preReformTaxableGain,
@@ -2151,7 +2152,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     const isFamily = persons.length > 1; // a couple — MLS family thresholds apply to both
     const familyIncome = repaymentIncome.client + repaymentIncome.partner;
-    const dependentChildren = state.plan.dependentChildren ?? 0;
+    // Input Usability spec, Commit 3 — derived per FY from each child's
+    // own DOB, so the family threshold steps down as children age out
+    // instead of being a fixed number for the life of the projection.
+    const dependentChildren = dependentChildrenCountInFY(state.plan.children, fyStart);
 
     taxOutArr.fill(0, yearStart(y), yearEnd(y));
     for (const p of persons) {
