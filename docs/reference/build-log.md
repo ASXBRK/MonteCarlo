@@ -617,10 +617,43 @@ This closes all six commits of docs/specs/13-implementation-rates-equity-compari
 
 This closes all five commits of docs/specs/14-what-if.md.
 
+- Commit 1 of docs/specs/15-input-usability.md, **Input UX: section
+  restructure and tooltip helper text** — Setup's single dense,
+  four-column, eight-field-per-person block split into Xplan's own
+  three-way division. **Setup** keeps identity and timeline only:
+  first name, surname, DOB, sex, retirement age, plus the existing
+  plan-level projection basis/start/end. New **Tax details** section
+  (sidebar, after Setup): tax residency, Medicare levy, private
+  hospital cover, opening carry-forward capital losses, work test met,
+  plus household `dependentChildren` (until Commit 3 replaces it with
+  a real Children model). **Super** section gained the Division
+  293/296 "tax paid from" election and release-account nomination,
+  shown per person above the account list — a super setting, not
+  identity — sharing the SAME field-mutation handler
+  (`handlePlanFieldChange`, wired to all three containers) rather than
+  three copies of the same logic. `eligibleForCentrelinkBenefits`
+  (`taxProfile.centrelinkEligible`) removed entirely — it drove
+  nothing; SCHEMA_VERSION 13→14, a version-gate-only migration (clamp
+  already stops reading/writing it). New tooltip component
+  (`tooltipHTML`/`wireTooltips`): every field's explanatory sentence
+  moved behind a small (i) icon — CSS `:hover`/`:focus-within` for
+  desktop/keyboard, a delegated click toggling `.tt-open` for touch.
+  Two exceptions stay inline (they change what the field MEANS, not
+  merely explain it): the derived age beside date of birth, and a
+  resolved anchor value beneath a date-ref select. New `.identity-grid`
+  CSS (two columns wide, one narrow) replaces the old four-column
+  `.person-grid` for these specific blocks only — `.person-grid`
+  itself is untouched, since it's shared by many unrelated cashflow-row
+  layouts elsewhere. No engine files touched at all in this commit, so
+  the regression gate (bit-identical projection output) holds by
+  construction — every moved field still lives in the exact same state
+  shape, just rendered from a different container.
+
 ### In flight
-Super threshold indexation per figure (AWOTE / CPI / unindexed, with
-nominal rounding), then Division 296, then Monte Carlo over the full
-scenario.
+Spec 15 Commits 2-3 (distinguish entered values from defaults;
+children and education funding); super threshold indexation per figure
+(AWOTE / CPI / unindexed, with nominal rounding), then Division 296,
+then Monte Carlo over the full scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary

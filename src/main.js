@@ -103,6 +103,7 @@ const els = {
   pageClient: $("pageClient"),
   pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
+  taxDetailsSection: $("taxDetailsSection"),
   implementationSection: $("implementationSection"),
   assets: $("assets"),
   lifestyleSection: $("lifestyleSection"),
@@ -359,6 +360,7 @@ function mountWorkspace(clientId, scenarioId) {
 
 const INPUT_NAV = [
   { id: "setup", label: "Setup" },
+  { id: "tax-details", label: "Tax details" },
   { id: "implementation", label: "Implementation" },
   { id: "income", label: "Income" },
   { id: "deductions", label: "Deductions" },
@@ -494,7 +496,7 @@ function persistLastVisited(area, section) {
 function unmountWorkspace() {
   if (typeof Plotly !== "undefined") { try { Plotly.purge($("chart")); } catch { /* fine */ } }
   $("chart").innerHTML = "";
-  for (const el of [els.planBar, els.implementationSection, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
+  for (const el of [els.planBar, els.taxDetailsSection, els.implementationSection, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
                     els.lifestyleSection, els.liabilitiesSection, els.goalsSection, els.propertySection,
                     els.investSection, els.settingsPanel, els.summaryStrip,
                     els.viewCashflow, els.assetsEntity, els.assetsTable,
@@ -859,6 +861,49 @@ function escapeHTML(s) {
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
+// --- tooltip affordance (Input Usability spec, Commit 1) --------------------
+//
+// A field's explanatory sentence goes behind a small (i) icon instead
+// of rendering permanently — every Setup/Tax details/Super field that
+// previously carried a `.helper-inline` sentence uses this now. Two
+// exceptions never do (see the label's own inline markup instead): the
+// derived age beside date of birth, and a resolved anchor value
+// beneath a date-ref select — both change what the field MEANS, not
+// merely explain it.
+//
+// Hover/focus shows it via CSS alone (:hover, :focus-within — so it's
+// keyboard-reachable too); a delegated click listener (wireTooltips,
+// called once at boot) toggles `.tt-open` for tap/click, and closes
+// any open bubble when the user clicks elsewhere. `unreviewedNote`
+// (Commit 2) appends the "Not yet reviewed — this is a default" line
+// when the field is untouched.
+function tooltipHTML(text, unreviewedNote = false) {
+  return `
+    <span class="tt-wrap">
+      <button type="button" class="tt-icon" aria-label="More info" tabindex="0">i</button>
+      <span class="tt-bubble">${escapeHTML(text)}${unreviewedNote ? `<span class="tt-unreviewed">Not yet reviewed — this is a default.</span>` : ""}</span>
+    </span>
+  `;
+}
+
+function wireTooltips() {
+  document.addEventListener("click", (e) => {
+    const icon = e.target.closest(".tt-icon");
+    const openWraps = document.querySelectorAll(".tt-wrap.tt-open");
+    if (icon) {
+      const wrap = icon.closest(".tt-wrap");
+      const wasOpen = wrap.classList.contains("tt-open");
+      for (const w of openWraps) w.classList.remove("tt-open");
+      if (!wasOpen) wrap.classList.add("tt-open");
+      return;
+    }
+    if (!e.target.closest(".tt-wrap")) {
+      for (const w of openWraps) w.classList.remove("tt-open");
+    }
+  });
+}
+wireTooltips();
+
 // Today's date (real-world, not plan-relative), ISO — used to bound an
 // "Owned" property's acquisition date input (input integrity: you
 // can't already own something you haven't bought yet, so a future
@@ -900,15 +945,18 @@ function personSpansWorkTestAges(person) {
   return from <= 74 && to >= 67;
 }
 
-function personBlockHTML(prefix, person, title) {
-  const tp = person.taxProfile;
-  const owner = prefix === "client" ? "client" : "partner";
-  const ownerSuperAccounts = (state.plan.superAccounts ?? []).filter((s) => s.owner === owner && s.include);
-  const divTaxPaidFrom = person.super?.divTaxPaidFrom === "cash" ? "cash" : "super";
+// Setup keeps identity and timeline only (Input Usability spec, Commit
+// 1) — Xplan's own "Basic Details" division. Tax residency, Medicare,
+// work test, capital losses and private hospital cover moved to the
+// new Tax details section (personTaxDetailsHTML, below); the Division
+// 293/296 election moved beside the super accounts it draws on
+// (renderSuper's own person block); "Eligible for Centrelink benefits"
+// is gone entirely (inert, reintroduced with Centrelink modelling).
+function personIdentityHTML(prefix, person, title) {
   return `
     <div class="person-block">
       <div class="cf-section-title">${escapeHTML(title)}</div>
-      <div class="person-grid">
+      <div class="identity-grid">
         <div class="cf-cell">
           <label>First name</label>
           <input type="text" maxlength="40" value="${escapeHTML(person.firstName)}"
@@ -924,12 +972,33 @@ function personBlockHTML(prefix, person, title) {
           <input type="date" value="${person.dob}" data-plan-field="${prefix}Dob" />
         </div>
         <div class="cf-cell">
-          <label>Sex <span class="helper-inline">used for life expectancy</span></label>
+          <label>Sex ${tooltipHTML("Used for life expectancy.")}</label>
           <select data-plan-field="${prefix}Sex">
             <option value="male"${person.sex !== "female" ? " selected" : ""}>Male</option>
             <option value="female"${person.sex === "female" ? " selected" : ""}>Female</option>
           </select>
         </div>
+        <div class="cf-cell">
+          <label>Retirement age ${tooltipHTML("Used as the Retirement key date and as the default report period anchor.")}</label>
+          <input type="number" min="${person.currentAge}" max="${state.plan.endAge}" step="1" value="${person.retirementAge}"
+                 data-plan-field="${prefix}RetirementAge" />
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// New Tax details section (Input Usability spec, Commit 1) — Xplan's
+// own "Tax Details" division: residency, Medicare, work test, opening
+// capital losses, private hospital cover. Household dependentChildren
+// also lives in this section (renderTaxDetails, below) until Commit 3
+// replaces it with a real Children model.
+function personTaxDetailsHTML(prefix, person, title) {
+  const tp = person.taxProfile;
+  return `
+    <div class="person-block">
+      <div class="cf-section-title">${escapeHTML(title)}</div>
+      <div class="identity-grid">
         <div class="cf-cell">
           <label>Tax residency</label>
           <select data-plan-field="${prefix}Residency">
@@ -944,18 +1013,9 @@ function personBlockHTML(prefix, person, title) {
             <option value="exempt"${tp.medicareExempt ? " selected" : ""}>Exempt</option>
           </select>
         </div>
-        <div class="cf-cell">
-          <label>Retirement age
-            <span class="helper-inline">Used as the Retirement key date and as the default report period anchor.</span>
-          </label>
-          <input type="number" min="${person.currentAge}" max="${state.plan.endAge}" step="1" value="${person.retirementAge}"
-                 data-plan-field="${prefix}RetirementAge" />
-        </div>
         ${personSpansWorkTestAges(person) ? `
           <div class="cf-cell">
-            <label>Work test met (age 67–74)
-              <span class="helper-inline">Gates personal deductible super contributions in that age band. The work-test exemption itself is not modelled.</span>
-            </label>
+            <label>Work test met (age 67–74) ${tooltipHTML("Gates personal deductible super contributions in that age band. The work-test exemption itself is not modelled.")}</label>
             <label class="ptg-check">
               <input type="checkbox" data-plan-field="${prefix}WorkTestMet"${person.super?.workTestMet !== false ? " checked" : ""} />
               <span>Yes</span>
@@ -968,18 +1028,30 @@ function personBlockHTML(prefix, person, title) {
                  data-plan-field="${prefix}OpeningLosses" />
         </div>
         <div class="cf-cell">
-          <label>Private hospital cover
-            <span class="helper-inline">Suppresses the Medicare Levy Surcharge for this person entirely.</span>
-          </label>
+          <label>Private hospital cover ${tooltipHTML("Suppresses the Medicare Levy Surcharge for this person entirely.")}</label>
           <label class="ptg-check">
             <input type="checkbox"${person.privateHospitalCover !== false ? " checked" : ""} data-plan-field="${prefix}PrivateHospitalCover" />
             <span>Yes</span>
           </label>
         </div>
+      </div>
+    </div>
+  `;
+}
+
+// Division 293/296 election — moved beside the super accounts it draws
+// on (renderSuper, below), not in identity. Its own field mutation
+// listener lives on els.superSection alongside the account cards.
+function personDivTaxHTML(prefix, person, title) {
+  const owner = prefix === "client" ? "client" : "partner";
+  const ownerSuperAccounts = (state.plan.superAccounts ?? []).filter((s) => s.owner === owner && s.include);
+  const divTaxPaidFrom = person.super?.divTaxPaidFrom === "cash" ? "cash" : "super";
+  return `
+    <div class="person-block">
+      <div class="cf-section-title">${escapeHTML(title)}</div>
+      <div class="identity-grid">
         <div class="cf-cell">
-          <label>Division 293 / 296 tax paid from
-            <span class="helper-inline">The taxpayer may elect either; release from super is the common election.</span>
-          </label>
+          <label>Division 293 / 296 tax paid from ${tooltipHTML("The taxpayer may elect either; release from super is the common election.")}</label>
           <select data-plan-field="${prefix}DivTaxPaidFrom">
             <option value="super"${divTaxPaidFrom === "super" ? " selected" : ""}>Super (release authority)</option>
             <option value="cash"${divTaxPaidFrom === "cash" ? " selected" : ""}>Personal cash</option>
@@ -994,15 +1066,6 @@ function personBlockHTML(prefix, person, title) {
             </select>
           </div>
         ` : ""}
-        <div class="cf-cell">
-          <label>Eligible for Centrelink benefits
-            <span class="coming-soon-tag" title="No engine effect yet">Used when Centrelink modelling arrives</span>
-          </label>
-          <label class="ptg-check">
-            <input type="checkbox" data-plan-field="${prefix}Centrelink"${tp.centrelinkEligible ? " checked" : ""} />
-            <span>Yes</span>
-          </label>
-        </div>
       </div>
     </div>
   `;
@@ -1133,12 +1196,6 @@ function renderPlanBar() {
       </div>
     </div>
     <div class="plan-field">
-      <label>Dependent children
-        <span class="helper-inline">Raises the Medicare Levy Surcharge family threshold — $1,500 (indexed) per child after the first.</span>
-      </label>
-      <input type="number" min="0" max="20" step="1" value="${p.dependentChildren ?? 0}" data-plan-field="dependentChildren" />
-    </div>
-    <div class="plan-field">
       <label>Start</label>
       <div class="plan-start">
         <select data-plan-field="startMonth">
@@ -1168,8 +1225,25 @@ function renderPlanBar() {
     </div>
     <div class="plan-derived">${endResolutionText(p)} · ${planSummaryText(p)}</div>
     ${keyDatesBlockHTML()}
-    ${personBlockHTML("client", p.client, couple ? `Client — ${clientName()}` : clientName())}
-    ${couple ? personBlockHTML("partner", p.partner, `Partner — ${partnerName()}`) : ""}
+    ${personIdentityHTML("client", p.client, couple ? `Client — ${clientName()}` : clientName())}
+    ${couple ? personIdentityHTML("partner", p.partner, `Partner — ${partnerName()}`) : ""}
+  `;
+}
+
+// New Tax details section (Input Usability spec, Commit 1) — household
+// dependentChildren (until Commit 3 replaces it with a real Children
+// model) plus each person's tax-details block.
+function renderTaxDetails() {
+  const p = state.plan;
+  const couple = isCouple();
+  els.taxDetailsSection.innerHTML = `
+    <h2 class="section-heading">Tax details</h2>
+    <div class="plan-field">
+      <label>Dependent children ${tooltipHTML("Raises the Medicare Levy Surcharge family threshold — $1,500 (indexed) per child after the first.")}</label>
+      <input type="number" min="0" max="20" step="1" value="${p.dependentChildren ?? 0}" data-plan-field="dependentChildren" />
+    </div>
+    ${personTaxDetailsHTML("client", p.client, couple ? `Client — ${clientName()}` : clientName())}
+    ${couple ? personTaxDetailsHTML("partner", p.partner, `Partner — ${partnerName()}`) : ""}
   `;
 }
 
@@ -1187,7 +1261,16 @@ function maybeDefaultWorkspaceClientName(field) {
   }
 }
 
-wireDeferredDateCommit(els.planBar, (e) => {
+// Shared by every container that can render a `data-plan-field`
+// control (Input Usability spec, Commit 1 split Setup's single block
+// into three: Setup itself, the new Tax details section, and the
+// Division 293/296 election beside super accounts) — wired to all
+// three below. Field names are unchanged by the split (still e.g.
+// "clientResidency", "clientDivTaxPaidFrom"), so this ONE handler
+// reads `e.target.dataset.planField` and no-ops when the event came
+// from an unrelated control on the same container (data-sfield etc.),
+// regardless of which section's DOM the event actually bubbled from.
+function handlePlanFieldChange(e) {
   const field = e.target.dataset.planField;
   if (!field) return;
   const p = state.plan;
@@ -1206,11 +1289,10 @@ wireDeferredDateCommit(els.planBar, (e) => {
     taxProfile: {
       residency: field === `${prefix}Residency` ? e.target.value : cur.taxProfile.residency,
       medicareExempt: field === `${prefix}Medicare` ? e.target.value === "exempt" : cur.taxProfile.medicareExempt,
-      centrelinkEligible: field === `${prefix}Centrelink` ? e.target.checked : cur.taxProfile.centrelinkEligible,
       openingCapitalLosses: field === `${prefix}OpeningLosses` ? e.target.value : cur.taxProfile.openingCapitalLosses,
     },
     // Super carry-forward ledger etc. (Tier 1.2) — carried through
-    // untouched by every OTHER Setup field edit; the work-test toggle
+    // untouched by every OTHER field edit; the work-test toggle
     // (Commit 2/4) and the Division 293/296 release election are the
     // only ones that write it here.
     super: field === `${prefix}WorkTestMet`
@@ -1251,7 +1333,10 @@ wireDeferredDateCommit(els.planBar, (e) => {
   saveState();
   maybeDefaultWorkspaceClientName(field);
   renderAll();
-});
+}
+wireDeferredDateCommit(els.planBar, handlePlanFieldChange);
+els.taxDetailsSection.addEventListener("change", handlePlanFieldChange);
+els.superSection.addEventListener("change", handlePlanFieldChange);
 
 els.planBar.addEventListener("click", (e) => {
   const btn = e.target.closest('[data-plan-action="household"]');
@@ -3614,9 +3699,19 @@ function renderSuper() {
         (cf.superWithdrawals ?? []).map(superWithdrawalRowHTML).join(""))}
     </div>
   `;
+  // Division 293/296 election (Input Usability spec, Commit 1) — moved
+  // here from identity, beside the accounts it draws on. Shown
+  // regardless of whether any account exists yet (the election is a
+  // per-person preference, not tied to a specific account).
+  const couple = isCouple();
+  const divTaxHTML = `
+    ${personDivTaxHTML("client", state.plan.client, couple ? `Client — ${clientName()}` : clientName())}
+    ${couple ? personDivTaxHTML("partner", state.plan.partner, `Partner — ${partnerName()}`) : ""}
+  `;
   els.superSection.innerHTML = accounts.length === 0
     ? `
       <h2 class="section-heading">Super</h2>
+      ${divTaxHTML}
       ${pageEmptyHTML(
         "Add a super account to model accumulation-phase superannuation — balances, contributions, caps, and withdrawals.",
         `<button class="add-row-btn" type="button" data-super-action="add-account">+ Add super account</button>`
@@ -3624,6 +3719,7 @@ function renderSuper() {
     `
     : `
       <h2 class="section-heading">Super</h2>
+      ${divTaxHTML}
       <div id="superAccounts" class="portfolio-stack">${cards}</div>
       <div class="portfolio-actions">
         <button class="btn-text" type="button" data-super-action="add-account">+ Add super account</button>
@@ -9166,6 +9262,7 @@ function renderAll() {
   // cheap (the engine is sub-millisecond at this size).
   recomputeProjection();
   renderPlanBar();
+  renderTaxDetails();
   renderAssets();
   renderCashflows();
   renderSettings();

@@ -554,24 +554,29 @@ describe("schema v4 migration (C3)", () => {
     const s = hydrate(JSON.stringify(v3), PROFILES);
     expect(s).not.toBeNull();
     expect(s.schemaVersion).toBe(SCHEMA_VERSION);
-    const def = { residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 };
+    const def = { residency: "resident", medicareExempt: false, openingCapitalLosses: 0 };
     expect(s.plan.client.taxProfile).toEqual(def);
     expect(s.plan.partner.taxProfile).toEqual(def);
   });
 
   it("explicit v4 tax profiles survive a serialize/hydrate round trip", () => {
     const s = defaultState(PROFILES, NOW);
-    s.plan.client.taxProfile = { residency: "nonResident", medicareExempt: true, centrelinkEligible: true, openingCapitalLosses: 2500 };
+    s.plan.client.taxProfile = { residency: "nonResident", medicareExempt: true, openingCapitalLosses: 2500 };
     const back = hydrate(serialize(s), PROFILES);
     expect(back.plan.client.taxProfile)
-      .toEqual({ residency: "nonResident", medicareExempt: true, centrelinkEligible: true, openingCapitalLosses: 2500 });
+      .toEqual({ residency: "nonResident", medicareExempt: true, openingCapitalLosses: 2500 });
   });
 
   it("clampTaxProfile defends junk", () => {
     expect(clampTaxProfile(null))
-      .toEqual({ residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 });
+      .toEqual({ residency: "resident", medicareExempt: false, openingCapitalLosses: 0 });
     expect(clampTaxProfile({ residency: "martian", medicareExempt: "yes", centrelinkEligible: 1, openingCapitalLosses: -5 }))
-      .toEqual({ residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 });
+      .toEqual({ residency: "resident", medicareExempt: false, openingCapitalLosses: 0 });
+  });
+
+  it("Input Usability spec, Commit 1: centrelinkEligible is dropped entirely, even if present in raw input", () => {
+    expect(clampTaxProfile({ residency: "resident", medicareExempt: false, centrelinkEligible: true, openingCapitalLosses: 0 }))
+      .not.toHaveProperty("centrelinkEligible");
   });
 });
 

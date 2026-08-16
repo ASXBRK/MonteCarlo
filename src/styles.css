@@ -1771,6 +1771,82 @@ html, body {
   color: var(--ink-soft);
 }
 
+/* --- tooltip affordance (Input Usability spec, Commit 1) ---
+   A field's explanatory sentence moves behind a small (i) icon rather
+   than rendering permanently — hover on desktop (:hover/:focus-within,
+   so keyboard tab access works too), tap on touch (a delegated click
+   listener toggles .tt-open — see main.js's tooltipHTML/wireTooltips).
+   Two exceptions stay inline instead of using this: the derived age
+   beside date of birth, and a resolved anchor value beneath a date-ref
+   select — both change what the field MEANS, not merely explain it. */
+.tt-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+}
+.tt-icon {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid var(--ink-soft);
+  background: var(--card);
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 13px;
+  text-align: center;
+  cursor: pointer;
+  padding: 0;
+}
+.tt-bubble {
+  position: absolute;
+  z-index: 30;
+  bottom: 130%;
+  left: 0;
+  width: 240px;
+  max-width: 60vw;
+  background: var(--ink);
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1.4;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+}
+.tt-wrap:hover .tt-bubble,
+.tt-wrap:focus-within .tt-bubble,
+.tt-wrap.tt-open .tt-bubble {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+.tt-bubble .tt-unreviewed {
+  display: block;
+  margin-top: 4px;
+  color: #ffd479;
+  font-style: italic;
+}
+
+/* --- identity/tax-details person blocks — two columns wide, one
+   column narrow (not the dense four-column .person-grid used
+   elsewhere for cashflow-style rows). */
+.identity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 10px 20px;
+  align-items: end;
+}
+@media (max-width: 700px) {
+  .identity-grid { grid-template-columns: 1fr; }
+}
+
 .cf-index-extra { position: relative; }
 
 .index-total {

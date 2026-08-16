@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -41,17 +41,18 @@ export function uid(prefix = "id") {
 // --- defaults ---------------------------------------------------------
 
 // Per-person tax profile (C3, extended D1 with opening carry-forward
-// capital losses). centrelinkEligible is captured but inert until
+// capital losses). Input Usability spec, Commit 1: centrelinkEligible
+// removed entirely — it was captured but inert (drove nothing) and is
+// noise in an already-dense form; reintroduce it properly when
 // Centrelink modelling arrives.
 export function defaultTaxProfile() {
-  return { residency: "resident", medicareExempt: false, centrelinkEligible: false, openingCapitalLosses: 0 };
+  return { residency: "resident", medicareExempt: false, openingCapitalLosses: 0 };
 }
 
 export function clampTaxProfile(raw) {
   return {
     residency: raw?.residency === "nonResident" ? "nonResident" : "resident",
     medicareExempt: raw?.medicareExempt === true,
-    centrelinkEligible: raw?.centrelinkEligible === true,
     openingCapitalLosses: clampNumber(raw?.openingCapitalLosses, 0),
   };
 }
@@ -1893,6 +1894,16 @@ function migrateV12toV13(raw) {
   return { ...raw, schemaVersion: 13 };
 }
 
+// v13 → v14 (Input Usability spec, Commit 1): eligibleForCentrelinkBenefits
+// (taxProfile.centrelinkEligible) is removed entirely — it drove nothing
+// and is reintroduced properly when Centrelink modelling arrives.
+// clampTaxProfile already stops reading/writing it, so a stored value
+// is silently dropped on the next clamp; no other field changes shape,
+// so again just the version gate.
+function migrateV13toV14(raw) {
+  return { ...raw, schemaVersion: 14 };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -1912,6 +1923,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 10) raw = migrateV10toV11(raw);
     if (raw.schemaVersion === 11) raw = migrateV11toV12(raw);
     if (raw.schemaVersion === 12) raw = migrateV12toV13(raw);
+    if (raw.schemaVersion === 13) raw = migrateV13toV14(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
