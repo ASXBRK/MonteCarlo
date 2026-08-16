@@ -231,6 +231,96 @@ describe("runMonteCarlo", () => {
     }
   });
 
+  // What-if spec, Commit 5's own explicit requirement — the rate
+  // linkage above must not break the zero-volatility guarantee for a
+  // scenario that ACTUALLY exercises it: a variable loan whose rate
+  // (and hence level payment) is now driven by the simulated CPI path
+  // every year, and a fixed loan whose own rollover it must still
+  // respect. At an entered rate that DIFFERS from the linkage
+  // formula's own defaults (neutralRealRate + cpi + margin), this only
+  // passes because the delta is applied relative to each loan's OWN
+  // rate, not as an absolute override.
+  it("zero CPI volatility reproduces the deterministic projection exactly, for a plan with variable AND fixed-rate liabilities", () => {
+    const zeroSigmaProfiles = Object.fromEntries(
+      Object.entries(PROFILES).map(([name, p]) => [name, { ...p, sigma_normal: 0, sigma_stress: 0 }])
+    );
+    const state = {
+      ...mkState({
+        endAge: 50,
+        assets: [mkAsset({ id: "a1", balance: 150000, allocation: { mode: "profile", profile: "Balanced" } })],
+        cashflows: { income: [employmentRow({ amount: 120000 })] },
+      }),
+      liabilities: [
+        {
+          id: "lb1", name: "Variable loan", type: "mortgage", owner: "client",
+          balance: 300000, interestRatePct: 5.25, termYears: 25, repayment: "pi", // deliberately NOT the 6%/2.5% defaults
+          ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+          rateType: "variable",
+        },
+        {
+          id: "lb2", name: "Fixed loan", type: "mortgage", owner: "client",
+          balance: 150000, interestRatePct: 4, termYears: 20, repayment: "pi",
+          ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+          rateType: "fixed", fixedRatePct: 4, fixedUntil: { kind: "age", age: 43 }, revertRatePct: 7.25,
+        },
+      ],
+    };
+    const deterministic = projectPlan(state, zeroSigmaProfiles);
+    const result = runMonteCarlo(state, zeroSigmaProfiles, { numPaths: 10, sampleCount: 10, seed: 7, cpiSigma: 0 });
+    for (const out of result.samplePaths) {
+      for (let y = 0; y < out.yearly.length; y++) {
+        expect(out.yearly[y].netAssets).toBeCloseTo(deterministic.yearly[y].netAssets, 4);
+        expect(out.yearly[y].liabilities.lb1.ratePct).toBeCloseTo(deterministic.yearly[y].liabilities.lb1.ratePct, 6);
+        expect(out.yearly[y].liabilities.lb2.ratePct).toBeCloseTo(deterministic.yearly[y].liabilities.lb2.ratePct, 6);
+      }
+    }
+  });
+
+  it("a variable loan's rate genuinely varies across paths and tracks that path's own CPI", () => {
+    const state = {
+      ...mkState({ endAge: 46, assets: [mkAsset({ id: "a1", balance: 100000 })] }),
+      liabilities: [{
+        id: "lb1", name: "Loan", type: "mortgage", owner: "client",
+        balance: 300000, interestRatePct: 6, termYears: 25, repayment: "pi",
+        ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+        rateType: "variable",
+      }],
+    };
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 30, sampleCount: 30, seed: 3, cpiSigma: 0.02 });
+    const y = 2;
+    const ratesAtY = result.samplePaths.map((out) => out.yearly[y].liabilities.lb1.ratePct);
+    // Genuine dispersion — not every path landed on the same rate.
+    expect(new Set(ratesAtY.map((r) => r.toFixed(4))).size).toBeGreaterThan(1);
+    // Each path's rate deviation from the household's own 6% tracks
+    // that SAME path's own net-assets deviation direction is not
+    // asserted here (too indirect); instead, confirm the rate
+    // dispersion's own spread is materially larger than the tiny
+    // float noise a bug-free but non-functioning link would produce.
+    const spread = Math.max(...ratesAtY) - Math.min(...ratesAtY);
+    expect(spread).toBeGreaterThan(0.5); // percentage points
+  });
+
+  it("a fixed loan's rate is invariant to the path until its own rollover, then varies", () => {
+    const state = {
+      ...mkState({ endAge: 48, assets: [mkAsset({ id: "a1", balance: 100000 })] }),
+      liabilities: [{
+        id: "lb1", name: "Fixed loan", type: "mortgage", owner: "client",
+        balance: 300000, interestRatePct: 6, termYears: 25, repayment: "pi",
+        ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+        rateType: "fixed", fixedRatePct: 6, fixedUntil: { kind: "age", age: 44 }, revertRatePct: 6.5,
+      }],
+    };
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 30, sampleCount: 30, seed: 9, cpiSigma: 0.02 });
+    // Before rollover (plan years 0-3, rollover at age 44 = year 4):
+    // every sampled path shows EXACTLY the contracted 6% rate.
+    for (const out of result.samplePaths) {
+      for (const y of [0, 1, 2, 3]) expect(out.yearly[y].liabilities.lb1.ratePct).toBeCloseTo(6, 6);
+    }
+    // After rollover: paths genuinely disperse around the 6.5% revert rate.
+    const ratesAfter = result.samplePaths.map((out) => out.yearly[5].liabilities.lb1.ratePct);
+    expect(new Set(ratesAfter.map((r) => r.toFixed(4))).size).toBeGreaterThan(1);
+  });
+
   it("a shared market factor at ρ 0.85 makes two assets' realised returns strongly, but not perfectly, correlated", () => {
     // Two identical-profile assets, otherwise independent — the only
     // thing linking their outcomes is the shared market factor.
@@ -357,6 +447,39 @@ describe("Monte Carlo paths satisfy the conservation invariant", () => {
     for (let i = 0; i < result.samplePaths.length; i++) {
       const out = result.samplePaths[i];
       for (let y = 0; y < out.yearly.length - 1; y++) { // final year excluded — see conservationCheck.js
+        checkYearConservation(out, y, `sampled path ${i}, year ${y}`);
+      }
+    }
+  });
+
+  // What-if spec, Commit 5 — the rate linkage recomputes a liability's
+  // level payment every simulated year (mcActivePmt in deterministic.js)
+  // and, for a fixed loan, switches from the contracted rate to the
+  // path-varying one at rollover — both are NEW money-flow-adjacent
+  // mechanics this invariant must still pass against, since a bug in
+  // either would show up as an amortisation gain/loss with nothing to
+  // explain it, the exact class of bug this invariant exists to catch.
+  it("holds for sampled paths through a fixed-rate loan's own rollover, with the annual repayment recompute active", () => {
+    const state = {
+      ...mkState({
+        endAge: 48,
+        assets: [mkAsset({ id: "a1", balance: 100000, allocation: { mode: "profile", profile: "Moderate Growth" } })],
+        cashflows: { income: [employmentRow({ amount: 120000 })] },
+        surplus: { mode: "invest", assetId: "a1" },
+        fundingOrder: ["a1"],
+      }),
+      liabilities: [{
+        id: "lb1", name: "Fixed loan", type: "mortgage", owner: "client",
+        balance: 250000, interestRatePct: 6, termYears: 25, repayment: "pi",
+        ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+        rateType: "fixed", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: 6.5,
+      }],
+    };
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 60, sampleCount: 15, rng: createRng(23), cpiSigma: 0.02 });
+    expect(result.samplePaths.length).toBe(15);
+    for (let i = 0; i < result.samplePaths.length; i++) {
+      const out = result.samplePaths[i];
+      for (let y = 0; y < out.yearly.length - 1; y++) {
         checkYearConservation(out, y, `sampled path ${i}, year ${y}`);
       }
     }

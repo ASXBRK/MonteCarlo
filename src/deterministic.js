@@ -139,6 +139,15 @@ function ownerShares(asset, couple) {
 // expectation — bit-identical to every existing regression gate.
 export function projectPlan(state, profiles = PROFILES, mc = null) {
   const shockFor = mc?.shockFor ?? (() => 0);
+  // Monte Carlo rate linkage (What-if spec, Commit 5): the deviation
+  // (in annual, real terms) a given plan year's rate should move by,
+  // relative to whatever the deterministic rate already is — Monte
+  // Carlo only, always absent for a deterministic run (mc null). See
+  // the liability loop below for how it's applied (added to the rate,
+  // never replacing it — same convention as shockFor for asset
+  // returns) and monteCarlo.js's own header for the formula and the
+  // two configurable parameters behind it.
+  const mortgageRateDeltaForYear = mc?.mortgageRateDeltaForYear ?? null;
   const schedule = buildSchedules(state);
   const cpi = state.assumptions.cpi;
   const bracketMode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
@@ -443,6 +452,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // loanBal (measurement vs real pass) since it's derived from the
   // path-dependent balance AT that month, not a static setup value.
   const postRolloverPmt = {};
+  // Monte Carlo rate linkage (What-if spec, Commit 5) — a SEPARATE
+  // cache from postRolloverPmt above, used ONLY when
+  // mortgageRateDeltaForYear is provided: the level payment recomputes
+  // once every July (the same cadence the rate itself can move, since
+  // CPI is drawn once per plan year), not just once at rollover. A
+  // level-payment schedule recomputed at an UNCHANGED rate reproduces
+  // the IDENTICAL figure every time (amortisation's own self-
+  // consistency property), so this is a genuine no-op whenever the
+  // rate hasn't actually moved — which is always true for a
+  // deterministic run (never reaches this branch at all) and for a
+  // zero-CPI-volatility Monte Carlo path (reaches it, but recomputes
+  // the same value every July), satisfying "zero volatility collapses
+  // to the deterministic projection exactly" by construction rather
+  // than by coincidence.
+  const mcActivePmt = {};
+  const mcJulyMonths = mortgageRateDeltaForYear
+    ? new Set(Array.from({ length: schedule.planYears }, (_, y) => julyOf(y)).filter((m) => m != null))
+    : null;
   for (const l of liabs) {
     const termM = termMonths(l);
     const ioM = ioMonths(l);
@@ -1347,19 +1374,43 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // (fixed or plain variable) from setup, so a variable loan
         // (rolloverMonth stays null) takes this branch's `false` arm
         // every month and is bit-identical to before this feature.
-        const rate = md.rolloverMonth != null && m >= md.rolloverMonth ? md.revertRate : md.i;
-        // The payment recomputes ONCE, at the trigger month, over the
-        // CURRENT balance and remaining term — then holds fixed exactly
-        // like the original pre-rollover payment ("the step change in
-        // repayment is the point of the feature — do not smooth it").
-        // Guarded by postRolloverPmt[l.id] == null so a later month
-        // revisiting this branch (there is none within a single pass,
-        // but the measurement/real replay reaches this month twice per
-        // year) doesn't re-derive it from an already-amortised balance.
-        if (md.recomputeTriggerMonth != null && m >= md.recomputeTriggerMonth && postRolloverPmt[l.id] == null) {
-          postRolloverPmt[l.id] = levelPayment(b0, md.revertRate, md.termM - mRel);
+        const baseRate = md.rolloverMonth != null && m >= md.rolloverMonth ? md.revertRate : md.i;
+        // Monte Carlo rate linkage (What-if spec, Commit 5): the delta
+        // is ADDED to the deterministic rate, never replaces it (same
+        // convention as shockFor for asset returns) — a fixed loan's
+        // own CONTRACTED rate stays untouched before its own rollover
+        // (the whole point of a fixed loan), exactly the differential
+        // Commit 2's deterministic rate shocks already established;
+        // every other case (a variable loan, or a fixed one past its
+        // own rollover) tracks the simulated path's own CPI deviation.
+        const isFixedPreRollover = md.rateType === "fixed" && (md.rolloverMonth == null || m < md.rolloverMonth);
+        const rateDelta = mortgageRateDeltaForYear && !isFixedPreRollover
+          ? mortgageRateDeltaForYear(schedule.yearOfMonth[m]) / 12
+          : 0;
+        const rate = baseRate + rateDelta;
+        let pmtPI;
+        if (mortgageRateDeltaForYear && !isFixedPreRollover) {
+          // See mcActivePmt's own declaration above for why recomputing
+          // every July is safe even when the rate never actually moves.
+          if (mRel >= md.ioM && (mcActivePmt[l.id] == null || mcJulyMonths.has(m))) {
+            mcActivePmt[l.id] = levelPayment(b0, rate, md.termM - mRel);
+          }
+          pmtPI = mcActivePmt[l.id] ?? md.pmtPI;
+        } else {
+          // Unchanged from before Commit 5 — recomputes exactly ONCE, at
+          // the trigger month, over the CURRENT balance and remaining
+          // term — then holds fixed exactly like the original
+          // pre-rollover payment ("the step change in repayment is the
+          // point of the feature — do not smooth it"). Guarded by
+          // postRolloverPmt[l.id] == null so a later month revisiting
+          // this branch (there is none within a single pass, but the
+          // measurement/real replay reaches this month twice per year)
+          // doesn't re-derive it from an already-amortised balance.
+          if (md.recomputeTriggerMonth != null && m >= md.recomputeTriggerMonth && postRolloverPmt[l.id] == null) {
+            postRolloverPmt[l.id] = levelPayment(b0, md.revertRate, md.termM - mRel);
+          }
+          pmtPI = postRolloverPmt[l.id] ?? md.pmtPI;
         }
-        const pmtPI = postRolloverPmt[l.id] ?? md.pmtPI;
         const interest = (b0 - offsetNom) * rate;
         const contractual = mRel < md.ioM ? interest : pmtPI;
         const payment = Math.min(Math.max(contractual, 0), b0 + interest);
@@ -1954,6 +2005,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // own, or the real pass would start with an already-recomputed
     // payment for months BEFORE it actually reaches the trigger.
     const pmtSnap = { ...postRolloverPmt };
+    // Monte Carlo rate linkage (Commit 5): mcActivePmt is path-dependent
+    // the exact same way postRolloverPmt is (derived from loanBal at
+    // whatever month it was last recomputed) — same snapshot/restore
+    // requirement, same reason.
+    const mcPmtSnap = { ...mcActivePmt };
     const propValSnap = { ...propVal };
     const propPoolSnap = { ...propPools };
     const wcaBalSnap = wcaBal;
@@ -1967,6 +2023,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     Object.assign(loanBal, loanSnap);
     for (const k of Object.keys(postRolloverPmt)) delete postRolloverPmt[k];
     Object.assign(postRolloverPmt, pmtSnap);
+    for (const k of Object.keys(mcActivePmt)) delete mcActivePmt[k];
+    Object.assign(mcActivePmt, mcPmtSnap);
     Object.assign(propVal, propValSnap);
     propPools = propPoolSnap;
     wcaBal = wcaBalSnap;

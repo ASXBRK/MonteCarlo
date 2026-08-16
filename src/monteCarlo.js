@@ -33,6 +33,36 @@
 // was previously certain (every path used the same assumed cpi), which
 // silently understated dispersion for geared clients.
 //
+// Interest rates (What-if spec, Commit 5): NOT modelled as an
+// independent stochastic process — driven off the SAME simulated CPI
+// path above, since central banks respond to inflation and this gives
+// the correlation for free. An independent process would permit
+// economically implausible paths (high inflation with low rates, which
+// is not a world that exists). Formula:
+//
+//   marketRate(path, year) = neutralRealRate + cpi(path, year) + margin
+//
+// with neutralRealRate/margin the two configurable parameters above.
+// Applied as a DEVIATION from each liability's own deterministic rate
+// (deterministic.js's mortgageRateDeltaForYear — see that module's own
+// comment), not as an absolute override: marketRate(path, year) minus
+// marketRate at the plan's ASSUMED (mean) CPI algebraically reduces to
+// exactly (cpi(path, year) − cpiMean), so neutralRealRate and margin
+// cancel out of the applied delta and every household's own actual
+// loan rate is always the anchor — this is what makes "zero CPI
+// volatility reproduces the deterministic projection exactly" hold
+// regardless of what rate a given loan was entered at, not just for
+// loans that happen to match the default assumption. The delta applies
+// to variable loans immediately and to fixed loans only after their
+// own rollover (the same differential Commit 2's deterministic rate
+// shocks established), so a fixed-rate client's fan chart is genuinely
+// narrower during the fixed period. Two consequences pull in opposite
+// directions, and both come through in the data rather than being
+// asserted: a high-inflation path carries a higher rate (repayments
+// rise, since the level payment recomputes each simulated year to
+// reflect it — see deterministic.js), but also erodes the loan's fixed
+// nominal balance faster in real terms.
+//
 // Seeding: every random draw this module makes — CPI, regime
 // transitions, correlated return shocks, even which paths get kept as
 // full samples — comes from ONE rng stream per run, in a fixed order,
@@ -67,6 +97,18 @@ export const DEFAULT_NUM_PATHS = 2000;
 export const MARKET_RHO = 0.85;
 export const DEFAULT_CPI_SIGMA = 0.01; // 1.0 percentage point, annual
 export const DEFAULT_CPI_FLOOR = -0.01; // −1%
+// Interest rate linkage (What-if spec, Commit 5) — see this module's
+// own header for the full design rationale. Defaults chosen so that,
+// combined, they're consistent with the firm's default mortgage rate
+// assumption (6.0%) at the default CPI assumption (2.5%): 1.0% + 2.5%
+// + 2.5% = 6.0%. neutralRealRate (≈1%) approximates the RBA's own
+// long-run neutral real cash rate; margin (≈2.5%) approximates a
+// variable home loan's typical spread over the cash rate. Neither
+// figure needs to be precise — what matters for the model is that
+// rates move dollar-for-dollar with CPI surprises (see
+// mortgageRateDeltaForYear below), not their absolute level.
+export const DEFAULT_NEUTRAL_REAL_RATE = 0.01;
+export const DEFAULT_MORTGAGE_MARGIN = 0.025;
 const SQRT12 = Math.sqrt(12);
 // [key, quantile] — 10/25/50/75/90, not sim.js's legacy 05/25/50/75/95:
 // the 5th/95th tails are wide enough, on a 40+ year tax-aware
@@ -257,6 +299,9 @@ function generatePathShocks(holdings, months, rng, rho) {
 //   rho         — market-factor correlation (default MARKET_RHO, 0.85)
 //   cpiSigma    — annual CPI draw's σ (default DEFAULT_CPI_SIGMA, 1.0%)
 //   cpiFloor    — annual CPI draw's floor (default DEFAULT_CPI_FLOOR, −1%)
+//   neutralRealRate, mortgageMargin — the interest-rate-linkage
+//     parameters (see this module's own header comment); defaults
+//     DEFAULT_NEUTRAL_REAL_RATE (1.0%) / DEFAULT_MORTGAGE_MARGIN (2.5%)
 //   onProgress(pathsDone, numPaths) — called periodically (throttled to
 //     roughly every 1% of numPaths, never more than once per path) as
 //     paths complete. The worker (monteCarloWorker.js) forwards this to
@@ -273,6 +318,8 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
     rho = MARKET_RHO,
     cpiSigma = DEFAULT_CPI_SIGMA,
     cpiFloor = DEFAULT_CPI_FLOOR,
+    neutralRealRate = DEFAULT_NEUTRAL_REAL_RATE,
+    mortgageMargin = DEFAULT_MORTGAGE_MARGIN,
     onProgress = null,
   } = options;
   const progressEvery = Math.max(1, Math.floor(numPaths / 100));
@@ -300,7 +347,15 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
   for (let path = 0; path < numPaths; path++) {
     const cpiPath = generatePathCpi(years, rng, { mean: cpiMean, sigma: cpiSigma, floor: cpiFloor });
     const shockFor = generatePathShocks(holdings, months, rng, rho);
-    const out = projectPlan(state, profiles, { shockFor, cpiForYear: (y) => cpiPath[y] });
+    // Interest rate linkage (What-if spec, Commit 5) — see this
+    // module's own header for the full formula and why neutralRealRate/
+    // margin cancel out of the applied delta (leaving it as exactly the
+    // path's own CPI deviation from the mean) while still being named,
+    // configurable parameters describing the model's economic story.
+    const mortgageRateForYear = (y) => neutralRealRate + cpiPath[y] + mortgageMargin;
+    const mortgageRateAtMeanCpi = neutralRealRate + cpiMean + mortgageMargin;
+    const mortgageRateDeltaForYear = (y) => mortgageRateForYear(y) - mortgageRateAtMeanCpi;
+    const out = projectPlan(state, profiles, { shockFor, cpiForYear: (y) => cpiPath[y], mortgageRateDeltaForYear });
     const rowBase = path * years;
     for (let y = 0; y < years; y++) netAssetsAll[rowBase + y] = out.yearly[y].netAssets;
     // The single, locked ruin definition (see the docblock above): ANY

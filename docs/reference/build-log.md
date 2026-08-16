@@ -560,12 +560,67 @@ This closes all six commits of docs/specs/13-implementation-rates-equity-compari
   the same factor at every year of the projection; both shocks produce
   unfunded cashflow in scenarios sized to break affordability, and
   never in scenarios that shouldn't.
+- Commit 5 of docs/specs/14-what-if.md, **Monte Carlo: interest rates
+  driven by the simulated CPI path** — interest rates are NOT modelled
+  as an independent stochastic process; they're driven off the SAME
+  simulated CPI path each Monte Carlo path already generates:
+  `marketRate(path, year) = neutralRealRate + cpi(path, year) + margin`
+  (two new configurable parameters, defaults 1.0%/2.5%, chosen so their
+  sum with the 2.5% CPI default reproduces the 6.0% mortgage rate
+  default). Applied as a DEVIATION from each loan's own deterministic
+  rate rather than an absolute override — the formula's own
+  neutralRealRate/margin terms algebraically cancel out of the applied
+  delta, leaving exactly `cpi(path, year) − cpiMean`, which is what
+  makes "zero CPI volatility reproduces the deterministic projection
+  exactly" hold for ANY loan regardless of what rate it was entered at,
+  not just ones that happen to match the default assumption. Applied to
+  variable loans immediately and to fixed loans only after their own
+  rollover (Commit 2's differential, again) via a new
+  `mc.mortgageRateDeltaForYear` parameter alongside `shockFor`/
+  `cpiForYear` — always absent for a deterministic run, so the change
+  is zero-risk there (confirmed: the full suite stayed bit-identical
+  throughout implementation). The level payment now recomputes once
+  every simulated July (not just once at rollover) whenever this
+  parameter is active, via a new `mcActivePmt` cache alongside
+  `postRolloverPmt` (same measurement/real-pass snapshot-and-restore
+  treatment) — this is what lets "repayments rise" under a high-
+  inflation path show up as a genuine, observable figure rather than
+  only the interest component moving; recomputing at an UNCHANGED rate
+  reproduces the IDENTICAL payment every time (amortisation's own
+  self-consistency), which is also why this is safe at zero CPI
+  volatility. Parameters modal updated: documents the formula, the two
+  new parameters and their calibration, and states plainly that rates
+  are a function of simulated inflation, not an independent process —
+  also corrected a stale "one constant interest rate for the whole
+  projection" claim left over from before fixed-rate rollover (Commit 1
+  of this same spec) already superseded it. Tested: a variable loan's
+  rate moves by exactly the delta every year; a fixed loan ignores the
+  delta entirely before its own rollover and applies it after; the
+  level payment reproduces the identical NOMINAL figure when the rate
+  doesn't change and genuinely rises when it does; a null/absent mc
+  leaves every liability figure bit-identical to before this commit;
+  across real Monte Carlo runs — rate genuinely varies path to path and
+  tracks that path's own CPI; a fixed loan's rate is invariant across
+  paths until its own rollover, then varies; zero CPI volatility
+  reproduces the deterministic projection exactly for a plan with BOTH
+  a variable and a fixed-rate liability (entered at rates that
+  deliberately don't match the linkage formula's own defaults); the
+  conservation invariant holds across sampled paths through a fixed
+  loan's own rollover with the annual repayment recompute active
+  (stress-tested across 16 additional seeds/1,920 checks beyond the
+  committed test suite); seeded reproducibility (already-existing
+  regression coverage, confirmed still byte-identical with the new code
+  path active). Timing impact measured directly (not assumed): a
+  2,000-path run with one liability went from ~4.3-4.6s to ~4.7-5.3s
+  (roughly 10-15% slower) — reported here per the spec's own
+  instruction, not optimised away.
+
+This closes all five commits of docs/specs/14-what-if.md.
 
 ### In flight
-Spec 14 Commit 5 (Monte Carlo rate uncertainty driven by the simulated
-CPI path); super threshold indexation per figure (AWOTE / CPI /
-unindexed, with nominal rounding), then Division 296, then Monte Carlo
-over the full scenario.
+Super threshold indexation per figure (AWOTE / CPI / unindexed, with
+nominal rounding), then Division 296, then Monte Carlo over the full
+scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary

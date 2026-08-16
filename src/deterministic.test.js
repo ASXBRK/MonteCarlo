@@ -4462,3 +4462,84 @@ describe("Where the money went: net worth decomposition (Implementation/Rates sp
     }
   });
 });
+
+// --- Monte Carlo rate linkage (What-if spec, Commit 5) — direct,
+// precisely-controlled tests of deterministic.js's own mc.
+// mortgageRateDeltaForYear handling, independent of monteCarlo.js's
+// stochastic CPI generation (that module's own tests cover the
+// end-to-end path-varies-with-CPI behaviour). A hand-crafted mc object
+// lets these tests assert EXACT rates/repayments rather than merely
+// "varies somehow".
+describe("Monte Carlo rate linkage (What-if spec, Commit 5)", () => {
+  const loan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 100000, interestRatePct: 6, termYears: 10, repayment: "pi",
+    ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+    extraRepayments: [], oneOffRepayments: [],
+    rateType: "variable", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 },
+    revertRatePct: null, commencedOn: null,
+    ...over,
+  });
+  const bigAsset = () => mkAsset({ allocation: zeroRealAlloc(), balance: 2000000 });
+  const withLoan = (l, years = 6) => ({
+    ...mkState({ endAge: 40 + years, assets: [bigAsset()], fundingOrder: [] }),
+    liabilities: [l],
+  });
+
+  it("a variable loan's rate moves by exactly the mc delta, every year", () => {
+    const state = withLoan(loan({ rateType: "variable", interestRatePct: 6 }));
+    const mc = { mortgageRateDeltaForYear: (y) => [0, 0.01, -0.02, 0, 0, 0][y] ?? 0 };
+    const out = projectPlan(state, undefined, mc);
+    expect(out.yearly[0].liabilities.lb1.ratePct).toBeCloseTo(6, 6);
+    expect(out.yearly[1].liabilities.lb1.ratePct).toBeCloseTo(7, 6); // +1pp
+    expect(out.yearly[2].liabilities.lb1.ratePct).toBeCloseTo(4, 6); // −2pp
+    expect(out.yearly[3].liabilities.lb1.ratePct).toBeCloseTo(6, 6); // back to baseline
+  });
+
+  it("a fixed loan's rate ignores the mc delta entirely before its own rollover, and applies it after", () => {
+    const l = loan({ rateType: "fixed", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: 6.5 });
+    const state = withLoan(l, 6);
+    const mc = { mortgageRateDeltaForYear: () => 0.02 }; // +2pp every year, if it applied
+    const out = projectPlan(state, undefined, mc);
+    for (const y of [0, 1, 2]) expect(out.yearly[y].liabilities.lb1.ratePct).toBeCloseTo(6, 6); // untouched
+    expect(out.yearly[3].liabilities.lb1.ratePct).toBeCloseTo(8.5, 6); // 6.5 + 2 after rollover
+  });
+
+  it("the level payment recomputes each year the rate actually differs, and reproduces the SAME NOMINAL payment when it doesn't", () => {
+    const l = loan({ rateType: "variable", interestRatePct: 6, termYears: 10 });
+    const state = withLoan(l, 6);
+    const cpi = state.assumptions.cpi;
+    const constantMc = { mortgageRateDeltaForYear: () => 0.015 }; // constant +1.5pp, every year
+    const risingMc = { mortgageRateDeltaForYear: (y) => 0.01 * y }; // rises every year
+    const outConstant = projectPlan(state, undefined, constantMc);
+    const outRising = projectPlan(state, undefined, risingMc);
+    // Real-dollar repayment figures deflate by CPI every year even at a
+    // constant NOMINAL payment — re-inflate by (1+cpi)^y before
+    // comparing, or a genuinely unchanged nominal payment would look
+    // like it's shrinking.
+    const nominalPmt = (out, y) => (out.yearly[y].liabilities.lb1.interest + out.yearly[y].liabilities.lb1.principal) * Math.pow(1 + cpi, y);
+    // A CONSTANT (non-zero) delta still recomputes the payment once at
+    // the first opportunity, but every subsequent year's recompute
+    // reproduces the IDENTICAL nominal figure — amortisation's own
+    // self-consistency at an unchanged rate.
+    const constantPmts = [1, 2, 3, 4].map((y) => nominalPmt(outConstant, y));
+    for (let i = 1; i < constantPmts.length; i++) expect(constantPmts[i]).toBeCloseTo(constantPmts[0], 0);
+    // A RISING delta produces a GENUINELY rising NOMINAL repayment year
+    // over year — "repayments rise" is a real, observable consequence,
+    // not just interest.
+    const risingPmts = [1, 2, 3, 4].map((y) => nominalPmt(outRising, y));
+    for (let i = 1; i < risingPmts.length; i++) expect(risingPmts[i]).toBeGreaterThan(risingPmts[i - 1]);
+  });
+
+  it("a null/absent mc leaves every liability figure bit-identical to before Commit 5", () => {
+    const l = loan({ rateType: "fixed", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: 8 });
+    const state = withLoan(l, 6);
+    const withoutMc = projectPlan(state);
+    const withNullMc = projectPlan(state, undefined, null);
+    const withEmptyMc = projectPlan(state, undefined, {});
+    for (let y = 0; y < withoutMc.yearly.length; y++) {
+      expect(withNullMc.yearly[y].liabilities.lb1.ratePct).toBeCloseTo(withoutMc.yearly[y].liabilities.lb1.ratePct, 10);
+      expect(withEmptyMc.yearly[y].liabilities.lb1.ratePct).toBeCloseTo(withoutMc.yearly[y].liabilities.lb1.ratePct, 10);
+    }
+  });
+});
