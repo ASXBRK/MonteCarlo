@@ -212,3 +212,33 @@ specific crash shocks beyond the growth/defensive split. Reverting the other
 dormant insight modules (`firstDecade`, `drawdownTolerance`, `tornado`) —
 assess them separately once this group exists and it is clear which have a
 home here.
+
+---
+
+## ERRATA (added after landing — not an edit to the body above)
+
+Commit 5's text above predicts that linking mortgage rates to simulated
+CPI makes "a fixed-rate client's fan chart... genuinely narrower during
+the fixed period." **That prediction is wrong. Verified behaviour is the
+opposite, and the shipped model is correct.**
+
+Measured: identical client, $700k loan, zero return volatility, CPI σ
+1.5%, 400 paths. 10–90 net-asset spread at age 50, inside the fixed
+period: variable $7,588, fixed $84,383.
+
+Why: with rates linked to CPI, a variable borrower's higher nominal
+interest in high-inflation paths is largely offset by faster real
+erosion of the nominal balance, so their real cost stays close to
+invariant to the inflation draw. A fixed borrower's rate does not move,
+so they take the full real-erosion benefit unhedged in a high-inflation
+path — and the full penalty in a low-inflation one. Fixing a rate is an
+inflation bet; a variable rate is substantially hedged in real terms.
+
+**Resolution: the implementation (`src/monteCarlo.js`) is correct; the
+prediction in Commit 5's own text above is the error, and the code is
+not being changed to match it.** The body above is otherwise unchanged
+and remains the historical record of what was asked for — see
+`docs/specs/README.md` on why specs aren't edited after the fact. The
+Parameters modal (`index.html`) and this module's own code comments
+carry the corrected explanation and the measured figures above; treat
+those as authoritative over this document's Commit 5 section.

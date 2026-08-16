@@ -55,13 +55,23 @@
 // loans that happen to match the default assumption. The delta applies
 // to variable loans immediately and to fixed loans only after their
 // own rollover (the same differential Commit 2's deterministic rate
-// shocks established), so a fixed-rate client's fan chart is genuinely
-// narrower during the fixed period. Two consequences pull in opposite
-// directions, and both come through in the data rather than being
-// asserted: a high-inflation path carries a higher rate (repayments
-// rise, since the level payment recomputes each simulated year to
-// reflect it — see deterministic.js), but also erodes the loan's fixed
-// nominal balance faster in real terms.
+// shocks established).
+//
+// VERIFIED RESULT (What-if spec 14's errata note — the spec itself
+// predicted the opposite, and was wrong): a fixed-rate client's fan
+// chart is WIDER during the fixed period, not narrower. Measured:
+// identical client, $700k loan, zero return volatility, 1.5% CPI σ,
+// 400 paths — 10–90 net-asset spread at age 50: variable $7,588, fixed
+// $84,383. A variable loan's rate moves with inflation, so a
+// high-inflation path's higher nominal repayment (the level payment
+// recomputes each simulated year — see deterministic.js) is largely
+// OFFSET by that same path's faster real erosion of the nominal
+// balance: their real cost ends up close to invariant to the inflation
+// draw. A fixed loan's rate does not move, so it takes the full
+// real-erosion benefit unhedged in a high-inflation path, and the full
+// penalty in a low-inflation one — fixing a rate is an inflation bet;
+// a variable rate is substantially hedged in real terms. Do not
+// "correct" this back to the spec's prediction; the code is right.
 //
 // Seeding: every random draw this module makes — CPI, regime
 // transitions, correlated return shocks, even which paths get kept as
