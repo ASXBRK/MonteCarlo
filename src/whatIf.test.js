@@ -210,3 +210,133 @@ describe("eligibleRateShockLoans", () => {
     expect(eligibleRateShockLoans(state).map((l) => l.id)).toEqual(["lb1"]);
   });
 });
+
+describe("Income interruption (What-if spec, Commit 4)", () => {
+  const salaryRow = (over = {}) => ({
+    id: "sal1", label: "Salary", owner: "client", amount: 8000, frequency: "monthly",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+    indexBasis: "none", indexExtraPct: 0, category: "salary", incomeType: "employment", sgApplies: false,
+    ...over,
+  });
+  const withIncome = (income, over = {}) => ({
+    ...mkState({ endAge: 46, assets: [mkAsset({ balance: 500000 })], ...over }),
+    cashflows: { income, expenses: [], deductions: [], contributions: [], withdrawals: [], lumpSums: [], superContributions: [] },
+  });
+
+  it("reduces income by exactly (1 - replacementPct) for exactly the gap year(s), no earlier and no later", () => {
+    const state = withIncome([salaryRow()]);
+    const { base, shocked } = runShock(state, { kind: "incomeGap", ownerId: "client", atAge: 42, months: 12, replacementPct: 50 });
+    const gapYear = 2; // age 42 - currentAge 40
+    for (const y of [0, 1]) expect(shocked.yearly[y].income).toBeCloseTo(base.yearly[y].income, 2);
+    expect(shocked.yearly[gapYear].income).toBeCloseTo(base.yearly[gapYear].income * 0.5, 1);
+    for (const y of [3, 4, 5]) expect(shocked.yearly[y].income).toBeCloseTo(base.yearly[y].income, 2);
+  });
+
+  it("replacementPct: 0 fully stops income for the gap year; 100 leaves it untouched", () => {
+    const state = withIncome([salaryRow()]);
+    const stopped = runShock(state, { kind: "incomeGap", ownerId: "client", atAge: 42, months: 12, replacementPct: 0 });
+    const untouched = runShock(state, { kind: "incomeGap", ownerId: "client", atAge: 42, months: 12, replacementPct: 100 });
+    expect(stopped.shocked.yearly[2].income).toBeCloseTo(0, 1);
+    expect(untouched.shocked.yearly[2].income).toBeCloseTo(untouched.base.yearly[2].income, 1);
+  });
+
+  it("only affects the named owner's salary rows — a partner's own income and other income categories are untouched", () => {
+    const other = salaryRow({ id: "sal2", label: "Other income", category: "otherIncome", incomeType: "otherTaxable", amount: 1000 });
+    const partnerSalary = salaryRow({ id: "sal3", owner: "partner" });
+    const state = withIncome([salaryRow(), other, partnerSalary], {
+      plan: { household: "couple", partner: { currentAge: 38 } },
+    });
+    const { base, shocked } = runShock(state, { kind: "incomeGap", ownerId: "client", atAge: 42, months: 12, replacementPct: 0 });
+    // The client's salary drops to 0 for the gap year, but total income
+    // doesn't drop to 0 — the other row and the partner's row keep flowing.
+    expect(shocked.yearly[2].income).toBeGreaterThan(0);
+    expect(shocked.yearly[2].income).toBeLessThan(base.yearly[2].income);
+  });
+
+  it("a gap large enough to break affordability produces unfunded cashflow the base run never sees", () => {
+    const tightAsset = mkAsset({ balance: 500, allocation: { mode: "custom", incomePct: 0, growthPct: 2.5, frankingPct: 0, volBasis: "Balanced" } });
+    const expenses = [{
+      id: "e1", label: "Living", category: "groceryFuel", amount: 4000, frequency: "monthly",
+      from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 }, indexBasis: "none", indexExtraPct: 0,
+    }];
+    const state = {
+      ...withIncome([salaryRow({ amount: 6000 })], {
+        assets: [tightAsset],
+        plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      }),
+      cashflows: { income: [salaryRow({ amount: 6000 })], expenses, deductions: [], contributions: [], withdrawals: [], lumpSums: [], superContributions: [] },
+    };
+    const { base, shocked } = runShock(state, { kind: "incomeGap", ownerId: "client", atAge: 42, months: 12, replacementPct: 0 });
+    expect(base.shortfall).toBeNull();
+    expect(shocked.shortfall).not.toBeNull();
+    expect(shocked.shortfall.total).toBeGreaterThan(0);
+  });
+
+  it("never mutates the caller's state", () => {
+    const state = withIncome([salaryRow()]);
+    const before = JSON.stringify(state);
+    runShock(state, { kind: "incomeGap", ownerId: "client", atAge: 42, months: 12, replacementPct: 50 });
+    expect(JSON.stringify(state)).toBe(before);
+  });
+});
+
+describe("Expense shock (What-if spec, Commit 4)", () => {
+  const expenseRow = (over = {}) => ({
+    id: "e1", label: "Groceries", category: "groceryFuel", amount: 1000, frequency: "monthly",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 }, indexBasis: "cpi", indexExtraPct: 0,
+    ...over,
+  });
+  const withExpenses = (expenses, over = {}) => ({
+    ...mkState({ endAge: 45, assets: [mkAsset({ balance: 500000 })], ...over }),
+    cashflows: { income: [], expenses, deductions: [], contributions: [], withdrawals: [], lumpSums: [], superContributions: [] },
+  });
+
+  it("scales every expense row by exactly (1+pct/100), for the whole projection", () => {
+    const state = withExpenses([expenseRow({ amount: 1000 }), expenseRow({ id: "e2", amount: 500 })]);
+    const { base, shocked } = runShock(state, { kind: "expenseShock", pct: 10 });
+    for (let y = 0; y < base.yearly.length; y++) {
+      expect(shocked.yearly[y].expenses).toBeCloseTo(base.yearly[y].expenses * 1.10, 1);
+    }
+  });
+
+  it("scales an INDEXED row's trajectory proportionally, not just its year-0 figure", () => {
+    // indexExtraPct above CPI so the row genuinely grows in real terms —
+    // proves the shock scales the base amount (carrying through every
+    // future year's indexation), not a one-off year-0 adjustment.
+    const state = withExpenses([expenseRow({ indexBasis: "cpi", indexExtraPct: 3 })]);
+    const { base, shocked } = runShock(state, { kind: "expenseShock", pct: -10 });
+    for (let y = 0; y < base.yearly.length; y++) {
+      expect(shocked.yearly[y].expenses).toBeCloseTo(base.yearly[y].expenses * 0.90, 1);
+    }
+    // The base itself is genuinely growing in real terms year over year
+    // (confirms this test fixture actually exercises indexation).
+    expect(base.yearly[4].expenses).toBeGreaterThan(base.yearly[0].expenses);
+  });
+
+  it("a large enough expense increase produces unfunded cashflow the base run never sees", () => {
+    const tightAsset = mkAsset({ balance: 500, allocation: { mode: "custom", incomePct: 0, growthPct: 2.5, frankingPct: 0, volBasis: "Balanced" } });
+    const income = [{
+      id: "sal1", label: "Salary", owner: "client", amount: 60000, frequency: "annual",
+      from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+      indexBasis: "none", indexExtraPct: 0, category: "salary", incomeType: "employment", sgApplies: false,
+    }];
+    const state = {
+      ...withExpenses([expenseRow({ amount: 3500, indexBasis: "none" })], {
+        assets: [tightAsset],
+        plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+      }),
+      cashflows: { income, expenses: [expenseRow({ amount: 3500, indexBasis: "none" })], deductions: [], contributions: [], withdrawals: [], lumpSums: [], superContributions: [] },
+    };
+    const { base, shocked } = runShock(state, { kind: "expenseShock", pct: 50 });
+    expect(base.shortfall).toBeNull();
+    expect(shocked.shortfall).not.toBeNull();
+    expect(shocked.shortfall.total).toBeGreaterThan(0);
+  });
+
+  it("never mutates the caller's state", () => {
+    const state = withExpenses([expenseRow()]);
+    const before = JSON.stringify(state);
+    runShock(state, { kind: "expenseShock", pct: 25 });
+    expect(JSON.stringify(state)).toBe(before);
+  });
+});

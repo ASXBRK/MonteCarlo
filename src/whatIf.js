@@ -13,6 +13,8 @@
 // change since Commit 1, only the registry has grown.
 import { projectPlan } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
+import { buildSchedules } from "./schedule.js";
+import { resolveRef } from "./keyDates.js";
 
 const SHOCK_APPLIERS = new Map();
 
@@ -125,3 +127,84 @@ function applyRevertRateShock(clone, shock) {
 
 registerShockKind("rateShock", applyRateShock);
 registerShockKind("revertRateShock", applyRevertRateShock);
+
+// --- Commit 4: Income interruption and expense shock ------------------------
+//
+// Income interruption ({kind: "incomeGap", ownerId, atAge, months,
+// replacementPct}) is a genuine STATE-level change (splitting an
+// income row across the gap), not an mc side-channel — unlike the
+// crash's return shock, income needs to move BOTH sides consistently
+// (the household's monthly cash AND that person's ANNUAL taxable
+// income, since tax is assessed from the SAME row-level figures
+// cashflowStatement.js's own assessableIncome already reads) — an
+// mc-only override would reduce cash but leave tax computed on the
+// full, un-reduced salary, a real inconsistency, not a simplification.
+// Only a state-level row change moves both together correctly.
+//
+// Every DateRef in this engine resolves to a WHOLE PLAN YEAR (age
+// anchors snap to 1 July of the year the age is reached — see
+// keyDates.js's resolveOwnerAge; annual rows and one-offs fire in July
+// for the same reason, per CLAUDE.md's own Cashflows convention) — there
+// is no month-level date granularity anywhere in this schema. `months`
+// is therefore rounded to the nearest whole number of plan years (a
+// disclosed simplification, not a bug): a plan year is genuinely the
+// finest interval a "when" can express here, the same as a fixed-rate
+// rollover or a planned purchase.
+function applyIncomeGap(clone, shock) {
+  const { ownerId, atAge, months, replacementPct } = shock;
+  const owner = ownerId === "partner" ? "partner" : "client";
+  const ownerCurrentAge = owner === "partner" ? clone.plan.partner?.currentAge : clone.plan.client.currentAge;
+  if (ownerCurrentAge == null) return; // no such owner on this household (e.g. shock targets a partner on a single)
+
+  const schedule = buildSchedules(clone);
+  const gapStartYear = resolveRef({ kind: "age", age: atAge }, clone.plan, schedule, owner).planYear;
+  const years = Math.max(1, Math.round((months ?? 0) / 12));
+  const gapEndYear = gapStartYear + years - 1;
+  const scale = Math.max(0, replacementPct ?? 0) / 100;
+  const ageOf = (y) => ownerCurrentAge + y;
+
+  // Scoped to the owner's own SALARY-category rows — the same category
+  // this model treats as PAYG-withheld employment income (planState.js's
+  // incomeCategoryTaxTreatment) — matching the spec's own examples
+  // (parental leave, illness, a career break, project-based employment:
+  // all interruptions to ongoing PAYG salary, not to rental/interest/
+  // other income types, which keep flowing regardless).
+  const next = [];
+  for (const r of clone.cashflows.income ?? []) {
+    if (r.owner !== owner || r.category !== "salary") { next.push(r); continue; }
+    const fromYear = resolveRef(r.from, clone.plan, schedule, owner).planYear;
+    const toYear = resolveRef(r.to, clone.plan, schedule, owner).planYear;
+    const overlapStart = Math.max(fromYear, gapStartYear);
+    const overlapEnd = Math.min(toYear, gapEndYear);
+    if (overlapStart > overlapEnd) { next.push(r); continue; } // this row's own window never touches the gap at all
+
+    if (fromYear < overlapStart) next.push({ ...r, to: { kind: "age", age: ageOf(overlapStart - 1) } });
+    next.push({
+      ...r, id: `${r.id}__gap`,
+      from: { kind: "age", age: ageOf(overlapStart) }, to: { kind: "age", age: ageOf(overlapEnd) },
+      amount: (r.amount ?? 0) * scale,
+    });
+    if (toYear > overlapEnd) next.push({ ...r, id: `${r.id}__after`, from: { kind: "age", age: ageOf(overlapEnd + 1) } });
+  }
+  clone.cashflows.income = next;
+}
+
+// Expense shock ({kind: "expenseShock", pct}) — every household expense
+// row runs at `pct`% above (or below, negative pct) plan, for the
+// WHOLE projection. Scaling the row's own `amount` (rather than the
+// engine's per-month indexed figure) is what makes an indexed row
+// scale too: indexation is a multiplicative factor layered on TOP of
+// `amount` at each point in time, so scaling the base amount scales
+// the entire indexed trajectory proportionally, with no separate
+// indexed-vs-flat handling needed. Scoped to state.cashflows.expenses
+// specifically — the household "living expenses" input section the
+// spec's own framing ("what if we just spend a bit more than we say we
+// will?") is about — not property expenses, loan repayments, super
+// contributions, or tax, each already its own distinct line item.
+function applyExpenseShock(clone, shock) {
+  const scale = 1 + (shock.pct ?? 0) / 100;
+  for (const r of clone.cashflows.expenses ?? []) r.amount = (r.amount ?? 0) * scale;
+}
+
+registerShockKind("incomeGap", applyIncomeGap);
+registerShockKind("expenseShock", applyExpenseShock);

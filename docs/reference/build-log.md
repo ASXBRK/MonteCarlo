@@ -522,12 +522,50 @@ This closes all six commits of docs/specs/13-implementation-rates-equity-compari
   the identical crash produces materially different end outcomes at
   different ages; the crash self-registers with `runShock`'s generic
   registry, producing identical figures to calling it directly.
+- Commit 4 of docs/specs/14-what-if.md, **What if: income interruption
+  and expense shock** — two more kinds self-registered into
+  `whatIf.js`. `incomeGap` ({ownerId, atAge, months, replacementPct})
+  is a genuine STATE-level change (splitting the owner's own
+  salary-category income row(s) across the gap), not an mc side-channel
+  like the crash — income needs to move BOTH the household's monthly
+  cash AND that person's annual taxable income together (tax is
+  assessed from the SAME row-level yearly totals cashflowStatement.js
+  already reads), and only a state-level row change moves both
+  consistently. Every DateRef in this engine resolves to a WHOLE PLAN
+  YEAR (age anchors snap to 1 July — keyDates.js's resolveOwnerAge;
+  annual rows and one-offs fire in July for the same reason, per
+  CLAUDE.md's own Cashflows convention) — there is no month-level date
+  granularity anywhere in this schema, so `months` is rounded to the
+  nearest whole number of plan years, a disclosed simplification
+  matching how every other timed event in this engine already works
+  (a fixed-rate rollover, a planned purchase — nothing resolves finer
+  than a plan year). `expenseShock` ({pct}) is far simpler: scales
+  every household expense row's own `amount` by `1+pct/100` — since
+  indexation is layered multiplicatively on top of `amount` at each
+  point in time, scaling the base amount scales the entire indexed
+  trajectory for free, no separate indexed-vs-flat handling needed.
+  Both shocks read through `runShock`'s existing generic deltas (net
+  assets, tax, surplus, unfunded cashflow, headline figures for both
+  runs) — neither needed a dedicated per-shock reader module the way
+  rate shocks and crash timing did. New **Income interruption** and
+  **Expense shock** What-if views: owner/age/length/replacement
+  controls (income gap) or a single percentage control (expense shock),
+  a shared base-vs-shocked net-assets-over-time chart, an affordability
+  callout naming whether the shock introduces or grows unfunded
+  cashflow, CSV export. Tested: the income reduction lands in exactly
+  the gap year(s) and no others; replacementPct of 0/50/100 all apply
+  correctly; only the named owner's salary rows are touched (other
+  income categories and the partner's own income keep flowing); the
+  expense shock scales every row, including an indexed one, by exactly
+  the same factor at every year of the projection; both shocks produce
+  unfunded cashflow in scenarios sized to break affordability, and
+  never in scenarios that shouldn't.
 
 ### In flight
-Spec 14 Commits 4-5 (income interruption and expense shock; Monte
-Carlo rate uncertainty driven by the simulated CPI path); super
-threshold indexation per figure (AWOTE / CPI / unindexed, with nominal
-rounding), then Division 296, then Monte Carlo over the full scenario.
+Spec 14 Commit 5 (Monte Carlo rate uncertainty driven by the simulated
+CPI path); super threshold indexation per figure (AWOTE / CPI /
+unindexed, with nominal rounding), then Division 296, then Monte Carlo
+over the full scenario.
 
 ### BLOCKING — not landed
 **Super contributions create money.** Personal deductible and salary

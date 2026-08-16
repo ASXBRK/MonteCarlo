@@ -64,6 +64,7 @@ import { buildTransferScheduleFocus, defaultTransferScheduleYear, perFortnight, 
 import { planWindowsMatch, keyFigureValuesAtYear, keyFigureComparisonRows } from "./scenarioComparison.js";
 import { buildRateShockView, RATE_SHOCK_DELTAS, eligibleRateShockLoans } from "./whatIfRateShock.js";
 import { buildCrashTimingView, eligibleCrashHoldings } from "./whatIfCrash.js";
+import { runShock } from "./whatIf.js";
 import {
   salarySacrificeCash as salarySacrificeCashPure,
   personalSuperContributionsCash,
@@ -187,6 +188,8 @@ const els = {
   viewFocusCompareScenarios: $("viewFocusCompareScenarios"),
   viewWhatIfRateShock: $("viewWhatIfRateShock"),
   viewWhatIfCrash: $("viewWhatIfCrash"),
+  viewWhatIfIncomeGap: $("viewWhatIfIncomeGap"),
+  viewWhatIfExpenseShock: $("viewWhatIfExpenseShock"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -417,6 +420,8 @@ const OUTPUT_NAV = {
     { id: "monte-carlo-table", label: "Monte Carlo (percentile table)" },
     { id: "whatif-rate-shock", label: "Interest rate shocks" },
     { id: "whatif-crash", label: "Market crash timing" },
+    { id: "whatif-income-gap", label: "Income interruption" },
+    { id: "whatif-expense-shock", label: "Expense shock" },
   ],
 };
 const SECTION_LABELS = Object.fromEntries([
@@ -4466,6 +4471,8 @@ const VIEW_MOUNTS = {
   "focus-compare-scenarios": () => els.viewFocusCompareScenarios,
   "whatif-rate-shock": () => els.viewWhatIfRateShock,
   "whatif-crash": () => els.viewWhatIfCrash,
+  "whatif-income-gap": () => els.viewWhatIfIncomeGap,
+  "whatif-expense-shock": () => els.viewWhatIfExpenseShock,
 };
 const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
 
@@ -4518,6 +4525,8 @@ function renderActiveView() {
   else if (activeView === "focus-compare-scenarios") renderFocusCompareScenariosView();
   else if (activeView === "whatif-rate-shock") renderWhatIfRateShockView();
   else if (activeView === "whatif-crash") renderWhatIfCrashView();
+  else if (activeView === "whatif-income-gap") renderWhatIfIncomeGapView();
+  else if (activeView === "whatif-expense-shock") renderWhatIfExpenseShockView();
 }
 
 const isNominal = () => state.display.units === "nominal";
@@ -8705,6 +8714,216 @@ els.viewWhatIfCrash.addEventListener("change", (e) => {
   }
 });
 
+// --- What if: Income interruption and expense shock (docs/specs/
+// 14-what-if.md, Commit 4) ---------------------------------------------------
+//
+// Both read straight off whatIf.js's runShock (the SAME generic runner
+// every What-if shock uses) — neither needed a dedicated per-shock
+// reader module the way rate shocks and crash timing did, since the
+// household-level deltas runShock already computes (net assets,
+// closing balance, tax, surplus, unfunded cashflow, plus headline
+// figures for both runs) are exactly what "the cash drawn down to
+// bridge the gap, whether the buffer holds, the recovery path, and the
+// permanent cost" and "the expense shock's affordability answer" need.
+
+// Shared by both views below (and reusable by any future simple
+// base-vs-shocked What-if view): a single net-assets-over-time chart,
+// base dotted, shocked solid.
+function renderBaseVsShockedChart(elId, base, shocked, factor, shockedLabel) {
+  const el = $(elId);
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = base.schedule.clientAges;
+  const traces = [
+    {
+      x: ages, y: base.yearly.map((row, y) => row.netAssets * factor(y)),
+      name: "Base", type: "scatter", mode: "lines",
+      line: { color: "#222", width: 2.5, dash: "dot" },
+      hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Base</extra>",
+    },
+    {
+      x: ages, y: shocked.yearly.map((row, y) => row.netAssets * factor(y)),
+      name: shockedLabel, type: "scatter", mode: "lines",
+      line: { color: "#dc5a28", width: 2.5 },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(shockedLabel)}</extra>`,
+    },
+  ];
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function unfundedCalloutHTML(deltas) {
+  const base = deltas.headline.base.totalUnfunded;
+  const shocked = deltas.headline.shocked.totalUnfunded;
+  if (shocked <= base) return `<p class="helper-text">The buffer holds — no unfunded cashflow introduced.</p>`;
+  return `<p class="helper-warning">${base === 0 ? "This introduces unfunded cashflow" : "Unfunded cashflow grows"} — ${fmtMoney(shocked)}${deltas.headline.shocked.firstShortfallAge != null ? ` starting at age ${deltas.headline.shocked.firstShortfallAge}` : ""} the plan can't actually cover${base > 0 ? `, versus ${fmtMoney(base)} in the base case` : ""}.</p>`;
+}
+
+let whatIfIncomeGapOwner = "client";
+let whatIfIncomeGapAge = null;
+let whatIfIncomeGapMonths = 6;
+let whatIfIncomeGapReplacementPct = 0;
+
+function renderWhatIfIncomeGapView() {
+  const hasSalary = (state.cashflows.income ?? []).some((r) => r.category === "salary");
+  if (!hasSalary) {
+    els.viewWhatIfIncomeGap.innerHTML = focusEmptyStateHTML(
+      "What a period without your usual salary — parental leave, illness, a career break — actually costs, including the compounding lost along with it. Add a salary income row to see it.",
+      "income"
+    );
+    return;
+  }
+  const couple = isCouple();
+  if (whatIfIncomeGapOwner === "partner" && !couple) whatIfIncomeGapOwner = "client";
+  if (whatIfIncomeGapAge == null) whatIfIncomeGapAge = state.plan.client.currentAge + 1;
+
+  const shock = { kind: "incomeGap", ownerId: whatIfIncomeGapOwner, atAge: whatIfIncomeGapAge, months: whatIfIncomeGapMonths, replacementPct: whatIfIncomeGapReplacementPct };
+  const { base, shocked, deltas } = runShock(state, shock);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lastY = deltas.byYear.length - 1;
+  const minWca = (out) => Math.min(...out.yearly.map((r, y) => r.wcaClosing * factor(y)));
+
+  els.viewWhatIfIncomeGap.innerHTML = `
+    <h2 class="section-heading">Income interruption</h2>
+    <p class="helper-text">Every date in this engine resolves to a whole plan year, so the gap length is rounded to the nearest whole number of years.</p>
+    <div class="focus-panel">
+      <div class="focus-section">
+        ${couple ? `<div id="whatIfIncomeGapOwnerToggle" class="seg-toggle" role="tablist" aria-label="Owner"></div>` : ""}
+        <label>Age when it starts
+          <input type="number" id="whatIfIncomeGapAge" min="${state.plan.client.currentAge}" max="${state.plan.endAge - 1}" value="${whatIfIncomeGapAge}" />
+        </label>
+        <label>Length (months)
+          <input type="number" id="whatIfIncomeGapMonths" min="1" max="120" step="1" value="${whatIfIncomeGapMonths}" />
+        </label>
+        <label>Replacement income (%)
+          <input type="number" id="whatIfIncomeGapReplacement" min="0" max="100" step="5" value="${whatIfIncomeGapReplacementPct}" />
+        </label>
+      </div>
+      <div class="focus-section">
+        <h3>Affordability</h3>
+        ${unfundedCalloutHTML(deltas)}
+        <div class="summary-strip">
+          <div class="stat"><div class="stat-label">Permanent cost (end net assets)</div><div class="stat-value">${fmtMoney((deltas.headline.shocked.endNetAssets - deltas.headline.base.endNetAssets) * factor(lastY))}</div></div>
+          <div class="stat"><div class="stat-label">Lowest working cash — base</div><div class="stat-value">${fmtMoney(minWca(base))}</div></div>
+          <div class="stat"><div class="stat-label">Lowest working cash — shocked</div><div class="stat-value">${fmtMoney(minWca(shocked))}</div></div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Net assets over time</h3>
+        <div id="whatIfIncomeGapChart"></div>
+      </div>
+    </div>
+  `;
+  if (couple) {
+    renderEntitySelector(
+      $("whatIfIncomeGapOwnerToggle"),
+      [{ id: "client", label: clientName() }, { id: "partner", label: partnerName() }],
+      whatIfIncomeGapOwner,
+      (id) => { whatIfIncomeGapOwner = id; renderWhatIfIncomeGapView(); }
+    );
+  }
+  renderBaseVsShockedChart("whatIfIncomeGapChart", base, shocked, factor, "During gap");
+}
+
+function exportWhatIfIncomeGapCSV() {
+  const shock = { kind: "incomeGap", ownerId: whatIfIncomeGapOwner, atAge: whatIfIncomeGapAge, months: whatIfIncomeGapMonths, replacementPct: whatIfIncomeGapReplacementPct };
+  const { base, shocked } = runShock(state, shock);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const ages = base.schedule.clientAges;
+  const lines = [csvEsc(`Income interruption: ${whatIfIncomeGapOwner}, age ${whatIfIncomeGapAge}, ${whatIfIncomeGapMonths} months, ${whatIfIncomeGapReplacementPct}% replacement`)];
+  lines.push("");
+  lines.push(["Age", "Base net assets", "Shocked net assets", "Delta"].map(csvEsc).join(","));
+  for (let y = 0; y < base.yearly.length; y++) {
+    const b = base.yearly[y].netAssets * factor(y);
+    const s = shocked.yearly[y].netAssets * factor(y);
+    lines.push([ages[y], b.toFixed(2), s.toFixed(2), (s - b).toFixed(2)].join(","));
+  }
+  downloadCSV("whatif-income-gap", lines);
+}
+
+els.viewWhatIfIncomeGap.addEventListener("change", (e) => {
+  if (e.target.id === "whatIfIncomeGapAge") {
+    whatIfIncomeGapAge = clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge - 1);
+    renderWhatIfIncomeGapView();
+  } else if (e.target.id === "whatIfIncomeGapMonths") {
+    whatIfIncomeGapMonths = Math.max(1, Number(e.target.value) || 1);
+    renderWhatIfIncomeGapView();
+  } else if (e.target.id === "whatIfIncomeGapReplacement") {
+    whatIfIncomeGapReplacementPct = clampNumber(e.target.value, 0, 100);
+    renderWhatIfIncomeGapView();
+  }
+});
+
+let whatIfExpenseShockPct = 10;
+
+function renderWhatIfExpenseShockView() {
+  if ((state.cashflows.expenses ?? []).length === 0) {
+    els.viewWhatIfExpenseShock.innerHTML = focusEmptyStateHTML(
+      "What if you just spend a bit more (or less) than the plan says — every expense row scaled by one percentage, for the whole projection. Add an expense row to see it.",
+      "expenses"
+    );
+    return;
+  }
+  const { base, shocked, deltas } = runShock(state, { kind: "expenseShock", pct: whatIfExpenseShockPct });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lastY = deltas.byYear.length - 1;
+
+  els.viewWhatIfExpenseShock.innerHTML = `
+    <h2 class="section-heading">Expense shock</h2>
+    <p class="helper-text">What if we just spend a bit more (or less) than we say we will — every expense row scaled by one percentage, for the whole projection.</p>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <label>All expenses run at
+          <input type="number" id="whatIfExpenseShockPct" min="-90" max="200" step="5" value="${whatIfExpenseShockPct}" />%
+        </label>
+      </div>
+      <div class="focus-section">
+        <h3>Affordability</h3>
+        ${unfundedCalloutHTML(deltas)}
+        <div class="summary-strip">
+          <div class="stat"><div class="stat-label">Change in end net assets</div><div class="stat-value">${fmtMoney((deltas.headline.shocked.endNetAssets - deltas.headline.base.endNetAssets) * factor(lastY))}</div></div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Net assets over time</h3>
+        <div id="whatIfExpenseShockChart"></div>
+      </div>
+    </div>
+  `;
+  renderBaseVsShockedChart("whatIfExpenseShockChart", base, shocked, factor, `${whatIfExpenseShockPct > 0 ? "+" : ""}${whatIfExpenseShockPct}% expenses`);
+}
+
+function exportWhatIfExpenseShockCSV() {
+  const { base, shocked } = runShock(state, { kind: "expenseShock", pct: whatIfExpenseShockPct });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const ages = base.schedule.clientAges;
+  const lines = [csvEsc(`Expense shock: ${whatIfExpenseShockPct}%`)];
+  lines.push("");
+  lines.push(["Age", "Base net assets", "Shocked net assets", "Delta"].map(csvEsc).join(","));
+  for (let y = 0; y < base.yearly.length; y++) {
+    const b = base.yearly[y].netAssets * factor(y);
+    const s = shocked.yearly[y].netAssets * factor(y);
+    lines.push([ages[y], b.toFixed(2), s.toFixed(2), (s - b).toFixed(2)].join(","));
+  }
+  downloadCSV("whatif-expense-shock", lines);
+}
+
+els.viewWhatIfExpenseShock.addEventListener("change", (e) => {
+  if (e.target.id !== "whatIfExpenseShockPct") return;
+  whatIfExpenseShockPct = Number(e.target.value) || 0;
+  renderWhatIfExpenseShockView();
+});
+
 // --- exports -----------------------------------------------------------------
 
 function exportNameBase() {
@@ -8768,6 +8987,8 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-compare-scenarios") exportFocusCompareScenariosCSV();
   else if (activeView === "whatif-rate-shock") exportWhatIfRateShockCSV();
   else if (activeView === "whatif-crash") exportWhatIfCrashCSV();
+  else if (activeView === "whatif-income-gap") exportWhatIfIncomeGapCSV();
+  else if (activeView === "whatif-expense-shock") exportWhatIfExpenseShockCSV();
 });
 
 els.showAssetsToggle.addEventListener("change", () => {
