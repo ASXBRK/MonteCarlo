@@ -1718,6 +1718,37 @@ describe("Tier 1.2 — Super (Commit 3): preservation, withdrawals, proportionin
     expect(out.yearly[3].superDetail.su1.withdrawals).toBeGreaterThan(0);
   });
 
+  it("regression: a deficit funded from super in the FY's LAST month is still reflected in the reported closing balance (found via a demo scenario, not randomScenario() — see the superSeries snapshot-ordering fix in deterministic.js)", () => {
+    // Same shape as the test above, but conservation-checked: a steady
+    // monthly deficit (every month, including June) drawn from super
+    // once release age is reached. superSeries[id][m+1] used to be
+    // snapshotted BEFORE that same month's deficit-funding-from-super
+    // withdrawal, so the withdrawal in the FY's LAST month never made
+    // it into the reported closing balance for that year — every OTHER
+    // month's shortfall self-corrected via the next month's fresh
+    // snapshot, so only June was ever wrong, and nothing in the
+    // existing suite checked conservation against this exact pattern
+    // until src/demo/highEarnerPreRetirement.js's "Reduce work at 58"
+    // scenario combined a persistent deficit with reaching release age.
+    const s = mkState({
+      // zeroRealSuperAlloc, not superAcct's own 0%/0% default — a
+      // literal 0% NOMINAL allocation still decays in REAL terms under
+      // nonzero CPI (Fisher deflation, same trap zeroRealSuperAlloc's
+      // own header warns about), which would leave a nonzero earnings
+      // term in the hand-calc below. zeroRealSuperAlloc nets to exactly
+      // zero real growth, so closing reduces to opening − withdrawals.
+      plan: { client: { currentAge: 60, retirementAge: 60 }, superAccounts: [superAcct({ balance: 50000, allocation: zeroRealSuperAlloc() })] },
+      endAge: 63,
+      assets: [],
+      cashflows: { expenses: [cf({ assetId: null, amount: 1000 })] }, // deficit every month of every year
+    });
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `super-drawdown-in-June regression, year ${y}`);
+    const y0 = out.yearly[0].superDetail.su1;
+    expect(y0.closing).toBeCloseTo(y0.opening - y0.withdrawals, 2);
+    expect(y0.withdrawals).toBeGreaterThan(0);
+  });
+
   it("proportioning recalculates at every payment: contributions between two withdrawals dilute the tax-free fraction, and the SECOND withdrawal reflects the NEW fraction, not the first", () => {
     // cpi:0 with a 0%/0% allocation gives an exact 0 real monthly rate
     // (no compounding drift), so every balance below is exact.

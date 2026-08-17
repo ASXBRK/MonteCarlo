@@ -127,19 +127,27 @@ function buildMaximiseConcessional(now) {
   });
 }
 
-// The client steps down to part-time/consulting work from 58, ahead of
-// full retirement at 65 — a real wind-down, not guaranteed to be fully
-// funded from cash flow alone at this household's spend rate, which is
-// why this is the one scenario allowed to show unfunded cashflow.
+// Both partners wind down together at 58/56 — well short of either
+// person's own super access age of 65 (retirementAge is unchanged by
+// this scenario, so superReleaseAge() still gates at 65 for both; see
+// data/superRates.js) — with a retirement lifestyle step-up in
+// spending. Both incomes stop entirely, leaving only the investment
+// property's net rental against a materially higher spend, funded from
+// the $150k joint savings alone: that bridge genuinely runs dry years
+// before either super balance is accessible. This is the one scenario
+// meant to show a plan that doesn't hold up, so it needs to actually
+// fail, not merely be exempted from the affordability check — see
+// demo.test.js's "genuinely produces unfunded cashflow" assertion.
 function buildReduceWorkAt58(now) {
   const { base, plan, assets, income, expenses, liabilities, properties, superAccounts } = baseInputs(now);
   const [clientSalary, partnerSalary] = income;
   const reducedIncome = [
-    { ...clientSalary, to: { kind: "age", age: 57 } },
-    { ...clientSalary, id: `${clientSalary.id}-reduced`, label: "Salary — client (reduced)", amount: 60_000 / 12, from: { kind: "age", age: 58 } },
-    partnerSalary,
+    { ...clientSalary, to: { kind: "age", age: 57 } }, // client stops entirely at 58
+    { ...partnerSalary, to: { kind: "age", age: 55 } }, // partner stops the same plan year (partner is 2 years younger)
   ];
-  return finalize(base, plan, assets, reducedIncome, expenses, liabilities, properties, superAccounts);
+  const [living] = expenses;
+  const higherLiving = { ...living, amount: 150_000 / 12 }; // retirement lifestyle step-up, not the working-years budget
+  return finalize(base, plan, assets, reducedIncome, [higherLiving], liabilities, properties, superAccounts);
 }
 
 export function build(now = new Date()) {

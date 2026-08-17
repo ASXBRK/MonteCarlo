@@ -67,10 +67,15 @@ what-if, and retirement drawdown.
 - **Maximise concessional** — both max out their concessional cap
   (including the partner's carry-forward); household taxable income falls
   relative to Current.
-- **Reduce work at 58** — the client steps down to $60k from age 58 ahead
-  of full retirement at 65; income falls from that year on. Marked
-  affordable: false — a real wind-down, not guaranteed to be fully funded
-  from cash flow alone at this household's spend rate.
+- **Reduce work at 58** — both partners stop working at 58/56, well
+  short of either person's own super access age of 65, with a
+  retirement lifestyle spending step-up. Genuinely unaffordable, not
+  merely labelled so: only the investment property's net rental remains
+  against the higher spend, the $150k joint savings buffer runs dry
+  within about a year, and the household goes without for years before
+  either super balance becomes accessible. Marked affordable: false and
+  asserted to actually produce unfunded cashflow — the one scenario in
+  this demo set meant to show a plan that doesn't hold up.
 
 ## Suggested walkthrough order
 

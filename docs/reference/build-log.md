@@ -1,1071 +1,347 @@
 # Build Log — Projection Tool (Xtools+ replacement)
 
 Repo `ASXBRK/MonteCarlo`, branch `claude/monte-carlo-investment-app-R9XSB`.
-Updated stock-take. Branch head at time of writing: `be278ca`.
+Rewritten stock-take, grouped by area rather than by spec — the specs
+themselves (`docs/specs/`) hold the full commit-by-commit reasoning; this
+file is the map of where things landed. 107 commits in, branch head at
+time of writing `9d6bf04`.
+
+This file is updated in the SAME commit as the work it describes, per
+CLAUDE.md's Workflow rules ("Keep `docs/reference/build-log.md` current:
+move completed items to DONE with their commit hashes as they land"). A
+build log that lags the code is worse than none — it reads as current
+when it isn't.
 
 ---
 
-## STATUS
+## STATUS — DONE
 
-### Landed
+### Engine and tax core
+Monthly deterministic engine over a plan-year ledger (`e48e471`, `6edd9f9`)
+with FY anchoring and a genuinely partial first year; household/couple
+with per-owner ages (`8f19300`/`c734897`, `cfdec6a`); client/scenario
+workspace with hash routing and JSON export/import (`edd0820`, `a9cfcda`).
+Full personal tax — brackets, Medicare, LITO, franking, both CGT regimes
+with pooled cost bases and the 1 Jul 2027 deemed-reacquisition reset
+(`e15ef1b`, `733ff6e`, `6971a7d`). Identity intake with DOB/sex and ABS
+life-expectancy anchoring, AWOTE indexation (`77aeb08`). Tier 1.1 **Key
+Dates** — named anchors (Start, End, Retirement, custom) referenced by
+every date field, verified as pure indirection, byte-identical to
+equivalent explicit ages (`f2fb60d`, `53a312d`). **Working Cash Account**
+— household cashflow buffer with an FY-end sweep, replacing monthly
+surplus destruction; a second latent bug (unfunded cashflow re-recording
+cumulatively) was found and fixed in the same work (`2115792`). Fixed-rate
+loans and rollover, and adviser fees with a `plan.implementation`
+reconciliation block for the flow of initial funds, both landed as part
+of the Implementation/Rates spec (`9240f52`, `c86e8d0`). Input UX: the
+dense Setup block split into Setup/Tax details/Super-settings, with
+tooltip-hidden helper text (`60d249f`); `state.meta.touched` distinguishes
+a value the adviser actually entered from an unreviewed default, covering
+every `.cf-cell`/`.plan-field` field in the app with zero per-field
+markup (`0bba12c`).
 
-**Foundation (Phases A–C, Tier 0)** — multi-asset input model; plan-level
-cashflows; household/couple; FY anchoring with partial first year;
-client/scenario pages with hash routing and JSON export/import; deterministic
-monthly engine; full personal tax (brackets, Medicare, LITO, franking, both
-CGT regimes with pooled cost bases and the 1 Jul 2027 reset); transposed
-multi-view output; in-grid one-off editing; sidebar one-section-per-page
-navigation; Graphs/Tables split; composite Cashflow-Assets-Liabilities chart
-with shared-zero dual axes.
+### Assets, liabilities and property
+Financial vs lifestyle asset classes (`8b51272`); liabilities with
+amortisation, offsets and deductible interest (`19d7475`); planned
+property purchases, stamp duty across eight jurisdictions, FHOG and
+post-2027 gearing rules (`534dced`); a data-accuracy pass completing the
+ABS life table and the WA FHB/FHOG figures, with unverified-state flags on
+anything not yet confirmed (`8409440`). Asset-class allocations and an
+allocation-over-time chart, franking derived from class weights with CMA
+inconsistencies flagged rather than silently accepted (`2805921`,
+`9bd1905`). Lenders mortgage insurance and the First Home Guarantee
+(indicative premium table and price caps, `eac776b`);
+extra and one-off loan repayments through the same funding-order/unfunded
+cascade the scheduled repayment already uses, never silently skipped
+(`a7b4a58`); usable equity and borrowing capacity as a read-only,
+security-constraint figure (`283be1b`). Input integrity, Part C
+(`1047ceb`) and the property-specific follow-ups: an "Owned" property with
+a future acquisition date is now unenterable rather than merely warned
+about, with an actionable "switch to planned purchase" fix in the same
+warning (`9a1f985`, `8d1b643`) — the canonical example CLAUDE.md's own
+Input integrity section now cites. Asset-deletion reassignment dialog and
+an excluded-asset row flag closed the remaining Phase A.1 gaps found by
+the spec audit (`94b88f9`).
 
-**Assets and structures (D1–D4)** — identity intake with DOB/sex and ABS
-life-expectancy anchoring; AWOTE indexation model; financial vs lifestyle
-asset classes; liabilities with amortisation, offsets and deductible
-interest; property including planned purchases, stamp duty across eight
-jurisdictions, FHOG and post-2027 gearing rules.
+### Super, including Division 293 and 296
+Accounts with tax components, SG derived from employment income, salary
+sacrifice/personal deductible/non-deductible/spouse contributions
+(`bc46c25`); concessional cap with five-year carry-forward and the
+prior-30-June TSB gate, NCC with bring-forward tiers, contributions tax,
+Division 293 (`f00e165`); preservation, release conditions, and
+payment-time proportioning of the tax-free/taxable split (`de8ba8e`).
+Division 296 — the two-tier tax on high super balances, with confirmed
+untaxed-plan-cap and indexation bases (`dfb51db`, `d73a731`); Division
+293/296 release from super as the default, not cash, with `divTaxPaidFrom`
+as the per-person override (`cdeb76e`). **Two money-creation bugs found
+and fixed here, both now permanently guarded by the conservation
+invariant**: personal deductible and salary-sacrifice contributions
+credited super and cut taxable income without ever debiting household
+cash (`e1eb61a`); the same gap for cap-based ("toConcessionalCap")
+contributions specifically, landed alongside the conservation invariant's
+own introduction so the fix and its guard shipped together (`2867768`).
+Per-figure super threshold indexation (AWOTE/CPI/unindexed, with nominal
+rounding) (`5ce30c1`). A third bug, found via this session's demo-client
+work rather than `randomScenario()`: the super account's reported closing
+balance silently omitted a deficit-funded-from-super withdrawal made in
+the FY's LAST month — `superSeries[id][m+1]` was snapshotted BEFORE that
+withdrawal ran, and every OTHER month's shortfall self-corrected via the
+next month's fresh snapshot, so only June was ever wrong. Fixed by moving
+the snapshot to the true end of the month's processing, alongside the
+financial-asset equivalent; locked in with a standalone regression test
+(`deterministic.test.js`, not a `randomScenario()` extension — see that
+test's own header for why this exact pattern wasn't reachable by the
+existing fuzzer) — housekeeping commit, this session.
 
-**Tier 1.1 — Key Dates** — named anchors (Start, End, Retirement, custom)
-referenced by every date field; verified as pure indirection (byte-identical
-to equivalent explicit ages).
+### HELP, FHSSS, MLS, deductions and PAYG withholding
+Document Set commits (`docs/specs/11-document-set.md`), found by a
+workbook document-sense-check: **HELP repayments** (`1f3a5eb`) — FY-keyed
+bracket table with the $186,052 whole-income cliff, per-person
+`helpBalance`, repayment income folding in reportable super contributions
+and net investment loss. **Medicare Levy Surcharge** (`afbfdec`) —
+single/family band tables, the $1,500/child-after-first family threshold
+step, `privateHospitalCover`/`dependentChildren` inputs (also fixed a
+latent bug: Setup's commit handler was dropping `workingCash` from the
+next plan object on every edit). **FHSSS** (`caa13fb`) — annual
+$15,000/lifetime $50,000 combined cap, 85%/100% release split, the
+taxable release taxed at MTR less a 30% offset, a planned PPR purchase's
+"release at purchase" toggle. PAYG withholding, tax refund timing, and
+deductions as their own commit (`ef7cafa`) — income tax accrues
+PAYG-style across a person's salary months, the gap to actual liability
+settles as a single outflow in July of FY t+1. HELP folded into
+`row.liabilities` so it's finally visible to net worth and the
+Liabilities table/chart, with the double-counted "Other Loan Repayments"
+line fixed alongside it (`132e7cd`). A real display-layer bug found
+during worked-example validation, independent of the document itself:
+`cashReceivedSums`'s take-home-pay figure netted off income-tax PAYG
+withholding only, never HELP or MLS withholding, despite both being
+withheld through the identical mechanism — overstated take-home pay by
+the client's full HELP repayment before the fix (`65e27d0`).
 
-**Tier 1.2 — Super accumulation** — accounts with tax components; SG derived
-from employment income; salary sacrifice, personal deductible/non-deductible,
-spouse; concessional cap with five-year carry-forward and the prior-30-June
-TSB gate; NCC with bring-forward tiers; contributions tax; Division 293;
-preservation, release conditions, proportioning.
+### Goals and education funding
+`state.goals` — label, target amount, target date, funded from an asset
+or from surplus, its own indexation; asset-funded draws through the same
+`sell()` every cashflow uses, surplus-funded capped at what's actually
+left over each month rather than manufacturing cash (`227b12a`). Children
+replace the flat `dependentChildren` count entirely
+(`plan.children = [{ id, name, dateOfBirth, education }]`), migrated from
+an existing count via plausible placeholder DOBs surfaced in the Review
+panel; per-child education funding blocks anchor to the child's own age
+via a self-contained affine shift, deliberately not wired into the
+shared owner/anchor system built for client/partner (`b3724c5`). A real
+bug caught by extending `randomScenario()` to generate children and
+education before this shipped: the schedule read `block.amount` where the
+model calls the field `annualAmount`, producing NaN expenses for every
+scenario with an education block — caught by the conservation test on
+run 5, not by hand.
 
-**Working Cash Account** — household cashflow buffer with FY-end sweep,
-replacing monthly surplus destruction. Fixed a second latent bug found during
-implementation (unfunded cashflow re-recording cumulatively).
+### Output — Graphs, Tables, Focus, What if, and the client-level Comparison
+**Graphs/Tables split** (`152e745`, `b321499`) with the composite
+Cashflow-Assets-Liabilities chart on shared-zero dual axes (`2feca18`,
+`d290b4c`); transposed multi-view ledgers with in-grid one-off editing
+and a period selector (`0966705`, `d9212d0`); Snapshot view with firm row
+vocabulary and "Copy for Word" clipboard export (`ab6b20e`); **Where the
+money went** — a 7-bucket waterfall decomposition of net worth change,
+reconciling to closing net worth exactly, not just within the invariant's
+tolerance (`3a6feb5`). **Focus** (`docs/specs/12-focus-views.md`) — one
+question, one page, read from the same `projectPlan()` output every other
+view reads: scaffold and a monotonic-direction goal-seek solver
+(`9bf12bb`), Deposit & home purchase with two solver actions and the
+`unfundedCashflow`-driven, whole-of-projection affordability fix
+(`4ae6fdf`, `277bd02`), FHSSS comparison (`7981d6c`), salary sacrifice
+comparison (`9c02b04`), debt payoff (`ddaf123`), stamp duty/LMI standalone
+lookups (`a1a6869`), usable equity, fortnightly transfer schedule
+(`0aa4cd6`). **What if** (`docs/specs/14-what-if.md`) — the mirror of
+Focus ("what if the world is different" vs "what if I did something
+different"): scaffold with a self-registering shock runner
+(`24c848a`), interest rate shocks (`2a6ff83`), market crash timing with a
+fully rewritten `sequenceRisk.js` (`d590705`), income interruption and
+expense shock (`a0a741b`); a later pass made cashflow — surplus and
+working cash, not net assets — the PRIMARY lens for the three cashflow
+shocks, since "do we get through it" is the real question for an income
+gap, not net worth in 2060 (`c431a9e`). **Client-level Comparison** — a
+Focus view originally (`438e0f4`), relocated off the workspace entirely
+onto its own client-level page with no input sidebar
+(`#/clients/<cid>/compare?s=<id>,<id>`), selection via a capped checkbox
+picker on the client page, and an 8-option view selector (6 charts, 2
+tables) replacing the old single stacked-everything page (`9d6bf04`). The
+comparison math itself (`planWindowsMatch`/`keyFigureValuesAtYear`/
+`keyFigureComparisonRows`) is untouched by the relocation — a relocation
+plus a view selector, not a rewrite. A latent bug found by testing the
+relocation end-to-end: a scenario with no stored blob yet (the
+workspace's bootstrap scenario, before any save) silently dropped out of
+a comparison instead of showing as the defaults it actually is — fixed
+with the same fallback `loadActiveState()` already used.
 
-**Output additions** — liabilities table and chart; cashflow bars chart; key
-figures table; projection chart moved to annual points on an age axis.
+### Monte Carlo, with CPI-linked interest rates
+Full-plan simulation with its own conservation checks and a timing report
+(`3d2169b`); a properly-seeded RNG with per-path CPI variation
+(`9ef4938`); 10/25/50/75/90 bands and a single ruin definition
+(`5a67a89`); a worker with progress and cancel so the tab never blocks
+(`297b1ed`); Tables view, distribution summary, CSV export (`09e674e`);
+a later audit fixed PNG export, the results cache, and the deterministic
+overlay (`f09cc43`). Relocated into the new **What if** group unchanged —
+same ids, same render functions, only the sidebar grouping moved
+(`24c848a`). **Interest rates driven by the simulated CPI path**, not an
+independent stochastic process: `marketRate = neutralRealRate +
+cpi(path, year) + margin`, applied as a deviation from each loan's own
+deterministic rate so zero CPI volatility reproduces the deterministic
+projection exactly for ANY loan, regardless of its entered rate
+(`9a70991`) — variable loans move immediately, fixed loans only after
+their own rollover, consistent with the fixed-rate-rollover work. An
+errata was needed, not a code fix: the spec had predicted a fixed-rate
+client's fan chart would be genuinely NARROWER during the fixed period;
+verified opposite — it's wider, because the hedge only holds while the
+client's own rate is fixed, and the erratum is recorded at the end of the
+spec, body untouched (`7ecdfc7`).
 
-**Document Set (docs/specs/11-document-set.md)** — gap-filling commits found
-by the workbook document-sense-check:
-- Commit 1, **HELP repayments** (`1f3a5eb`) — FY-keyed bracket table with the
-  $186,052 whole-income cliff; per-person `helpBalance`; repayment income =
-  taxable income + reportable super contributions (SS+PD, not SG) + net
-  investment loss; folded into PAYG withholding/refund settlement.
-- Commit 2, **Medicare Levy Surcharge** (`afbfdec`) — single/family band
-  tables (AWOTE-indexed), +$1,500/child-after-first family threshold step;
-  reuses HELP's repayment-income figure; `privateHospitalCover` (per person)
-  and `dependentChildren` (household) inputs. Also fixed a latent bug: the
-  Setup plan-bar's commit handler dropped `workingCash` from the next plan
-  object, silently resetting the WCA to defaults on every Setup edit.
-- Commit 3, **FHSSS** — new `src/fhsss.js` (annual $15,000/lifetime $50,000
-  combined cap acceptance, 85%/100% release split); `fhsssEligible` flag per
-  voluntary super contribution row (SG/spouse always excluded); the taxable
-  release (85% of eligible concessional + all associated earnings) taxed at
-  MTR less a 30% offset via a new `assessPerson` parameter, mirroring the
-  existing excess-concessional-contributions offset shape; a planned PPR
-  purchase's "Release FHSSS at purchase" toggle credits the gross release
-  against settlement cash, with the tax settling through the normal FY
-  assessment/PAYG-refund mechanism rather than netted at settlement.
-  `assumptions.fhsssEarningsRate` (indicative ATO shortfall interest rate,
-  needs confirming — see Open Items).
-- Commit 4, **LMI and First Home Guarantee** — new `src/data/lmiRates.js`
-  (indicative LVR × loan-size premium table, applies above 80% LVR) and
-  `src/data/fhbgCaps.js` (indicative per-state price caps, flagged not
-  blocked when exceeded); both need firm confirmation — see Open Items.
-  Per-purchase `lmiOverride` (nominal $, same precedence as `dutyOverride`),
-  `lmiPayAtSettlement` (default false = capitalised into the loan
-  drawdown), and `firstHomeGuarantee` (waives LMI; forced off unless
-  `firstHomeBuyer` and a planned purchase).
-- Commit 5, **Extra and one-off loan repayments** — per liability, a
-  repeatable `extraRepayments` list (amount/frequency/DateRef/indexation)
-  and a `oneOffRepayments` list (amount/DateRef); both reduce principal the
-  same month, through the same WCA/deficit-funding/unfunded cascade the
-  scheduled repayment already uses (an unaffordable plan surfaces as
-  unfunded, not silently skipped). New `scheduledAmortisation` in
-  `liabilities.js` computes the no-extras baseline; the Liabilities table
-  reports interest/time saved once a loan with extras is fully repaid
-  within the projection.
-- Commit 6, **Goals** — `state.goals` (per goal: label, targetAmount,
-  targetAt, fundedFrom [assetId | "surplus"], indexation), a new input
-  page. Accrues straight-line from plan start to the (indexed) target
-  month; asset-funded draws via the same `sell()` every asset-affecting
-  cashflow uses (naturally capped at the asset's balance); surplus-funded
-  is capped at whatever's actually left over each month (a discretionary
-  contribution can't manufacture cash, unlike an instructed transaction —
-  no "unfunded" cascade, the shortfall reduces the goal's own accrual
-  instead). "Spent at the target date" = the accrual itself, no separate
-  goal-balance ledger. Reports achieved/shortfall + an extrapolated
-  alternative date; own group in the Cashflow table; dated markers on
-  the composite chart.
-- Commit 7, **Snapshot view and Word-ready export** — `cashflowStatement.js`
-  gained a per-owner `forOwner` breakdown (Client/Partner/Total; jointly-owned
-  items split 50/50, income/expense/deduction rows attribute exactly since
-  they're never joint) alongside the existing household total, so a new
-  `src/snapshot.js` (`buildSnapshotColumns`/`buildSnapshotTable`) reuses it
-  directly — a Snapshot column reconciles to the Cashflow table by
-  construction, not a second computation. New Snapshot table (Tables), up to
-  six DateRef-selected years (default: current, retirement, four spread),
-  persisted per scenario (`display.snapshotYears`). "Copy for Word" (HTML
-  clipboard) and Export CSV both reuse the same hideEmptyRows-filtered table
-  — explicitly no .docx generation, per the spec.
+### Conservation invariant and input-integrity work
+Motivated by two real engine defects found by using the tool and looking
+at output, not by the test suite (WCA timing spending annual income the
+month it arrived; the super money-creation bug above) — both violated the
+same principle, "money must be conserved," and neither had a test that
+could see it. `conservationCheck.js` now asserts, for every plan year,
+that the change in net position equals the sum of every named source of
+cash entering or leaving the household, with `randomScenario()`
+(`deterministic.test.js`) generating the money flows to exercise it.
+**Four bugs found via this invariant since**, each the same class —
+"a guard that doesn't grow with the engine silently stops guarding" — and
+each closed by extending BOTH the generator and the invariant in the same
+commit, per CLAUDE.md's explicit rule: an FHSSS release crediting
+settlement cash with more than the super account actually gave up
+(`0d205aa`); two claims on the same super account in the same year (adviser
+fees, Division 293/296, FHSSS) each believing they alone could take the
+full balance, closed by a fixed-order `reserveFromSuper` (Implementation/
+Rates Commit 2); the property acquisition-date bug — a legal-looking
+"Owned" property with a future date silently producing rent from year one
+— now the canonical unenterable-state example (`1047ceb`, `9a1f985`); and
+this session's super-closing-balance snapshot-ordering bug (see Super,
+above). Input integrity: Part C of the spec audit made impossible states
+unenterable rather than merely warned about (`1047ceb`); Input UX
+(`docs/specs/15-input-usability.md`) added `state.meta.touched` so an
+unreviewed default is visibly distinguished from a deliberate entry,
+covering the whole app with a generic path-computation function rather
+than per-field markup (`0bba12c`).
 
-Roughly 653 tests, clean build. **All seven Document Set commits
-(docs/specs/11-document-set.md) are now landed.**
+### Worked-example validation
+The tool had never been checked against an independently-produced
+correct answer. `docs/reference/workbook-document-sense-check.md`
+analysed a real advice document the firm produced by hand;
+`src/workedExample.test.js` builds that client as a committed fixture
+(never localStorage) and asserts the Snapshot view's year-one column
+against the document's own five figures — HELP and the work-related
+deduction match exactly, take-home pay within 0.25%, the refund gap a
+disclosed timing convention (`65e27d0`). NET INCOME carried a genuine
+~4.7% discrepancy after that first pass; a follow-up resolved it against
+PRIMARY SOURCES rather than assuming the firm's hand-built, prior-FY
+workbook was correct: a first-principles derivation reproduces the
+document's implied pre-HELP figure exactly and is defensible on its own;
+HELP's own bracket shape makes the reconstructed taxable income
+provably UNIQUE for a single earner, so no single-earner input set
+reaches the document's NET INCOME figure — a second-earner household
+does, exactly, a demonstrated-consistent candidate, not a confirmed one;
+and the "workbook predates this FY" hypothesis was tested directly by
+re-running under FY2025–26 brackets and REJECTED — the prior year taxes
+MORE, moving further from the document's figure, not closer (`cfa36b4`).
+The standing precedence rule this established, now the project
+convention: "Where our figure and the workbook disagree, ours stands if
+it traces to a primary source with the source and date cited. The
+workbook is a second opinion from a point in time, not a reference
+implementation. Divergences are recorded, attributed where possible, and
+only treated as our defect where a primary source says so."
 
-**Conservation invariant coverage** — `randomScenario()` extended to
-generate every Document Set money flow (goals, FHSSS + a paired planned
-property, extra/one-off loan repayments, LMI with/without FHBG, HELP/MLS-
-triggering incomes) and `conservationCheck.js` extended with a named term
-for each, including an explicit net-to-zero assertion for the FHSSS
-transfer. Found and fixed a genuine money-creation bug in the process: the
-FHSSS release call site discarded `withdrawFromSuper`'s return value, so
-settlement cash could be credited more than the super account actually
-gave up.
-
-**HELP as a liability** — a HELP/HECS balance was tracked and repaid
-correctly but invisible to net worth: `helpBal` never joined
-`liabilitiesClosing`, so a client with a $60,000 balance and one with none
-reported identical `netAssets`. Folded into `row.liabilities` (the same
-map ordinary loans use) so it's covered by the Liabilities table/chart and
-netAssets for free, plus genuine annual indexation at the lower of CPI and
-AWOTE (AWOTE proxying WPI, the post-1 June 2023 "lesser of" legislative
-basis — confirm against the firm reference). Input moved from Setup into
-its own block in the Liabilities section (Xplan's own structure: no
-interest rate, term or repayment schedule, so a Liability object's field
-set didn't fit). Fixed a related latent double-count: HELP's compulsory
-repayment is already reported per-owner via `taxSums()`'s `helpRepayment`
-figure, so `cashflowStatement.js`'s generic per-liability expense loop
-would have counted it a second time as "Other Loan Repayments" — excluded
-explicitly (`isHelpLiability`), with a regression test proving the bug
-would have broken the Client + Partner = Total identity.
-
-**Focus views (docs/specs/12-focus-views.md)** — one question, one page,
-read from the same `projectPlan()` output every other view reads, never a
-separate calculation.
-- Commit 1, **scaffold and solver** — `src/solve.js`'s `bisectScalar`
-  (monotonic-direction inferred from the two endpoints, non-monotonicity
-  detected and reported rather than silently narrowed on) and `solveFor`
-  (clones the plan, applies one of three named vary targets, re-validates
-  via `clampAllToPlan`, runs the real engine). Third sidebar group
-  (Graphs · Tables · Focus) with five empty-state views, each with a
-  direct link to the input section it needs.
-- Commit 2, **Deposit & home purchase** — `src/focusDeposit.js`. Target
-  price/growth/purchase date, required-at-settlement breakdown (deposit,
-  duty, LMI or the FHBG waiver, costs, less FHOG — new `deposit`/`duty`/
-  `costs`/`fhog` fields on `row.properties[pid]`, exposing figures the
-  purchase-event block already computes), an accumulating-funds-vs-
-  required chart, and an on-track/shortfall answer keyed to the engine's
-  own cumulative `unfundedCashflow` — not a separate arithmetic
-  threshold. Two solver actions ("What would I need to save?" / "When
-  could I buy?") via a new `findMinimumFunded` search (binary search for
-  the SMALLEST/EARLIEST value at which cumulative unfunded cashflow
-  drops to zero — deliberately not `solveFor`/`bisectScalar`, since
-  "funded" floors at exactly zero and stays there, a plateau rather than
-  a single root, which an equation solver would land on arbitrarily
-  rather than at the minimum). Caught a genuine bug in its own build:
-  an earlier metric that only checked "opening balance vs. required
-  settlement cash" could converge on an amount that funded the deposit
-  but left the new loan's own first-year repayments unfunded — fixed by
-  switching both solvers to the engine's actual `unfundedCashflow`
-  ground truth, with a regression test.
-- Commit 3, **First Home Super Saver** — `src/focusFhsss.js`. The
-  engine tracked FHSSS running balances (`fhsssBal`) purely internally;
-  a new `row.fhsssDetail[person]` (contribution accepted/rejected,
-  associated earnings accrued, running concessional/non-concessional/
-  earnings balance, lifetime contributed) exposes the same accrual step
-  already computed each year, and `row.taxDetail[person]` gained
-  `fhsssTaxableComponent`/`fhsssTaxFreeComponent` alongside the existing
-  gross release/offset. Cap headroom (annual $15,000, lifetime $50,000)
-  is derived from that exposure against the fhsss.js constants — the
-  engine itself has no headroom concept, only acceptance/rejection.
-  "Eligible release" reuses `fhsssReleaseAmounts()` directly (never
-  reimplemented) against the latest tracked balance when no release has
-  fired yet. The comparison that justifies the strategy — the same
-  dollars inside FHSSS versus saved outside super — runs a second real
-  `projectPlan()` on a clone that redirects the eligible contribution
-  rows into an ordinary asset using the linked super account's own
-  allocation (isolating the tax-wrapper difference from the investment
-  mix), per the spec's explicit requirement not to hand-roll either arm.
-- Commit 4, **Salary sacrifice** — `src/focusSalarySacrifice.js`. Both
-  arms from a real `projectPlan()` run: "without" is the same plan with
-  the sacrifice row deleted outright — no redirection needed, unlike
-  FHSSS's comparison, since the extra take-home pay just flows through
-  the household's own existing surplus handling. Per year: income tax
-  saved, HELP repayment shown explicitly unchanged across both arms
-  (the single most commonly misunderstood interaction), Division 293
-  triggered/increased, super gained net of the 15% contributions tax,
-  household cash reduced (financial assets AND the Working Cash
-  Account — a household on "accumulate" never invests surplus into a
-  named asset at all), and net position charted over time. Amount is
-  adjustable live in the view as a what-if (not an edit to the real
-  row); cap headroom reuses the input panel's own
-  `superCapHeadroomHTML` display verbatim, per the spec's explicit
-  instruction not to re-derive it.
-- Commit 5, **Debt payoff** — `src/focusDebtPayoff.js`. Payoff date and
-  lifetime interest work for ANY loan (summed straight off
-  `row.liabilities[id]`, no dependency on extras being configured); the
-  effect of extra repayments is the engine's own
-  `liabilityRepaymentStats`, read through unchanged, `null` (not zero)
-  when no extras are configured. The balance-over-time chart runs a
-  second real `projectPlan()` on a clone with the loan's own
-  `extraRepayments`/`oneOffRepayments` stripped — `scheduledAmortisation`
-  only returns summary figures, not a series, so this is a genuine
-  counterfactual run rather than a re-derivation. Solver ("What extra
-  repayment clears this by [date]?") generalised the deposit view's own
-  plateau-search into a shared `findMinimumThreshold` (`solve.js`) —
-  a loan's payoff year plateaus at the earliest sufficient extra
-  repayment exactly the way cumulative unfunded cashflow does, the same
-  reason `solveFor`/`bisectScalar` don't fit. Affordability is checked
-  and surfaced separately from convergence: a mathematically sufficient
-  extra repayment the household can't fund reports `unfunded > 0`
-  rather than a clean "apply this" success. Also closed a scaffold gap
-  from Commits 2–4: the sidebar's Export button was wired for every
-  other view but not one Focus view — added a CSV export (flat
-  section/item/value rows, not the year-columns ledger shape) for all
-  four Focus views built so far.
-
-- Commit 6, **Standalone lookups** — `src/focusLookups.js`. The one
-  deliberate exception to the governing principle: a lookup, not a
-  projection, so it takes no plan/scenario input at all — just state,
-  price, FHB/new-build/FHBG flags and an LVR. Calls the SAME functions
-  the purchase engine calls (`dutyWithConcessions`, `fhogAmount`,
-  `lmiPremium`, `fhbgPriceCapExceeded`), no new rate data; reconciled
-  against a real `projectPlan()` run with a property purchasing at
-  month 0 (nominal price = today's price exactly at that point,
-  regardless of growth/CPI) per the spec's own test requirement. As-at
-  dates and verification caveats from each data module's own metadata
-  are shown directly in the view, not summarised away.
-
-**Deposit solver: whole-of-projection affordability** — Focus Commit
-2's own fix (settlement-year-scoped `cumulativeUnfundedThroughYear`, to
-close the "deposit funded but the new loan's first-year repayments
-aren't" bug) reintroduced the same class of error one step later: a
-metric scoped to the purchase year is still blind to a loan that clears
-settlement and then becomes unaffordable to service in year three, five,
-or any year after. `solveWhenCouldIBuy` could report a fully "achieved"
-date on a mortgage that, once drawn down, produced six figures of
-unfunded cashflow for the rest of the projection — it was checking
-"did this settle", not "does the plan work". Both solvers now target a
-NEW `cumulativeUnfundedWhole` (sum through the LAST projected year, not
-the purchase year) as the primary metric, via a shared
-`solveWithAffordabilitySplit`. Where nothing in range clears that bar, a
-second pass against the old settlement-only metric distinguishes WHY —
-`"settlement-unaffordable"` (the deposit itself is never raised) from
-`"servicing-unaffordable"` (settlement clears somewhere, but the
-resulting loan is never serviceable) — because they call for opposite
-advice: save more / wait, versus this property isn't affordable
-regardless of timing. The settlement-only figure survives as
-`earliestSettleable`, reported as clearly-labelled CONTEXT alongside the
-`servicing-unaffordable` result, never as the answer itself (no apply
-button — it isn't one). `buildDepositFocus`'s own `answer.onTrack` gained
-the same two-reason split, so a property that settles but never
-services reads as "cannot afford this purchase" with the servicing
-shortfall, not as a shortfall-by-date the client just hasn't reached yet.
-
-**Implementation, Fixed Rates, Equity, and Comparison
-(docs/specs/13-implementation-rates-equity-comparison.md)**
-- Commit 1, **Fixed-rate loans and rollover** — a liability gains
-  `rateType`/`fixedRatePct`/`fixedUntil`/`revertRatePct`/`commencedOn`.
-  Interest accrues at `fixedRatePct` until the rollover month (resolved
-  via the SAME "fires in July of the resolved plan year" convention
-  every other one-off plan event uses), `revertRatePct` after (null =
-  falls back to `assumptions.mortgageRate`, the same override-or-default
-  shape as `dutyOverride`/`lmiOverride`). The level repayment recomputes
-  EXACTLY ONCE, at the later of rollover or IO-end, over the loan's
-  actual balance and remaining term at that point — held fixed
-  afterward, deliberately not smoothed. The recomputed payment
-  (`postRolloverPmt`) is path-dependent (balance-at-trigger), so it gets
-  the SAME measurement/real-pass snapshot-and-restore treatment as
-  `loanBal` itself. `scheduledAmortisation`'s own "no extras" baseline
-  (Document Set Commit 5's interest-saved comparison) now rolls over
-  too, or a fixed-then-reverting loan WITH extras would misattribute
-  the rate switch's own effect to the extras. New `out.liabilityRollovers`
-  gives the Liabilities table's new rate row, the rollover's forced
-  annotation on tables/the Liabilities chart (same `forcedYearIndices`
-  mechanism a planned property's purchase date already uses), and the
-  Focus debt-payoff view's before/after figures — all read straight
-  through, never recomputed. Verified (not assumed) that this needs NO
-  new conservation-invariant term: `randomScenario()` now generates
-  fixed-rate liabilities with a rollover before/during/after the
-  projection, and the existing `liabilityInterest`/`liabilityRevaluation`
-  terms held across thousands of randomised runs — documented in
-  `conservationCheck.js` itself.
-- Commit 2, **Adviser fees and flow of initial funds** —
-  `plan.adviserFees` (upfront once at plan start, ongoing every year,
-  indexed; each split outside/inside super) and `plan.implementation`
-  (a reconciliation block, not a new source of truth: total cash
-  available less the upfront fee less each allocation equals residual,
-  cross-checked against entered opening balances and flagged, never
-  overwritten, on mismatch). Inside-super fees are a direct balance
-  debit via `withdrawFromSuper` — the SAME mechanic and reasoning as
-  the Division 293/296 release (not a benefit payment, no preservation
-  gate, applied before that period's growth so growth compounds on the
-  post-fee balance). `emergencyFundTarget` writes through to
-  `workingCash.minimumBalance` once it's actually set, giving the
-  emergency fund a modelled consequence, without clobbering a
-  manually-entered minimum on a household that's never touched
-  Implementation. Not modelled as deductible (disclosed in the
-  Parameters modal — the partial deductibility for advice on existing
-  investments needs an apportionment this build doesn't collect).
-  **A fourth conservation-invariant bug found via `randomScenario()`**
-  (not the reported one, but the SAME class): adviser fees, Division
-  293/296, and FHSSS each independently capped their own release
-  against a super account's raw balance, so two mechanisms sharing an
-  account in the same year could each believe they alone could take
-  the full amount and together debit more than the account ever
-  held — closed by a new `reserveFromSuper`, which resolves every
-  same-year claim on an account in a fixed order (adviser fees, then
-  Division 293/296, then FHSSS — matching the order they actually debit)
-  against what's genuinely left after the earlier ones, not the raw
-  balance. Per CLAUDE.md's rule, the whole class was closed in this
-  commit, not just the adviser-fee instance that surfaced it.
-- Commit 3, **Usable equity and borrowing capacity** — per property,
-  `usableEquity = value × equityCeilingPct − (linked loan closing −
-  offset applied)`, floored at 0 (a capacity, not a signed balance).
-  A property's "linked loan" is either the D4-derived purchase loan OR
-  any user-entered liability the adviser has explicitly linked via
-  `linkedAssetId` — both are real, already-tracked liabilities, netted
-  together. No new money flow (a read-only, derived security-constraint
-  figure, never a projection input), so no conservation-invariant
-  change. New `depositFromEquity`/`depositFromEquitySourcePropertyId`
-  on a planned purchase (validated in two stages — self-reference and
-  stale ids both fall back to off/null, the same pattern
-  `plan.implementation`'s own cross-referencing fields use) flags, at
-  the purchase year, when the source property's usable equity falls
-  short of the deposit this purchase actually needs
-  (`row.properties[pid].deposit`, Focus Commit 2's own field, never
-  re-derived) — a flag, never a block; the purchase still completes
-  through the ordinary funding order regardless. New Focus view (usable
-  equity by property and in total, over the projection) carries the
-  spec's own "be explicit about what this is not" disclosure
-  prominently, not buried: a security constraint, not a serviceability
-  assessment.
-- Commit 4, **Where the money went: net worth decomposition** —
-  `conservationCheck.js`'s `checkYearConservation` refactored into a
-  pure `computeYearFlows(out, y)` (every named term, unchanged
-  behaviour — bit-identical, re-verified against the full suite and the
-  invariant's own randomised stress test) plus a new
-  `decomposeNetWorthChange(out, y)` that regroups those same terms into
-  the spec's 7 waterfall buckets (income, growth, tax, expenses,
-  interest, fees, oneOffs), with the FHSSS transfer folded into oneOffs
-  rather than dropped so the decomposition reconciles to closing net
-  worth EXACTLY, not just within the invariant's own tolerance. The
-  single scaffolding term `propertyAcquisitionCosts` splits into
-  `propertyOneOffCost` (duty+costs−FHOG, zero outside a purchase year)
-  and `propertyGrowth` (the residual — organic growth of already-owned
-  properties) — the two still sum to exactly what they replaced.
-  `deterministic.js` runs this in a post-pass (a pure read of
-  already-computed per-year figures, no new money flow, so no
-  conservation-invariant change) to populate `row.decomposition` (this
-  year's own bucket increments) and `row.cumulativeDecomposition`
-  (running totals since projection start) on every yearly row, plus a
-  top-level `wealthCrossoverYear` — the first year cumulative investment
-  growth overtakes cumulative income, per the spec's own "point" this
-  view exists to show. New Graphs view (**Where the money went**): a
-  waterfall chart (opening net worth → cumulative buckets → closing net
-  worth) for a selectable year, plus a transposed table of both the
-  per-year walk and the cumulative totals, CSV export. Tested with a
-  known-value growth-only fixture, a crossover-annotation fixture, and —
-  per CLAUDE.md's rule for a decomposition of this kind — a dedicated
-  test asserting exact reconciliation to closing net worth across
-  `randomScenario()`-generated scenarios (not a single case).
-- Commit 5, **Fortnightly transfer schedule** — new `src/focusTransferSchedule.js`,
-  pure. For a selected plan year (default: the first FULL year —
-  `monthsInFirstYear(plan.start) === 12`, else year 1), Sources lists
-  every income cashflow row take-home plus every investment property's
-  rent; Destinations lists every expense row, every non-HELP liability's
-  repayment, every super account's personal (non-sacrifice) contribution,
-  every goal's accrual, adviser fees paid from cash, and a settling
-  property's own cash contribution. "Net of PAYG" mirrors
-  `cashflowStatement.js`'s `cashReceivedSums` exactly — only the
-  "salary" category is withheld at all in this model, and a person's
-  PAYG is spread across THEIR OWN salary rows proportionally by gross
-  share, one level deeper than the Cashflow table's own household
-  total — verified to sum back to that exact figure. HELP/HECS never
-  appears as a destination (already withheld via PAYG, never a
-  household-initiated transfer), and neither does salary sacrifice (a
-  payroll deduction before the money is "received", already its own
-  line in the Cashflow table). Residual to savings = sources −
-  destinations. No new money flow (a pure regrouping of already-taxed,
-  already-computed engine figures), so no conservation-invariant
-  change. New Focus view (**Transfer schedule**): fortnightly by
-  default with monthly/annual toggle, a year selector, an Initial
-  transfer section straight from Commit 2's implementation allocations
-  (a one-off, never converted to a rate), CSV and "Copy for Word"
-  clipboard export (same `ClipboardItem` pattern as the Snapshot view's
-  own Word export). Tested: fortnightly/monthly = annual ÷ 26 / ÷ 12;
-  a two-salary-row household's summed take-home matches the Cashflow
-  table's own `regularTakeHomePay` exactly, with the PAYG split
-  correctly proportional to each row's gross share; sources reconcile
-  to destinations plus residual; HELP is never a destination; loan/
-  super/goal rows each surface correctly; the initial transfer column
-  is read straight from `plan.implementation`, never re-derived.
-- Commit 6, **Scenario comparison** — new `src/scenarioComparison.js`,
-  pure (`planWindowsMatch`, `keyFigureValuesAtYear`,
-  `keyFigureComparisonRows`). "Current is simply another scenario — no
-  new data model": every compared scenario is a full, independent
-  `projectPlan()` run — the active one reuses the SAME `state`/
-  `projection` every other view already reads, every other scenario is
-  loaded straight from storage via the same `hydrate()` path
-  `loadActiveState()` itself uses. `buildKeyFiguresGroups`/
-  `incomeCategorySums`/`expenseCategorySums` (main.js) all gained an
-  optional `{state, projection}` ctx, defaulting to the active
-  workspace's own globals — backward compatible with every existing
-  call site — specifically so a comparison column reuses the EXACT SAME
-  row definitions the Key figures table itself uses, never a second,
-  driftable copy. New Focus view (**Compare scenarios**): pick 2-3 of
-  the active client's own scenarios (checkboxes, order = delta base
-  order); mismatched plan windows (current age, start date, or end age)
-  are refused with a clear message naming which scenarios differ,
-  never approximated to fit; matching windows show Net assets over time
-  (one line per scenario, age axis, each scenario's OWN CPI driving its
-  own nominal conversion), Key figures side by side + a delta column
-  per non-base scenario against the first-listed, and Snapshot rows
-  side by side at a selected year (household total only — a disclosed
-  simplification, since scenarios can differ in household composition
-  and each scenario's own Snapshot view still has the full Client/
-  Partner split). CSV and "Copy for Word" export (the Snapshot half
-  reuses `snapshot.js`'s own `snapshotToHTML`/`snapshotToCSV`
-  unchanged, columns relabelled scenario names instead of years). No
-  new money flow, so no conservation-invariant change. Tested: each
-  scenario's own values pass through unchanged; deltas compute against
-  the first-listed scenario specifically (never adjacent pairs); a row
-  present in only some scenarios (e.g. HELP balance) never misaligns,
-  matched by label not index; mismatched windows refused; cross-client
-  scenario ids are structurally impossible to select (the picker only
-  ever lists the active client's own scenarios).
-
-This closes all six commits of docs/specs/13-implementation-rates-equity-comparison.md.
-
-- Commit 1 of docs/specs/14-what-if.md, **What if: group scaffold, shock
-  runner, Monte Carlo relocation** — new `src/whatIf.js` (pure):
-  `runShock(state, shock)` clones the caller's state via
-  `structuredClone` (never mutating it — asserted directly in tests via
-  a before/after JSON snapshot), applies the shock to the clone only,
-  and runs `projectPlan()` on both the untouched original and the
-  modified clone. Shock kinds self-register via `registerShockKind`
-  rather than growing one switch statement across five commits — each
-  later commit registers its own kind at the module that owns its
-  logic. `buildDeltas(base, shocked)` — exported and tested
-  independently of any shock kind — is "the delta shape" itself: per
-  plan year, the shocked-minus-base change in net assets, closing
-  balance, tax, surplus, and unfunded cashflow, plus headline figures
-  (end net assets, first shortfall age, total unfunded) for BOTH runs,
-  since a shock "introducing unfunded cashflow where there was none" is
-  itself often the headline the two-runs-plus-delta framing exists to
-  show. New **What if** sidebar/output group (Graphs, Tables, Focus,
-  What if): the organising distinction is Focus answers "what if I did
-  something different" (levers the client controls), What if answers
-  "what if the world is different" (things they don't control). Monte
-  Carlo relocated here unchanged — the fan chart out of Graphs, the
-  percentile table out of Tables, same ids, same render functions, same
-  behaviour, only the sidebar grouping and labels moved (disambiguated
-  as "Monte Carlo (fan chart)"/"Monte Carlo (percentile table)" now
-  that both sit under one group instead of two). Output view ids stay
-  flat (router.js's own documented convention) — no nested route
-  segment, matching how Focus was actually built despite its own spec
-  prose describing a "Focus → " path.
-- Commit 2 of docs/specs/14-what-if.md, **What if: interest rate
-  shocks** — two shock kinds self-registered into `whatIf.js`:
-  `rateShock` (moves a VARIABLE loan's rate immediately; moves only a
-  FIXED loan's REVERT rate, leaving its contracted rate untouched until
-  its own rollover — no engine change needed, since deterministic.js
-  already switches a fixed loan's rate at its own rolloverMonth,
-  Implementation/Rates spec Commit 1, and both shocks just move the
-  input fields that switch already reads) and `revertRateShock` (the
-  same revert-rate move alone, leaving variable loans and the current
-  fixed rate completely untouched — "what if you roll off into 8%
-  instead of 6.5%"). `revertRatePct`'s null-means-assumptions-default
-  is resolved to a concrete number BEFORE the shock is added, so a
-  loan that's never had its own revert rate overridden still shocks
-  correctly. New `src/whatIfRateShock.js` (pure): reuses
-  `focusDebtPayoff.js`'s own `buildDebtPayoffFocus` against BOTH the
-  base and shocked outputs for every loan's total interest, rollover
-  before/after repayment, and balance path — never a second, re-derived
-  copy of that logic. New **Interest rate shocks** What-if view:
-  shock-type toggle, magnitude selector (−2/−1/+1/+2/+3pp, base always
-  shown), loan balance paths overlaid (base solid, shocked dashed), an
-  affordability callout naming whether the shock introduces or grows
-  unfunded cashflow, per-loan interest/repayment table, CSV export.
-  Tested: a variable loan's interest changes from month one; a fixed
-  loan's rate is unchanged until its own rollover and changes after
-  (rateShock); a revert-rate shock leaves the fixed period AND every
-  variable loan untouched; a shock sized to break affordability
-  produces unfunded cashflow in the shocked run only.
-- Commit 3 of docs/specs/14-what-if.md, **What if: market crash timing
-  and sequence risk** — `src/sequenceRisk.js` REWRITTEN entirely (per
-  the spec's own instruction: "read it, salvage what is useful... do
-  not simply re-enable it"). Nothing from the old dormant single-
-  portfolio "Path A vs Path B" DOM visualiser survived — it generated
-  its own synthetic normal-distributed returns and manipulated the DOM
-  directly, both patterns this codebase moved away from before this
-  file went dormant. The crash is injected via the SAME
-  `mc.shockFor(holdingId, m)` hook Monte Carlo already uses
-  (deterministic.js's own documented overlay parameter) — no engine
-  change needed: at the crash month, each holding's growth return is
-  cut by `dropPct` scaled by its own growth-sleeve weight
-  (`classWeights` — the Australian/international equity + property
-  split the Asset class allocation chart already derives, excluding
-  fixed interest and cash entirely, matching allocation.js's own scope);
-  an optional recovery period applies a constant above-trend monthly
-  return that exactly reverses that holding's own proportional loss by
-  the end of the period. `whatIf.js`'s `runShock` gained the ability
-  for an applier to return an `mc` override (rather than only mutating
-  a cloned state) — backward compatible, Commit 2's shocks are
-  unaffected — since a crash needs no liability/asset FIELD changed at
-  all. New `src/whatIfCrash.js` (pure): runs the identical crash at
-  three representative ages (early/mid-career/near-retirement, spread
-  across the accumulation phase) against the same base. New **Market
-  crash timing** What-if view: crash-size and recovery-period
-  selectors, net assets over time (base + three age lines), an
-  end-net-assets-by-timing table, an explicit note that this is the
-  deterministic counterpart to the (also relocated) Monte Carlo view,
-  CSV export. Tested: the balance drop matches dropPct × growth
-  fraction exactly; a 100%-cash holding is completely unaffected; a
-  recovery period restores the balance to trend exactly on schedule;
-  the identical crash produces materially different end outcomes at
-  different ages; the crash self-registers with `runShock`'s generic
-  registry, producing identical figures to calling it directly.
-- Commit 4 of docs/specs/14-what-if.md, **What if: income interruption
-  and expense shock** — two more kinds self-registered into
-  `whatIf.js`. `incomeGap` ({ownerId, atAge, months, replacementPct})
-  is a genuine STATE-level change (splitting the owner's own
-  salary-category income row(s) across the gap), not an mc side-channel
-  like the crash — income needs to move BOTH the household's monthly
-  cash AND that person's annual taxable income together (tax is
-  assessed from the SAME row-level yearly totals cashflowStatement.js
-  already reads), and only a state-level row change moves both
-  consistently. Every DateRef in this engine resolves to a WHOLE PLAN
-  YEAR (age anchors snap to 1 July — keyDates.js's resolveOwnerAge;
-  annual rows and one-offs fire in July for the same reason, per
-  CLAUDE.md's own Cashflows convention) — there is no month-level date
-  granularity anywhere in this schema, so `months` is rounded to the
-  nearest whole number of plan years, a disclosed simplification
-  matching how every other timed event in this engine already works
-  (a fixed-rate rollover, a planned purchase — nothing resolves finer
-  than a plan year). `expenseShock` ({pct}) is far simpler: scales
-  every household expense row's own `amount` by `1+pct/100` — since
-  indexation is layered multiplicatively on top of `amount` at each
-  point in time, scaling the base amount scales the entire indexed
-  trajectory for free, no separate indexed-vs-flat handling needed.
-  Both shocks read through `runShock`'s existing generic deltas (net
-  assets, tax, surplus, unfunded cashflow, headline figures for both
-  runs) — neither needed a dedicated per-shock reader module the way
-  rate shocks and crash timing did. New **Income interruption** and
-  **Expense shock** What-if views: owner/age/length/replacement
-  controls (income gap) or a single percentage control (expense shock),
-  a shared base-vs-shocked net-assets-over-time chart, an affordability
-  callout naming whether the shock introduces or grows unfunded
-  cashflow, CSV export. Tested: the income reduction lands in exactly
-  the gap year(s) and no others; replacementPct of 0/50/100 all apply
-  correctly; only the named owner's salary rows are touched (other
-  income categories and the partner's own income keep flowing); the
-  expense shock scales every row, including an indexed one, by exactly
-  the same factor at every year of the projection; both shocks produce
-  unfunded cashflow in scenarios sized to break affordability, and
-  never in scenarios that shouldn't.
-- Commit 5 of docs/specs/14-what-if.md, **Monte Carlo: interest rates
-  driven by the simulated CPI path** — interest rates are NOT modelled
-  as an independent stochastic process; they're driven off the SAME
-  simulated CPI path each Monte Carlo path already generates:
-  `marketRate(path, year) = neutralRealRate + cpi(path, year) + margin`
-  (two new configurable parameters, defaults 1.0%/2.5%, chosen so their
-  sum with the 2.5% CPI default reproduces the 6.0% mortgage rate
-  default). Applied as a DEVIATION from each loan's own deterministic
-  rate rather than an absolute override — the formula's own
-  neutralRealRate/margin terms algebraically cancel out of the applied
-  delta, leaving exactly `cpi(path, year) − cpiMean`, which is what
-  makes "zero CPI volatility reproduces the deterministic projection
-  exactly" hold for ANY loan regardless of what rate it was entered at,
-  not just ones that happen to match the default assumption. Applied to
-  variable loans immediately and to fixed loans only after their own
-  rollover (Commit 2's differential, again) via a new
-  `mc.mortgageRateDeltaForYear` parameter alongside `shockFor`/
-  `cpiForYear` — always absent for a deterministic run, so the change
-  is zero-risk there (confirmed: the full suite stayed bit-identical
-  throughout implementation). The level payment now recomputes once
-  every simulated July (not just once at rollover) whenever this
-  parameter is active, via a new `mcActivePmt` cache alongside
-  `postRolloverPmt` (same measurement/real-pass snapshot-and-restore
-  treatment) — this is what lets "repayments rise" under a high-
-  inflation path show up as a genuine, observable figure rather than
-  only the interest component moving; recomputing at an UNCHANGED rate
-  reproduces the IDENTICAL payment every time (amortisation's own
-  self-consistency), which is also why this is safe at zero CPI
-  volatility. Parameters modal updated: documents the formula, the two
-  new parameters and their calibration, and states plainly that rates
-  are a function of simulated inflation, not an independent process —
-  also corrected a stale "one constant interest rate for the whole
-  projection" claim left over from before fixed-rate rollover (Commit 1
-  of this same spec) already superseded it. Tested: a variable loan's
-  rate moves by exactly the delta every year; a fixed loan ignores the
-  delta entirely before its own rollover and applies it after; the
-  level payment reproduces the identical NOMINAL figure when the rate
-  doesn't change and genuinely rises when it does; a null/absent mc
-  leaves every liability figure bit-identical to before this commit;
-  across real Monte Carlo runs — rate genuinely varies path to path and
-  tracks that path's own CPI; a fixed loan's rate is invariant across
-  paths until its own rollover, then varies; zero CPI volatility
-  reproduces the deterministic projection exactly for a plan with BOTH
-  a variable and a fixed-rate liability (entered at rates that
-  deliberately don't match the linkage formula's own defaults); the
-  conservation invariant holds across sampled paths through a fixed
-  loan's own rollover with the annual repayment recompute active
-  (stress-tested across 16 additional seeds/1,920 checks beyond the
-  committed test suite); seeded reproducibility (already-existing
-  regression coverage, confirmed still byte-identical with the new code
-  path active). Timing impact measured directly (not assumed): a
-  2,000-path run with one liability went from ~4.3-4.6s to ~4.7-5.3s
-  (roughly 10-15% slower) — reported here per the spec's own
-  instruction, not optimised away.
-
-This closes all five commits of docs/specs/14-what-if.md.
-
-- Commit 1 of docs/specs/15-input-usability.md, **Input UX: section
-  restructure and tooltip helper text** — Setup's single dense,
-  four-column, eight-field-per-person block split into Xplan's own
-  three-way division. **Setup** keeps identity and timeline only:
-  first name, surname, DOB, sex, retirement age, plus the existing
-  plan-level projection basis/start/end. New **Tax details** section
-  (sidebar, after Setup): tax residency, Medicare levy, private
-  hospital cover, opening carry-forward capital losses, work test met,
-  plus household `dependentChildren` (until Commit 3 replaces it with
-  a real Children model). **Super** section gained the Division
-  293/296 "tax paid from" election and release-account nomination,
-  shown per person above the account list — a super setting, not
-  identity — sharing the SAME field-mutation handler
-  (`handlePlanFieldChange`, wired to all three containers) rather than
-  three copies of the same logic. `eligibleForCentrelinkBenefits`
-  (`taxProfile.centrelinkEligible`) removed entirely — it drove
-  nothing; SCHEMA_VERSION 13→14, a version-gate-only migration (clamp
-  already stops reading/writing it). New tooltip component
-  (`tooltipHTML`/`wireTooltips`): every field's explanatory sentence
-  moved behind a small (i) icon — CSS `:hover`/`:focus-within` for
-  desktop/keyboard, a delegated click toggling `.tt-open` for touch.
-  Two exceptions stay inline (they change what the field MEANS, not
-  merely explain it): the derived age beside date of birth, and a
-  resolved anchor value beneath a date-ref select. New `.identity-grid`
-  CSS (two columns wide, one narrow) replaces the old four-column
-  `.person-grid` for these specific blocks only — `.person-grid`
-  itself is untouched, since it's shared by many unrelated cashflow-row
-  layouts elsewhere. No engine files touched at all in this commit, so
-  the regression gate (bit-identical projection output) holds by
-  construction — every moved field still lives in the exact same state
-  shape, just rendered from a different container.
-
-- Commit 2 of docs/specs/15-input-usability.md, **Input UX: distinguish
-  entered values from defaults** — `state.meta.touched`, the dotted
-  path of every field the user has attended to (changed, or explicitly
-  confirmed); SCHEMA_VERSION 14→15, version-gate migration (`hydrate()`
-  defaults an absent `meta` to `{ touched: [] }` — an existing scenario
-  shows everything as unreviewed, the honest reading, not a guessed
-  one). Path computation is fully generic (`computeFieldPath` in
-  main.js), driven by which `data-*` attributes an element carries, not
-  by which section renders it — one lookup table per existing naming
-  convention (`data-plan-field`, `data-kind`+`data-cfid`+`data-field`,
-  `data-aid`, `data-said`, `data-lid`(+`data-erid`/`data-orid`),
-  `data-pid`, `data-gid`, `data-alid`, `data-impl-field`,
-  `data-settings-field`, `data-kd-id`) plus explicit maps for the
-  person-prefixed and static Setup/Tax-details codes. This covers every
-  field in the app with zero per-field markup changes: a single
-  capture-phase `change`/`focusout` listener on `.workspace-canvas`
-  marks a path touched before that section's own bubble-phase handler
-  re-renders, so the muted styling is never a render behind. Rendering:
-  a post-render decoration pass (`decorateTouchedFields`, called once
-  at the end of `renderAll()`) mutes untouched fields' `.cf-cell`/
-  `.plan-field` container and gives it a small amber dot; the dot is
-  per CONTAINER, not per field, since a couple of fields (Setup's
-  month+year "Start" pair) share one — clicking it confirms every path
-  still untouched inside that container in one action, so the tick
-  never leaves a sibling field permanently unconfirmable. Tooltips gain
-  "Not yet reviewed — this is a default." (the `unreviewedNote` param
-  built into `tooltipHTML` back in Commit 1). Each populated
-  `[data-section]` gets a "Mark all remaining as reviewed (N)" button
-  when it has untouched fields; the sidebar gets a subtle amber dot
-  badge alongside the existing count badge
-  (`sectionHasUntouched`/`renderSideNav`). New **Review defaults**
-  modal (mirrors the Parameters `<dialog>` pattern, triggered from a
-  button above the sidebar so it's reachable from any input section):
-  every untouched field grouped by section with its live value, a
-  jump-to-section link, a per-field "Mark reviewed," and a global "Mark
-  all as reviewed." Scenario duplication/export round-trip
-  `meta.touched` for free — both copy the serialized blob verbatim, and
-  `serialize()` already spreads the whole state object. Regression gate
-  (touched state has no effect on projection output) verified directly:
-  `projectPlan()` on the same randomised scenario with an empty vs a
-  garbage-filled `meta.touched` produces byte-identical output
-  (`deterministic.test.js`). Scope note: the tick/mute visual treatment
-  covers every `.cf-cell`/`.plan-field`-wrapped field (the large
-  majority of the app — Setup, Tax details, Super, Financial/Lifestyle
-  assets, Liabilities, Properties, Goals, Implementation); table-row
-  cashflow fields (Income/Expenses/Deductions/Contributions/
-  Withdrawals/Super contributions/Super withdrawals — no per-cell
-  label to mute) are tracked identically in the data model and listed
-  in the Review panel, but get no inline dot — a disclosed, not silent,
-  limitation.
-
-  Follow-up fix landed in the same push: the decoration pass (dots,
-  mute, mark-all button) was only ever wired into renderAll(), but
-  Setup/Tax details are the ONLY sections whose own edit handler calls
-  renderAll() — every other section (Liabilities, Assets, Goals,
-  Properties, Super) re-renders itself narrowly (e.g. renderLiabilities()),
-  so their fields never actually got decorated after an edit, only at
-  initial mount. Replaced the direct call with a MutationObserver on
-  the whole canvas, so any section's innerHTML replacement — present or
-  future — triggers decoration uniformly. Its own DOM writes re-trigger
-  it once more, which surfaced a genuine infinite loop: the mark-all
-  button's `textContent` was written unconditionally every pass (a
-  mutation regardless of whether the string changed), so the observer
-  re-fired forever and hung the tab. Fixed by writing only when the
-  label actually differs.
-
-- Commit 3 of docs/specs/15-input-usability.md, **Children and
-  education funding** — `plan.children = [{ id, name, dateOfBirth,
-  education }]` replaces the flat `dependentChildren` count entirely;
-  SCHEMA_VERSION 15→16, migration converts an existing count into that
-  many placeholder children (synthDob'd to age 8 — a plausible, not
-  guessed, starting point) with unknown real DOBs, surfaced in the
-  Review panel simply by never being added to `state.meta.touched`
-  (Commit 2's own "mark nothing on migration" already covers this for
-  free). `dependentChildrenCountInFY(children, fyStartYear)` derives
-  the MLS family-threshold count per FY from each child's own DOB — the
-  threshold now genuinely steps down as a child turns 21, verified with
-  a 3-year engine-level test where family income sits between the
-  3-dependents and 2-dependents thresholds and the surcharge switches
-  on exactly at the tick. New **Children** section (sidebar, after Tax
-  details): each child a card (name, DOB, derived current age); a
-  not-yet-born child's age would display as a nonsensical negative
-  number, so `childCurrentAgeInfo` clamps the shown age to 0 and flags
-  "Not yet born — arrives FYxx–yy" instead (the same input-integrity
-  principle as the property acquisition-date bug — a wrong-looking
-  value must never render unflagged). Per-child **education funding**
-  blocks (`{ label, annualAmount, fromAge, toAge, indexBasis,
-  indexExtraPct }`, default CPI + 2% — school fees have historically
-  outrun CPI) anchor to the CHILD's own age, a third age basis besides
-  client/partner — deliberately NOT wired into the shared owner/
-  DateRef/anchor system every other cashflow row uses (income,
-  expenses, goals, key dates): that system is keyed to "client"/
-  "partner" throughout schedule.js's per-owner age arrays, and
-  extending it for a feature that only needs its own two plain numbers
-  would have touched every one of those features for no shared benefit.
-  Instead, `childEducationPlanYearBounds` is a self-contained affine
-  shift (a child's age in plan year y = age-at-start + y, even when
-  age-at-start is negative for a not-yet-born child — the window simply
-  lands later, no special-case clamp required, verified directly).
-  Education fees flow through the EXACT SAME mechanism as any flat
-  expense row (schedule.js's `expenses[]` array, annual, fires in July)
-  — genuinely not a new money flow, so no new conservation-invariant
-  term, but `randomScenario()` now generates children + education
-  anyway (ages spanning not-yet-born through aged-out) so the
-  conservation invariant actually exercises the code path; this is also
-  what caught a real bug before it shipped — the schedule.js loop
-  originally read `block.amount` where the model calls the field
-  `annualAmount`, producing NaN expenses for every scenario with an
-  education block (300-run conservation test caught it on run 5).
-  Outputs: "Education Fees" is its own line in the Cashflow table's
-  Expenses section and its own band in the cashflow-bars chart (not
-  folded into Living expenses) — one of the largest cashflow items this
-  client base faces, per the spec. Deferred per the spec's own list:
-  childcare/CCS, Family Tax Benefit, the under-25-studying dependency
-  condition, child death benefit pensions, education savings vehicles,
-  per-child asset ownership.
-
-This closes all three commits of docs/specs/15-input-usability.md.
-
-- **What if: cashflow as the primary lens for cashflow shocks** —
-  three of the four What-if shocks (income gap, expense shock, rate
-  shock) perturb CASHFLOW, not asset values; the views led with net
-  assets anyway. For an income gap the client's real question is "do
-  we get through it?" — the surplus line and the working cash balance
-  — not net worth in 2060. `buildDeltas` (whatIf.js) gains
-  `wcaClosing`/`deficitFunded` per year, each carrying BASE AND
-  SHOCKED absolute values (not a delta — these plot as two lines, a
-  difference alone answers the wrong question); every existing series
-  is unchanged. New pure module `whatIfCashflowLens.js`: `bufferBreach`
-  detects the first year money had to be drawn from other assets to
-  keep the working cash account topped up, or a genuine shortfall —
-  deliberately NOT "did the reported WCA balance dip below its
-  minimum," which this engine's own "balances never go negative"
-  convention means can never fire (an unfundable month sets the
-  balance back UP to its minimum rather than letting it go negative;
-  discovered by a failing reconciliation test, not assumed).
-  `incomeGapHeadline`/`expenseShockHeadline`/`rateShockHeadline` read
-  straight off `base`/`shocked`/`deltas` for the headline figures the
-  spec calls for — total cash drawn (the shock's own INCREMENTAL draw,
-  not the shocked run's whole total), permanent cost, first year
-  surplus turns negative, total additional spending, and — for rate
-  shocks — the first plan year household repayments actually differ
-  (discovered from the engine's own per-year loan figures, so it's
-  correct for any mix of variable/fixed loans without hand-coding
-  either type's timing) plus total additional interest. Each of the
-  three cashflow-primary views now defaults to a "Cashflow" lens (two
-  new shared charts: surplus + working cash with a minimum-balance
-  reference line that itself scales under the nominal/real toggle;
-  unfunded cashflow + deficit-funded-from-assets as bars, highlighted
-  where non-zero) with "Net assets" one toggle away; the crash view is
-  unchanged as primary net-assets but gains the same cashflow charts as
-  its own secondary toggle, reusing the identical chart functions
-  against its base + 3 age-lines. Tests: the new series match their
-  engine sources for both runs; buffer-breach detection fires in the
-  right year, verified against the real engine (a fixture-only test
-  passed for the wrong reason at first — the real-engine reconciliation
-  test caught it); headline figures reconcile to the plotted series.
-
-- **Worked example: validated against the firm's advice document.** The
-  tool had never been checked against an independently-produced correct
-  answer. `docs/reference/workbook-document-sense-check.md` analysed a
-  real advice document the firm produced by hand; this exercise builds
-  that client as a committed test fixture (`src/workedExample.test.js`,
-  runs in CI, never a saved localStorage scenario) and asserts the
-  Snapshot view's year-one column against the document's own five
-  figures. Reconstruction: household composition, gross salary, age and
-  HELP opening balance are all UNSTATED in the sense-check summary (we
-  don't have the source workbook) — taxable income ($218,150) is
-  DERIVED, not invented, from the fact that $21,815 is EXACTLY 10% of it
-  (spec 11's own literal HELP cliff formula, which predates this
-  exercise); gross salary follows from that plus the given $6,547
-  deduction; household composition defaults to a single client since
-  composition isn't stated and splitting the figures across an invented
-  second income would itself be "inventing a value to make a line
-  reconcile." Result: HELP ($21,815) and the deduction ($6,547) match
-  exactly; take-home pay is within 0.25%; the Anticipated Tax Return gap
-  is a disclosed timing convention (refunds settle in the FOLLOWING FY,
-  so a scenario's first year always shows $0 here — the underlying
-  accrual figure, $3,731.79, is within 1.6% of the document's $3,793);
-  NET INCOME carries a genuine, unexplained ~4.7% discrepancy, reported
-  with two named-but-unconfirmed hypotheses (a different tax-bracket
-  vintage in the source document; the single-vs-couple assumption
-  above) rather than forced to reconcile. Full line-by-line reasoning in
-  `docs/reference/worked-example.md`.
-
-  **A real bug was found and fixed in the same commit, independent of
-  the document:** `cashReceivedSums`'s "Regular Take Home Pay" netted
-  off income-tax PAYG withholding only, never HELP or MLS withholding,
-  even though both are withheld through the identical mechanism (the
-  engine's own comment where they're computed already said so) —
-  overstating take-home pay by the client's full $21,815 HELP repayment
-  before the fix (17.5% high; 0.25% high after). `deterministic.js` now
-  exposes `helpWithheld`/`mlsWithheld` per person on `taxDetail`
-  (computed already, previously discarded at function exit);
-  `cashReceivedSums` nets off all three. Display-layer only — the actual
-  household cash movement already correctly included HELP/MLS
-  withholding every month, so no conservation-invariant change needed.
-
-- **Worked example follow-up: net income discrepancy resolved against
-  primary sources, not the workbook.** The prior entry left NET INCOME
-  as an open ~4.7% discrepancy with two unconfirmed hypotheses. Both
-  now investigated directly, no engine change made (per the standing
-  note added to the top of `docs/reference/worked-example.md`: our
-  figure stands where it traces to a primary source, the workbook is a
-  second opinion, not a reference implementation). (1) First-principles
-  derivation with every rate cited — `src/Tax/engine.js`'s FY2026–27
-  bracket table and `src/data/helpRates.js`'s HELP thresholds,
-  independently cross-checked against the ATO's own published FY2026–27
-  figures during this investigation — reproduces $127,934.50 exactly;
-  defensible from primary sources. (2) Searched for a single-earner
-  input set reproducing all five of the document's figures at once:
-  HELP's own bracket shape makes $218,150 the *unique* taxable income
-  consistent with $21,815 (the two marginal brackets below the cliff
-  cap out at $9,028 and $18,605 respectively, both short of $21,815),
-  and lowering it further via reportable-super-contribution add-backs
-  only ever reduces net income more — no single-earner set reaches
-  $134,215. A second-earner household reconciles it exactly instead
-  ($6,280.50 net, plausible below the tax-free threshold) — a
-  demonstrated-consistent candidate, not a confirmed one. (3) Tested
-  the "workbook predates this FY" hypothesis directly by re-running the
-  identical reconstruction under FY2025–26 brackets (16% vs FY2026–27's
-  legislated 15% cut, both tables already in `LEG.brackets`): net income
-  comes out $268 LOWER, not higher — the prior year taxed MORE, so this
-  moves further from the document's figure, not closer. Hypothesis
-  rejected, cleanly and by direct test, not by assumption. New tests in
-  `src/workedExample.test.js` (FY2025–26 rerun; HELP-uniqueness proof)
-  lock all three findings in as regression-tested claims, not prose.
-
-- **Demo clients as committed fixtures.** Three clients under `src/demo/`
-  (First home buyer; Family with a mortgage; High earner pre-retirement),
-  each built through the real factories + `clampAllToPlan`, never a
-  hand-written state object, with a "Load demo clients" action on the
-  Clients page (reuses `importFile`'s "client" kind wholesale — Replace/
-  Add-as-copy/Cancel on a name clash, never a silent overwrite).
-  `src/demo/demo.test.js` is structural only, per the explicit
-  instruction — no dollar-figure or snapshot assertions, since a bug fix
-  is supposed to move the demo numbers. Found and fixed two real bugs
-  surfaced by building these: (1) `client: { ...base.plan.client,
-  currentAge: N, ... }` silently did nothing, because `defaultState`'s
-  default client carries a real `dob` string and `clampPerson` derives
-  `currentAge` from `dob` whenever one is present — the override pattern
-  now omits the stale `dob` entirely so the explicit `currentAge` wins,
-  across all three demo files (this is exactly the class of bug the
-  Input integrity section warns about: a wrong value accepted with no
-  visible cue, here at construction time rather than in the UI). (2) An
-  annual-frequency income/expense/contribution row fires once, in July
-  (`schedule.js`'s `applyRegular`) — every demo client is anchored to
-  today's date, so plan year 0 is almost always a partial FY with no
-  July, and an annual row contributed nothing at all in year one. Every
-  salary, living-expense, and amount-basis contribution row is now
-  monthly. Two tests were also fixed to stop asserting against a
-  structurally-partial year 0: Division 293 and the concessional-cap
-  comparison now read plan year 1 (the first full FY), and the purchase-
-  liability check reads the year right after settlement rather than the
-  final projection year (a 25–30yr purchase loan is long paid off by the
-  end of a ~50-year projection to end-of-life — checking the last year
-  was asserting the loan should still exist after its own term ended).
-  Docs: `docs/reference/demo-clients.md`.
-
-- **Scenario comparison moved to the client page (Spec 13 Commit 6
-  relocation).** Was a workspace Focus view (`focus-compare-scenarios`,
-  picker + everything on one page); now a client-level page
-  (`#/clients/<cid>/compare?s=<id>,<id>[,<id>]`, no input sidebar).
-  Selection happens on the client page itself: a "Compare" button
-  enters a checkbox selection mode on the scenario list (capped at
-  three), "Compare" navigates to the new route, "Cancel" backs out —
-  never a silent auto-pick. The comparison logic itself
-  (`scenarioComparison.js`'s `planWindowsMatch`/`keyFigureValuesAtYear`/
-  `keyFigureComparisonRows`) is unchanged — this was a relocation plus a
-  view selector, not a rewrite. The single "everything stacked on one
-  page" view became a View selector with 8 options: 6 charts (Net
-  assets, Cashflow surplus, Total assets, Total liabilities, Super
-  balance, Tax paid — each reading the exact field
-  `buildKeyFiguresGroups`' own rows read, never a second derivation) and
-  2 tables (Key figures, Snapshot rows, both byte-identical to the old
-  view's tables). PNG export for chart views; CSV + Copy for Word for
-  table views. `router.js` gained the `compare` route shape (query-
-  string scenario-id list, stale ids dropped rather than treated as
-  fatal — same non-rejecting treatment an invalid area/section already
-  gets); `focus-compare-scenarios` removed from `OUTPUT_VIEWS`/
-  `OUTPUT_NAV.Focus`. Fixed a latent bug surfaced by testing this
-  end-to-end: a scenario with no stored blob yet (the workspace's very
-  first bootstrap scenario, before anything triggers a save) silently
-  dropped out of the comparison instead of showing as the defaults it
-  actually is — `loadScenarioFullState` now falls back to
-  `defaultState()`, the same fallback `loadActiveState()` already uses
-  for the identical situation.
-
-### In flight
-Super threshold indexation per figure (AWOTE / CPI / unindexed, with
-nominal rounding), then Division 296, then Monte Carlo over the full
-scenario.
-
-### BLOCKING — not landed
-**Super contributions create money.** Personal deductible and salary
-sacrifice contributions are credited to super and deducted from taxable
-income but never debited from household cash; the working cash account is
-only credited with the tax saving. A $20k/year contribution leaves the client
-with more super, less tax *and* more cash. This flatters every
-salary-sacrifice comparison — the exact question super was built to answer.
-Prompt written; must land before Monte Carlo.
-
----
-
-## THE REAL RISK
-
-Two serious engine defects have been found in this build. Both destroyed or
-created money. Both were found by **using the tool and looking at output** —
-neither was caught by the test suite, which was green throughout.
-
-- **WCA timing** — annual income spent the month it arrived, so eleven months
-  of every year ran deficits funded by selling assets. A client with a
-  $16.5k annual surplus was shown running out of money.
-- **Super contributions** — funded from nowhere (above).
-
-The suite tests components well and behaviour poorly. Both bugs violated the
-same principle and neither had a test that could see it: **money must be
-conserved**. Every dollar leaving one place must arrive somewhere or be
-explicitly recorded as leaving the model.
-
-### Proposed: a conservation pass before Monte Carlo
-
-1. **Money-conservation invariant.** For every plan year, assert:
-   `Δ(all asset balances + super + WCA − liabilities)
-    = income − expenses − tax − contributions-tax − fees
-      + growth ± external one-offs − unfunded`
-   with an explicit, named term for every legitimate leak (surplus spent,
-   one-off amounts leaving the model, unfunded cashflow). Anything
-   unaccounted for fails.
-2. **Run it over randomised scenarios** — property-test style, a few hundred
-   generated combinations of income/expenses/assets/super/liabilities/
-   property/purchases. This is what would have caught both bugs on the day
-   they were written.
-3. **Golden scenarios** — five to eight fixed cases with externally verified
-   expectations: income tax against the ATO calculator, amortisation against
-   a bank calculator, SG and salary sacrifice against MoneySmart, stamp duty
-   against the state revenue office. Committed as tests with the source and
-   date in comments.
-
-Monte Carlo makes this urgent rather than merely wise: a simulation runs the
-engine 2,000 times and presents the result as a probability distribution.
-Any engine defect acquires the authority of a fan chart.
+### Demo clients
+Three committed fixtures under `src/demo/` (First home buyer; Family with
+a mortgage; High earner pre-retirement), each built through the real
+factories and `clampAllToPlan` rather than a hand-written state object, so
+a schema change breaks the demo at build/test time instead of drifting
+silently out of sync; a "Load demo clients" action on the Clients page
+reuses `importFile`'s "client" kind wholesale (`d004642`). Two real bugs
+found while building these, fixed at the source: a `{...base.plan.client,
+currentAge: N}` override pattern silently did nothing, because
+`clampPerson` derives `currentAge` from a stale `dob` whenever one is
+present; and an annual-frequency income/expense row fires once, in July,
+so a demo client anchored to today's date (almost always a partial first
+year) contributed nothing in year one until every such row was made
+monthly (`d004642`). This session's housekeeping pass found and fixed a
+third: "Reduce work at 58" was marked `expectAffordable: false` but
+projected with zero unfunded cashflow — an `expectAffordable:false`
+scenario exempted from the affordability check rather than tested for the
+failure it exists to show, passing vacuously. Both partners now wind down
+together, well short of either person's own super access age, with a
+retirement lifestyle spending step-up; the scenario now GENUINELY produces
+sustained unfunded cashflow (the $150k joint savings buffer runs dry
+within about a year, and the household goes without for years before
+super becomes accessible), and `demo.test.js` now asserts non-zero
+unfunded cashflow for any `expectAffordable:false` scenario rather than
+skipping the check — this is what surfaced the super-closing-balance bug
+above. The other eight scenarios were checked for the same vacuity; all
+are genuinely affordable as constructed.
 
 ---
 
 ## WHERE WE'RE GOING
 
-### Next (in order)
-1. **Super contribution fix** — blocking, prompt written.
-2. **Conservation pass** — invariant + randomised scenarios + golden cases.
-3. **Super threshold indexation + Division 296** — in flight.
-4. **Monte Carlo** — engine, fan chart, percentile table. Closes the
-   cross-asset correlation question with a single shared market factor
-   (ρ default 0.85) plus the original regime switching.
-
-### Then — completing the accumulator story
-5. **HECS-HELP** — near-universal in the target cohort; changes cashflow and
-   the effective marginal rate every salary-sacrifice comparison depends on.
-6. **Extra and lump-sum loan repayments** — core debt strategy, currently
-   absent.
-7. **FHSSS** — unblocked by super; pairs with the property purchase engine
-   already built.
-8. **Drawdown / goal-seek solver** — sustainable spend to life expectancy,
-   required contribution to hit a target. Xtools has no solver ("no magic
-   button"); our sub-millisecond engine makes it trivial. Still the clearest
-   capability advantage available.
-
-### Then — cashflow intelligence (from the Xtools research)
-9. Surplus allocation as a percentage split with **pay non-deductible debt
-   first** and interest-rate ordering.
-10. Deficit funding with **minimum balance per asset** and optional
-    **minimum-capital-gain** sell-down ordering.
-11. **Adjustment rows** on tax and cashflow tables — the escape hatch that
-    makes an imperfect engine usable.
-12. **Goals** as a distinct expense category.
-13. Loan **drawdowns** (redraw, equity release, debt recycling).
-
-### Then — advice workflow
-14. **Scenario compare** overlay, launched from the client page.
-15. Scenario **templates** and **locking** (locking has a compliance
-    rationale: point-in-time evidence).
-16. Insight modules reworked against the new per-path output (they cannot be
-    re-enabled as-is — they read a data shape that no longer exists).
-17. Asset allocation over time — blocked on asset-class splits for the firm
-    profiles. **Outstanding data ask.**
-
-### Later
-Pension phase and TTR; Centrelink; aged care.
-
-### Parked (deliberate, ~1 client in 1000)
-SMSF; trusts, companies and other entities; insurance modelling (premiums
-already work as expenses); investment bonds; death benefits; defined benefit;
-Word merge to firm templates.
+1. **Surplus allocation intelligence** — a percentage split across
+   destinations, "pay non-deductible debt first," interest-rate ordering.
+   Currently only spend / invest / accumulate.
+2. **Bonus and allowance income as distinct types** — lumpy, variable
+   income, matching the firm's own "Site/Locality Allowance" and "After
+   tax bonus" rows (previously deferred in specs 11 and 13; promoted here).
+3. **Drawdown solver** — sustainable spend to life expectancy.
 
 ---
 
-## OPEN ITEMS NEEDING YOU
+## PARKED AND OPEN ITEMS
 
-- **Asset-class splits** for the firm's risk profiles — blocks the allocation
-  chart and improves Monte Carlo correlation realism.
-- **Confirm the seven non-WA stamp duty schedules** against revenue offices,
-  or continue relying on the per-purchase override.
-- **Mortgage rate and term defaults** (currently 6.0% nominal, 30-year P&I)
-  — these silently shape every first-home scenario.
-- **Div 296 threshold indexation basis** — confirm against the firm
-  reference before it is implemented.
-- **A real client scenario, run end to end**, once the contribution fix
-  lands. Manual testing has found more than the test suite has.
-- **FHSSS associated earnings rate** (currently 7.94% nominal, an
-  indicative ATO shortfall interest rate) — confirm against the firm's
-  reference figures; it's user-adjustable in the meantime (Parameters
-  modal / Assumptions view).
+### Unverified data — needs firm confirmation
+- **The seven non-WA stamp duty schedules** (`src/data/stampDuty.js`) —
+  WA and the ABS life table were confirmed in a data-accuracy pass
+  (`8409440`); the other seven jurisdictions have not been. The
+  per-purchase `dutyOverride` is the precision escape hatch meanwhile.
 - **LMI premium table and FHBG price caps** (`src/data/lmiRates.js`,
-  `src/data/fhbgCaps.js`) — both indicative, built from the general shape
-  of published figures rather than a live rate card; per-purchase LMI
-  override exists as the precision escape hatch in the meantime.
-- **HELP/HECS balance indexation basis** — this build indexes the balance
-  annually at the lower of CPI and AWOTE (AWOTE proxying WPI, the post-1
-  June 2023 "lesser of CPI or WPI" legislative basis). Confirm against the
-  firm reference before relying on this for advice.
+  `src/data/fhbgCaps.js`) — indicative, built from the general shape of
+  published figures rather than a live rate card; `lmiOverride` exists as
+  the escape hatch.
+- **FHSSS associated earnings rate** (`assumptions.fhsssEarningsRate`,
+  currently 7.94% nominal) — an indicative ATO shortfall interest rate;
+  user-adjustable in the meantime (Parameters modal / Assumptions view).
+- **HELP/HECS balance indexation basis** — indexed annually at the lower
+  of CPI and AWOTE (AWOTE proxying WPI, the post-1 June 2023 "lesser of"
+  legislative basis) — confirm against the firm reference before relying
+  on this for advice.
+
+### Deferred — do not build
+
+Accumulated across specs 11–15; see each spec's own "Deferred" section
+for the reasoning behind each item.
+- Salary packaging and novated leases (FBT mechanics are a separate
+  build); debt recycling (needs loan drawdowns); trust distributions,
+  foreign income, taxable pension component, TTR offset, SAPTO, and
+  Centrelink payments (spec 11 — these currently emit as zero rows to
+  preserve the worked document's table shape).
+- Investment product comparison (research, not projection); solver
+  targets beyond the three Focus already has (spec 12).
+- The banking-structure diagram itself (produced separately); property
+  sale with CGT; fixed-rate break costs and fixed-period repayment caps;
+  serviceability assessment; Monte Carlo run ACROSS compared scenarios
+  (ordinary scenario comparison is done; a stochastic version is not)
+  (spec 13).
+- Stacked or combined What-if shocks; shock probabilities or likelihood
+  weighting (Monte Carlo is deliberately where probability lives, not
+  here); yield-curve/term-structure modelling; asset-class-specific
+  crash shocks beyond the growth/defensive split; the other dormant
+  insight modules (`firstDecade`, `drawdownTolerance`, `tornado`) —
+  assessed separately if a home for them turns up (spec 14).
+- Childcare costs and CCS; Family Tax Benefit; the under-25-studying
+  dependency condition; child death benefit pensions; education savings
+  vehicles (bonds, trusts) as distinct structures; per-child asset
+  ownership (spec 15).
+
+### Standing design note
+**Scenarios are independent copies — there is no shared client-facts
+model.** A fact entered in one scenario (income, an asset balance, a
+child's DOB) is not reflected in any other scenario for the same client;
+each is a fully separate plan state. Deferred since spec 13; still true
+today, including for the relocated Comparison page. Surfaced to the user
+directly wherever scenarios are compared, rather than silently assumed.

@@ -40,6 +40,17 @@ describe("Demo clients — every scenario builds, projects, and conserves money"
           const out = projectPlan(scenario.state);
           expect(out.shortfall).toBeNull();
         });
+      } else {
+        // An expectAffordable:false scenario exists to demonstrate a
+        // plan that doesn't hold up — it must actually fail, not merely
+        // be exempted from the check above. A scenario that never
+        // produces unfunded cashflow while flagged false is a vacuous
+        // assertion (it would trivially "pass" no matter what the
+        // engine did) and a mislabelled scenario besides.
+        it(`${label}: genuinely produces unfunded cashflow (marked unaffordable)`, () => {
+          const out = projectPlan(scenario.state);
+          expect(out.shortfall).not.toBeNull();
+        });
       }
     }
   }

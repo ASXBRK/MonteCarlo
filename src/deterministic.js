@@ -1164,7 +1164,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             recordUnfunded(want - paid, m);
           }
         }
-        for (const id of superIds) superSeries[id][m + 1] = superBal[id];
+        // superSeries[id][m+1] is snapshotted at the TRUE end of this
+        // month's processing (alongside series[id][m+1]/wcaSeries[m+1]
+        // below), not here — step "d" (funding a WCA shortfall from
+        // released super, further down this same month) still has to
+        // debit superBal AFTER this point, and a snapshot taken here
+        // would freeze the pre-debit balance, silently overstating the
+        // reported closing balance by that debit whenever it fell in
+        // the FY's last month (the only month with no following
+        // month's fresh snapshot to catch it up) — found via the
+        // conservation invariant once a demo scenario finally combined
+        // a persistent monthly deficit with reaching super release age
+        // (src/demo/highEarnerPreRetirement.js's "Reduce work at 58").
       }
 
       // a2. Properties (D4): planned purchases fire at this month's
@@ -1657,6 +1668,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         }
         combined[m + 1] = total;
         wcaSeries[m + 1] = wcaBal;
+        // Taken here, at the TRUE end of the month — after step "d"'s
+        // possible deficit-funding-from-super debit above — so a
+        // shortfall funded from super in the FY's last month isn't
+        // silently missing from the reported closing balance (see the
+        // comment where this used to live, earlier in this function).
+        for (const id of superIds) superSeries[id][m + 1] = superBal[id];
       }
     }
     return acc;
