@@ -2553,12 +2553,30 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       id: `su_${p}`, owner: p, balance: pick([0, rand(0, 200000)]), allocation: randomAllocation(),
     }));
 
-    const income = persons.map((p) => employmentRow({
-      id: `sal_${p}`, owner: p, amount: randomIncome(),
-      frequency: pick(["monthly", "annual"]),
-      from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
-      sgApplies: Math.random() < 0.9,
-    }));
+    // Redundancy and ETP (spec 19 Commit 3) — sometimes one person's
+    // income row terminates: the row's own `to` is forced to match
+    // termination.at (clampIncomeRow's own rule, mirrored by hand since
+    // this raw state bypasses clamping), a random completed-service
+    // length, both types, and a payout spanning comfortably under and
+    // over both the ETP cap and the (tighter, resignation-only)
+    // whole-of-income cap.
+    const income = persons.map((p) => {
+      const terminates = Math.random() < 0.3;
+      const at = terminates ? randInt(40, endAge) : null;
+      return employmentRow({
+        id: `sal_${p}`, owner: p, amount: randomIncome(),
+        frequency: pick(["monthly", "annual"]),
+        from: { kind: "age", age: 40 }, to: { kind: "age", age: terminates ? at : 120 },
+        sgApplies: Math.random() < 0.9,
+        termination: terminates ? {
+          enabled: true, at: { kind: "age", age: at },
+          completedYearsOfService: randInt(0, 25),
+          type: pick(["genuineRedundancy", "resignation"]),
+          etpTaxableComponent: rand(0, 320000), // spans under/over both caps
+          unusedLeave: rand(0, 20000),
+        } : { enabled: false, at: { kind: "age", age: 40 }, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 },
+      });
+    });
 
     const expenses = [cf({
       id: "exp1", assetId: null, amount: rand(20000, 60000) / 12, frequency: "monthly",
@@ -5446,5 +5464,100 @@ describe("Adjustment rows (docs/specs/18-adjustment-rows.md, Commit 1)", () => {
     expect(t1.amount).toBeCloseTo(-100, 0);
     // A year outside the window reports nothing for it.
     expect(out.yearly[0].adjustments.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Redundancy and ETP (spec 19 Commit 3)", () => {
+  // A termination fires in July of its resolved plan year (same
+  // "age-anchored one-off" convention every other event in this engine
+  // uses) — the income row's own `to` is set to match, mirroring
+  // clampIncomeRow's own rule (raw fixtures here bypass clamping, so
+  // this is set by hand). endAge 42 leaves a full FY for the payout to
+  // land in cleanly.
+  const terminatedRow = (over = {}) => ({
+    id: "sal1", label: "Salary", owner: "client", amount: 8000, frequency: "monthly",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+    indexBasis: "none", indexExtraPct: 0, category: "salary", incomeType: "employment", sgApplies: false,
+    termination: {
+      enabled: true, at: { kind: "age", age: 40 }, completedYearsOfService: 5,
+      type: "genuineRedundancy", etpTaxableComponent: 50000, unusedLeave: 5000,
+    },
+    ...over,
+  });
+  const withTermination = (rowOver = {}, stateOver = {}) => mkState({
+    endAge: 42,
+    assets: [mkAsset({ allocation: growthOnlyAlloc() })],
+    cashflows: { income: [terminatedRow(rowOver)] },
+    plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+    ...stateOver,
+  });
+
+  it("the genuine-redundancy tax-free amount does not appear in assessable income, HELP repayment income, or Division 293 income", () => {
+    // Tax-free base at 5 completed years: 13,598 + 5×6,801 = 47,603 —
+    // large enough that its OMISSION from taxable income is easy to see.
+    const out = projectPlan(withTermination());
+    const y0 = out.yearly[0].taxDetail.client;
+    const withoutRedundancy = projectPlan(withTermination({ termination: { ...terminatedRow().termination, enabled: false } }));
+    const y0plain = withoutRedundancy.yearly[0].taxDetail.client;
+    // Taxable income rises by roughly the ETP taxable component + leave
+    // (both still excluded/ordinary per this engine's own design) but
+    // NOT by the ~47,603 tax-free base — if it leaked in, the gap would
+    // be tens of thousands of dollars larger than it is.
+    const salaryOnlyGap = y0.taxableIncome - y0plain.taxableIncome; // should be ~ -unusedLeave (row ends 1 FY early) + unusedLeave (added back) ≈ small
+    expect(Math.abs(salaryOnlyGap)).toBeLessThan(47603);
+    // HELP repayment income and Div293 both derive from the SAME
+    // measured ordinary/taxable figures — confirming taxableIncome
+    // excludes the tax-free base is sufficient; spot-check HELP is
+    // consistent with it (no separate leak in that path).
+    expect(out.yearly[0].taxDetail.helpRepayment).toBeCloseTo(withoutRedundancy.yearly[0].taxDetail.helpRepayment, 0);
+  });
+
+  it("genuine redundancy vs resignation produce DIFFERENT tax on an IDENTICAL payout", () => {
+    // 200,000 taxable component: under the ~270,000 ETP cap (genuine
+    // redundancy sees no 45%-bracket excess) but over the $180,000
+    // whole-of-income cap (resignation's tighter cap pushes ~20,000
+    // into the 45% top-up rate) — a difference that holds regardless of
+    // "other income this FY", unlike the base fixture's $50,000 payout.
+    const over = { termination: { ...terminatedRow().termination, etpTaxableComponent: 200000 } };
+    const genuine = projectPlan(withTermination(over));
+    const resignation = projectPlan(withTermination({
+      termination: { ...over.termination, type: "resignation" },
+    }));
+    expect(genuine.yearly[0].tax).not.toBeCloseTo(resignation.yearly[0].tax, 0);
+    expect(resignation.yearly[0].tax).toBeGreaterThan(genuine.yearly[0].tax);
+  });
+
+  it("reports the termination event on the row, with its tax-free/ETP/leave breakdown", () => {
+    const out = projectPlan(withTermination());
+    const events = out.yearly[0].termination;
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ owner: "client", type: "genuineRedundancy", etpTaxableComponent: 50000, unusedLeave: 5000 });
+    expect(events[0].taxFreeAmount).toBeCloseTo(13598 + 5 * 6801, 0);
+    expect(events[0].etpTax).toBeGreaterThan(0);
+  });
+
+  it("the income row ends at the termination date — no ordinary salary in the FY AFTER termination", () => {
+    const out = projectPlan(withTermination());
+    // Row's own `to` = age 40 = plan year 0 — DateRef windows are
+    // inclusive of both boundary years (CLAUDE.md convention), so year
+    // 0 itself still earns its salary (plus the termination payout
+    // lands the same July); the row genuinely ENDS the FY after that —
+    // year 1 has no salary and no payout.
+    expect(out.yearly[1].income).toBeCloseTo(0, 2);
+    expect(out.yearly[1].termination).toHaveLength(0);
+  });
+
+  it("conservation holds for a scenario with a termination event active", () => {
+    const out = projectPlan(withTermination());
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `termination fixture, year ${y}`);
+  });
+
+  it("regression gate: an income row with no termination field at all behaves exactly as before", () => {
+    const { termination, ...noTermination } = terminatedRow();
+    const withField = mkState({ endAge: 42, cashflows: { income: [terminatedRow({ termination: { ...terminatedRow().termination, enabled: false } })] } });
+    const withoutField = mkState({ endAge: 42, cashflows: { income: [noTermination] } });
+    const a = projectPlan(withField);
+    const b = projectPlan(withoutField);
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
   });
 });

@@ -54,6 +54,7 @@ import { levelPayment, monthlyRate, termMonths, ioMonths, scheduledAmortisation,
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
 import { landTaxOnValue } from "./data/landTax.js";
+import { etpRatesFor, redundancyTaxFreeAmount, etpTax } from "./data/etpRates.js";
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
 import { decomposeNetWorthChange } from "./conservationCheck.js";
@@ -744,6 +745,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // arithmetic itself — see the a-adjustments block for where the
     // SAME amount actually feeds income/deductions/expenses/super/tax.
     adjustments: [],
+    // Redundancy and ETP (spec 19 Commit 3) — reporting only, one entry
+    // per termination event that fired this FY.
+    termination: [],
     surplusOrDeficit: 0,
     surplusInvested: 0,
     // FY-end sweep of WCA surplus above minimumBalance (Working Cash
@@ -1151,6 +1155,66 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             row.adjustments.push({
               id: adj.id, target: adj.target, owner: adj.owner, superAccountId: adj.superAccountId,
               label: adj.label, note: adj.note, amount: amt,
+            });
+          }
+        }
+      }
+
+      // a-termination. Redundancy and ETP (spec 19 Commit 3) — resolved
+      // once per FY by schedule.js (month + age), fired here in July
+      // like every other age-anchored one-off event. UNGATED: the
+      // unused-leave portion (assessable, disclosed as taxed like
+      // ordinary income — no distinct concessional treatment modelled)
+      // must feed the tax measurement pass, same reasoning as
+      // a-adjustments above. The genuine-redundancy tax-free base and
+      // the ETP taxable component are BOTH excluded from
+      // acc[owner].ordinary entirely (not merely untaxed) — the
+      // spec's own test that neither appears in assessable income,
+      // HELP repayment income, or Division 293 income falls out for
+      // free from that exclusion, since all three read acc[*].ordinary.
+      // The ETP's own flat tax (concessional rate up to the relevant
+      // cap, 45% above, plus Medicare — see etpRates.js) is added
+      // directly to this exact month's tax outflow, not spread or
+      // PAYG-estimated — it settles in full the month it's incurred.
+      let terminationCashOut = 0;
+      if (m === julyOf(y)) {
+        for (const ev of schedule.terminationEvents ?? []) {
+          if (ev.month !== m) continue;
+          if (!acc[ev.owner]) continue; // defensive — see a-adjustments' own guard
+          const rates = etpRatesFor(fyStart, bracketMode, cpi, awoteAssum);
+          const genuineRedundancy = ev.type === "genuineRedundancy";
+          const taxFreeAmount = genuineRedundancy ? redundancyTaxFreeAmount(rates, ev.completedYearsOfService) : 0;
+          // "Other taxable income this FY" for the whole-of-income cap
+          // (resignation/retirement only — a genuine redundancy is an
+          // EXCLUDED ETP, so the cap never applies to it) approximates
+          // using whatever this person has already accrued THIS FY
+          // before this event fires — disclosed simplification: since
+          // termination fires in July (this FY's first month, the same
+          // "annual one-off" convention every other age-anchored event
+          // uses), that is usually $0, likely understating other income
+          // for a same-July termination. A real multi-month-precision
+          // model would need a finer DateRef grain than this engine's
+          // age-year resolution supports anywhere else either.
+          const { tax: etpTaxAmount } = etpTax(rates, ev.etpTaxableComponent, ev.age ?? 65, {
+            genuineRedundancy, otherTaxableIncomeThisFY: acc[ev.owner].ordinary,
+          });
+          terminationCashOut += taxFreeAmount + ev.etpTaxableComponent + ev.unusedLeave - etpTaxAmount;
+          // Pass-gated like every other direct tax-outflow write here
+          // (spreadTax's own taxOutArr) — the measurement pass runs
+          // with taxOut:null (see its own call site's comment) and only
+          // needs the ordinary-income/cash effects above, not the
+          // actual ledger write; writing once, in the real pass, avoids
+          // double-counting across the two runYear calls per year.
+          if (taxOut) taxOut[m] += etpTaxAmount;
+          if (ev.unusedLeave > 0) {
+            acc[ev.owner].ordinary += ev.unusedLeave;
+            acc[ev.owner].incomeMonths.add(m);
+          }
+          if (row) {
+            row.termination.push({
+              rowId: ev.rowId, owner: ev.owner, type: ev.type,
+              taxFreeAmount, etpTaxableComponent: ev.etpTaxableComponent, unusedLeave: ev.unusedLeave,
+              etpTax: etpTaxAmount,
             });
           }
         }
@@ -1706,7 +1770,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // cash income the same month it's resolved, exactly like an
       // explicit salary-sacrifice row already does upstream in
       // schedule.js (see a-super-fill above).
-      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash;
+      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
         if (own && own[m] > 0) {

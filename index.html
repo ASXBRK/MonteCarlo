@@ -318,6 +318,42 @@
       </div>
     </dialog>
 
+    <dialog id="terminationModal" class="modal" aria-labelledby="terminationTitle">
+      <div class="modal-head">
+        <h2 id="terminationTitle" class="modal-title">Redundancy / termination</h2>
+        <button class="modal-close" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <form id="terminationForm" class="adjustment-form">
+          <input type="hidden" id="termRowId" />
+          <label class="ptg-check"><input type="checkbox" id="termEnabled" /><span>This income ends in a termination event</span></label>
+          <div id="terminationFields">
+            <label>Type
+              <select id="termType">
+                <option value="genuineRedundancy">Genuine redundancy</option>
+                <option value="resignation">Resignation / retirement</option>
+              </select>
+            </label>
+            <div class="adjustment-window">
+              <label>Termination age <input type="number" id="termAt" min="0" max="120" /></label>
+              <label>Completed years of service <input type="number" id="termYears" min="0" max="60" /></label>
+            </div>
+            <label>ETP taxable component ($, today's dollars)
+              <input type="number" id="termEtp" min="0" step="1000" />
+            </label>
+            <label>Unused leave ($, today's dollars)
+              <input type="number" id="termLeave" min="0" step="1000" />
+            </label>
+            <p class="helper-text">The genuine redundancy tax-free amount ($13,598 + $6,801 per completed year of service, AWOTE-indexed) is calculated automatically — it isn't entered here. Unused annual/long-service leave is taxed as ordinary income (a disclosed simplification, not given its own concessional treatment); leave blank if not modelling it. This income row ends the FY after the termination age.</p>
+          </div>
+          <div class="adjustment-form-actions">
+            <button type="submit" class="btn-text">Save</button>
+            <button type="button" id="termCancelBtn" class="btn-text">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
     <dialog id="paramsModal" class="modal" aria-labelledby="paramsTitle">
       <div class="modal-head">
         <h2 id="paramsTitle" class="modal-title">Parameters</h2>

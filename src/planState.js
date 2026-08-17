@@ -572,6 +572,34 @@ export function createIncomeRow(plan, existing = []) {
     category: "salary",
     incomeType: "employment", // derived from category; kept for existing engine consumers
     sgApplies: true, // Super Guarantee (Tier 1.2) — default on for employment income
+    // Redundancy and ETP (spec 19 Commit 3) — disabled by default; see
+    // clampIncomeRow's own header for the field-by-field rationale.
+    termination: { enabled: false, at: null, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 },
+  };
+}
+
+export const TERMINATION_TYPES = ["genuineRedundancy", "resignation"];
+
+// A termination event on an income row (spec 19 Commit 3) — date, years
+// of completed service (the redundancy tax-free base's own input),
+// type (only "genuineRedundancy" gets the tax-free base and is excluded
+// from the whole-of-income cap — see etpRates.js), and payout
+// components. Unused leave is deliberately NOT given its own
+// concessional treatment — disclosed choice (spec's own "pick one and
+// disclose it"): it is taxed as ordinary income, same as any other cash
+// receipt, which the engine achieves for free by just adding it to
+// ordinary assessable income rather than needing a distinct mechanism.
+// `at` clamps to the OWNER's whole window (not the row's own from/to —
+// clampIncomeRow doesn't resolve those to ages either, so this matches
+// every other DateRef field's own clamping precision in this function).
+function clampTermination(t, win, plan) {
+  return {
+    enabled: t?.enabled === true,
+    at: clampDateRef(t?.at ?? { kind: "age", age: win.to }, win.from, win.to, plan),
+    completedYearsOfService: clampNumber(t?.completedYearsOfService, 0, 60),
+    type: TERMINATION_TYPES.includes(t?.type) ? t.type : "genuineRedundancy",
+    etpTaxableComponent: clampNumber(t?.etpTaxableComponent, 0),
+    unusedLeave: clampNumber(t?.unusedLeave, 0),
   };
 }
 
@@ -1782,14 +1810,22 @@ export function clampLumpSum(ls, plan) {
 export function clampIncomeRow(row, plan) {
   const owner = row.owner === "partner" && plan.partner ? "partner" : "client";
   const win = ownerWindow(plan, owner);
-  const { from, to } = clampFromTo(row, win.from, win.to, plan);
+  const { from, to: clampedTo } = clampFromTo(row, win.from, win.to, plan);
   const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
   const category = INCOME_CATEGORIES.includes(row.category)
     ? row.category
     : (LEGACY_INCOME_TYPE_TO_CATEGORY[row.incomeType] ?? "salary");
   const incomeType = incomeCategoryTaxTreatment(category);
   const sgApplies = incomeType === "employment" && row.sgApplies !== false;
-  return { ...rest, owner, from, to, category, incomeType, sgApplies, ...clampIndexation(row) };
+  // Redundancy and ETP (spec 19 Commit 3) — "the income row ends at the
+  // termination date" (the spec's own words) is satisfied by forcing
+  // `to` to equal termination.at whenever a termination is active,
+  // rather than adding a second truncation mechanism: schedule.js's
+  // EXISTING from/to window already stops the row's ordinary income
+  // there for free, so termination is just another way `to` gets set.
+  const termination = clampTermination(row.termination, win, plan);
+  const to = termination.enabled ? termination.at : clampedTo;
+  return { ...rest, owner, from, to, category, incomeType, sgApplies, termination, ...clampIndexation(row) };
 }
 
 export function clampExpenseRow(row, plan) {

@@ -674,6 +674,25 @@ export function buildSchedules(state) {
     return { ...a, fromYear, toYear, amountAtYear };
   });
 
+  // Redundancy and ETP (spec 19 Commit 3) — resolved once here, same
+  // "fires in July of its resolved plan year" convention every other
+  // age-anchored one-off event in this engine already uses (property
+  // purchases, FHSSS releases). planState.js's clampIncomeRow forces
+  // the row's own `to` to equal termination.at when enabled, so the
+  // row's ordinary income naturally stops there via the EXISTING
+  // from/to mechanism — this only resolves the PAYOUT's own month/age
+  // (age drives the ETP tax bracket in deterministic.js).
+  const terminationEvents = state.cashflows.income
+    .filter((r) => r.termination?.enabled)
+    .map((r) => {
+      const owner = r.owner === "partner" ? "partner" : "client";
+      const y = resolveRef(r.termination.at, plan, dateSchedule, owner).planYear;
+      const month = julyMonthIndex(plan, y);
+      const age = (owner === "partner" ? partnerAges : clientAges)[y] ?? null;
+      return { rowId: r.id, owner, month, age, ...r.termination };
+    })
+    .filter((e) => e.month != null);
+
   return {
     months,
     planYears,
@@ -693,6 +712,7 @@ export function buildSchedules(state) {
     toConcessionalCapRows,
     surplusPeriods,
     adjustments,
+    terminationEvents,
     superWarnings,
     rowTotals,
     oneOffsByAssetYear,

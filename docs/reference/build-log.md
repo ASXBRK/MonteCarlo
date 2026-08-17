@@ -549,6 +549,66 @@ threshold (empirically confirmed, not engineered), so no existing dollar
 assertion needed updating — a NEW property crossing a threshold gets the
 new (correct) tax, which is the point of the commit.
 
+### Redundancy and ETP (spec 19, Commit 3)
+`src/data/etpRates.js`: genuine redundancy tax-free base ($13,598 +
+$6,801/completed year, AWOTE-indexed — NOT rounded to a step, since
+those figures are themselves the ATO's own already-rounded FY2026/27
+numbers rather than round numbers to begin with, unlike the ETP cap's
+$5,000 step), the $270,000 ETP cap (AWOTE-indexed), and the $180,000
+whole-of-income cap (a flat figure, genuinely not indexed in law).
+Training-knowledge figures, UNVERIFIED against ato.gov.au this session —
+disclosed the same way as every other embedded schedule.
+
+Model (planState.js): a `termination` object on an income row —
+enabled, date, completed years of service, type (genuine redundancy |
+resignation/retirement), ETP taxable component, unused leave (taxed as
+ordinary income — the spec's own "pick one and disclose it" choice;
+no distinct leave-specific concessional treatment modelled).
+`clampIncomeRow` forces the row's own `to` to equal `termination.at`
+when enabled — "the income row ends at the termination date" falls out
+of the row's EXISTING from/to mechanism for free, needing no separate
+truncation logic; DateRef year-granularity means the row still earns
+its salary for the WHOLE of the termination FY (inclusive-boundary
+convention, same as every other row) with the payout landing the same
+July, not a mid-year cutoff — disclosed.
+
+Engine: schedule.js resolves each termination to a month + age once
+(same "fires in July of its resolved plan year" convention as every
+other age-anchored one-off — property purchases, FHSSS releases), into
+`schedule.terminationEvents`; deterministic.js applies it UNGATED (the
+unused-leave credit to `acc[owner].ordinary` must feed the tax
+measurement pass) except the actual tax-outflow WRITE, which is
+pass-gated (`if (taxOut)`) to avoid double-counting across the
+measured/real `runYear` calls — mirroring `spreadTax`'s own convention.
+The tax-free base and the ETP taxable component are BOTH excluded from
+`acc[owner].ordinary` entirely (not merely untaxed) — the spec's own
+test that neither appears in assessable income, HELP repayment income,
+or Division 293 income falls out for free, since all three read
+`acc[*].ordinary`/`measured[*].taxableIncome`. The ETP's own flat tax
+(concessional rate to the relevant cap, 45% above, plus Medicare) is
+computed via `etpRates.js` and settles in full the same month, not
+spread or PAYG-estimated. Genuine redundancy uses the ETP cap alone
+(an excluded ETP); resignation/retirement uses the tighter of the ETP
+cap and (whole-of-income cap − other taxable income this FY) —
+"other taxable income" approximates using whatever the person has
+already accrued THIS FY before the event fires, a disclosed
+simplification (often ~$0 for a same-July termination, likely
+understating other income for that case — a real multi-month-precision
+model would need finer DateRef granularity than this engine supports
+anywhere else either).
+Regression gate: an income row with no `termination` field behaves
+byte-identically (verified); extended `randomScenario()` (0.3 chance
+per person, both types, a payout spanning under/over both caps) and
+held across 5×300 randomised conservation runs — no new named
+conservation term needed (the payout and its tax both flow through the
+existing income/tax terms).
+Known gap, disclosed rather than silently absent: cashflowStatement.js's
+independent re-derivation (the Cashflow table) does not yet break the
+termination payout out as its own line — `row.income`/`row.tax` are
+correct and reconcile exactly (verified), but an adviser scanning the
+Cashflow table's category rows won't see "Redundancy" as a distinct
+line yet; the raw ledger and Tax view figures are unaffected.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

@@ -38,6 +38,7 @@ import {
   createChild, createEducationBlock, childCurrentAgeInfo, flatEducationBlocks,
   SCHEMA_VERSION,
   ADJUSTMENT_TARGETS, ADJUSTMENT_TARGET_LABELS, createAdjustment,
+  TERMINATION_TYPES,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -220,6 +221,17 @@ const els = {
   adjNote: $("adjNote"),
   adjCancelBtn: $("adjCancelBtn"),
   adjDeleteBtn: $("adjDeleteBtn"),
+  terminationModal: $("terminationModal"),
+  terminationForm: $("terminationForm"),
+  termRowId: $("termRowId"),
+  termEnabled: $("termEnabled"),
+  terminationFields: $("terminationFields"),
+  termType: $("termType"),
+  termAt: $("termAt"),
+  termYears: $("termYears"),
+  termEtp: $("termEtp"),
+  termLeave: $("termLeave"),
+  termCancelBtn: $("termCancelBtn"),
   reviewDefaultsModal: $("reviewDefaultsModal"),
   reviewDefaultsBody: $("reviewDefaultsBody"),
   assetRemoveModal: $("assetRemoveModal"),
@@ -2899,6 +2911,7 @@ function incomeRowHTML(r) {
                    data-kind="income" data-cfid="${r.id}" data-field="sgApplies" />
             <span>SG applies</span>
           </label>
+          <button type="button" class="btn-text" data-action="edit-termination" data-cfid="${r.id}">${r.termination?.enabled ? "Termination ✓" : "Termination…"}</button>
         ` : ""}
       </td>
       <td class="cf-td-label">
@@ -3987,6 +4000,8 @@ function onCashflowSectionClick(e) {
     if (cf[kind]) cf[kind] = cf[kind].filter((r) => r.id !== cfid);
     saveState();
     if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
+  } else if (action === "edit-termination") {
+    openTerminationEditor(cfid);
   }
 }
 
@@ -11255,6 +11270,58 @@ els.outputCanvas.addEventListener("click", (e) => {
   const owner = marker.dataset.adjOwner || null;
   const existing = (state.plan.adjustments ?? []).find((a) => a.target === target && (owner == null || a.owner === owner));
   openAdjustmentEditor(existing ? { id: existing.id } : { target, owner });
+});
+
+// --- Redundancy and ETP (spec 19 Commit 3) ----------------------------------
+//
+// A small modal, one-per-income-row (not a list like Adjustments — this
+// is a 1:1 property of the row, not a separate collection), triggered
+// by the row's own "Termination…" button (salary-category rows only,
+// matching the spec's own "a termination event on an income row").
+
+function terminationFieldsVisibility() {
+  els.terminationFields.hidden = !els.termEnabled.checked;
+}
+
+function openTerminationEditor(rowId) {
+  const row = state.cashflows.income.find((r) => r.id === rowId);
+  if (!row) return;
+  const t = row.termination ?? { enabled: false, at: null, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 };
+  els.termRowId.value = rowId;
+  els.termEnabled.checked = t.enabled === true;
+  els.termType.value = TERMINATION_TYPES.includes(t.type) ? t.type : "genuineRedundancy";
+  els.termAt.value = ageRefLabel(t.at ?? { kind: "age", age: state.plan.client.currentAge });
+  els.termYears.value = t.completedYearsOfService ?? 0;
+  els.termEtp.value = t.etpTaxableComponent ?? 0;
+  els.termLeave.value = t.unusedLeave ?? 0;
+  terminationFieldsVisibility();
+  els.terminationModal.showModal();
+}
+
+els.termEnabled.addEventListener("change", terminationFieldsVisibility);
+els.terminationModal.querySelector(".modal-close").addEventListener("click", () => els.terminationModal.close());
+els.terminationModal.addEventListener("click", (e) => {
+  if (e.target === els.terminationModal) els.terminationModal.close();
+});
+els.termCancelBtn.addEventListener("click", () => els.terminationModal.close());
+
+els.terminationForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const row = state.cashflows.income.find((r) => r.id === els.termRowId.value);
+  if (!row) { els.terminationModal.close(); return; }
+  row.termination = {
+    enabled: els.termEnabled.checked,
+    at: { kind: "age", age: clampInt(els.termAt.value, 0, 120) },
+    completedYearsOfService: clampNumber(els.termYears.value, 0, 60),
+    type: TERMINATION_TYPES.includes(els.termType.value) ? els.termType.value : "genuineRedundancy",
+    etpTaxableComponent: clampNumber(els.termEtp.value, 0),
+    unusedLeave: clampNumber(els.termLeave.value, 0),
+  };
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+  renderCashflows();
+  els.terminationModal.close();
 });
 
 // Bracket-mode toggle (Parameters modal): indexed real-constant vs
