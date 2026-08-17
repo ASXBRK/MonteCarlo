@@ -4167,6 +4167,10 @@ function propertyCardHTML(p) {
             ${cell("Expenses deductible", `<label class="ptg-check"><input type="checkbox"${p.expensesDeductible ? " checked" : ""} data-pid="${p.id}" data-pfield="expensesDeductible" /><span>Yes</span></label>`)}
             ${num("Depreciation ($ p.a., deductible)", "depreciation", p.depreciation ?? 0)}
           ` : ""}
+          ${p.propertyType !== "ppr" ? `
+            ${num(`Land value (% of property value) ${tooltipHTML("Land tax is assessed on unimproved land value, not total property value — this estimates the land component (the largest approximation in this feature). Investment and holiday properties both attract land tax; a main residence is exempt.")}`, "landValuePct", p.landValuePct ?? 60, 'min="0" max="100" step="1"')}
+            ${num("Land tax override ($/yr, blank = calculated)", "landTaxOverride", p.landTaxOverride ?? "", 'min="0" step="100"')}
+          ` : ""}
         </div>
         ${helper.text ? `<p class="${helper.warn ? "helper-warning" : "helper-text"}">${escapeHTML(helper.text)}${
           helper.action === "convertToPlanned"
@@ -4286,6 +4290,8 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field === "equityCeilingPct") p.equityCeilingPct = clampNumber(v, 0, 100);
   else if (field === "depositFromEquity") p.depositFromEquity = e.target.checked;
   else if (field === "depositFromEquitySourcePropertyId") p.depositFromEquitySourcePropertyId = v || null;
+  else if (field === "landValuePct") p.landValuePct = clampNumber(v, 0, 100);
+  else if (field === "landTaxOverride") p.landTaxOverride = v === "" ? null : clampNumber(v, 0);
   else if (field.includes(".")) {
     const [group, sub] = field.split(".");
     if ((group === "rent" || group === "expenses") && p[group]) {
@@ -7480,6 +7486,7 @@ function buildCashflowGroups(forOwner = null) {
     { label: "Property Interest Deductions", cell: (y) => -stmt(y).deductions.propertyInterestDeductions },
     { label: "Property Deductions", cell: (y) => -stmt(y).deductions.propertyDeductions },
     { label: "Property Depreciation", cell: (y) => -stmt(y).deductions.propertyDepreciation },
+    { label: "Land Tax (investment)", cell: (y) => -stmt(y).deductions.propertyLandTax },
     ...catRow(deductionRows, rt.deductions, "vehicle", "Vehicle Deductions", (y) => stmt(y).deductions.vehicle).map(negate),
     ...catRow(deductionRows, rt.deductions, "socialClub", "Social Club (pre-tax)", (y) => stmt(y).deductions.socialClub).map(negate),
     ...catRow(deductionRows, rt.deductions, "insurance", "Deductible Insurance Premiums", (y) => stmt(y).deductions.insurance).map(negate),
@@ -7557,6 +7564,7 @@ function buildCashflowGroups(forOwner = null) {
     ...catRow(expenseRows, rt.expenses, "holidays", "Holidays", (y) => stmt(y).expenses.holidays).map(negate),
     ...catRow(expenseRows, rt.expenses, "insurance", "New Insurance Premiums", (y) => stmt(y).expenses.insurance).map(negate),
     { label: "Investment Property expenses", cell: (y) => -stmt(y).expenses.investmentPropertyExpenses },
+    { label: "Land Tax", cell: (y) => -stmt(y).expenses.landTax },
     ...catRow(expenseRows, rt.expenses, "homeMaintenance", "Home Maintenance expenses", (y) => stmt(y).expenses.homeMaintenance).map(negate),
     ...catRow(expenseRows, rt.expenses, "other", "Other", (y) => stmt(y).expenses.other).map(negate),
     { label: "Education Fees", cell: (y) => -stmt(y).expenses.education },

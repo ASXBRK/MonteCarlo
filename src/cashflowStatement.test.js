@@ -74,6 +74,16 @@ describe("deductionSums", () => {
     expect(d.propertyDepreciation).toBe(6000); // matches row.properties.p1.depreciation exactly
   });
 
+  it("land tax (spec 19 Commit 2) is deductible for an investment property, split by owner share", () => {
+    const row = mkRow({ properties: { p1: { landTax: 1000 }, p2: { landTax: 500 } } });
+    const properties = [
+      { id: "p1", propertyType: "investment", owner: "client" },
+      { id: "p2", propertyType: "holiday", owner: "client" }, // NOT deductible — excluded here
+    ];
+    const d = deductionSums(row, { properties, liabilities: [], y: 0 });
+    expect(d.propertyLandTax).toBe(1000);
+  });
+
   it("splits a standalone deductible liability into Investment Portfolio Interest, never Property Interest Deductions", () => {
     const row = mkRow({ liabilities: { margin1: { interest: 900, principal: 0 } } });
     const liabilities = [{ id: "margin1", deductible: true }];
@@ -211,6 +221,17 @@ describe("cashReceivedSums", () => {
 });
 
 describe("expenseSums", () => {
+  it("land tax (spec 19 Commit 2) is a cash outflow for BOTH investment and holiday properties, split by owner share; PPR is excluded", () => {
+    const row = mkRow({ properties: { p1: { landTax: 1000 }, p2: { landTax: 500 }, p3: { landTax: 99 } } });
+    const properties = [
+      { id: "p1", propertyType: "investment", owner: "client" },
+      { id: "p2", propertyType: "holiday", owner: "client" },
+      { id: "p3", propertyType: "ppr", owner: "client" },
+    ];
+    const e = expenseSums(row, { properties, y: 0 });
+    expect(e.landTax).toBe(1500); // p1 + p2, NOT p3 (PPR is exempt, and never even assessed)
+  });
+
   it("mortgage repayments reconcile to a property-linked liability's own interest+principal exactly", () => {
     const row = mkRow({ liabilities: { "prop-p1": { interest: 9000, principal: 4000 } } });
     const properties = [{ id: "p1", propertyType: "investment" }];

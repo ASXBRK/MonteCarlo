@@ -160,6 +160,11 @@ export function deductionSums(row, ctx, forOwner = null) {
     s + (row.properties?.[p.id]?.expenses ?? 0) * shareOf(p.owner, forOwner), 0);
   const propertyDepreciation = investmentProps.reduce((s, p) =>
     s + (row.properties?.[p.id]?.depreciation ?? 0) * shareOf(p.owner, forOwner), 0);
+  // Land tax (spec 19 Commit 2) — deductible for an INVESTMENT property
+  // only (a holiday home earns no assessable income to offset against;
+  // see deterministic.js's own comment on why it's routed differently).
+  const propertyLandTax = investmentProps.reduce((s, p) =>
+    s + (row.properties?.[p.id]?.landTax ?? 0) * shareOf(p.owner, forOwner), 0);
   const vehicle = byCat("vehicle");
   const socialClub = byCat("socialClub");
   const insurance = byCat("insurance");
@@ -170,8 +175,8 @@ export function deductionSums(row, ctx, forOwner = null) {
   const salaryPackaging = byCat("salaryPackaging");
   const other = byCat("other");
   const computedTotal = investmentPortfolioInterest + propertyInterestDeductions + propertyDeductions + propertyDepreciation
-    + vehicle + socialClub + insurance + novatedLease + workingExpense + salarySacrifice + lumpSumSuperContributions
-    + salaryPackaging + other;
+    + propertyLandTax + vehicle + socialClub + insurance + novatedLease + workingExpense + salarySacrifice
+    + lumpSumSuperContributions + salaryPackaging + other;
   // Adjustment rows (spec 18) — a "deductions" adjustment (either sign)
   // folds into the section total; the engine credits the same amount to
   // measured[owner].deductions (deterministic.js), so this reconciles
@@ -181,7 +186,7 @@ export function deductionSums(row, ctx, forOwner = null) {
   const adjDeductions = adjustmentSum(row, "deductions", forOwner);
   const total = computedTotal + adjDeductions;
   return {
-    investmentPortfolioInterest, propertyInterestDeductions, propertyDeductions, propertyDepreciation,
+    investmentPortfolioInterest, propertyInterestDeductions, propertyDeductions, propertyDepreciation, propertyLandTax,
     vehicle, socialClub, insurance, novatedLease, workingExpense, salarySacrifice, lumpSumSuperContributions,
     salaryPackaging, other, computedTotal, adjDeductions, total,
   };
@@ -315,8 +320,14 @@ export function expenseSums(row, ctx, forOwner = null) {
     s + (row.properties?.[p.id]?.expenses ?? 0) * shareOf(p.owner, forOwner), 0);
   const homeMaintenance = byCat("homeMaintenance");
   const other = byCat("other");
+  // Land tax (spec 19 Commit 2) — a cash outflow for EVERY non-PPR
+  // property (investment or holiday alike; deductibility is investment-
+  // only, handled separately in deductionSums above).
+  const nonPprProps = properties.filter((p) => p.propertyType !== "ppr");
+  const landTax = nonPprProps.reduce((s, p) =>
+    s + (row.properties?.[p.id]?.landTax ?? 0) * shareOf(p.owner, forOwner), 0);
   const computedTotal = mortgageRepayments + otherLoanRepayments + nonDiscretionary + discretionary + groceryFuel
-    + holidays + insurance + investmentPropertyExpenses + homeMaintenance + other + education;
+    + holidays + insurance + investmentPropertyExpenses + homeMaintenance + other + education + landTax;
   // Adjustment rows (spec 18) — "expenses" is household-owned (a joint
   // leak, per the registry), so it's split the same 50/50 way as
   // education above for a per-person view, in full for the household.
@@ -326,7 +337,7 @@ export function expenseSums(row, ctx, forOwner = null) {
   const total = computedTotal + adjExpenses;
   return {
     mortgageRepayments, otherLoanRepayments, nonDiscretionary, discretionary, groceryFuel, holidays,
-    insurance, investmentPropertyExpenses, homeMaintenance, other, education, computedTotal, adjExpenses, total,
+    insurance, investmentPropertyExpenses, homeMaintenance, other, education, landTax, computedTotal, adjExpenses, total,
   };
 }
 

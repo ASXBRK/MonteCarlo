@@ -53,6 +53,7 @@ import {
 import { levelPayment, monthlyRate, termMonths, ioMonths, scheduledAmortisation, deductibleFraction } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
+import { landTaxOnValue } from "./data/landTax.js";
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
 import { decomposeNetWorthChange } from "./conservationCheck.js";
@@ -825,7 +826,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     //                  be added again here.
     properties: Object.fromEntries(props.map((p) => [p.id, {
       value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0, fhsssRelease: 0, lmi: 0,
-      deposit: 0, duty: 0, costs: 0, fhog: 0,
+      deposit: 0, duty: 0, costs: 0, fhog: 0, landTax: 0,
       // Usable equity and borrowing capacity (Implementation/Rates
       // spec, Commit 3) — filled in by a post-pass once `yearly` is
       // complete (needs the property's own linked liabilities' closing
@@ -1434,6 +1435,73 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         }
       }
 
+      // a3. Land tax (spec 19 Commit 2) — assessed annually (July only,
+      // same "annual rows fire in July" convention as everything else
+      // here) on the AGGREGATED unimproved land value of each owner's
+      // non-exempt (non-PPR) properties within a jurisdiction — a
+      // household cash outflow either way, but deductible against
+      // rental income ONLY for an investment property (a holiday home
+      // earns no assessable income to offset against, so its land tax
+      // is a personal, non-deductible cost). Routed through the SAME
+      // _propNet[pid].expenses bucket ordinary property expenses use,
+      // not a bare acc[per].deductions credit alone, so a land-tax-
+      // driven loss is subject to the SAME negative-gearing quarantine
+      // rule below (line ~2400) — otherwise land tax would always
+      // offset other income even in a year the quarantine should apply.
+      // landValuePct estimates the unimproved-land share of total value
+      // (disclosed approximation); landTaxOverride bypasses the
+      // aggregate calculation for that one property, added to its
+      // owner's cash/deduction totals directly instead (dutyOverride's
+      // own precedence convention).
+      let landTaxOut = 0;
+      if (m === julyOf(y)) {
+        const aggValue = {};
+        for (const per of persons) aggValue[per] = {};
+        for (const pid in propMeta) {
+          const pm = propMeta[pid];
+          const p = propsById[pid];
+          if (p.propertyType === "ppr" || propVal[pid] <= 0 || p.landTaxOverride != null) continue;
+          const landValue = ((p.landValuePct ?? 60) / 100) * propVal[pid];
+          for (const per of persons) {
+            const s = pm.shares[per];
+            if (!s) continue;
+            aggValue[per][p.state] = (aggValue[per][p.state] ?? 0) + landValue * s;
+          }
+        }
+        const taxByOwnerState = {};
+        for (const per of persons) {
+          taxByOwnerState[per] = {};
+          for (const st in aggValue[per]) taxByOwnerState[per][st] = landTaxOnValue(st, aggValue[per][st]);
+        }
+        for (const pid in propMeta) {
+          const pm = propMeta[pid];
+          const p = propsById[pid];
+          if (p.propertyType === "ppr" || propVal[pid] <= 0) continue;
+          let propTax = 0;
+          if (p.landTaxOverride != null) {
+            propTax = p.landTaxOverride;
+          } else {
+            const landValue = ((p.landValuePct ?? 60) / 100) * propVal[pid];
+            for (const per of persons) {
+              const s = pm.shares[per];
+              if (!s) continue;
+              const groupTotal = aggValue[per][p.state] ?? 0;
+              const groupTax = taxByOwnerState[per][p.state] ?? 0;
+              if (groupTotal > 0) propTax += groupTax * (landValue * s) / groupTotal;
+            }
+          }
+          landTaxOut += propTax;
+          if (pm.invest) {
+            acc._propNet[pid].expenses += propTax;
+            for (const per of persons) {
+              const s = pm.shares[per];
+              if (s) acc[per].deductions += propTax * s;
+            }
+          }
+          if (row) row.properties[pid].landTax = propTax;
+        }
+      }
+
       // b. Distribution + deduction accrual on the grown balance.
       let cashDist = 0;
       for (const id of ids) {
@@ -1674,7 +1742,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       const upfrontCashOut = m === 0 ? upfrontOutsideOnly + upfrontFromSuperShortfall : 0;
       const ongoingCashOut = ongoingOutsideMonthlyAt(m) + (m === first ? ongoingFromSuperShortfall : 0);
       const adviserFeeCashOut = upfrontCashOut + ongoingCashOut;
-      let net = inc - (exp + propExpenseOut) - tax - loanPayReal - settlementOut - superContribCashOut - adviserFeeCashOut;
+      let net = inc - (exp + propExpenseOut + landTaxOut) - tax - loanPayReal - settlementOut - superContribCashOut - adviserFeeCashOut;
       // Goals, surplus-funded: capped at whatever's actually left over
       // this month (a goal can't manufacture cash that doesn't exist,
       // unlike an instructed transaction such as a loan repayment or a
@@ -1695,7 +1763,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       if (row) {
         row.income += inc;
         row.cashDistributions += cashDist;
-        row.expenses += exp + propExpenseOut;
+        row.expenses += exp + propExpenseOut + landTaxOut;
         row.tax += tax;
         // Adviser fees (Commit 2) — outsideCash/requestedFromSuper let
         // the UI show "cap, requested, shortfall" without recomputing

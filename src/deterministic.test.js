@@ -1299,6 +1299,119 @@ describe("D4 — property", () => {
   });
 });
 
+describe("Land tax (spec 19 Commit 2)", () => {
+  const invProp = (over = {}) => ({
+    id: "p1", name: "Investment unit", owner: "client", state: "WA",
+    propertyType: "investment", status: "owned",
+    currentValue: 400000, acquisitionDate: "2020-01-15", costBase: 300000,
+    priceToday: 0, purchaseAt: { kind: "age", age: 41 },
+    lvrPct: 0, firstHomeBuyer: false, newBuild: true, // newBuild — negative gearing unrestricted, isolates land tax
+    purchaseCostsPct: 0, dutyOverride: null, growthPct: 0,
+    rent: { amount: 30000, indexBasis: "none", indexExtraPct: 0 },
+    expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expensesDeductible: true, landValuePct: 60, landTaxOverride: null,
+    ...over,
+  });
+  const bigCash = () => mkAsset({ allocation: growthOnlyAlloc(), balance: 2000000 });
+  const withProps = (properties, over = {}) => ({
+    ...mkState({ endAge: 43, assets: [bigCash()], cashflows: { income: [salary(100000 / 12)] }, ...over }),
+    properties,
+    liabilities: [],
+  });
+
+  it("a PPR is exempt regardless of value", () => {
+    const out = projectPlan(withProps([invProp({ propertyType: "ppr", currentValue: 2000000 })]));
+    for (const r of out.yearly) expect(r.properties.p1.landTax).toBe(0);
+  });
+
+  it("WA: a single property under its own $300k land-value threshold pays nothing", () => {
+    // 400,000 × 60% = 240,000 land value — under WA's $300,000 threshold alone.
+    const out = projectPlan(withProps([invProp()]));
+    expect(out.yearly[0].properties.p1.landTax).toBe(0);
+  });
+
+  it("aggregates land value across two properties in the same state — exceeding a threshold that neither reaches alone", () => {
+    // Two IDENTICAL WA properties, ~240,000 land value each — under the
+    // $300,000 threshold alone (confirmed $0 by the previous test), but
+    // the combined ~480,000 crosses into WA's $420k–$1m bracket, so
+    // together they owe a positive amount split evenly between them.
+    const out = projectPlan(withProps([
+      invProp({ id: "p1" }),
+      invProp({ id: "p2" }),
+    ]));
+    const t1 = out.yearly[0].properties.p1.landTax;
+    const t2 = out.yearly[0].properties.p2.landTax;
+    expect(t1).toBeGreaterThan(0); // neither is zero here...
+    expect(t2).toBeGreaterThan(0); // ...though each alone (previous test) is exactly $0
+    expect(t1).toBeCloseTo(t2, 6); // identical properties split the aggregate tax evenly
+    // Sanity bound: WA's bracket at ~480,000 combined is ~300 + 0.25%
+    // of the excess over 420,000 — a few hundred dollars, not a few
+    // thousand (would signal the aggregation used the WRONG bracket).
+    expect(t1 + t2).toBeGreaterThan(100);
+    expect(t1 + t2).toBeLessThan(1000);
+  });
+
+  it("deductible for an investment property: land tax reduces taxable income", () => {
+    const withTax = projectPlan(withProps([invProp({ landValuePct: 100, currentValue: 2000000 })])); // well over WA's top bracket
+    const without = projectPlan(withProps([invProp({ landValuePct: 100, currentValue: 2000000, landTaxOverride: 0 })]));
+    const landTax = withTax.yearly[0].properties.p1.landTax;
+    expect(landTax).toBeGreaterThan(0);
+    expect(without.yearly[0].properties.p1.landTax).toBe(0);
+    // Both scenarios have IDENTICAL rent (30,000, well above the land
+    // tax amount) so neither triggers the negative-gearing quarantine —
+    // land tax reduces taxable income by ~landTax, not exactly (paying
+    // it also draws down the Working Cash Account balance a little
+    // sooner, so the "withTax" run earns slightly less WCA interest
+    // over the rest of the FY — a real, expected second-order effect,
+    // not a bug — so this checks the direct deduction dominates, within
+    // a tolerance wide enough for that indirect interest differential).
+    const delta = without.yearly[0].taxDetail.client.taxableIncome - withTax.yearly[0].taxDetail.client.taxableIncome;
+    expect(delta).toBeCloseTo(landTax, -3); // within $500 of the direct deduction
+  });
+
+  it("NOT deductible for a holiday home: land tax is a cash outflow but does not reduce taxable income", () => {
+    const holiday = invProp({ propertyType: "holiday", landValuePct: 100, currentValue: 2000000, rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 } });
+    const withTax = projectPlan(withProps([holiday]));
+    const without = projectPlan(withProps([{ ...holiday, landTaxOverride: 0 }]));
+    const landTax = withTax.yearly[0].properties.p1.landTax;
+    expect(landTax).toBeGreaterThan(0);
+    // Same taxable income either way, within the WCA-interest second-
+    // order tolerance noted above — land tax never touched deductions
+    // directly for a holiday home, so the gap here should be much
+    // smaller than the land tax amount itself (confirming it's the
+    // indirect WCA effect, not a mistaken direct deduction).
+    const delta = Math.abs(withTax.yearly[0].taxDetail.client.taxableIncome - without.yearly[0].taxDetail.client.taxableIncome);
+    expect(delta).toBeLessThan(landTax * 0.05);
+    // But it IS a real household cash outflow, reported on the property.
+    expect(withTax.yearly[0].expenses).toBeGreaterThan(without.yearly[0].expenses);
+  });
+
+  it("landTaxOverride bypasses the aggregate calculation for that property, and is excluded from its sibling's aggregate", () => {
+    // p1 overridden to a flat 9999; p2 (same state) is assessed alone
+    // against WA's schedule — must NOT see p1's land value in its aggregate.
+    const out = projectPlan(withProps([
+      invProp({ id: "p1", landTaxOverride: 9999 }),
+      invProp({ id: "p2" }),
+    ]));
+    expect(out.yearly[0].properties.p1.landTax).toBe(9999);
+    expect(out.yearly[0].properties.p2.landTax).toBe(0); // 240,000 alone, under WA's threshold
+  });
+
+  it("conservation holds for a scenario with land tax active", () => {
+    const out = projectPlan(withProps([invProp({ landValuePct: 100, currentValue: 2000000 })]));
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `land tax fixture, year ${y}`);
+  });
+
+  it("regression gate: a property with no landValuePct/landTaxOverride fields at all (pre-Commit-2 state) still derives from the 60% default, not undefined/NaN", () => {
+    const bare = invProp({ landValuePct: 100, currentValue: 2000000 });
+    delete bare.landValuePct;
+    delete bare.landTaxOverride;
+    const out = projectPlan(withProps([bare]));
+    expect(out.yearly[0].properties.p1.landTax).toBeGreaterThan(0);
+    expect(Number.isFinite(out.yearly[0].properties.p1.landTax)).toBe(true);
+  });
+});
+
 // --- D5: unrealised gain (cost-base pool exposure) -----------------------------
 
 describe("D5 — perAssetDetail.costBasePool", () => {
@@ -2569,6 +2682,33 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         firstHomeGuarantee: firstHomeBuyer && Math.random() < 0.5,
         lmiOverride: null,
         lmiPayAtSettlement: Math.random() < 0.5,
+      });
+    }
+
+    // Land tax (spec 19 Commit 2) — 0-2 non-PPR properties (investment
+    // or holiday), PLANNED (never "owned" — see conservationCheck.js's
+    // own caveat on why randomScenario() must never generate an owned
+    // property) and purchased early enough to reach at least one July
+    // assessment before the projection ends. Sometimes both share a
+    // state (exercises the per-owner/jurisdiction aggregation), and
+    // landTaxOverride is sometimes set (bypasses it for that property).
+    for (let i = 0; i < randInt(0, 2); i++) {
+      const sharedState = pick(["NSW", "VIC", "QLD", "WA", "SA", "TAS", "ACT", "NT"]);
+      properties.push({
+        id: `lt${i}`, name: `Land tax property ${i}`, owner: couple ? pick(["client", "partner", "joint"]) : "client",
+        state: sharedState, // biased toward the SAME state across both, to exercise aggregation
+        propertyType: pick(["investment", "holiday"]), status: "planned",
+        currentValue: 0, acquisitionDate: null, costBase: 0,
+        priceToday: rand(300000, 2000000),
+        purchaseAt: { kind: "age", age: 40 },
+        lvrPct: 0, firstHomeBuyer: false, newBuild: Math.random() < 0.5,
+        purchaseCostsPct: 0, dutyOverride: null, growthPct: rand(-2, 6),
+        rent: { amount: rand(0, 40000), indexBasis: "none", indexExtraPct: 0 },
+        expenses: { amount: rand(0, 10000), indexBasis: "none", indexExtraPct: 0 },
+        expensesDeductible: true, depreciation: 0,
+        releaseFhsssAtPurchase: false, firstHomeGuarantee: false, lmiOverride: null, lmiPayAtSettlement: false,
+        landValuePct: pick([40, 60, 80, 100]),
+        landTaxOverride: Math.random() < 0.3 ? rand(0, 5000) : null,
       });
     }
 

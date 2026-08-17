@@ -731,6 +731,14 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
     equityCeilingPct: 80,
     depositFromEquity: false,
     depositFromEquitySourcePropertyId: null,
+    // Land tax (spec 19 Commit 2) — non-PPR only (investment/holiday).
+    // landValuePct estimates the unimproved-land share of total value
+    // (default 60%, the feature's largest disclosed approximation);
+    // landTaxOverride bypasses the aggregate per-owner/jurisdiction
+    // calculation for this property entirely, same "manual figure wins"
+    // convention as dutyOverride/lmiOverride.
+    landValuePct: 60,
+    landTaxOverride: null,
   };
 }
 
@@ -818,6 +826,14 @@ export function clampProperty(p, plan) {
     depositFromEquity: p.depositFromEquity === true && status === "planned",
     depositFromEquitySourcePropertyId: typeof p.depositFromEquitySourcePropertyId === "string" && p.depositFromEquitySourcePropertyId
       ? p.depositFromEquitySourcePropertyId : null,
+    // Land tax (spec 19 Commit 2) — meaningful for ANY non-PPR property
+    // (investment or holiday), owned or still planned, so not gated on
+    // status; a PPR property still carries the fields harmlessly (the
+    // engine skips PPR entirely — see deterministic.js), same "inert
+    // but not hidden unless it could mislead" treatment as other
+    // fields that only apply to a subset of properties.
+    landValuePct: clampNumber(p.landValuePct ?? 60, 0, 100),
+    landTaxOverride: p.landTaxOverride == null ? null : clampNumber(p.landTaxOverride, 0),
   };
 }
 

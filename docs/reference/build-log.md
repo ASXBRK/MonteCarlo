@@ -502,6 +502,53 @@ derived figures). No new money flow (a derived default replaces a
 manual entry; it doesn't add a leak), so no `randomScenario()`/
 conservation-invariant change needed.
 
+### Land tax (spec 19, Commit 2)
+`src/data/landTax.js`: per-jurisdiction progressive bracket schedules,
+same [floor, base, rate] encoding as stampDuty.js. WA's general scale was
+cross-checked this session against multiple independently-converging
+secondary sources (calculator sites + RSM Australia commentary) via web
+search — RevenueWA's own site could not be reached directly (network
+egress to *.wa.gov.au is blocked from this build environment), so it's
+disclosed as corroborated-but-not-primary-sourced rather than the spec's
+own "verified" — an honest downgrade from the instruction, not a silent
+one. Every other jurisdiction is a disclosed UNVERIFIED simplified (2-4
+bracket) approximation from training knowledge; NT genuinely levies no
+general land tax at all.
+
+Engine (deterministic.js): assessed annually (July only) on the
+AGGREGATED unimproved land value of each owner's non-PPR properties
+within a jurisdiction — a two-pass computation (sum land values per
+person per state, look up each group's tax, then apportion back to each
+contributing property in proportion to its own share) so a threshold
+crossed only by the SUM of two properties neither reaches alone is
+caught, and so deductibility/reporting stay meaningful per property
+despite the shared progressive scale. `landValuePct` (default 60%,
+editable per property — smartDefaults.js registers it) estimates the
+unimproved-land share of total value, the feature's largest disclosed
+approximation; `landTaxOverride` bypasses the aggregate calculation for
+one property (dutyOverride's own precedence convention), excluded from
+its siblings' aggregate. Deductible against rental income for an
+INVESTMENT property only — routed through the SAME `_propNet[pid].expenses`
+bucket ordinary property expenses use (not a bare deduction credit
+alone), so a land-tax-driven loss is subject to the SAME negative-
+gearing quarantine rule as everything else; a holiday home's land tax is
+a real cash outflow with no deduction at all, since it earns no
+assessable income to offset against. Folds into the SAME `row.expenses`/
+`net` computation as ordinary property expenses, so the conservation
+invariant needed NO new named term (verified across 5×300 randomised
+runs after extending `randomScenario()` to generate 0-2 planned
+investment/holiday properties, sometimes sharing a jurisdiction to
+exercise the aggregation, with a randomised land-tax override).
+cashflowStatement.js's independent re-derivation (Cashflow table) gained
+matching `propertyLandTax` (deductions, investment-only) and `landTax`
+(expenses, investment+holiday) fields — the same blind spot spec 18's
+own Commit 2 found and fixed for adjustments.
+Regression gate: full suite green unchanged; every pre-existing property
+test fixture's land value happens to fall under its state's own
+threshold (empirically confirmed, not engineered), so no existing dollar
+assertion needed updating — a NEW property crossing a threshold gets the
+new (correct) tax, which is the point of the commit.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real
