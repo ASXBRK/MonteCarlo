@@ -1226,6 +1226,9 @@ export function defaultState(profiles = {}, now = new Date()) {
       // by subject id; a subject with no entry falls back to its first
       // allowed form (router.js's OUTPUT_SUBJECT_FORMS).
       outputForm: {},
+      // Navigation/charts spec (17), Commit 2 — which sidebar subgroup
+      // is expanded, per area (input|output), per scenario.
+      navExpanded: {},
     },
     assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed", fhsssEarningsRate: 0.0794 },
     // A newly created scenario starts fully untouched — correct, since
@@ -1342,6 +1345,24 @@ export function clampOutputForm(raw) {
   if (!raw || typeof raw !== "object") return out;
   for (const [subject, allowed] of Object.entries(OUTPUT_SUBJECT_FORMS)) {
     if (allowed.includes(raw[subject])) out[subject] = raw[subject];
+  }
+  return out;
+}
+
+// --- Nested sidebar groups (spec 17, Commit 2) -----------------------------
+//
+// Which subgroup is expanded per area (input|output), per scenario.
+// Deliberately free-form strings, not validated against a fixed group-
+// id enum: the actual set of valid group ids is a presentation concern
+// owned by main.js's INPUT_GROUPS/OUTPUT_GROUPS, not this schema — a
+// stale id from a future regrouping is main.js's fallback to resolve at
+// render time, not a clamp failure here.
+export function clampNavExpanded(raw) {
+  const out = {};
+  if (raw && typeof raw === "object") {
+    for (const area of ["input", "output"]) {
+      if (typeof raw[area] === "string" && raw[area]) out[area] = raw[area];
+    }
   }
   return out;
 }
@@ -2379,6 +2400,7 @@ export function hydrate(json, profiles = {}) {
         showIndividualCashflowItems: raw.display?.showIndividualCashflowItems === true,
         snapshotYears: clampSnapshotYears(raw.display?.snapshotYears, plan),
         outputForm: clampOutputForm(raw.display?.outputForm),
+        navExpanded: clampNavExpanded(raw.display?.navExpanded),
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,

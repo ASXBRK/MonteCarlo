@@ -302,6 +302,19 @@ consolidation case, not a deletion case. `composite` and
 selector in Commit 4; until then they land on the plain chart form of
 their new home.
 
+### Navigation and charts (spec 17, Commit 2 — nested collapsible sidebar)
+Both areas of the sidebar (Input's 15 sections, Output's 10 subjects +
+Focus + What if) are now grouped into collapsible subgroups — Input:
+Client/Money in/Money out/Assets/Debt/Plan; Output: Output/Focus/What
+if — one expanded at a time per area, persisted per scenario
+(`state.display.navExpanded`, same free-form-string/main.js-owns-the-
+enum pattern as `chartTreatment`). Navigating (deep link, sidebar click,
+or any other route change) always force-expands the group containing
+the new active section, so the active view is never hidden inside a
+collapsed group. A collapsed group's header still carries an aggregate
+item count and untouched-badge OR ("Assets ●1" style) for input groups,
+matching the spec's "a collapsed group still signals what is inside."
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

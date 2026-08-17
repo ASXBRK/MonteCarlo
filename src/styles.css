@@ -1452,6 +1452,30 @@ html, body {
   padding: 0 10px 0 18px;
 }
 
+/* Nested collapsible sidebar groups (spec 17, Commit 2). */
+.nav-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--ink-soft);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 10px 6px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.nav-group-header:hover { background: #eef1f5; color: var(--ink); }
+.nav-group-chevron { flex: 0 0 auto; font-size: 10px; width: 10px; }
+.nav-group-title { flex: 1 1 auto; }
+.nav-subgroup-items { display: flex; flex-direction: column; gap: 2px; }
+
 .nav-item {
   display: flex;
   align-items: center;

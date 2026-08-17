@@ -349,6 +349,7 @@ function handleRoute() {
     return;
   }
   persistLastVisited(route.area, route.section);
+  expandNavGroupForRoute(route.area, route.section);
   renderWorkspaceBreadcrumb();
   showSection(route.area, route.section);
   renderSideNav();
@@ -389,6 +390,19 @@ const INPUT_NAV = [
   { id: "goals", label: "Goals" },
   { id: "investment-cashflows", label: "Investment cashflows" },
   { id: "settings", label: "Settings" },
+];
+
+// Navigation, View Consolidation, and Simple Charts (spec 17), Commit 2
+// — nested collapsible sidebar groups. Every id below must appear in
+// INPUT_NAV/OUTPUT_NAV exactly once; grouping is purely a presentation
+// re-ordering, not a new section.
+const INPUT_GROUPS = [
+  { id: "client", label: "Client", ids: ["setup", "tax-details", "children"] },
+  { id: "money-in", label: "Money in", ids: ["income", "deductions"] },
+  { id: "money-out", label: "Money out", ids: ["expenses", "goals"] },
+  { id: "assets", label: "Assets", ids: ["financial-assets", "lifestyle-assets", "property", "super"] },
+  { id: "debt", label: "Debt", ids: ["liabilities"] },
+  { id: "plan", label: "Plan", ids: ["implementation", "investment-cashflows", "settings"] },
 ];
 // Navigation, View Consolidation, and Simple Charts (docs/specs/17-
 // navigation-and-charts.md), Commit 1 — one subject per row, each
@@ -441,6 +455,15 @@ const OUTPUT_NAV = {
     { id: "whatif-expense-shock", label: "Expense shock" },
   ],
 };
+// Commit 2's output-side groups — the three OUTPUT_NAV groups
+// themselves become the collapsible units (no further nesting asked
+// for), so this is just OUTPUT_NAV reshaped into the same {id, label,
+// ids} shape INPUT_GROUPS uses.
+const OUTPUT_GROUPS = [
+  { id: "output", label: "Output", ids: OUTPUT_NAV.Output.map((n) => n.id) },
+  { id: "focus", label: "Focus", ids: OUTPUT_NAV.Focus.map((n) => n.id) },
+  { id: "whatif", label: "What if", ids: OUTPUT_NAV.WhatIf.map((n) => n.id) },
+];
 const SECTION_LABELS = Object.fromEntries([
   ...INPUT_NAV.map((n) => [n.id, n.label]),
   ...Object.values(OUTPUT_NAV).flat().map((n) => [n.id, n.label]),
@@ -523,35 +546,96 @@ function sectionHasUntouched(sectionId) {
   return false;
 }
 
+// Navigation, View Consolidation, and Simple Charts (spec 17), Commit 2
+// — one group expanded at a time PER AREA (input/output each keep
+// their own single expanded subgroup), persisted per scenario in
+// state.display.navExpanded like every other display-state field. A
+// stale/unrecognised stored id (e.g. after a future regrouping) falls
+// back to the group containing that area's default landing section,
+// rather than a clamp failure — planState.js deliberately treats the
+// value as free-form since group ids are a presentation concern owned
+// here, not by the schema.
+function groupsFor(area) {
+  return area === "input" ? INPUT_GROUPS : OUTPUT_GROUPS;
+}
+function groupContaining(area, sectionId) {
+  const groups = groupsFor(area);
+  return groups.find((g) => g.ids.includes(sectionId))?.id ?? groups[0].id;
+}
+function defaultExpandedGroup(area) {
+  return groupContaining(area, area === "input" ? DEFAULT_INPUT_SECTION : DEFAULT_OUTPUT_VIEW);
+}
+function expandedGroupId(area) {
+  const stored = state.display.navExpanded?.[area];
+  if (stored && groupsFor(area).some((g) => g.id === stored)) return stored;
+  return defaultExpandedGroup(area);
+}
+// Persisted separately from saveState(), same reasoning as
+// persistLastVisited: expanding a sidebar group to browse is not a plan
+// edit and must not bump the scenario's "last updated" timestamp.
+function setExpandedGroup(area, groupId) {
+  state.display.navExpanded = { ...state.display.navExpanded, [area]: groupId };
+  writeRaw(scenarioKey(workspace.activeScenarioId), serialize(state));
+}
+// The group containing the active view is always expanded (spec) —
+// called from handleRoute on every navigation, so arriving at a section
+// via a deep link or the export/toggle controls reopens its group even
+// if the user had a different one open.
+function expandNavGroupForRoute(area, section) {
+  if (area !== "input" && area !== "output") return;
+  setExpandedGroup(area, groupContaining(area, section));
+}
+
 function renderSideNav() {
   const counts = sectionCounts(state);
-  const badge = (id) => (counts[id] ? `<span class="nav-badge">${counts[id]}</span>` : "");
-  const item = (n, sub = false) => {
-    const area = INPUT_NAV.includes(n) ? "input" : "output";
-    const active = currentRoute?.area === area && currentRoute?.section === n.id;
-    const unreviewed = area === "input" && sectionHasUntouched(n.id)
+  const labelFor = (area, id) => (area === "input" ? INPUT_NAV : Object.values(OUTPUT_NAV).flat()).find((n) => n.id === id)?.label ?? id;
+  const item = (area, id) => {
+    const active = currentRoute?.area === area && currentRoute?.section === id;
+    const unreviewed = area === "input" && sectionHasUntouched(id)
       ? `<span class="nav-badge-unreviewed" title="Contains fields not yet reviewed">●</span>` : "";
+    const badge = counts[id] ? `<span class="nav-badge">${counts[id]}</span>` : "";
     return `
-      <button class="nav-item${sub ? " nav-item-sub" : ""}${active ? " active" : ""}" type="button"
-              data-nav-area="${area}" data-nav-section="${n.id}">
-        <span>${escapeHTML(n.label)}</span>${unreviewed}${badge(n.id)}
+      <button class="nav-item nav-item-sub${active ? " active" : ""}" type="button"
+              data-nav-area="${area}" data-nav-section="${id}">
+        <span>${escapeHTML(labelFor(area, id))}</span>${unreviewed}${badge}
       </button>
+    `;
+  };
+  const group = (area, g) => {
+    const expanded = expandedGroupId(area) === g.id;
+    // Aggregate count/untouched badge (spec: "a collapsed group still
+    // signals what is inside") — only input sections carry either
+    // concept today; an output group's header shows just its label.
+    const groupCount = area === "input" ? g.ids.reduce((s, id) => s + (counts[id] ?? 0), 0) : 0;
+    const groupUnreviewed = area === "input" && g.ids.some((id) => sectionHasUntouched(id));
+    return `
+      <button type="button" class="nav-group-header" data-nav-group-area="${area}" data-nav-group="${g.id}" aria-expanded="${expanded}">
+        <span class="nav-group-chevron">${expanded ? "▾" : "▸"}</span>
+        <span class="nav-group-title">${escapeHTML(g.label)}</span>
+        ${groupUnreviewed ? `<span class="nav-badge-unreviewed" title="Contains fields not yet reviewed">●</span>` : ""}
+        ${groupCount ? `<span class="nav-badge">${groupCount}</span>` : ""}
+      </button>
+      <div class="nav-subgroup-items"${expanded ? "" : " hidden"}>
+        ${g.ids.map((id) => item(area, id)).join("")}
+      </div>
     `;
   };
   els.sideNav.innerHTML = `
     <button type="button" id="reviewDefaultsBtn" class="btn-text side-nav-review-btn">Review defaults</button>
     <div class="nav-group-label">Input</div>
-    ${INPUT_NAV.map((n) => item(n)).join("")}
+    ${INPUT_GROUPS.map((g) => group("input", g)).join("")}
     <div class="nav-group-label">Output</div>
-    ${OUTPUT_NAV.Output.map((n) => item(n, true)).join("")}
-    <div class="nav-subgroup-label">Focus</div>
-    ${OUTPUT_NAV.Focus.map((n) => item(n, true)).join("")}
-    <div class="nav-subgroup-label">What if</div>
-    ${OUTPUT_NAV.WhatIf.map((n) => item(n, true)).join("")}
+    ${OUTPUT_GROUPS.map((g) => group("output", g)).join("")}
   `;
 }
 
 els.sideNav.addEventListener("click", (e) => {
+  const groupBtn = e.target.closest("[data-nav-group]");
+  if (groupBtn) {
+    setExpandedGroup(groupBtn.dataset.navGroupArea, groupBtn.dataset.navGroup);
+    renderSideNav();
+    return;
+  }
   const btn = e.target.closest("[data-nav-section]");
   if (!btn || btn.disabled) return;
   const { client, scenario } = findActive(workspace);
