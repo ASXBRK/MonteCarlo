@@ -76,7 +76,9 @@ import {
 } from "./cashflowCategories.js";
 import { realThreshold, LITO } from "./Tax/annual.js";
 import { superRatesFor } from "./data/superRates.js";
+import { SUPER_RATES_BASE } from "./data/superRates.js";
 import { LEG } from "./Tax/engine.js";
+import { expenseFundingSeries, taxByTypeSeries, debtVsAssetsSeries, debtAssetsCrossoverYear, superVsNonSuperSeries } from "./chartSeries.js";
 import {
   createIndex, normaliseIndex, findActive, findClient,
   newClient, renameClient, deleteClient, switchClient,
@@ -130,6 +132,7 @@ const els = {
   workspaceCanvas: document.querySelector(".workspace-canvas"),
   outputCanvas: $("outputCanvas"),
   outputFormToggle: $("outputFormToggle"),
+  chartTypeSelect: $("chartTypeSelect"),
   exportBtn: $("exportBtn"),
   viewProjection: $("viewProjection"),
   viewCashflow: $("viewCashflow"),
@@ -156,6 +159,11 @@ const els = {
   viewLiabilitiesBalances: $("viewLiabilitiesBalances"),
   viewCashflowBars: $("viewCashflowBars"),
   viewMoneyDecomposition: $("viewMoneyDecomposition"),
+  viewIncomeSources: $("viewIncomeSources"),
+  viewExpenseFunding: $("viewExpenseFunding"),
+  viewTaxByType: $("viewTaxByType"),
+  viewDebtVsAssets: $("viewDebtVsAssets"),
+  viewSuperVsNonSuper: $("viewSuperVsNonSuper"),
   viewKeyFigures: $("viewKeyFigures"),
   keyFiguresPersonSelector: $("keyFiguresPersonSelector"),
   keyFiguresTable: $("keyFiguresTable"),
@@ -498,6 +506,76 @@ const SUBJECT_FORM_VIEW = {
   assumptions: { table: "assumptions" },
 };
 
+// Navigation, View Consolidation, and Simple Charts (spec 17), Commit 4
+// — a subject whose CHART form actually offers more than one chart
+// picks among these via the header's chart-type dropdown, rather than
+// SUBJECT_FORM_VIEW's single fixed id. Ids reuse the existing legacy
+// view ids where the chart already existed (cashflow-bars, net-assets,
+// composite, money-decomposition, super-balances) — the same
+// compatibility-layer trick Commit 1 used, so none of those four
+// existing render functions needed touching.
+const CHART_OPTIONS = {
+  cashflow: [
+    { id: "cashflow-bars", label: "Cashflow bars" },
+    { id: "income-sources", label: "Income sources" },
+    { id: "expense-funding", label: "Expense funding" },
+    { id: "tax-by-type", label: "Tax by type" },
+    // "Where the surplus went" (spec) is deliberately NOT added yet:
+    // surplus allocation's engine (spec 16, Commit 1) only tracks a
+    // per-destination breakdown for asset/liability targets today
+    // (row.perAssetDetail[id].surplusInvested, row.liabilities[id].
+    // surplusRepayment) — super/goal allocations still land in the
+    // SAME generic fields an ordinary contribution/goal uses, with no
+    // "this came from surplus" tag. Building this chart now would mean
+    // either a materially wrong chart or a new engine field, and this
+    // spec is presentation-only. Add it once spec 16's own Commit 3
+    // ("Outputs") gives every destination that tag.
+  ],
+  "net-worth": [
+    { id: "net-assets", label: "Net assets" },
+    { id: "composite", label: "Composite" },
+    { id: "money-decomposition", label: "Where the money went" },
+    { id: "debt-vs-assets", label: "Debt vs assets" },
+  ],
+  super: [
+    { id: "super-balances", label: "Super balances" },
+    { id: "super-vs-non-super", label: "Super vs non-super" },
+  ],
+};
+
+function resolveChartSelection(subject) {
+  const options = CHART_OPTIONS[subject];
+  if (!options) return null;
+  const stored = state.display.chartSelection?.[subject];
+  return options.some((o) => o.id === stored) ? stored : options[0].id;
+}
+function setChartSelection(subject, chartId) {
+  state.display.chartSelection = { ...state.display.chartSelection, [subject]: chartId };
+  writeRaw(scenarioKey(workspace.activeScenarioId), serialize(state));
+}
+// Chart-type dropdown, in the view header (spec 17 Commit 4) — shown
+// only while the active subject's CHART form is on screen AND that
+// subject actually offers more than one chart (activeView is one of
+// CHART_OPTIONS[subject]'s own ids — false whenever the TABLE form, or
+// a single-chart subject, is showing instead).
+function renderChartTypeSelect() {
+  const options = CHART_OPTIONS[activeOutputSubject];
+  const isChartForm = options && options.some((o) => o.id === activeView);
+  els.chartTypeSelect.hidden = !isChartForm;
+  if (!isChartForm) return;
+  els.chartTypeSelect.innerHTML = options.map((o) =>
+    `<option value="${o.id}"${o.id === activeView ? " selected" : ""}>${escapeHTML(o.label)}</option>`
+  ).join("");
+  els.chartTypeSelect.onchange = () => {
+    const { client, scenario } = findActive(workspace);
+    setChartSelection(activeOutputSubject, els.chartTypeSelect.value);
+    navigate({
+      page: "workspace", clientId: client.id, scenarioId: scenario.id,
+      area: "output", section: activeOutputSubject, form: "chart",
+    });
+  };
+}
+
 // The active Output subject (as opposed to `activeView`, the underlying
 // chart/table id) — set by showSection, read by the header's
 // chart/table toggle and its click handler.
@@ -673,7 +751,10 @@ function showSection(area, section) {
       // legacy view id every render/export/mount dispatcher still uses.
       const form = resolveOutputForm(subject, currentRoute?.form);
       state.display.outputForm = { ...state.display.outputForm, [subject]: form };
-      activeView = forms[form];
+      // Commit 4 — a subject with more than one chart resolves which
+      // one via CHART_OPTIONS/chartSelection rather than
+      // SUBJECT_FORM_VIEW's single fixed id.
+      activeView = form === "chart" && CHART_OPTIONS[subject] ? resolveChartSelection(subject) : forms[form];
     } else {
       // Focus/What-if ids have no chart/table concept — pass through.
       activeView = subject;
@@ -5363,6 +5444,11 @@ const VIEW_MOUNTS = {
   "liabilities-balances": () => els.viewLiabilitiesBalances,
   "cashflow-bars": () => els.viewCashflowBars,
   "money-decomposition": () => els.viewMoneyDecomposition,
+  "income-sources": () => els.viewIncomeSources,
+  "expense-funding": () => els.viewExpenseFunding,
+  "tax-by-type": () => els.viewTaxByType,
+  "debt-vs-assets": () => els.viewDebtVsAssets,
+  "super-vs-non-super": () => els.viewSuperVsNonSuper,
   "key-figures": () => els.viewKeyFigures,
   cashflow: () => els.viewCashflow,
   assets: () => els.viewAssets,
@@ -5384,7 +5470,10 @@ const VIEW_MOUNTS = {
   "whatif-income-gap": () => els.viewWhatIfIncomeGap,
   "whatif-expense-shock": () => els.viewWhatIfExpenseShock,
 };
-const GRAPH_VIEWS = new Set(["projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars"]);
+const GRAPH_VIEWS = new Set([
+  "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars",
+  "income-sources", "expense-funding", "tax-by-type", "debt-vs-assets", "super-vs-non-super",
+]);
 
 // Selection now happens via the sidebar (data-nav-section), which
 // routes through handleRoute → showSection → here.
@@ -5393,6 +5482,7 @@ function renderActiveView() {
     mount().hidden = name !== activeView;
   }
   renderOutputFormToggle();
+  renderChartTypeSelect();
   els.exportBtn.textContent = GRAPH_VIEWS.has(activeView) ? "Export PNG" : "Export CSV";
   // Asset allocation is a pure mix (always 100%, whichever way you cut
   // it) — real vs nominal dollars has nothing to say about it, so the
@@ -5417,6 +5507,11 @@ function renderActiveView() {
   else if (activeView === "liabilities-balances") renderLiabilitiesBalancesChart();
   else if (activeView === "cashflow-bars") renderCashflowBarsChart();
   else if (activeView === "money-decomposition") renderMoneyDecompositionView();
+  else if (activeView === "income-sources") renderIncomeSourcesChart();
+  else if (activeView === "expense-funding") renderExpenseFundingChart();
+  else if (activeView === "tax-by-type") renderTaxByTypeChart();
+  else if (activeView === "debt-vs-assets") renderDebtVsAssetsChart();
+  else if (activeView === "super-vs-non-super") renderSuperVsNonSuperChart();
   else if (activeView === "key-figures") renderKeyFiguresView();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
@@ -6500,6 +6595,241 @@ function renderCashflowBarsChart() {
       tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
     },
     font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+// --- Single-question charts (spec 17, Commit 4) -----------------------------
+//
+// Each reads chartSeries.js's pure per-year series (unit-tested there
+// to reconcile against the ledger rows they claim to represent) and
+// shapes traces the same way every existing chart above does: age axis,
+// units-toggle-aware $ formatting, hide-empty-rows, PNG export.
+
+const BASE_CHART_FONT = { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" };
+
+// Income sources — the same five categories the Cashflow bars chart's
+// income half already shows (incomeCategorySums), stacked alone without
+// the expense/surplus overlay, labelled per the spec's own wording.
+const INCOME_SOURCE_SEGMENTS = [
+  { key: "employment", name: "Salary", color: "#1c5ab4" },
+  { key: "rental", name: "Rent", color: "#2e8a8a" },
+  { key: "investment", name: "Distributions", color: "#6b8e23" },
+  { key: "wcaInterest", name: "Cash interest", color: "#5e60ce" },
+  // "other" folds in one-off asset inflows (the closest existing fit
+  // to "capital drawdown") alongside a small amount of otherTaxable/
+  // nonTaxable income — see incomeCategorySums' own header.
+  { key: "other", name: "Capital drawdown & other", color: "#8d99ae" },
+];
+
+function renderIncomeSourcesChart() {
+  const el = $("chartIncomeSources");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const sums = yearIdxs.map((y) => incomeCategorySums(y));
+  const traces = [];
+  for (const seg of INCOME_SOURCE_SEGMENTS) {
+    const series = yearIdxs.map((yr, i) => sums[i][seg.key] * factor(yr));
+    if (seriesIsAllZero(series)) continue;
+    traces.push({
+      x: ages, y: series, name: seg.name, type: "bar", marker: { color: seg.color },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
+    });
+  }
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    barmode: "stack", hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.25, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Income (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Expense funding — "the affordability picture in one image": each
+// year's funding need split into met from income, funded by selling
+// assets, and unfunded (chartSeries.js's expenseFundingSeries).
+function renderExpenseFundingChart() {
+  const el = $("chartExpenseFunding");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const series = expenseFundingSeries(projection.yearly);
+  const segments = [
+    { key: "metFromIncome", name: "Met from income", color: "#1c5ab4" },
+    { key: "fundedFromAssets", name: "Funded by selling assets", color: "#d97b2f" },
+    { key: "unfunded", name: "Unfunded", color: "#c1121f" },
+  ];
+  const traces = [];
+  for (const seg of segments) {
+    const vals = yearIdxs.map((y) => series[y][seg.key] * factor(y));
+    if (seriesIsAllZero(vals)) continue;
+    traces.push({
+      x: ages, y: vals, name: seg.name, type: "bar", marker: { color: seg.color },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
+    });
+  }
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    barmode: "stack", hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.25, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Funding need (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Tax by type — income tax, CGT, contributions tax, Division 293/296,
+// HELP, and the Medicare Levy Surcharge (chartSeries.js's
+// taxByTypeSeries) — each its own line so a client can see WHICH lever
+// is driving the household's total tax cost, not just the total.
+const TAX_TYPE_SEGMENTS = [
+  { key: "incomeTax", name: "Income tax", color: "#1c5ab4" },
+  { key: "cgt", name: "CGT", color: "#6b8e23" },
+  { key: "contributionsTax", name: "Contributions tax", color: "#5e60ce" },
+  { key: "div293", name: "Division 293", color: "#d97b2f" },
+  { key: "div296", name: "Division 296", color: "#9a031e" },
+  { key: "help", name: "HELP", color: "#2e8a8a" },
+  { key: "mls", name: "Medicare Levy Surcharge", color: "#8d99ae" },
+];
+function renderTaxByTypeChart() {
+  const el = $("chartTaxByType");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const series = taxByTypeSeries(projection.yearly);
+  const traces = [];
+  for (const seg of TAX_TYPE_SEGMENTS) {
+    const vals = yearIdxs.map((y) => series[y][seg.key] * factor(y));
+    if (seriesIsAllZero(vals)) continue;
+    traces.push({
+      x: ages, y: vals, name: seg.name, type: "scatter", mode: "lines", stackgroup: "tax",
+      line: { color: seg.color, width: 1 },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
+    });
+  }
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.3, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Tax (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Debt vs assets — two lines, with the crossover year annotated
+// (chartSeries.js's debtVsAssetsSeries/debtAssetsCrossoverYear).
+function renderDebtVsAssetsChart() {
+  const el = $("chartDebtVsAssets");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const series = debtVsAssetsSeries(projection.yearly);
+  const crossoverYear = debtAssetsCrossoverYear(projection.yearly);
+  const traces = [
+    {
+      x: ages, y: yearIdxs.map((y) => series[y].assets * factor(y)),
+      name: "Total assets", type: "scatter", mode: "lines", line: { color: "#1c5ab4", width: 2.5 },
+      hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Total assets</extra>",
+    },
+    {
+      x: ages, y: yearIdxs.map((y) => series[y].debt * factor(y)),
+      name: "Total debt", type: "scatter", mode: "lines", line: { color: "#c1121f", width: 2.5 },
+      hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Total debt</extra>",
+    },
+  ];
+  const shapes = [], annotations = [];
+  if (crossoverYear != null && yearIdxs.includes(crossoverYear)) {
+    const age = projection.schedule.clientAges[crossoverYear];
+    shapes.push({
+      type: "line", xref: "x", yref: "paper", x0: age, x1: age, y0: 0, y1: 1,
+      line: { color: "rgba(30,120,60,0.6)", width: 1.5, dash: "dash" },
+    });
+    annotations.push({
+      x: age, xref: "x", y: 1, yref: "paper", yanchor: "bottom", xanchor: "center",
+      text: "Assets overtake debt", showarrow: false,
+      font: { size: 11, color: "rgba(30,120,60,0.9)" }, bgcolor: "rgba(255,255,255,0.8)", borderpad: 2,
+    });
+  }
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    shapes, annotations,
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Super vs non-super — the salary-sacrifice question made visual, with
+// preservation age marked (currently a flat 60 for every cohort this
+// tool models — see SUPER_RATES_BASE's own comment).
+function renderSuperVsNonSuperChart() {
+  const el = $("chartSuperVsNonSuper");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const series = superVsNonSuperSeries(projection.yearly);
+  const traces = [
+    {
+      x: ages, y: yearIdxs.map((y) => series[y].superBalance * factor(y)),
+      name: "Super", type: "scatter", mode: "lines", stackgroup: "svns", line: { color: "#1c5ab4", width: 1 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Super</extra>",
+    },
+    {
+      x: ages, y: yearIdxs.map((y) => series[y].nonSuper * factor(y)),
+      name: "Non-super", type: "scatter", mode: "lines", stackgroup: "svns", line: { color: "#6b8e23", width: 1 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Non-super</extra>",
+    },
+  ];
+  const shapes = [], annotations = [];
+  const preservationAge = SUPER_RATES_BASE.preservationAge;
+  if (ages.length && preservationAge >= ages[0] && preservationAge <= ages[ages.length - 1]) {
+    shapes.push({
+      type: "line", xref: "x", yref: "paper", x0: preservationAge, x1: preservationAge, y0: 0, y1: 1,
+      line: { color: "rgba(80,70,50,0.55)", width: 1.25, dash: "dash" },
+    });
+    annotations.push({
+      x: preservationAge, xref: "x", y: 1, yref: "paper", yanchor: "bottom", xanchor: "center",
+      text: "Preservation age", showarrow: false,
+      font: { size: 11, color: "rgba(80,70,50,0.85)" }, bgcolor: "rgba(255,255,255,0.8)", borderpad: 2,
+    });
+  }
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    shapes, annotations,
+    font: BASE_CHART_FONT,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -10387,6 +10717,11 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "super-balances") exportChartPNG("chartSuperBalances", "super-balances");
   else if (activeView === "liabilities-balances") exportChartPNG("chartLiabilitiesBalances", "liabilities-balances");
   else if (activeView === "cashflow-bars") exportChartPNG("chartCashflowBars", "cashflow-bars");
+  else if (activeView === "income-sources") exportChartPNG("chartIncomeSources", "income-sources");
+  else if (activeView === "expense-funding") exportChartPNG("chartExpenseFunding", "expense-funding");
+  else if (activeView === "tax-by-type") exportChartPNG("chartTaxByType", "tax-by-type");
+  else if (activeView === "debt-vs-assets") exportChartPNG("chartDebtVsAssets", "debt-vs-assets");
+  else if (activeView === "super-vs-non-super") exportChartPNG("chartSuperVsNonSuper", "super-vs-non-super");
   else if (activeView === "monte-carlo") exportChartPNG("chartMonteCarlo", "monte-carlo");
   else if (activeView === "money-decomposition") exportMoneyDecompositionCSV();
   else if (activeView === "key-figures") exportTransposedCSV("key-figures", buildKeyFiguresGroups({ state, projection }, keyFiguresPersonEntity));

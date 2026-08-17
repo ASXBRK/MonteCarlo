@@ -1229,6 +1229,11 @@ export function defaultState(profiles = {}, now = new Date()) {
       // Navigation/charts spec (17), Commit 2 — which sidebar subgroup
       // is expanded, per area (input|output), per scenario.
       navExpanded: {},
+      // Navigation/charts spec (17), Commit 4 — which chart a
+      // multi-chart subject (Cashflow, Net worth, Super) last showed,
+      // per scenario. Keyed by subject id; a subject with no entry (or
+      // only one chart option) falls back to its first chart.
+      chartSelection: {},
     },
     assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed", fhsssEarningsRate: 0.0794 },
     // A newly created scenario starts fully untouched — correct, since
@@ -1362,6 +1367,20 @@ export function clampNavExpanded(raw) {
   if (raw && typeof raw === "object") {
     for (const area of ["input", "output"]) {
       if (typeof raw[area] === "string" && raw[area]) out[area] = raw[area];
+    }
+  }
+  return out;
+}
+
+// Which chart a multi-chart subject last showed (spec 17, Commit 4) —
+// same free-form-string pattern as clampNavExpanded above, and for the
+// same reason: the valid chart-id set per subject is main.js's
+// CHART_OPTIONS, a presentation concern this schema module doesn't own.
+export function clampChartSelection(raw) {
+  const out = {};
+  if (raw && typeof raw === "object") {
+    for (const [subject, chartId] of Object.entries(raw)) {
+      if (typeof chartId === "string" && chartId) out[subject] = chartId;
     }
   }
   return out;
@@ -2401,6 +2420,7 @@ export function hydrate(json, profiles = {}) {
         snapshotYears: clampSnapshotYears(raw.display?.snapshotYears, plan),
         outputForm: clampOutputForm(raw.display?.outputForm),
         navExpanded: clampNavExpanded(raw.display?.navExpanded),
+        chartSelection: clampChartSelection(raw.display?.chartSelection),
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,

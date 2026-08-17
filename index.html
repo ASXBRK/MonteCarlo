@@ -90,6 +90,7 @@
                   <button class="display-option" data-units="real" type="button" aria-pressed="true">Today's dollars</button>
                   <button class="display-option" data-units="nominal" type="button" aria-pressed="false">Future dollars</button>
                 </div>
+                <select id="chartTypeSelect" class="chart-type-select" aria-label="Chart" hidden></select>
                 <div id="outputFormToggle" class="seg-toggle output-form-toggle" role="tablist" aria-label="Chart or table" hidden></div>
                 <button id="paramsBtn" class="btn-text" type="button">Parameters</button>
                 <button id="exportBtn" class="btn-text" type="button">Export PNG</button>
@@ -168,6 +169,14 @@
               <div id="viewLiabilitiesBalances" hidden><div id="chartLiabilitiesBalances"></div></div>
               <div id="viewCashflowBars" hidden><div id="chartCashflowBars"></div></div>
               <div id="viewMoneyDecomposition" hidden></div>
+              <!-- Navigation/charts spec (17), Commit 4 — single-question
+                   charts within the Cashflow/Net worth/Super subject
+                   selectors, chosen via #chartTypeSelect. -->
+              <div id="viewIncomeSources" hidden><div id="chartIncomeSources"></div></div>
+              <div id="viewExpenseFunding" hidden><div id="chartExpenseFunding"></div></div>
+              <div id="viewTaxByType" hidden><div id="chartTaxByType"></div></div>
+              <div id="viewDebtVsAssets" hidden><div id="chartDebtVsAssets"></div></div>
+              <div id="viewSuperVsNonSuper" hidden><div id="chartSuperVsNonSuper"></div></div>
               <div id="viewKeyFigures" hidden>
                 <div id="keyFiguresPersonSelector" class="seg-toggle entity-select" role="tablist" aria-label="Client, partner, or consolidated" hidden></div>
                 <div id="keyFiguresTable"></div>

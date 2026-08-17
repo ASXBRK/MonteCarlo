@@ -340,6 +340,27 @@ Cashflow's Funding/One-off/Goals groups and Tax's Household group are
 similarly shown in full regardless of the selection, titled to say so.
 No engine change.
 
+### Navigation and charts (spec 17, Commit 4 — single-question charts)
+A chart-type dropdown in the view header (`state.display.chartSelection`,
+same persistence pattern as Commits 1/2) lets Cashflow, Net worth, and
+Super each offer more than one chart: Cashflow gains Income sources,
+Expense funding, and Tax by type; Net worth gains Debt vs assets
+(crossover year annotated) alongside its existing Net assets/Composite/
+Where-the-money-went; Super gains Super vs non-super (preservation age
+marked). New pure module `src/chartSeries.js` computes each new chart's
+series and is unit-tested to reconcile against the ledger rows it
+claims to represent — the expense-funding split in particular relies on
+an exact identity (`metFromIncome + fundedFromAssets + unfunded = income
+− surplusOrDeficit`) verified against a real `projectPlan()` run, not
+just hand-built fixtures. "Where the surplus went" is deliberately
+**not** built yet: surplus allocation's engine (spec 16, Commit 1) only
+tags asset/liability destinations distinctly from ordinary flows —
+super/goal surplus contributions still land in the same generic fields
+an ordinary contribution uses, so an accurate per-destination chart
+needs spec 16's own Commit 3 first. No engine change; the four existing
+charts folded into these two selectors needed no changes at all (same
+compatibility-layer ids Commit 1 established).
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

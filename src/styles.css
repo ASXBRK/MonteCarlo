@@ -1452,6 +1452,20 @@ html, body {
   padding: 0 10px 0 18px;
 }
 
+/* Chart-type dropdown (spec 17, Commit 4) — same visual weight as the
+   btn-text controls it sits beside in .output-actions. */
+.chart-type-select {
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
 /* Nested collapsible sidebar groups (spec 17, Commit 2). */
 .nav-group-header {
   display: flex;
