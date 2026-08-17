@@ -363,6 +363,17 @@ export function buildSchedules(state) {
       withdrawals: new Float64Array(months), // gross REQUESTED amount; release-gated below (Commit 3)
     };
   }
+  // Spouse contributions, co-contribution and LISTO (spec 19 Commit 6)
+  // — both government payments AND the spouse offset need to tell a
+  // "spouse" contribution (into the RECEIVING owner's account, on their
+  // behalf) apart from that SAME owner's own "personalNonDeductible"
+  // NCC, even though both already merge into the SAME nonConcessional
+  // flow key above for cap-acceptance purposes (unaffected, deliberately
+  // not touched) — additive per-FY-per-owner totals, gated the SAME
+  // age/work-test way as the real credit (accumulated inside the SAME
+  // loop below, right where the gated `temp` array is already known).
+  const spouseContributionsByOwner = { client: new Float64Array(planYears), partner: new Float64Array(planYears) };
+  const personalNccByOwner = { client: new Float64Array(planYears), partner: new Float64Array(planYears) };
   // FHSSS-eligible contributions (Document Set Commit 3), keyed by the
   // CONTRIBUTING person (not account — FHSSS eligibility is a
   // per-person entitlement) and split concessional/non-concessional,
@@ -574,6 +585,14 @@ export function buildSchedules(state) {
       for (let m = 0; m < months; m++) fhsssFlows[owner][bucket][m] += temp[m];
     }
     for (let m = 0; m < months; m++) flows[key][m] += temp[m];
+    // Spouse contributions, co-contribution and LISTO (spec 19 Commit
+    // 6) — per-FY-per-owner totals, additive alongside the merged
+    // nonConcessional credit above (see this block's own header).
+    if (sc.type === "spouse" || sc.type === "personalNonDeductible") {
+      const bucket = sc.type === "spouse" ? spouseContributionsByOwner : personalNccByOwner;
+      const owner = sc.owner === "partner" ? "partner" : "client";
+      for (let m = 0; m < months; m++) if (temp[m] > 0) bucket[owner][yearOfMonth[m]] += temp[m];
+    }
   }
 
   // Super withdrawals (Tier 1.2, Commit 3): only ever paid once the
@@ -713,6 +732,8 @@ export function buildSchedules(state) {
     surplusPeriods,
     adjustments,
     terminationEvents,
+    spouseContributionsByOwner,
+    personalNccByOwner,
     superWarnings,
     rowTotals,
     oneOffsByAssetYear,

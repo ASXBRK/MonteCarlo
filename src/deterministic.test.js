@@ -2606,6 +2606,28 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
         }));
       }
+      // Government co-contribution (spec 19 Commit 6) — a personal NCC,
+      // small enough to sometimes land inside the co-contribution's own
+      // phase-out band relative to randomIncome()'s own range.
+      if (Math.random() < 0.4) {
+        superContributions.push(scRow({
+          id: `sc_ncc_${p}`, owner: p, accountId: `su_${p}`,
+          type: "personalNonDeductible", basis: "amount", amount: rand(200, 1500), frequency: "annual",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+        }));
+      }
+    }
+    // Spouse contribution tax offset (spec 19 Commit 6) — only ever
+    // meaningful for a couple; owner is the RECEIVING spouse (this
+    // engine's own convention — see planState.js's clampSuperContribution
+    // header), so the OTHER person is the contributor the offset credits.
+    if (couple && Math.random() < 0.4) {
+      const receivingOwner = pick(persons);
+      superContributions.push(scRow({
+        id: "sc_spouse", owner: receivingOwner, accountId: `su_${receivingOwner}`,
+        type: "spouse", basis: "amount", amount: rand(500, 4000), frequency: "annual",
+        from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+      }));
     }
 
     // Extra and one-off loan repayments (Document Set Commit 5) — some
@@ -5823,5 +5845,111 @@ describe("Main residence exemption and the six-year absence rule (spec 19 Commit
       properties: [withoutField], liabilities: [],
     });
     expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+  });
+});
+
+describe("Spouse contributions, co-contribution and LISTO (spec 19 Commit 6)", () => {
+  it("spouse contribution tax offset: reduces the CONTRIBUTING spouse's tax when the receiving spouse's income is low", () => {
+    const base = (spouseAmount) => mkState({
+      endAge: 41, household: "couple",
+      plan: { partner: { currentAge: 40 }, superAccounts: [superAcct({ id: "su_client", owner: "client" }), superAcct({ id: "su_partner", owner: "partner" })] },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", owner: "client", amount: 150000, to: { kind: "age", age: 120 } }),
+          employmentRow({ id: "i2", owner: "partner", amount: 20000, to: { kind: "age", age: 120 } }), // well under $37,000
+        ],
+        superContributions: spouseAmount > 0 ? [scRow({
+          id: "sc1", owner: "partner", accountId: "su_partner", type: "spouse", basis: "amount", amount: spouseAmount, to: { kind: "age", age: 120 },
+        })] : [],
+      },
+    });
+    const withOffset = projectPlan(base(3000));
+    const without = projectPlan(base(0));
+    // 18% of min(3000, 3000) = 540, since partner's income (~20,000) is
+    // well under the $37,000 lower threshold — full notional cap applies.
+    const taxSaving = without.yearly[0].tax - withOffset.yearly[0].tax;
+    // The contribution itself ALSO leaves client's cash (3000) — netted
+    // against the expected 540 offset when comparing total household tax.
+    expect(taxSaving).toBeCloseTo(3000 * 0.18, 0);
+  });
+
+  it("no offset once the receiving spouse's income reaches $40,000", () => {
+    const base = (partnerIncome) => mkState({
+      endAge: 41, household: "couple",
+      plan: { partner: { currentAge: 40 }, superAccounts: [superAcct({ id: "su_client", owner: "client" }), superAcct({ id: "su_partner", owner: "partner" })] },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", owner: "client", amount: 150000, to: { kind: "age", age: 120 } }),
+          employmentRow({ id: "i2", owner: "partner", amount: partnerIncome, to: { kind: "age", age: 120 } }),
+        ],
+        superContributions: [scRow({ id: "sc1", owner: "partner", accountId: "su_partner", type: "spouse", basis: "amount", amount: 3000, to: { kind: "age", age: 120 } })],
+      },
+    });
+    const highIncome = projectPlan(base(45000));
+    const noContribution = projectPlan({ ...base(45000), cashflows: { ...base(45000).cashflows, superContributions: [] } });
+    expect(highIncome.yearly[0].tax).toBeCloseTo(noContribution.yearly[0].tax, 0);
+  });
+
+  it("government co-contribution: phases out between the two income thresholds", () => {
+    const withNcc = (income) => mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [employmentRow({ amount: income, to: { kind: "age", age: 120 } })],
+        superContributions: [scRow({ type: "personalNonDeductible", basis: "amount", amount: 1000, to: { kind: "age", age: 120 } })],
+      },
+    });
+    const low = projectPlan(withNcc(40000)); // below the lower threshold — full entitlement
+    const mid = projectPlan(withNcc(56793)); // roughly halfway through the phase-out band
+    const high = projectPlan(withNcc(70000)); // above the upper threshold — nil
+    expect(low.yearly[0].superDetail.su1.govSuperInflow).toBeCloseTo(500, 0);
+    expect(mid.yearly[0].superDetail.su1.govSuperInflow).toBeGreaterThan(0);
+    expect(mid.yearly[0].superDetail.su1.govSuperInflow).toBeLessThan(500);
+    expect(high.yearly[0].superDetail.su1.govSuperInflow).toBe(0);
+  });
+
+  it("LISTO: paid while adjusted taxable income is under $37,000, nil above it", () => {
+    const withIncome = (income) => mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [employmentRow({ amount: income, to: { kind: "age", age: 120 } })] }, // SG alone is concessional
+    });
+    const low = projectPlan(withIncome(30000));
+    const high = projectPlan(withIncome(50000));
+    expect(low.yearly[0].superDetail.su1.govSuperInflow).toBeGreaterThan(0);
+    expect(high.yearly[0].superDetail.su1.govSuperInflow).toBe(0);
+  });
+
+  it("contribution splitting is NOT modelled — disclosed, not silently assumed (no splitting field exists on a super contribution row)", () => {
+    // Documents the commit's own scope decision; nothing to assert
+    // beyond the schema not offering the field at all.
+    expect(scRow().splitPct).toBeUndefined();
+  });
+
+  it("conservation holds for a scenario with spouse contributions, co-contribution and LISTO all active", () => {
+    const s = mkState({
+      endAge: 41, household: "couple",
+      plan: { partner: { currentAge: 40 }, superAccounts: [superAcct({ id: "su_client", owner: "client" }), superAcct({ id: "su_partner", owner: "partner" })] },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", owner: "client", amount: 150000, to: { kind: "age", age: 120 } }),
+          employmentRow({ id: "i2", owner: "partner", amount: 25000, to: { kind: "age", age: 120 } }),
+        ],
+        superContributions: [
+          scRow({ id: "sc1", owner: "partner", accountId: "su_partner", type: "spouse", basis: "amount", amount: 2000, to: { kind: "age", age: 120 } }),
+          scRow({ id: "sc2", owner: "partner", accountId: "su_partner", type: "personalNonDeductible", basis: "amount", amount: 800, to: { kind: "age", age: 120 } }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `spouse/co-contribution/LISTO fixture, year ${y}`);
+  });
+
+  it("regression gate: a scenario with no spouse/personalNonDeductible contributions is unaffected", () => {
+    const s = mkState({ endAge: 41, plan: { superAccounts: [superAcct()] }, cashflows: { income: [employmentRow({ amount: 80000, to: { kind: "age", age: 120 } })] } });
+    const a = projectPlan(s);
+    const b = projectPlan(JSON.parse(JSON.stringify(s)));
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+    expect(a.yearly[0].superDetail.su1.govSuperInflow).toBe(0);
   });
 });

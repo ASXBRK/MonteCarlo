@@ -725,6 +725,67 @@ CGT-if-sold-by-year line + exempt-days table) — the underlying figures
 `exemptProportion` for a what-if year) are all available for one to be
 built from directly, same "engine first" scoping as Commits 2 and 4.
 
+### Spouse contributions, co-contribution and LISTO (spec 19, Commit 6)
+`src/data/spouseSuperRates.js`: the spouse contribution tax offset
+(18% of the lesser of the contribution and $3,000, phasing to nil as
+the RECEIVING spouse's income runs from $37,000 to $40,000), government
+co-contribution (50% of eligible personal NCCs up to $500, phasing out
+$49,293–$64,293), and LISTO (15% of eligible concessional
+contributions up to $500, nil at/above $37,000 adjusted taxable
+income) — training-knowledge figures, UNVERIFIED against ato.gov.au
+this session, disclosed the same way as every other embedded schedule.
+
+The schema already had `personalNonDeductible` and `spouse` contribution
+types (and their existing UI dropdown labels) from Tier 1.2 — this
+commit is the first to give them real tax/government-payment
+consequences beyond the non-concessional-cap bucketing they already
+had. schedule.js gained two ADDITIVE per-FY-per-owner totals
+(`spouseContributionsByOwner`, `personalNccByOwner`), accumulated
+alongside the EXISTING merged `nonConcessional` flow key rather than
+splitting it — a smaller, lower-risk change than reshaping a
+widely-read core structure. Government inflows credit the person's own
+default (first-listed, included) account, same convention SG uses; the
+"10% eligible income" test collapses to "10%+ from employment" (this
+tool has no separate self-employment/business income category to test
+against, disclosed) and both payments are credited in the SAME FY
+they're earned — a disclosed simplification of the real ~12-18 month
+ATO payment lag. Spouse offset TSB check uses the receiving spouse's
+CURRENT super balance as a proxy for "at the prior 30 June"; the "no
+excess NCCs" condition is not modelled (disclosed, a rare edge case
+next to the income-based phase-out). Contribution SPLITTING (up to 85%
+of the prior year's concessional contributions moved to a spouse's
+account, no new contribution, no cap effect) is NOT built — a
+disclosed, deliberate scope cut for this commit, distinct from the two
+genuine-inflow mechanisms the spec itself names as needing a
+conservation term.
+
+Two real ordering bugs were found and fixed via this very invariant
+while wiring this in (not hypothetical — both reproduced against a
+randomly generated scenario before the fix):
+1. Crediting `govSuperInflow` to `superBal` BEFORE the real pass let
+   that FY's adviser-fee-from-super reservation see an inflated
+   balance, silently shifting some of ITS OWN funding from cash to
+   super with no cash-vs-super term accounting for the shift — fixed by
+   applying the credit strictly AFTER the real pass completes (once
+   every other same-year super-balance decision has already settled),
+   the same "resolve in a fixed order against what's actually left"
+   principle `reserveFromSuper`'s own header already documents.
+2. The spouse offset's own `spreadTax` call landed BEFORE
+   `taxOutArr.fill(...)` resets that FY's tax-outflow array for the
+   ordinary PAYG/adjustment settlement below it — the offset's write
+   was silently wiped every time. Fixed by moving it to run AFTER that
+   per-person settlement loop, mirroring where `taxAdjustmentTotal`'s
+   own spreadTax calls already sit.
+`govSuperInflow` is a new named conservation term (a genuine inflow
+with no household cash movement — the spec's own words); extended
+`randomScenario()` (spouse/personalNonDeductible contributions, ~40%
+each, couple-only for spouse) and verified across 1500+ randomised
+conservation + net-worth-decomposition runs.
+No new UI needed — `spouse`/`personalNonDeductible` were already
+selectable in the existing super contribution row editor with their
+own labels ("Spouse contribution", "Personal (non-deductible)"); this
+commit is engine-complete end to end.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

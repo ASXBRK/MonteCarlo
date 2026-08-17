@@ -215,6 +215,12 @@ export function computeYearFlows(out, y) {
   const superEarningsNet = sumVals(row.superDetail, "earnings") - sumVals(row.superDetail, "earningsTax");
   const contributionsTax = sumVals(row.superDetail, "contributionsTax");
   const sgInflow = sumVals(row.superDetail, "sg");
+  // Government co-contribution + LISTO (spec 19 Commit 6) — a genuine
+  // inflow FROM the government INTO super, exactly the same shape as
+  // sgInflow above (money the household never had, entering only
+  // through super) — the spec's own words: "a genuine inflow with no
+  // household cash movement, so they are a named conservation term."
+  const govSuperInflow = sumVals(row.superDetail, "govSuperInflow");
   // Surplus/deficit allocation spec, Commit 1: a surplus allocation that
   // tops up an existing salary-sacrifice row writes into the SAME
   // `salarySacrifice` field as a genuine payroll-reduced contribution
@@ -356,7 +362,7 @@ export function computeYearFlows(out, y) {
 
   return {
     openingN, closingN, delta: closingN - openingN,
-    income, growth, sgInflow,
+    income, growth, sgInflow, govSuperInflow,
     expenses: row.expenses, tax: row.tax, contributionsTax, liabilityInterest,
     surplusSpent: row.surplusSpent, unfundedCashflow: row.unfundedCashflow,
     divReleaseFromSuper,
@@ -390,7 +396,7 @@ export function checkYearConservation(out, y, ctx) {
   }
 
   const expected =
-    f.income + f.growth + f.sgInflow
+    f.income + f.growth + f.sgInflow + f.govSuperInflow
     - f.expenses - f.tax - f.contributionsTax - f.liabilityInterest
     - f.surplusSpent + f.unfundedCashflow - f.divReleaseFromSuper
     + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
@@ -419,7 +425,7 @@ export function checkYearConservation(out, y, ctx) {
 // verified by a dedicated test over randomScenario()-generated plans.
 //
 //   opening net worth
-//     + income bucket        (income + sgInflow)
+//     + income bucket        (income + sgInflow + govSuperInflow)
 //     + growth bucket        (asset/super/property growth, net of tax;
 //                             HELP's PAYG-withheld repayment folded in —
 //                             see computeYearFlows' own comment)
@@ -444,7 +450,7 @@ export function decomposeNetWorthChange(out, y) {
     openingN: f.openingN,
     closingN: f.closingN,
     delta: f.delta,
-    income: f.income + f.sgInflow,
+    income: f.income + f.sgInflow + f.govSuperInflow,
     growth: f.growth + f.propertyGrowth + f.helpRepayment,
     tax: f.tax + f.contributionsTax + f.divReleaseFromSuper,
     expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,

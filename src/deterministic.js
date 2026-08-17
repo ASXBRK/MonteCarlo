@@ -56,6 +56,7 @@ import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
 import { landTaxOnValue } from "./data/landTax.js";
 import { etpRatesFor, redundancyTaxFreeAmount, etpTax } from "./data/etpRates.js";
 import { exemptProportion } from "./mainResidence.js";
+import { spouseSuperRatesFor, spouseContributionOffset, coContribution, listo } from "./data/spouseSuperRates.js";
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
 import { decomposeNetWorthChange } from "./conservationCheck.js";
@@ -921,6 +922,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     superDetail: Object.fromEntries(superIds.map((id) => [id, {
       opening: 0, contributions: 0, contributionsTax: 0,
       sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0,
+      // Government co-contribution + LISTO (spec 19 Commit 6) — a
+      // genuine inflow from the government, no household cash movement
+      // (a named conservation term — see conservationCheck.js).
+      govSuperInflow: 0,
       earnings: 0, earningsTax: 0, withdrawals: 0,
       // Division 293/296 release authority payments — a direct balance
       // reduction, separate from `withdrawals` (a benefit payment) since
@@ -2758,6 +2763,49 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         + (superOutcome[p]?.reportableSuperContributions ?? 0)
         + netInvestmentLoss[p];
     }
+    // Spouse contributions, co-contribution and LISTO (spec 19 Commit
+    // 6) — both persons' pre-assessed taxable income is now known
+    // (repaymentIncome/pre, just above), so this is the earliest safe
+    // point: the spouse offset needs the RECEIVING spouse's own income,
+    // which isn't ready until BOTH persons' loop iterations above have
+    // run. Credited/applied immediately, in the SAME FY it's earned —
+    // a disclosed simplification of the real ~12-18 month ATO payment
+    // lag for co-contribution/LISTO (which this tool doesn't otherwise
+    // model deferred-government-payment timing for at all).
+    const spouseRatesY = spouseSuperRatesFor(fyStart, bracketMode, cpi, awoteAssum);
+    // Government co-contribution and LISTO — genuine inflows FROM the
+    // government INTO super, credited to the person's own default
+    // (first-listed, included) account, same convention SG uses. The
+    // "10% eligible income" test (real law: 10%+ of income from
+    // employment or business) collapses to "10%+ from employment" here
+    // — this tool has no separate self-employment/business income
+    // category to test against (disclosed).
+    // Credited to superBal (and reported on the row) below, once `row`
+    // exists — computed here, alongside everything else this FY's
+    // assessment needs, but applied later (this function-level scope
+    // doesn't have `row` yet; it's declared just before the real pass).
+    const govSuperInflowAccount = { client: null, partner: null };
+    const govSuperInflowAmount = { client: 0, partner: 0 };
+    for (const p of persons) {
+      const account = (state.plan.superAccounts ?? []).find((s) => s.owner === p && s.include);
+      if (!account) continue;
+      const empArr = schedule.employmentIncomeByOwner[p];
+      let employmentIncomeFy = 0;
+      if (empArr) for (let m = yearStart(y); m < yearEnd(y); m++) employmentIncomeFy += empArr[m];
+      const totalIncome = Math.max(1, measured[p].ordinary); // avoid a spurious 100% ratio at zero income
+      const eligibleIncomeTestMet = employmentIncomeFy / totalIncome >= spouseRatesY.coContributionEligibleIncomeTestPct;
+      let inflow = 0;
+      if (eligibleIncomeTestMet) {
+        const ncc = schedule.personalNccByOwner?.[p]?.[y] ?? 0;
+        inflow += coContribution(spouseRatesY, ncc, measured[p].ordinary);
+        inflow += listo(spouseRatesY, superOutcome[p]?.lowTaxContributions ?? 0, measured[p].ordinary);
+      }
+      if (inflow > 0) {
+        govSuperInflowAccount[p] = account.id;
+        govSuperInflowAmount[p] = inflow;
+      }
+    }
+
     const isFamily = persons.length > 1; // a couple — MLS family thresholds apply to both
     const familyIncome = repaymentIncome.client + repaymentIncome.partner;
     // Input Usability spec, Commit 3 — derived per FY from each child's
@@ -2880,6 +2928,35 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       helpBal[p] -= helpDue[p];
     }
 
+    // Spouse contribution tax offset (spec 19 Commit 6) — applied via
+    // the SAME spreadTax mechanism as every other same-year tax debit/
+    // credit above, so it MUST run after `taxOutArr.fill(...)` and the
+    // per-person spreadTax calls just above (both of those reset/write
+    // this exact array) — placed any earlier, this offset's own write
+    // gets silently wiped by that later fill, a real bug this file's
+    // own conservation invariant caught (a $500 gap between the
+    // adviser-fee-from-super/-cash split it exposed on an unrelated
+    // interaction while debugging this same commit).
+    if (state.plan.partner) {
+      for (const receivingOwner of persons) {
+        const contributingOwner = receivingOwner === "partner" ? "client" : "partner";
+        const contribution = schedule.spouseContributionsByOwner?.[receivingOwner]?.[y] ?? 0;
+        if (contribution <= 0) continue;
+        // TSB check (disclosed simplification: the receiving spouse's
+        // CURRENT total super balance, a reasonable proxy for "at the
+        // prior 30 June" — this engine doesn't separately snapshot TSB
+        // at FY boundaries anywhere else either). The "no excess NCCs"
+        // condition is not modelled — disclosed, not silently assumed
+        // met; a rare edge case relative to the income-based phase-out.
+        const receivingTsb = (state.plan.superAccounts ?? [])
+          .filter((s) => s.owner === receivingOwner && s.include)
+          .reduce((s, acc) => s + (superBal[acc.id] ?? 0), 0);
+        if (receivingTsb >= spouseRatesY.generalTransferBalanceCap) continue;
+        const offset = spouseContributionOffset(spouseRatesY, contribution, repaymentIncome[receivingOwner]);
+        if (offset > 0) spreadTax(-offset, measured[contributingOwner].incomeMonths, yearEnd(y) - 1);
+      }
+    }
+
     // Division 293 (Tier 1.2, Commit 2): assessed this FY on the
     // taxable income just computed, paid as a household outflow in
     // July of FY t+1 (same convention as CGT — folded into cgtDue
@@ -2935,6 +3012,34 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.superDetail[id].closing = superSeries[id][yearEnd(y)];
       row.superDetail[id].taxFreeClosing = superTaxFree[id];
       row.superClosing += superSeries[id][yearEnd(y)];
+    }
+
+    // Government co-contribution + LISTO (spec 19 Commit 6) — credited
+    // strictly AFTER the real pass completes (not before, and not
+    // between the measured pass and `row` — both were tried and both
+    // leak into the SAME-year adviser-fee/Division 293/296/FHSSS
+    // reservation system: those all resolve "how much to draw from
+    // super vs cash" against superBal EARLIER in this function, so
+    // crediting super before they run made the balance look bigger than
+    // it actually was AT THAT DECISION POINT, silently shifting some of
+    // THEIR funding from cash to super — found via this very invariant,
+    // the same class of bug reserveFromSuper's own header describes.
+    // Applied here, after everything else this FY has already settled,
+    // it can't influence any of that; it just doesn't compound further
+    // growth THIS year — a disclosed timing simplification, reasonable
+    // given the real ATO payment lag is 12-18 months anyway. Bumping
+    // superSeries too (not just superBal) keeps NEXT year's own
+    // opening balance (read from superSeries, not superBal, at that
+    // point) consistent with this year's true closing.
+    for (const p of persons) {
+      const accountId = govSuperInflowAccount[p];
+      if (!accountId) continue;
+      const amount = govSuperInflowAmount[p];
+      superBal[accountId] += amount;
+      superSeries[accountId][yearEnd(y)] += amount;
+      row.superDetail[accountId].closing += amount;
+      row.superDetail[accountId].govSuperInflow += amount;
+      row.superClosing += amount;
     }
 
     // Division 296 (Super thresholds Commit 2): assessed this FY, per
