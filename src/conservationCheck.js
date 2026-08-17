@@ -265,7 +265,24 @@ export function computeYearFlows(out, y) {
   const growth = row.growth + superEarningsNet + liabilityRevaluation;
 
   // --- Properties (Document Set Commits 3/4) — see the header derivation.
-  const propertyValueDelta = row.propertyClosing - (prev ? prev.propertyClosing : 0);
+  // Property sale (spec 19 Commit 4) adds a THIRD property-shaped event
+  // alongside ordinary growth and a purchase: a sale zeroes propVal,
+  // which the purchase-era propertyResidual/propertyAcquisitionCosts
+  // formula below (drawdown/settlementCash/fhsssRelease/lmiPremium —
+  // all purchase-shaped) has no term for and would misread as a huge,
+  // nonsensical "negative purchase". Adding the gross sale value BACK
+  // into propertyValueDelta before that formula runs cancels the drop
+  // entirely, so the REST of this year's property activity (an
+  // unrelated purchase, ordinary growth on other properties) is read
+  // exactly as if the sale never happened; the sale's own real effect —
+  // property shrinks by its gross value, the destination asset/loan
+  // payoff pocket grows by the NET proceeds, the gap between them
+  // (agent fees + settlement costs) genuinely leaves the household — is
+  // named explicitly as propertySaleCosts below instead.
+  const propertySaleGrossValue = sumProps("saleValue");
+  const propertySaleProceeds = sumProps("saleProceeds");
+  const propertySaleCosts = propertySaleGrossValue - propertySaleProceeds;
+  const propertyValueDelta = row.propertyClosing - (prev ? prev.propertyClosing : 0) + propertySaleGrossValue;
   const drawdown = sumVals(row.liabilities, "drawdown");
   const settlementCash = sumProps("settlement");
   const fhsssRelease = sumProps("fhsssRelease");
@@ -344,6 +361,7 @@ export function computeYearFlows(out, y) {
     surplusSpent: row.surplusSpent, unfundedCashflow: row.unfundedCashflow,
     divReleaseFromSuper,
     propertyGrowth, propertyOneOffCost,
+    propertySaleCosts,
     fhsssRelease, fhsssSuperDebit,
     lmiPremium,
     goalSpend,
@@ -376,6 +394,7 @@ export function checkYearConservation(out, y, ctx) {
     - f.expenses - f.tax - f.contributionsTax - f.liabilityInterest
     - f.surplusSpent + f.unfundedCashflow - f.divReleaseFromSuper
     + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
+    - f.propertySaleCosts
     - f.goalSpend + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash;
 
   const gap = f.delta - expected;
@@ -409,8 +428,9 @@ export function checkYearConservation(out, y, ctx) {
 //                             any recorded-but-unfunded shortfall)
 //     − interest bucket       (liability interest)
 //     − fees bucket           (LMI + adviser fees, from super and cash)
-//     ± one-offs bucket       (property duty/costs/FHOG, goal spend, the
-//                             FHSSS transfer)
+//     ± one-offs bucket       (property duty/costs/FHOG, a property
+//                             sale's agent fees + settlement costs, goal
+//                             spend, the FHSSS transfer)
 //   = closing net worth
 //
 // ICR/platform fees are NOT separately extractable — they're already
@@ -430,6 +450,6 @@ export function decomposeNetWorthChange(out, y) {
     expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,
     interest: f.liabilityInterest,
     fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash,
-    oneOffs: f.propertyOneOffCost - f.goalSpend + f.fhsssRelease - f.fhsssSuperDebit,
+    oneOffs: f.propertyOneOffCost - f.propertySaleCosts - f.goalSpend + f.fhsssRelease - f.fhsssSuperDebit,
   };
 }

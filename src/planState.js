@@ -767,6 +767,18 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
     // convention as dutyOverride/lmiOverride.
     landValuePct: 60,
     landTaxOverride: null,
+    // Property sale (spec 19 Commit 4) — disabled by default. Only a
+    // linked purchase-derived loan (id `prop-<propertyId>`, the SAME
+    // naming convention isPropertyLoan already uses everywhere else in
+    // this codebase — see cashflowStatement.js) is ever discharged by
+    // "repayLoanThenAsset"; a standalone liability the user separately
+    // entered against an already-owned property was never formally
+    // linked to begin with (this tool has no such link for that case),
+    // so it simply continues, unaffected — disclosed, not a new gap.
+    sale: {
+      enabled: false, at: null, agentFeesPct: 2.5, settlementCosts: 2000,
+      proceedsDestination: "repayLoanThenAsset", assetId: null,
+    },
   };
 }
 
@@ -862,13 +874,40 @@ export function clampProperty(p, plan) {
     // fields that only apply to a subset of properties.
     landValuePct: clampNumber(p.landValuePct ?? 60, 0, 100),
     landTaxOverride: p.landTaxOverride == null ? null : clampNumber(p.landTaxOverride, 0),
+    // Property sale (spec 19 Commit 4) — dates anchor to the CLIENT's
+    // own age window, same simplification purchaseAt above already
+    // uses (property dates aren't owner-anchored in this model).
+    // assetId's EXISTENCE is only shape-validated here (a string or
+    // null) — normaliseProperties does the real cross-referencing
+    // second-stage check, same two-stage pattern as
+    // depositFromEquitySourcePropertyId above.
+    sale: clampPropertySale(p.sale, plan),
   };
 }
 
-export function normaliseProperties(properties, plan) {
+const PROPERTY_SALE_DESTINATIONS = ["repayLoanThenAsset", "asset"];
+function clampPropertySale(s, plan) {
+  return {
+    enabled: s?.enabled === true,
+    at: clampDateRef(s?.at ?? ageRef(plan.endAge), plan.client.currentAge, plan.endAge, plan),
+    agentFeesPct: clampNumber(s?.agentFeesPct ?? 2.5, 0, 10),
+    settlementCosts: clampNumber(s?.settlementCosts ?? 2000, 0),
+    proceedsDestination: PROPERTY_SALE_DESTINATIONS.includes(s?.proceedsDestination) ? s.proceedsDestination : "repayLoanThenAsset",
+    assetId: typeof s?.assetId === "string" && s.assetId ? s.assetId : null,
+  };
+}
+
+export function normaliseProperties(properties, plan, assets = []) {
   if (!Array.isArray(properties)) return [];
   const clamped = properties.map((p) => clampProperty(p, plan));
   const ids = new Set(clamped.map((p) => p.id));
+  // Property sale (spec 19 Commit 4) — a sale's destination asset must
+  // be a real, non-lifestyle asset (same "financial asset" universe
+  // fundingOrder/goals already restrict to); an invalid/dangling id
+  // disables the sale entirely rather than silently defaulting proceeds
+  // somewhere the user never chose — same input-integrity principle as
+  // depositFromEquitySourcePropertyId below.
+  const financialAssetIds = new Set(assets.filter((a) => a.class !== "lifestyle").map((a) => a.id));
   // A depositFromEquity flag with no valid, DIFFERENT sibling property
   // to source from is meaningless — forced off entirely (not just its
   // source nulled) rather than left as a flag pointing nowhere.
@@ -876,8 +915,14 @@ export function normaliseProperties(properties, plan) {
     const validSource = p.depositFromEquitySourcePropertyId
       && p.depositFromEquitySourcePropertyId !== p.id
       && ids.has(p.depositFromEquitySourcePropertyId);
-    if (p.depositFromEquity && validSource) return p;
-    return { ...p, depositFromEquity: false, depositFromEquitySourcePropertyId: null };
+    const depositFromEquity = p.depositFromEquity && validSource;
+    const validSaleAsset = p.sale.assetId && financialAssetIds.has(p.sale.assetId);
+    const sale = p.sale.enabled && validSaleAsset ? p.sale : { ...p.sale, enabled: false, assetId: validSaleAsset ? p.sale.assetId : null };
+    return {
+      ...p,
+      depositFromEquity, depositFromEquitySourcePropertyId: depositFromEquity ? p.depositFromEquitySourcePropertyId : null,
+      sale,
+    };
   });
 }
 
@@ -1890,7 +1935,7 @@ export function clampAllToPlan(state, profiles = {}) {
   // allocations may target either, and settings needs the final,
   // already-clamped id sets to validate against, not the raw ones.
   const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
-  const properties = normaliseProperties(state.properties, plan);
+  const properties = normaliseProperties(state.properties, plan, assets);
   const goals = normaliseGoals(state.goals, plan, assets);
   const settings = normaliseSettings(state.settings, assets, plan, {
     liabilities, goals, superContributions: cashflows.superContributions,
@@ -2491,7 +2536,7 @@ export function hydrate(json, profiles = {}) {
         superWithdrawals: hydrateSuperWithdrawals(cf.superWithdrawals, plan, superAccountOwnerById),
       },
       liabilities: hydratedLiabilities,
-      properties: normaliseProperties(raw.properties, plan),
+      properties: normaliseProperties(raw.properties, plan, assets),
       goals: goalsForImplementation,
       settings: normaliseSettings(raw.settings, assets, plan, {
         liabilities: hydratedLiabilities, goals: goalsForImplementation, superContributions: hydratedSuperContributions,

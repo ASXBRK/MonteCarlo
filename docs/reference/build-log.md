@@ -609,6 +609,72 @@ correct and reconcile exactly (verified), but an adviser scanning the
 Cashflow table's category rows won't see "Redundancy" as a distinct
 line yet; the raw ledger and Tax view figures are unaffected.
 
+### Property sale (spec 19, Commit 4)
+Property gains a `sale` object: enabled, date, agentFeesPct (derived
+default 2.5%), settlementCosts (derived default $2,000), and a
+proceeds destination (a real financial asset, or repay the linked loan
+first then that asset — the default, since a sale rarely leaves the
+mortgage outstanding). `normaliseProperties` now takes `assets` (every
+call site updated) to validate the destination the same two-stage way
+`depositFromEquitySourcePropertyId` already validates a sibling
+property — an invalid/dangling asset id disables the sale entirely
+rather than defaulting proceeds somewhere unchosen.
+
+Engine: a dedicated pre-pass fires in July of the sale's resolved plan
+year (same convention as a purchase), BEFORE that month's property
+growth/rent/land-tax loop (so a sold property isn't also grown/taxed
+the same month) and before the liability loop (so a discharged loan
+accrues no further interest this FY). CGT joins the SAME pooled cost-
+base machinery (`poolConsume`) a financial asset sale already uses —
+full disposal (f=1, whole pool consumed), PPR exempt (skipped
+entirely), both regimes (pre/post 1 Jul 2027) apply via the existing
+boundary. Agent fees and settlement costs are a cost-base element (the
+spec's own words) — mathematically identical to reducing the taxable
+gain directly (proceeds − pool − costs), which is what the engine does,
+rather than expensing them separately. Only a purchase-derived linked
+loan (id `prop-<propertyId>`, the SAME naming convention
+`isPropertyLoan` uses everywhere else in this codebase) is ever
+discharged by "repay loan then asset" — a standalone liability the user
+separately entered against an already-owned property was never
+formally linked to begin with (this tool has no such link for that
+case today), so it continues unaffected; disclosed, not a new gap. The
+discharge amount is reported as the liability's own `principal` field
+so the existing liabilityRevaluation formula treats it like an
+oversized repayment rather than misreading it as a mystery CPI gain.
+The property "leaves the projection" simply by `propVal` reaching zero
+— every existing gate (`propVal > 0`) already treats that as "doesn't
+exist", so rent/expenses/land tax/growth all stop for free, no separate
+flag needed.
+
+Conservation: a THIRD property-shaped event (alongside ordinary growth
+and a purchase) needed its own term — `propertySaleCosts` (agent fees +
+settlement costs, the only genuine leak; the net proceeds themselves
+are a transfer already reflected in the destination asset's/liability's
+own closing balance). The existing purchase-era
+propertyResidual/propertyAcquisitionCosts formula has no concept of a
+sale and would misread a sold property's value dropping to zero as a
+nonsensical "negative purchase" — fixed by adding the gross sale value
+back into `propertyValueDelta` before that formula runs, cancelling the
+drop so the rest of the year's property activity reads exactly as if
+the sale never happened, then naming the sale's own real effect
+separately. Folded into `decomposeNetWorthChange`'s `oneOffs` bucket
+alongside duty/costs/FHOG (same category of figure). Extended
+`randomScenario()` (30% chance per land-tax-generating property, both
+proceeds destinations, randomised costs) and verified across 5×300
+randomised conservation + net-worth-decomposition runs.
+"Sell and buy in the same year" (the spec's own named scenario) is
+verified BY CONSTRUCTION — the sale pre-pass credits the destination
+asset before that month's purchase-settlement funding draw runs — but
+does not yet have a dedicated committed test exercising a simultaneous
+sale+purchase pair; a known gap, disclosed rather than silently assumed
+airtight.
+Known gaps, disclosed: no dedicated UI for entering a sale (the engine,
+model, and tests are complete; the property card doesn't yet expose
+`sale.*` fields — an adviser can model a sale via direct JSON import/
+export today, not through the input panel); the Cashflow table doesn't
+yet show sale proceeds as its own line, mirroring land tax's own
+Commit 2 gap.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

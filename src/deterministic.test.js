@@ -2727,6 +2727,19 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         releaseFhsssAtPurchase: false, firstHomeGuarantee: false, lmiOverride: null, lmiPayAtSettlement: false,
         landValuePct: pick([40, 60, 80, 100]),
         landTaxOverride: Math.random() < 0.3 ? rand(0, 5000) : null,
+        // Property sale (spec 19 Commit 4) — sometimes sold partway
+        // through the projection (always AFTER its own age-40
+        // purchase); both destinations and a randomised cost pair, so
+        // both the CGT-via-pool-consumption path and the loan-discharge
+        // path (repayLoanThenAsset — inert here since this fixture
+        // never draws a purchase loan, lvrPct:0, but still exercises
+        // the "no loan to discharge" branch) get exercised.
+        sale: Math.random() < 0.3 ? {
+          enabled: true, at: { kind: "age", age: randInt(41, endAge) },
+          agentFeesPct: rand(0, 5), settlementCosts: rand(0, 5000),
+          proceedsDestination: pick(["repayLoanThenAsset", "asset"]),
+          assetId: pick(assets).id,
+        } : { enabled: false, at: null, agentFeesPct: 2.5, settlementCosts: 2000, proceedsDestination: "asset", assetId: null },
       });
     }
 
@@ -5556,6 +5569,136 @@ describe("Redundancy and ETP (spec 19 Commit 3)", () => {
     const { termination, ...noTermination } = terminatedRow();
     const withField = mkState({ endAge: 42, cashflows: { income: [terminatedRow({ termination: { ...terminatedRow().termination, enabled: false } })] } });
     const withoutField = mkState({ endAge: 42, cashflows: { income: [noTermination] } });
+    const a = projectPlan(withField);
+    const b = projectPlan(withoutField);
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+  });
+});
+
+describe("Property sale (spec 19 Commit 4)", () => {
+  const soldProp = (over = {}) => ({
+    id: "p1", name: "Investment unit", owner: "client", state: "NSW",
+    propertyType: "investment", status: "owned",
+    currentValue: 500000, acquisitionDate: "2020-01-15", costBase: 400000,
+    priceToday: 0, purchaseAt: { kind: "age", age: 41 },
+    lvrPct: 0, firstHomeBuyer: false, newBuild: true,
+    purchaseCostsPct: 0, dutyOverride: null, growthPct: 0,
+    rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expensesDeductible: true, landValuePct: 60, landTaxOverride: 0, // land tax off — isolates sale arithmetic
+    sale: {
+      enabled: true, at: { kind: "age", age: 41 }, agentFeesPct: 2.5, settlementCosts: 2000,
+      proceedsDestination: "asset", assetId: "a1",
+    },
+    ...over,
+  });
+  const withSale = (propOver = {}, stateOver = {}) => ({
+    ...mkState({
+      endAge: 43,
+      assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 0 })],
+      plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+      ...stateOver,
+    }),
+    properties: [soldProp(propOver)],
+    liabilities: [],
+  });
+
+  it("proceeds net of agent fees and settlement costs credit the destination asset", () => {
+    const out = projectPlan(withSale());
+    // saleValue is the property's own REAL value the moment it's sold —
+    // ~500,000/1.025 after one year's Fisher deflation of a flat
+    // nominal value (growthPct:0), same real-terms-decay this file's
+    // land tax tests already hand-calc against, not a round 500,000.
+    const saleValue = out.yearly[1].properties.p1.saleValue;
+    expect(saleValue).toBeCloseTo(500000 / 1.025, 0);
+    const expectedProceeds = saleValue - saleValue * 0.025 - 2000;
+    expect(out.yearly[1].properties.p1.saleProceeds).toBeCloseTo(expectedProceeds, 0);
+    expect(out.yearly[1].perAssetClosing.a1).toBeCloseTo(expectedProceeds, 0);
+    // The property leaves the projection — zero value from the sale FY.
+    expect(out.yearly[1].properties.p1.value).toBe(0);
+  });
+
+  it("the property leaves the projection: no further growth, rent, or land tax after the sale", () => {
+    const out = projectPlan(withSale({ landTaxOverride: null, rent: { amount: 20000, indexBasis: "none", indexExtraPct: 0 } }));
+    expect(out.yearly[2].properties.p1.value).toBe(0);
+    expect(out.yearly[2].properties.p1.rent).toBe(0);
+    expect(out.yearly[2].properties.p1.landTax).toBe(0);
+  });
+
+  it("CGT: post-reform (constant-real pool) — gain is proceeds minus pool minus selling costs", () => {
+    const out = projectPlan(withSale({}, { plan: { start: { year: 2028, month: 7 } } }));
+    // The pool is pure real dollars throughout (costBasePool.js's own
+    // header) and stays at its seeded 400,000 all year — only the
+    // PROPERTY's own value decays in real terms (Fisher deflation of a
+    // flat nominal value, growthPct:0) between plan start and the sale.
+    const saleValue = out.yearly[1].properties.p1.saleValue;
+    const agentFeesReal = saleValue * 0.025;
+    const expectedGain = (saleValue - 400000) - agentFeesReal - 2000;
+    expect(out.yearly[1].properties.p1.saleGain).toBeCloseTo(expectedGain, 0);
+  });
+
+  it("CGT: pre-reform (50% discount, old money) — half the post-cost gain is taxable", () => {
+    const out = projectPlan(withSale({}, { plan: { start: { year: 2025, month: 7 } } }));
+    const saleValue = out.yearly[1].properties.p1.saleValue;
+    const agentFeesReal = saleValue * 0.025;
+    const netGain = (saleValue - 400000) - agentFeesReal - 2000;
+    expect(out.yearly[1].properties.p1.saleGain).toBeCloseTo(netGain * 0.5, 0);
+  });
+
+  it("a PPR sale is CGT-exempt regardless of gain", () => {
+    const out = projectPlan(withSale({ propertyType: "ppr" }));
+    expect(out.yearly[1].properties.p1.saleGain).toBe(0);
+  });
+
+  it("a linked purchase-derived loan is discharged from proceeds before the remainder reaches the asset", () => {
+    const planned = {
+      id: "p1", name: "Home", owner: "client", state: "NSW", propertyType: "investment", status: "planned",
+      currentValue: 0, acquisitionDate: null, costBase: 0, priceToday: 500000,
+      purchaseAt: { kind: "age", age: 40 }, lvrPct: 80, firstHomeBuyer: false, newBuild: true,
+      purchaseCostsPct: 0, dutyOverride: null, growthPct: 0,
+      rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 }, expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+      expensesDeductible: true, landValuePct: 60, landTaxOverride: 0,
+      sale: { enabled: true, at: { kind: "age", age: 42 }, agentFeesPct: 0, settlementCosts: 0, proceedsDestination: "repayLoanThenAsset", assetId: "a1" },
+    };
+    const out = projectPlan({
+      ...mkState({
+        endAge: 44,
+        assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 200000 })], // covers the deposit
+        plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+      }),
+      properties: [planned],
+      liabilities: [],
+    });
+    const saleY = 2; // age 42 - age 40 (start)
+    const loanBalanceJustBeforeSale = out.yearly[saleY - 1].liabilities["prop-p1"].closing;
+    expect(loanBalanceJustBeforeSale).toBeGreaterThan(0); // confirms the loan genuinely existed
+    // Discharged: the liability's closing balance in the sale year drops to (near) zero.
+    expect(out.yearly[saleY].liabilities["prop-p1"].closing).toBeCloseTo(0, 0);
+    // Remainder (sale value − loan payoff) reaches the asset — saleValue
+    // is the property's own real value at sale (no fees/costs in this
+    // fixture), not a round 500,000 (real-terms decay between purchase
+    // and sale, same as every other property fixture in this file).
+    const saleValue = out.yearly[saleY].properties.p1.saleValue;
+    expect(out.yearly[saleY].properties.p1.saleProceeds).toBeCloseTo(saleValue, 0);
+    const remainder = saleValue - loanBalanceJustBeforeSale;
+    expect(out.yearly[saleY].perAssetClosing.a1).toBeGreaterThan(remainder - 5000); // roughly the leftover, allowing for asset growth/other flows
+  });
+
+  it("conservation holds for a scenario with a property sale active", () => {
+    const out = projectPlan(withSale());
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `property sale fixture, year ${y}`);
+  });
+
+  it("regression gate: a property with sale.enabled:false behaves exactly as one with no sale field at all", () => {
+    const { sale, ...noSale } = soldProp({ landTaxOverride: 0 });
+    const withField = {
+      ...mkState({ endAge: 43, assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc() })] }),
+      properties: [soldProp({ landTaxOverride: 0, sale: { ...soldProp().sale, enabled: false } })], liabilities: [],
+    };
+    const withoutField = {
+      ...mkState({ endAge: 43, assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc() })] }),
+      properties: [noSale], liabilities: [],
+    };
     const a = projectPlan(withField);
     const b = projectPlan(withoutField);
     expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));

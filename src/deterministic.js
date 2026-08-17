@@ -311,6 +311,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       const y = resolveRef(p.purchaseAt, state.plan, schedule, "client").planYear;
       purchaseMonth = julyOf(y); // null = never fires (convention 5's partial-year skip)
     }
+    // Property sale (spec 19 Commit 4) — same "fires in July of its
+    // resolved plan year" resolution as purchaseMonth above. A sale
+    // dated before the property is even purchased (a still-planned
+    // property) can never fire — null, same as any other one-off whose
+    // trigger never arrives (convention 5's own partial-year skip is
+    // the same shape: a date that structurally can't occur this
+    // projection is silently inert, not an error).
+    let saleMonth = null;
+    if (p.sale?.enabled) {
+      const saleY = resolveRef(p.sale.at, state.plan, schedule, "client").planYear;
+      const sm = julyOf(saleY);
+      if (sm != null && (owned || (purchaseMonth != null && sm > purchaseMonth))) saleMonth = sm;
+    }
     const invest = p.propertyType === "investment";
     // Negative gearing is unrestricted when the loss year is pre-FY2027-28,
     // the property is a new build, or it was acquired before Budget
@@ -321,6 +334,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       shares: ownerShares(p, couple),
       owned,
       purchaseMonth,
+      saleMonth,
+      sale: p.sale,
       invest,
       isCgt: p.propertyType !== "ppr", // PPR exempt — assessment skipped (disclosed)
       newBuild: p.newBuild === true,
@@ -831,12 +846,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     properties: Object.fromEntries(props.map((p) => [p.id, {
       value: 0, rent: 0, expenses: 0, depreciation: 0, settlement: 0, costBaseSeed: 0, fhsssRelease: 0, lmi: 0,
       deposit: 0, duty: 0, costs: 0, fhog: 0, landTax: 0,
+      // Property sale (spec 19 Commit 4) — zero except in the sale's
+      // own FY. saleProceeds is net of agent fees/settlement costs;
+      // saleGain is the taxable capital gain (0 for a PPR, always
+      // exempt) already folded into row.tax via the usual FY-end
+      // assessment, reported here only for disclosure.
+      saleProceeds: 0, saleGain: 0, saleValue: 0,
       // Usable equity and borrowing capacity (Implementation/Rates
       // spec, Commit 3) — filled in by a post-pass once `yearly` is
       // complete (needs the property's own linked liabilities' closing
       // balances, which are only final at year-end).
       usableEquity: 0,
     }])),
+    // Property sale (spec 19 Commit 4) — household total, net of
+    // costs, across every property sold this FY (usually one).
+    propertySaleProceeds: 0,
     propertyClosing: 0,
     netAssets: 0,
     // Per-asset flow detail for the Assets view: opening + contributions
@@ -1373,6 +1397,74 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // conservation invariant once a demo scenario finally combined
         // a persistent monthly deficit with reaching super release age
         // (src/demo/highEarnerPreRetirement.js's "Reduce work at 58").
+      }
+
+      // a1c. Property sale (spec 19 Commit 4) — fires in July of its
+      // resolved plan year (same convention as a purchase), BEFORE the
+      // property loop below (which would otherwise grow/rent/land-tax
+      // a property this SAME month) and before the liability loop
+      // further down this same month (so a discharged loan accrues no
+      // further interest this FY, not one month too many). CGT joins
+      // the SAME pooled cost-base machinery a financial asset sale uses
+      // (poolConsume) — PPR is exempt, skipped entirely. Agent fees and
+      // settlement costs are a COST-BASE element (spec's own words), so
+      // they reduce the taxable gain directly rather than being
+      // expensed separately — mathematically identical to adding them
+      // to cost base, since gain = proceeds − pool either way. The
+      // property "leaves the projection" simply by propVal reaching
+      // zero — every existing gate (`propVal[pid] > 0`) already treats
+      // that as "doesn't exist", so no separate flag is needed for
+      // rent/expenses/land tax/growth to stop.
+      let saleNetProceeds = 0;
+      for (const pid in propMeta) {
+        const pm = propMeta[pid];
+        if (pm.saleMonth !== m || propVal[pid] <= 0) continue;
+        const saleValue = propVal[pid];
+        const agentFeesReal = saleValue * (pm.sale.agentFeesPct / 100);
+        const settlementCostsReal = pm.sale.settlementCosts;
+        const netProceeds = Math.max(0, saleValue - agentFeesReal - settlementCostsReal);
+        let taxableGain = 0;
+        if (pm.isCgt) {
+          const { state: newPool, gain, newMoneyFraction } = poolConsume(propPools[pid], saleValue, saleValue);
+          propPools[pid] = newPool;
+          const netGain = gain - agentFeesReal - settlementCostsReal;
+          taxableGain = fyStart < 2027 ? preReformTaxableGain(netGain, newMoneyFraction) : netGain;
+          for (const per of persons) {
+            const s = pm.shares[per];
+            if (s) acc[per].netCapitalGain += taxableGain * s;
+          }
+        }
+        // Discharge the linked purchase-derived loan (id `prop-<id>`,
+        // the SAME naming convention isPropertyLoan uses everywhere
+        // else) — the only loan this engine can identify as "this
+        // property's own", per this field's own header comment above.
+        let toDestination = netProceeds;
+        const loanId = `prop-${pid}`;
+        if (pm.sale.proceedsDestination === "repayLoanThenAsset" && loanBal[loanId] > 0) {
+          const payoff = Math.min(toDestination, loanBal[loanId]);
+          loanBal[loanId] -= payoff;
+          toDestination -= payoff;
+          // Reported as `principal` — conservationCheck.js's
+          // liabilityRevaluation formula already subtracts this field
+          // to isolate CPI-driven revaluation from a deliberate balance
+          // reduction; a sale-funded discharge is conservation-neutral
+          // the same way an ordinary principal repayment or an extra/
+          // one-off repayment already is, just funded from a different
+          // pocket (the sale, not household cash directly).
+          if (row) row.liabilities[loanId].principal += payoff;
+        }
+        if (pm.sale.assetId && toDestination > 0 && bal[pm.sale.assetId] != null) {
+          bal[pm.sale.assetId] += toDestination;
+          if (meta[pm.sale.assetId]?.cgt) pools[pm.sale.assetId] = poolAdd(pools[pm.sale.assetId], toDestination);
+        }
+        saleNetProceeds += netProceeds;
+        propVal[pid] = 0;
+        if (row) {
+          row.properties[pid].saleProceeds = netProceeds;
+          row.properties[pid].saleGain = taxableGain;
+          row.properties[pid].saleValue = saleValue;
+          row.propertySaleProceeds += netProceeds;
+        }
       }
 
       // a2. Properties (D4): planned purchases fire at this month's

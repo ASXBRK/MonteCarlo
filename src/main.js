@@ -4319,7 +4319,7 @@ wireDeferredDateCommit(els.propertySection, (e) => {
       else if (sub === "indexExtraPct") p[group].indexExtraPct = clampNumber(v, -10, 10);
     }
   }
-  state.properties = normaliseProperties(state.properties, state.plan);
+  state.properties = normaliseProperties(state.properties, state.plan, state.assets);
   state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
   saveState();
   refreshOutputs();
@@ -4353,7 +4353,7 @@ els.propertySection.addEventListener("click", (e) => {
       `to grow from until then.`
     )) return;
     convertPropertyToPlanned(p);
-    state.properties = normaliseProperties(state.properties, state.plan);
+    state.properties = normaliseProperties(state.properties, state.plan, state.assets);
     state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
   }
   saveState();
