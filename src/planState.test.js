@@ -29,6 +29,7 @@ import {
   clampTouched,
   createChild, createEducationBlock, childCurrentAgeInfo, dependentChildrenCountInFY,
   childEducationPlanYearBounds, normaliseChildren, flatEducationBlocks,
+  createSurplusPeriod, legacySurplusPeriod, clampSurplusPeriod, normaliseSurplusPeriods,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -61,7 +62,11 @@ describe("defaults (v3)", () => {
     expect(s.cashflows.expenses).toEqual([]);
     expect(s.cashflows.contributions).toHaveLength(1);
     expect(s.cashflows.contributions[0].assetId).toBe(s.assets[0].id);
-    expect(s.settings.surplus).toEqual({ mode: "accumulate", assetId: null });
+    expect(s.settings.surplus.periods).toHaveLength(1);
+    expect(s.settings.surplus.periods[0]).toMatchObject({
+      payNonDeductibleDebtFirst: true, debtOrder: "interestRate", allocations: [], remainderTo: "cash",
+      from: { kind: "anchor", anchorId: "start" }, to: { kind: "anchor", anchorId: "end" },
+    });
     expect(s.settings.fundingOrder).toEqual([s.assets[0].id]);
   });
 
@@ -197,34 +202,43 @@ describe("fundingOrder invariants", () => {
     expect(normaliseFundingOrder(["b", "a"], [a, b, c])).toEqual(["b", "a", "c"]);
   });
 
-  it("surplus invest mode resets to accumulate when its target is invalid", () => {
+  it("an asset allocation drops when its target is invalid, surviving allocations keep their pct", () => {
+    const plan = { client: { currentAge: 40 }, partner: null, endAge: 90 };
     const assets = [{ id: "a", include: true }, { id: "b", include: false }];
-    expect(normaliseSettings({ surplus: { mode: "invest", assetId: "a" }, fundingOrder: [] }, assets).surplus)
-      .toEqual({ mode: "invest", assetId: "a" });
-    expect(normaliseSettings({ surplus: { mode: "invest", assetId: "b" }, fundingOrder: [] }, assets).surplus)
-      .toEqual({ mode: "accumulate", assetId: null });
-    expect(normaliseSettings({ surplus: { mode: "invest", assetId: "gone" }, fundingOrder: [] }, assets).surplus)
-      .toEqual({ mode: "accumulate", assetId: null });
+    const withTarget = (targetId) => ({
+      surplus: { periods: [{ ...createSurplusPeriod(), allocations: [{ id: "sa1", targetType: "asset", targetId, pct: 40 }] }] },
+      fundingOrder: [],
+    });
+    expect(normaliseSettings(withTarget("a"), assets, plan).surplus.periods[0].allocations)
+      .toEqual([{ id: "sa1", targetType: "asset", targetId: "a", pct: 40 }]);
+    // "b" is excluded, "gone" doesn't exist — both drop the allocation
+    // entirely (never coerced to some other target), leaving none.
+    expect(normaliseSettings(withTarget("b"), assets, plan).surplus.periods[0].allocations).toEqual([]);
+    expect(normaliseSettings(withTarget("gone"), assets, plan).surplus.periods[0].allocations).toEqual([]);
   });
 
-  it("surplus spend mode is preserved as-is (a valid, explicit choice — never silently upgraded)", () => {
+  it("remainderTo is preserved as-is (a valid, explicit choice — never silently upgraded)", () => {
+    const plan = { client: { currentAge: 40 }, partner: null, endAge: 90 };
     const assets = [{ id: "a", include: true }];
-    expect(normaliseSettings({ surplus: { mode: "spend", assetId: null }, fundingOrder: [] }, assets).surplus)
-      .toEqual({ mode: "spend", assetId: null });
+    const settings = { surplus: { periods: [{ ...createSurplusPeriod(), remainderTo: "expenditure" }] }, fundingOrder: [] };
+    expect(normaliseSettings(settings, assets, plan).surplus.periods[0].remainderTo).toBe("expenditure");
   });
 
-  it("removeAsset cascades cashflows, funding order, and surplus target", () => {
+  it("removeAsset cascades cashflows, funding order, and a surplus allocation targeting it", () => {
     const s = defaultState(PROFILES, NOW);
     const a2 = createAsset(s.plan, s.assets, PROFILES);
     s.assets.push(a2);
-    s.settings = normaliseSettings({ surplus: { mode: "invest", assetId: a2.id }, fundingOrder: s.settings.fundingOrder }, s.assets);
+    s.settings = normaliseSettings({
+      surplus: { periods: [{ ...createSurplusPeriod(), allocations: [{ id: "sa1", targetType: "asset", targetId: a2.id, pct: 100 }] }] },
+      fundingOrder: s.settings.fundingOrder,
+    }, s.assets, s.plan);
     s.cashflows.withdrawals.push(createCashflow("withdrawal", s.plan, a2.id));
 
     const out = removeAsset(s, a2.id);
     expect(out.assets).toHaveLength(1);
     expect(out.cashflows.withdrawals).toHaveLength(0);
     expect(out.settings.fundingOrder).toEqual([s.assets[0].id]);
-    expect(out.settings.surplus).toEqual({ mode: "accumulate", assetId: null });
+    expect(out.settings.surplus.periods[0].allocations).toEqual([]);
   });
 
   it("never removes the last asset", () => {
@@ -293,7 +307,7 @@ describe("household transitions", () => {
     const ja = createAsset(s.plan, [...s.assets, pa], PROFILES);
     ja.owner = "joint";
     s.assets.push(pa, ja);
-    s.settings = normaliseSettings(s.settings, s.assets);
+    s.settings = normaliseSettings(s.settings, s.assets, s.plan);
     const inc = createIncomeRow(s.plan, []);
     inc.owner = "partner";
     inc.from = { kind: "age", age: 36 }; inc.to = { kind: "age", age: 65 };
@@ -385,7 +399,11 @@ describe("migration", () => {
     expect(s.cashflows.expenses).toEqual([]);
     // fundingOrder = included assets only (a2 is excluded).
     expect(s.settings.fundingOrder).toEqual(["a1"]);
-    expect(s.settings.surplus).toEqual({ mode: "spend", assetId: null });
+    // v2→v3's own migration stamps the old "spend" mode — migrated
+    // forward to v17's period model, that's 100% remainder to
+    // expenditure, non-deductible-first off (bit-identical projection).
+    expect(s.settings.surplus.periods).toHaveLength(1);
+    expect(s.settings.surplus.periods[0]).toMatchObject({ payNonDeductibleDebtFirst: false, allocations: [], remainderTo: "expenditure" });
   });
 
   it("rejects garbage and unknown versions", () => {
@@ -404,9 +422,9 @@ describe("persistence round-trip (v3)", () => {
     a2.distributions = "cash";
     s.assets.push(a2);
     s.settings = normaliseSettings({
-      surplus: { mode: "invest", assetId: a2.id },
+      surplus: { periods: [{ ...createSurplusPeriod(), allocations: [{ id: "sa1", targetType: "asset", targetId: a2.id, pct: 100 }] }] },
       fundingOrder: [a2.id, s.assets[0].id],
-    }, s.assets);
+    }, s.assets, s.plan);
 
     const inc = createIncomeRow(s.plan, []);
     inc.owner = "partner"; inc.amount = 90000;
@@ -421,7 +439,7 @@ describe("persistence round-trip (v3)", () => {
     expect(back.plan.household).toBe("married"); // v5 splits marital status
     expect(back.plan.partner.currentAge).toBe(36);
     expect(back.assets[1]).toMatchObject({ owner: "joint", distributions: "cash" });
-    expect(back.settings.surplus).toEqual({ mode: "invest", assetId: a2.id });
+    expect(back.settings.surplus.periods[0].allocations).toEqual([{ id: "sa1", targetType: "asset", targetId: a2.id, pct: 100 }]);
     expect(back.settings.fundingOrder).toEqual([a2.id, s.assets[0].id]);
     expect(back.cashflows.income[0]).toMatchObject({
       owner: "partner", amount: 90000,
@@ -847,11 +865,15 @@ describe("D2 — asset class model", () => {
   });
 
   it("lifestyle assets never join fundingOrder or surplus targets", () => {
+    const plan = { client: { currentAge: 40 }, partner: null, endAge: 90 };
     const fin = { id: "f", include: true, class: "financial" };
     const lf = { id: "l", include: true, class: "lifestyle" };
     expect(normaliseFundingOrder(["l", "f"], [fin, lf])).toEqual(["f"]);
-    expect(normaliseSettings({ surplus: { mode: "invest", assetId: "l" }, fundingOrder: [] }, [fin, lf]).surplus)
-      .toEqual({ mode: "accumulate", assetId: null });
+    const settings = {
+      surplus: { periods: [{ ...createSurplusPeriod(), allocations: [{ id: "sa1", targetType: "asset", targetId: "l", pct: 100 }] }] },
+      fundingOrder: [],
+    };
+    expect(normaliseSettings(settings, [fin, lf], plan).surplus.periods[0].allocations).toEqual([]);
   });
 
   it("cashflow rows targeting lifestyle assets drop on hydrate", () => {
@@ -1146,10 +1168,15 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
   it("super accounts are structurally invisible to fundingOrder and settings — there is no path to include one", () => {
     // normaliseFundingOrder/normaliseSettings only ever consult
     // state.assets; a super account id is never even a candidate.
+    const plan = { client: { currentAge: 40 }, partner: null, endAge: 90 };
     expect(normaliseFundingOrder(["su1"], [])).toEqual([]);
-    const settings = normaliseSettings({ surplus: { mode: "invest", assetId: "su1" }, fundingOrder: ["su1"] }, []);
+    const raw = {
+      surplus: { periods: [{ ...createSurplusPeriod(), allocations: [{ id: "sa1", targetType: "asset", targetId: "su1", pct: 100 }] }] },
+      fundingOrder: ["su1"],
+    };
+    const settings = normaliseSettings(raw, [], plan);
     expect(settings.fundingOrder).toEqual([]);
-    expect(settings.surplus).toEqual({ mode: "accumulate", assetId: null });
+    expect(settings.surplus.periods[0].allocations).toEqual([]);
   });
 
   it("hydrate drops contribution/withdrawal/lump-sum rows that target a super account id (not a financial asset)", () => {
@@ -1332,7 +1359,7 @@ describe("Working Cash Account (engine correctness fix)", () => {
 
   it("defaultState's default surplus treatment is accumulate, not spend", () => {
     const s = defaultState(PROFILES, NOW);
-    expect(s.settings.surplus).toEqual({ mode: "accumulate", assetId: null });
+    expect(s.settings.surplus.periods[0]).toMatchObject({ allocations: [], remainderTo: "cash" });
   });
 
   it("hydrate migrates a pre-WCA (v8) blob forward, stamping the default workingCash", () => {
@@ -1358,8 +1385,12 @@ describe("Working Cash Account (engine correctness fix)", () => {
     expect(s).not.toBeNull();
     expect(s.plan.workingCash).toEqual({ balance: 0, minimumBalance: 0, ratePct: null });
     // An existing scenario's explicit "spend" choice is preserved —
-    // the new "accumulate" default only applies to brand-new scenarios.
-    expect(s.settings.surplus).toEqual({ mode: "spend", assetId: null });
+    // migrated to the period model's equivalent (100% remainder to
+    // expenditure, non-deductible-first off for bit-identity) — the
+    // new payNonDeductibleDebtFirst-true default only applies to
+    // brand-new scenarios.
+    expect(s.settings.surplus.periods).toHaveLength(1);
+    expect(s.settings.surplus.periods[0]).toMatchObject({ payNonDeductibleDebtFirst: false, allocations: [], remainderTo: "expenditure" });
   });
 });
 

@@ -215,7 +215,16 @@ export function computeYearFlows(out, y) {
   const superEarningsNet = sumVals(row.superDetail, "earnings") - sumVals(row.superDetail, "earningsTax");
   const contributionsTax = sumVals(row.superDetail, "contributionsTax");
   const sgInflow = sumVals(row.superDetail, "sg");
-  const salarySacrificed = sumVals(row.superDetail, "salarySacrifice");
+  // Surplus/deficit allocation spec, Commit 1: a surplus allocation that
+  // tops up an existing salary-sacrifice row writes into the SAME
+  // `salarySacrifice` field as a genuine payroll-reduced contribution
+  // (for display), but unlike the genuine case it DID pass through
+  // wcaBal/row.income on its way in (a real, ordinary-cash top-up, the
+  // same shape as a personalDeductible one) — so it must NOT also be
+  // added back below, or the invariant double-counts it. Named
+  // separately (surplusSalarySacrifice) so only the genuine, upstream-
+  // reduced portion gets the add-back.
+  const salarySacrificed = sumVals(row.superDetail, "salarySacrifice") - sumVals(row.superDetail, "surplusSalarySacrifice");
   const divReleaseFromSuper = sumVals(row.superDetail, "release");
   const liabilityInterest = sumVals(row.liabilities, "interest");
   // A liability's nominal balance amortises independently of CPI, but
@@ -233,8 +242,14 @@ export function computeYearFlows(out, y) {
   // (a purchase loan settling this FY, Document Set Commits 3/4) is a
   // BRAND NEW liability appearing — not revaluation at all — added
   // back so it doesn't get misread as a free CPI gain.
+  // surplusRepayment (Surplus and Deficit Allocation spec, Commit 1) is
+  // cash-funded-vs-balance-shrinks the SAME way principal/extraRepayment
+  // already are — a genuine transfer (WCA down, liability down by the
+  // identical amount), not a free CPI gain — so it's pulled out here
+  // too, same reasoning as extraRepayment's own comment above it.
   const liabilityRevaluation = sumVals(row.liabilities, "opening") - sumVals(row.liabilities, "closing")
     - sumVals(row.liabilities, "principal") - sumVals(row.liabilities, "extraRepayment")
+    - sumVals(row.liabilities, "surplusRepayment")
     + sumVals(row.liabilities, "drawdown");
 
   // A salary-sacrifice contribution (explicit or a toConcessionalCap

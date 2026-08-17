@@ -126,8 +126,12 @@ export function deductionSums(row, ctx, forOwner = null) {
     if (isPropertyLoan(lid, properties)) {
       const prop = properties.find((p) => `prop-${p.id}` === lid);
       propertyInterestDeductions += interest * shareOf(prop?.owner, forOwner);
-    } else if (liab?.deductible) {
-      investmentPortfolioInterest += interest * shareOf(liab.owner, forOwner);
+    } else if (liab) {
+      // Surplus/deficit allocation spec, Commit 1: deductiblePct
+      // replaces the old boolean — a part-deductible loan reports only
+      // its deductible proportion here, same as the tax assessment.
+      const frac = typeof liab.deductiblePct === "number" ? liab.deductiblePct / 100 : (liab.deductible === true ? 1 : 0);
+      if (frac > 0) investmentPortfolioInterest += interest * frac * shareOf(liab.owner, forOwner);
     }
   }
   const propertyDeductions = investmentProps.reduce((s, p) =>

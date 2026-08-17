@@ -29,7 +29,7 @@
 
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
-import { childEducationPlanYearBounds } from "./planState.js";
+import { childEducationPlanYearBounds, legacySurplusPeriod } from "./planState.js";
 
 // Age 75 limit (member/spouse contributions — SG is exempt) and the
 // personal-deductible work test (ages 67–74, gated by the person's own
@@ -632,6 +632,25 @@ export function buildSchedules(state) {
     liabilityExtraFlows[l.id] = target;
   }
 
+  // Surplus allocation periods (Surplus and Deficit Allocation spec,
+  // Commit 1) — bounds only, same split as toConcessionalCapRows above:
+  // this module resolves WHEN a period applies (its from/to DateRefs
+  // are static, so a plan-year bound is all this needs); deterministic.js
+  // resolves WHAT it does, since applying it needs live per-FY state
+  // (loan balances, super cap headroom) this module doesn't have.
+  // Tolerates the pre-Commit-1 {mode, assetId} shape too (same
+  // dual-shape tolerance as liabilities.js's deductibleFraction) — a
+  // lot of this codebase's own test fixtures build raw state directly,
+  // bypassing clampAllToPlan's migration entirely.
+  const rawSurplusPeriods = Array.isArray(state.settings?.surplus?.periods)
+    ? state.settings.surplus.periods
+    : [legacySurplusPeriod(state.settings?.surplus)];
+  const surplusPeriods = rawSurplusPeriods.map((p) => ({
+    ...p,
+    fromYear: resolveRef(p.from, plan, dateSchedule, "client").planYear,
+    toYear: resolveRef(p.to, plan, dateSchedule, "client").planYear,
+  }));
+
   return {
     months,
     planYears,
@@ -649,6 +668,7 @@ export function buildSchedules(state) {
     superFlows,
     fhsssFlows,
     toConcessionalCapRows,
+    surplusPeriods,
     superWarnings,
     rowTotals,
     oneOffsByAssetYear,

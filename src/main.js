@@ -1124,8 +1124,6 @@ const SETTINGS_FIELD_PATH = {
   wcaBalance: "plan.workingCash.balance",
   wcaMinimum: "plan.workingCash.minimumBalance",
   wcaRate: "plan.workingCash.ratePct",
-  surplusMode: "settings.surplus.mode",
-  surplusAsset: "settings.surplus.assetId",
 };
 
 function computePlanFieldPath(field) {
@@ -3002,11 +3000,14 @@ function renderSettings() {
   }).join("");
 
   const wca = state.plan.workingCash;
-  const SURPLUS_HELP = {
-    accumulate: "left in the Working Cash Account, building a cash balance",
-    invest: "invested into the selected asset",
-    spend: "treated as additional spending and disappears from the projection",
-  };
+  // Surplus/deficit allocation spec, Commit 1: settings.surplus is now
+  // a list of periods (model + engine only in this commit) — the old
+  // single-destination mode/assetId select is gone. A real period
+  // editor is Commit 2's own scope ("Allocation UI"); this is a safe,
+  // honest placeholder for the gap between the two, not the finished
+  // feature — it never writes the old {mode, assetId} shape, which
+  // normaliseSettings no longer reads at all.
+  const periodCount = s.surplus.periods.length;
   els.settingsPanel.innerHTML = `
     <div class="cf-panel">
       <div class="cf-section">
@@ -3030,21 +3031,7 @@ function renderSettings() {
       </div>
       <div class="cf-section">
         <div class="cf-section-title">Surplus treatment</div>
-        <div class="settings-row">
-          <select data-settings-field="surplusMode">
-            <option value="accumulate"${s.surplus.mode === "accumulate" ? " selected" : ""}>Accumulate in the Working Cash Account</option>
-            <option value="invest"${s.surplus.mode === "invest" ? " selected" : ""}>Invest to…</option>
-            <option value="spend"${s.surplus.mode === "spend" ? " selected" : ""}>Spend (additional expenses)</option>
-          </select>
-          ${s.surplus.mode === "invest" ? `
-            <select data-settings-field="surplusAsset">
-              ${includedAssets.map((a) =>
-                `<option value="${a.id}"${a.id === s.surplus.assetId ? " selected" : ""}>${escapeHTML(a.name)}</option>`
-              ).join("")}
-            </select>
-          ` : ""}
-        </div>
-        <p class="helper-text">Once a year, at the end of each financial year, whatever is sitting in the Working Cash Account above its minimum is ${SURPLUS_HELP[s.surplus.mode]}.</p>
+        <p class="helper-text">${periodCount} period${periodCount === 1 ? "" : "s"} configured. Once a year, at the end of each financial year, whatever is sitting in the Working Cash Account above its minimum is allocated per the period covering that year. A full period editor is coming; this scenario's allocation is unchanged from before.</p>
       </div>
       <div class="cf-section">
         <div class="cf-section-title">Deficit funding order</div>
@@ -3058,18 +3045,7 @@ function renderSettings() {
 els.settingsPanel.addEventListener("change", (e) => {
   const field = e.target.dataset.settingsField;
   if (!field) return;
-  if (field === "surplusMode") {
-    if (e.target.value === "invest") {
-      const first = state.assets.find((a) => a.include && a.class !== "lifestyle");
-      state.settings.surplus = { mode: "invest", assetId: first ? first.id : null };
-      state.settings = normaliseSettings(state.settings, state.assets);
-    } else {
-      state.settings.surplus = { mode: e.target.value === "spend" ? "spend" : "accumulate", assetId: null };
-    }
-  } else if (field === "surplusAsset") {
-    state.settings.surplus = { mode: "invest", assetId: e.target.value };
-    state.settings = normaliseSettings(state.settings, state.assets);
-  } else if (field === "wcaBalance") {
+  if (field === "wcaBalance") {
     state.plan.workingCash = clampWorkingCash({ ...state.plan.workingCash, balance: clampNumber(e.target.value, 0) });
   } else if (field === "wcaMinimum") {
     state.plan.workingCash = clampWorkingCash({ ...state.plan.workingCash, minimumBalance: clampNumber(e.target.value, 0) });
@@ -3497,6 +3473,14 @@ function wireDeferredDateCommit(container, handler) {
 
 // --- structural actions ------------------------------------------------------
 
+// Whether any surplus period's allocation list targets this asset —
+// replaces the old single settings.surplus.assetId check now that a
+// period can allocate to several destinations at once.
+function isSurplusAllocationTarget(settings, assetId) {
+  return (settings.surplus?.periods ?? []).some((p) =>
+    (p.allocations ?? []).some((a) => a.targetType === "asset" && a.targetId === assetId));
+}
+
 function onAssetSectionClick(e) {
   const target = e.target.closest("[data-action]");
   if (!target) return;
@@ -3521,13 +3505,15 @@ function onAssetSectionClick(e) {
       break;
     }
     case "toggle-include": {
-      const wasSurplusTarget = state.settings.surplus.assetId === aid && e.target.checked === false;
+      const wasSurplusTarget = isSurplusAllocationTarget(state.settings, aid) && e.target.checked === false;
       if (wasSurplusTarget) {
-        const ok = window.confirm(`"${a.name}" is the surplus investment target. Excluding it reverts surplus treatment to Spend. Continue?`);
+        const ok = window.confirm(`"${a.name}" is a surplus allocation target. Excluding it drops that allocation — its share falls back to the period's remainder. Continue?`);
         if (!ok) { e.target.checked = true; return; }
       }
       a.include = e.target.checked;
-      state.settings = normaliseSettings(state.settings, state.assets);
+      state.settings = normaliseSettings(state.settings, state.assets, state.plan, {
+        liabilities: state.liabilities, goals: state.goals, superContributions: state.cashflows.superContributions,
+      });
       saveState();
       assetCardEl(aid)?.classList.toggle("excluded", !a.include);
       renderSettings();
@@ -3538,7 +3524,7 @@ function onAssetSectionClick(e) {
     case "remove-asset": {
       const financialCount = state.assets.filter((x) => x.class !== "lifestyle").length;
       if (a.class !== "lifestyle" && financialCount <= 1) return; // keep the last financial asset
-      const isSurplusTarget = state.settings.surplus.assetId === aid;
+      const isSurplusTarget = isSurplusAllocationTarget(state.settings, aid);
       const affectedRows = cashflowRowsForAsset(state, aid);
       // No attached cashflow rows (the common case — lifestyle assets
       // never have any, per D2) — a plain confirm is enough; nothing
@@ -3547,7 +3533,7 @@ function onAssetSectionClick(e) {
       // follow-up B1 — this used to cascade-delete unconditionally).
       if (affectedRows.length === 0) {
         const msg = isSurplusTarget
-          ? `Remove "${a.name}"? It is the surplus investment target — surplus treatment will revert to Spend.`
+          ? `Remove "${a.name}"? It is a surplus allocation target — that allocation will drop, falling back to the period's remainder.`
           : `Remove "${a.name}"?`;
         if (!window.confirm(msg)) return;
         state = removeAsset(state, aid);
@@ -3592,7 +3578,7 @@ function openAssetRemoveDialog(asset, rows, isSurplusTarget) {
   const otherFinancial = state.assets.filter((x) => x.id !== asset.id && x.class !== "lifestyle");
   const rowList = rows.map((r) => `<li>${escapeHTML(r.summary)}</li>`).join("");
   const surplusNote = isSurplusTarget
-    ? `<p>It is also the surplus investment target — surplus treatment will revert to Spend.</p>` : "";
+    ? `<p>It is also a surplus allocation target — that allocation will drop, falling back to the period's remainder.</p>` : "";
   els.assetRemoveModalBody.innerHTML = `
     <p>"${escapeHTML(asset.name)}" has ${rows.length} cashflow row(s) attached:</p>
     <ul>${rowList}</ul>
@@ -3696,7 +3682,9 @@ for (const mount of CF_MOUNTS) {
 els.addAssetBtn.addEventListener("click", () => {
   const a = createAsset(state.plan, state.assets, PROFILES);
   state.assets.push(a);
-  state.settings = normaliseSettings(state.settings, state.assets); // appends to funding order
+  state.settings = normaliseSettings(state.settings, state.assets, state.plan, {
+    liabilities: state.liabilities, goals: state.goals, superContributions: state.cashflows.superContributions,
+  }); // appends to funding order
   collapsed.set(a.id, false);
   saveState();
   renderAll();
@@ -4735,11 +4723,9 @@ function liabilityCardHTML(l) {
             </div>
           ` : ""}
           <div class="cf-cell">
-            <label>Interest deductible</label>
-            <label class="ptg-check">
-              <input type="checkbox"${l.deductible ? " checked" : ""} data-lid="${l.id}" data-lfield="deductible" />
-              <span>Deducts against ${l.owner === "joint" ? "both owners'" : "the owner's"} income</span>
-            </label>
+            <label>Interest deductible (%)</label>
+            <input type="number" min="0" max="100" step="1" value="${l.deductiblePct}" data-lid="${l.id}" data-lfield="deductiblePct" />
+            <p class="helper-text">Deducts against ${l.owner === "joint" ? "both owners'" : "the owner's"} income — 100% for a fully investment loan, 0% for a home loan, or a part-way figure for a mixed-purpose loan.</p>
           </div>
           <div class="cf-cell">
             <label>Relates to / secured by</label>
@@ -4885,7 +4871,7 @@ els.liabilitiesSection.addEventListener("change", (e) => {
     else if (field === "interestRatePct") l.interestRatePct = clampNumber(e.target.value, 0, 30);
     else if (field === "termYears") l.termYears = clampInt(e.target.value, 1, 50);
     else if (field === "ioYears") l.ioYears = clampInt(e.target.value, 1, l.termYears); // never longer than the loan's own term
-    else if (field === "deductible") l.deductible = e.target.checked;
+    else if (field === "deductiblePct") l.deductiblePct = clampNumber(e.target.value, 0, 100);
     else if (field === "linkedAssetId") l.linkedAssetId = e.target.value || null;
     else if (field === "offsetAssetId") l.offsetAssetId = e.target.value || null;
     // Fixed-rate rollover (Commit 1).
@@ -6821,10 +6807,6 @@ function buildCashflowGroups() {
     oneOffRows.push({ label: `${pr.name} settlement`, cell: (y) => -(yl[y].properties?.[pr.id]?.settlement ?? 0) });
   }
 
-  const surplusTarget = state.settings.surplus.mode === "invest"
-    ? state.assets.find((a) => a.id === state.settings.surplus.assetId)
-    : null;
-
   const groups = [
     { title: "Assessable Income", rows: assessableRows },
     { title: "Deductions", rows: deductionSectionRows },
@@ -6844,9 +6826,12 @@ function buildCashflowGroups() {
     groups.push({ title: "Goals", rows });
   }
   if (oneOffRows.length) groups.push({ title: "One-off amounts", rows: oneOffRows });
+  // Surplus/deficit allocation spec: with multiple periods/destinations
+  // possible in a single year, a single named target no longer applies
+  // — Commit 3 ("Outputs") breaks the surplus row into one line per
+  // destination; this aggregate view is the interim shape.
   groups.push({ title: "Funding", rows: [
-    { label: surplusTarget ? `Surplus invested (to ${surplusTarget.name})` : "Surplus invested",
-      cell: (y) => yl[y].surplusInvested },
+    { label: "Surplus invested", cell: (y) => yl[y].surplusInvested },
     { label: "Surplus swept to cash", cell: (y) => yl[y].surplusAccumulated },
     { label: "Surplus spent", cell: (y) => yl[y].surplusSpent },
     { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },

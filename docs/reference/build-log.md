@@ -250,6 +250,36 @@ workbook is a second opinion from a point in time, not a reference
 implementation. Divergences are recorded, attributed where possible, and
 only treated as our defect where a primary source says so."
 
+### Surplus and deficit allocation (spec 16, Commit 1 of 4 — model and engine)
+`settings.surplus` moves from a single whole-of-surplus choice (spend /
+invest to one asset / accumulate) to a list of periods, each splitting the
+surplus by percentage across asset/liability/superContribution/goal
+destinations, with an always-explicit remainder. Pay-non-deductible-debt-
+first (ranked by `deductiblePct`, a percentage rather than a boolean, so a
+part-deductible loan's priority ceiling is proportional) runs before the
+percentage split; a liability allocation's overflow and a superContribution
+allocation's cap-breach both fall through to later destinations rather than
+being lost or silently exceeding a cap. Deficit funding gained per-asset
+minimum balances (drawn to floor, then breached in the funding order, only
+once every asset is at floor) and a minimum-capital-gain sell rule (sorts
+by unrealised-gain ratio via the existing pooled cost bases; no-CGT assets
+sort first). Migration (`{mode,assetId}` → a single Start→End period) is
+bit-identical for existing scenarios. `randomScenario()` now generates
+allocation plans across every rule and target type; this surfaced a real
+conservation-invariant gap — a surplus top-up of an existing
+salary-sacrifice row writes into the same display field a genuine
+payroll-reduced sacrifice does, but (unlike the genuine case) it passes
+through the household's own cash pocket on the way in, so it must not also
+get the invariant's usual salary-sacrifice add-back; fixed by naming that
+slice separately (`surplusSalarySacrifice`) rather than widening the
+existing field's meaning. Also found and fixed: `liabSeries` (like
+`superSeries` before it) was snapshotting a liability's closing balance
+before the same month's later surplus-repayment code had a chance to
+change it — the same "snapshot taken too early" bug class, a second
+occurrence. UI (Commit 2), outputs and a Focus view (Commit 3), and the
+non-deductible-first advice signal (Commit 4) are tracked in
+"Where we're going" below until they land.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real
@@ -282,9 +312,11 @@ are genuinely affordable as constructed.
 
 ## WHERE WE'RE GOING
 
-1. **Surplus allocation intelligence** — a percentage split across
-   destinations, "pay non-deductible debt first," interest-rate ordering.
-   Currently only spend / invest / accumulate.
+1. **Surplus allocation UI, outputs, and advice signal** (spec 16, Commits
+   2–4) — the settings editor for periods/allocations/remainder, the
+   Cashflow/Liabilities table breakdown and a Focus → Surplus allocation
+   view, and the non-deductible-first interest-saved figure. The model and
+   engine (Commit 1) are done — see DONE above.
 2. **Bonus and allowance income as distinct types** — lumpy, variable
    income, matching the firm's own "Site/Locality Allowance" and "After
    tax bonus" rows (previously deferred in specs 11 and 13; promoted here).

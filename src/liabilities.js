@@ -32,6 +32,20 @@ export function contractualPayment(liab, mRel) {
   return { pi: levelPayment(liab.balance, i, termM - ioM), io: false };
 }
 
+// Surplus/deficit allocation spec, Commit 1: deductiblePct (0-100)
+// replaces the old boolean `deductible` flag — a part-deductible loan
+// needs a real percentage, both for the deduction itself and to rank
+// liabilities by non-deductible proportion for "pay non-deductible
+// debt first". Reads either shape so every existing fixture built
+// with `deductible: true/false` (randomScenario(), the many test
+// mkState() helpers, demo clients) keeps working unchanged — 0/100%
+// reproduce false/true exactly; clampLiability normalises properly-
+// clamped state to always carry deductiblePct, but raw/test state
+// bypassing the clamp is common enough in this codebase's own test
+// suite that the engine has to tolerate both.
+export const deductibleFraction = (l) =>
+  typeof l.deductiblePct === "number" ? Math.max(0, Math.min(100, l.deductiblePct)) / 100 : (l.deductible === true ? 1 : 0);
+
 export const monthlyRate = (l) => (l.interestRatePct ?? 0) / 100 / 12;
 export const termMonths = (l) => Math.max(1, Math.round((l.termYears ?? 30) * 12));
 export const ioMonths = (l) =>

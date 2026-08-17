@@ -116,7 +116,23 @@ function finalize(base, plan, assets, income, expenses, liabilities, superAccoun
     liabilities,
     properties: [],
     goals: [],
-    settings: { surplus: { mode: "accumulate", assetId: null }, fundingOrder: assets.map((a) => a.id) },
+    // Surplus/deficit allocation spec, Commit 1: settings.surplus is now
+    // a list of periods, not {mode, assetId} — a single period covering
+    // the whole projection with no allocations and remainderTo "cash"
+    // reproduces this demo's original "accumulate" intent exactly.
+    // payNonDeductibleDebtFirst is off, same reasoning the v16->v17
+    // migration uses for an existing scenario: this fixture's numbers
+    // were built and are tested against the neutral behaviour, not the
+    // new default (a future demo could turn it on deliberately, to
+    // actually showcase the feature).
+    settings: {
+      surplus: { periods: [{
+        id: "sp-demo", from: { kind: "anchor", anchorId: "start" }, to: { kind: "anchor", anchorId: "end" },
+        payNonDeductibleDebtFirst: false, debtOrder: "interestRate", allocations: [], remainderTo: "cash",
+      }] },
+      fundingOrder: assets.map((a) => a.id),
+      deficit: { minimumBalances: {}, sellRule: "order" },
+    },
   };
   return clampAllToPlan(raw, PROFILES);
 }

@@ -50,7 +50,7 @@ import { lmiPremium } from "./data/lmiRates.js";
 import {
   processConcessionalCap, processNonConcessionalCap, div293Tax, availableCarryForward,
 } from "./Tax/superContributions.js";
-import { levelPayment, monthlyRate, termMonths, ioMonths, scheduledAmortisation } from "./liabilities.js";
+import { levelPayment, monthlyRate, termMonths, ioMonths, scheduledAmortisation, deductibleFraction } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
 import { assessPerson } from "./Tax/annual.js";
@@ -369,7 +369,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         termYears: 30,
         repayment: "pi",
         ioYears: 0,
-        deductible: invest, // investment loans deduct by default
+        deductiblePct: invest ? 100 : 0, // investment loans deduct by default
         startMonth: purchaseMonth,
         propertyId: p.id,
       });
@@ -501,7 +501,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       startMonth: l.startMonth ?? 0, // purchase loans (D4) start at settlement
       pmtPI: levelPayment(l.balance, i, termM - ioM),
       offsetId,
-      deductible: l.deductible === true,
+      deductibleFraction: deductibleFraction(l),
       shares: ownerShares(l, couple),
       propertyId: l.propertyId ?? null, // interest joins that property's gearing calc
       rateType, revertRate, rolloverMonth, rolloverYear,
@@ -563,13 +563,49 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // sources, never surplus targets (defensive — settings invariants
   // already exclude them).
   const fundingOrder = state.settings.fundingOrder.filter((id) => id in bal && !meta[id].lifestyle);
-  const surplusMode = state.settings.surplus.mode;
-  const surplusTargetId =
-    surplusMode === "invest" &&
-    state.settings.surplus.assetId in bal &&
-    !meta[state.settings.surplus.assetId].lifestyle
-      ? state.settings.surplus.assetId
-      : null;
+  // Deficit side (Surplus and Deficit Allocation spec, Commit 1):
+  // per-asset minimum balances and the sell-rule choice. fundingOrder
+  // itself is untouched by this phase.
+  const deficitSettings = state.settings.deficit ?? { minimumBalances: {}, sellRule: "order" };
+  const deficitMinimums = deficitSettings.minimumBalances ?? {};
+  const deficitSellRule = deficitSettings.sellRule === "minimumCapitalGain" ? "minimumCapitalGain" : "order";
+
+  // Concessional contribution rows a surplus allocation may top up
+  // (v1 scope — see planState.js's clampAllocationEntry for why only
+  // these two types are eligible): keyed by contribution row id →
+  // { accountId, owner, type }, so the FY-end sweep can credit the
+  // right account under the right person's cap without re-deriving it.
+  const surplusSuperTargets = Object.fromEntries(
+    (state.cashflows.superContributions ?? [])
+      .filter((sc) => (sc.type === "salarySacrifice" || sc.type === "personalDeductible") && sc.accountId in superBal)
+      .map((sc) => [sc.id, { accountId: sc.accountId, owner: sc.owner, type: sc.type }])
+  );
+
+  // Surplus side: an ordered list of periods, each covering part of the
+  // projection (schedule.js resolved from/to into plan years already).
+  // Re-validated against live engine state the same defensive way
+  // fundingOrder is above — clampAllToPlan should already guarantee
+  // valid references, but this module has never fully trusted that for
+  // anything that moves real money.
+  const surplusPeriods = (schedule.surplusPeriods ?? []).map((p) => ({
+    ...p,
+    allocations: (p.allocations ?? []).filter((a) => {
+      if (a.targetType === "asset") return a.targetId in bal && !meta[a.targetId].lifestyle;
+      if (a.targetType === "liability") return liabs.some((l) => l.id === a.targetId);
+      if (a.targetType === "superContribution") return a.targetId in surplusSuperTargets;
+      if (a.targetType === "goal") return a.targetId in goalMeta;
+      return false;
+    }),
+  }));
+  // The period covering plan year y — periods are supposed to be
+  // contiguous and cover the whole projection (Commit 2's UI makes
+  // gaps/overlaps impossible to enter), but this engine never assumes
+  // its inputs are perfect: an uncovered year falls back to the LAST
+  // period rather than leaving the FY-end sweep with nothing to do.
+  function resolveSurplusPeriod(y) {
+    if (surplusPeriods.length === 0) return null;
+    return surplusPeriods.find((p) => y >= p.fromYear && y <= p.toYear) ?? surplusPeriods[surplusPeriods.length - 1];
+  }
 
   // --- Working Cash Account (household cashflow buffer) ----------------------
   //
@@ -745,10 +781,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // already means for an ordinary loan.
     liabilities: Object.fromEntries([
       ...liabs.map((l) => [l.id, {
-        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0, ratePct: 0,
+        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, surplusRepayment: 0, indexation: 0, ratePct: 0,
       }]),
       ...helpLiabPersons.map((p) => [`help_${p}`, {
-        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0, ratePct: 0,
+        opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, surplusRepayment: 0, indexation: 0, ratePct: 0,
       }]),
     ]),
     liabilitiesClosing: 0,
@@ -838,6 +874,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // `release` above (a direct balance reduction, not a withdrawal:
       // no preservation gate, not assessable).
       adviserFee: 0,
+      // Surplus/deficit allocation spec, Commit 1: the slice of
+      // `salarySacrifice` above (if any) that arrived via a surplus
+      // allocation topping up an existing salary-sacrifice row, rather
+      // than via schedule.js's normal payroll-reduction path. Unlike a
+      // real salary sacrifice — which never touches wcaBal/row.income at
+      // all, hence conservationCheck.js's `salarySacrificed` add-back —
+      // this money DID pass through the household's own WCA pocket (the
+      // FY-end sweep debits it just like a personalDeductible top-up
+      // would), so it must NOT also be added back or the invariant
+      // double-counts it. Tracked separately so conservationCheck.js can
+      // subtract it back out of that add-back without touching the
+      // genuine payroll figure.
+      surplusSalarySacrifice: 0,
       closing: 0, taxFreeClosing: 0,
     }])),
     superClosing: 0,
@@ -1446,14 +1495,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const defl = 1 / infl;
         loanPayReal += (payment + extraApplied) * defl;
         const interestReal = interest * defl;
-        if (md.deductible && interestReal > 0) {
+        // Surplus/deficit allocation spec, Commit 1: deductibleFraction
+        // replaces the old all-or-nothing boolean — a part-deductible
+        // loan deducts that proportion of its interest, same as before
+        // when the fraction is exactly 0 or 1.
+        if (md.deductibleFraction > 0 && interestReal > 0) {
+          const deductibleInterestReal = interestReal * md.deductibleFraction;
           for (const p of persons) {
             if (md.shares[p]) {
-              acc[p].deductions += interestReal * md.shares[p];
+              acc[p].deductions += deductibleInterestReal * md.shares[p];
               // Interest on a loan tied to an investment property joins
               // that property's gearing calculation (D4).
               if (md.propertyId && propMeta[md.propertyId]?.invest) {
-                acc._propNet[md.propertyId].interest[p] += interestReal * md.shares[p];
+                acc._propNet[md.propertyId].interest[p] += deductibleInterestReal * md.shares[p];
               }
             }
           }
@@ -1583,18 +1637,46 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // has pushed it below — fundingOrder never touches the WCA above
       // minimum; it only ever refills it. No monthly surplus sweep:
       // surplus just sits in the WCA, growing, until FY-end below.
+      //
+      // Deficit side (Surplus and Deficit Allocation spec, Commit 1):
+      // sellOrder is fundingOrder itself, or — under "minimumCapitalGain"
+      // — fundingOrder's own ids re-ranked by smallest unrealised gain
+      // as a proportion of value (a non-CGT asset, e.g. cash, always
+      // sorts first, since selling it realises nothing); recomputed
+      // fresh every month this fires, since balances/pools move between
+      // months. Two passes over that SAME order: first draw each asset
+      // down to its own minimumBalances floor (default 0 — the pre-
+      // Commit-1 behaviour when nothing is configured), then — only
+      // once every asset is AT its floor — draw below them, same order,
+      // before falling back to super then truly unfunded.
       if (wcaBal < wca.minimumBalance) {
         let shortfall = wca.minimumBalance - wcaBal;
-        for (const id of fundingOrder) {
-          if (shortfall <= 0) break;
-          const paid = sell(id, shortfall, m);
-          shortfall -= paid;
-          wcaBal += paid;
-          if (row) {
-            row.deficitFundedFromAssets += paid;
-            row.perAssetDetail[id].deficitFunding += paid;
+        const gainRatio = (id) => {
+          if (!meta[id].cgt) return -Infinity; // no CGT — realises nothing, always sells first
+          const value = bal[id];
+          if (value <= 0) return Infinity;
+          return (value - pools[id].pool) / value;
+        };
+        const sellOrder = deficitSellRule === "minimumCapitalGain"
+          ? [...fundingOrder].sort((a, b) => gainRatio(a) - gainRatio(b))
+          : fundingOrder;
+        const drawTo = (floorOf) => {
+          for (const id of sellOrder) {
+            if (shortfall <= 0) break;
+            const floor = floorOf(id);
+            const available = Math.max(0, bal[id] - floor);
+            if (available <= 0) continue;
+            const paid = sell(id, Math.min(shortfall, available), m);
+            shortfall -= paid;
+            wcaBal += paid;
+            if (row) {
+              row.deficitFundedFromAssets += paid;
+              row.perAssetDetail[id].deficitFunding += paid;
+            }
           }
-        }
+        };
+        drawTo((id) => deficitMinimums[id] ?? 0);
+        if (shortfall > 0) drawTo(() => 0); // every asset's own minimum exhausted — draw below them, same order
         // Super (Tier 1.2, Commit 3): drawn ONLY after the ordinary
         // funding order is exhausted, in account-list order, and ONLY
         // from accounts whose owner has met a condition of release
@@ -1629,34 +1711,158 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         recordUnfunded(shortfall, m);
       }
 
-      // FY-end sweep: the WCA's balance above minimumBalance, only on
-      // the FY's final month, per settings.surplus.mode. Ungated (runs
-      // in both passes, the same way the old monthly surplus-invest
-      // step did) — bal/wcaBal are snapshotted and discarded after the
-      // measurement pass regardless, and the sweep can't affect this
-      // year's already-accrued income, so there is nothing to gate.
+      // FY-end sweep (Surplus and Deficit Allocation spec, Commit 1):
+      // the WCA's balance above minimumBalance, only on the FY's final
+      // month, routed through the period covering this plan year —
+      // replaces the old single-destination settings.surplus.mode
+      // sweep with a waterfall: non-deductible debt first (optional),
+      // then percentage allocations across up to four destination
+      // types, then an explicit remainder. Asset/liability balance
+      // moves are UNGATED (bal/loanBal are snapshotted and restored
+      // around the measurement pass, same as every other mutation to
+      // them — see loanSnap/balSnap above); super crediting and goal
+      // accrual are real-pass-only, same as every other super/goal
+      // mutation in this engine, since neither has that snapshot and
+      // neither feeds the tax measurement pass regardless of when
+      // (both settle with zero tax effect in the SAME year they're
+      // paid — this whole sweep only ever fires in the FY's LAST
+      // month, so nothing it does can still be growing/earning income
+      // measured in this same year either way).
       if (m === last - 1 && wcaBal > wca.minimumBalance) {
-        const excess = wcaBal - wca.minimumBalance;
-        if (surplusMode === "invest" && surplusTargetId) {
-          wcaBal -= excess;
-          bal[surplusTargetId] += excess;
-          if (meta[surplusTargetId].cgt) pools[surplusTargetId] = poolAdd(pools[surplusTargetId], excess);
-          if (row) {
-            row.surplusInvested += excess;
-            row.perAssetDetail[surplusTargetId].surplusInvested += excess;
-            row.wcaDetail.sweptInvested += excess;
+        const surplusPeriod = resolveSurplusPeriod(y);
+        if (surplusPeriod) {
+          let remaining = wcaBal - wca.minimumBalance;
+
+          // Step 1 — pay non-deductible debt first. Ranked by
+          // interest rate (descending) or manual (state.liabilities'
+          // own order); a part-deductible loan's eligible amount is
+          // its CURRENT balance times its non-deductible proportion,
+          // recomputed fresh each year (a disclosed simplification —
+          // not a separately tracked non-deductible sub-balance, see
+          // docs/specs/16-surplus-allocation.md's own Commit 1 for why
+          // this proportional reading is what "treat a part-deductible
+          // loan proportionally" means here).
+          if (surplusPeriod.payNonDeductibleDebtFirst && remaining > 0) {
+            const rateAt = (l) => {
+              const md = liabMeta[l.id];
+              return md.rolloverMonth != null && julyOf(y) >= md.rolloverMonth ? md.revertRate : md.i;
+            };
+            const candidates = liabs.filter((l) => loanBal[l.id] > 0 && liabMeta[l.id].deductibleFraction < 1);
+            const ordered = surplusPeriod.debtOrder === "interestRate"
+              ? [...candidates].sort((a, b) => rateAt(b) - rateAt(a))
+              : candidates; // "manual" — the order liabilities are entered in the Liabilities section
+            for (const l of ordered) {
+              if (remaining <= 0) break;
+              const nonDeductibleBalance = loanBal[l.id] * (1 - liabMeta[l.id].deductibleFraction);
+              const pay = Math.min(remaining, nonDeductibleBalance);
+              if (pay <= 0) continue;
+              loanBal[l.id] -= pay;
+              wcaBal -= pay;
+              remaining -= pay;
+              if (row) row.liabilities[l.id].surplusRepayment += pay;
+            }
           }
-        } else if (surplusMode === "spend") {
-          wcaBal -= excess;
-          if (row) {
-            row.surplusSpent += excess;
-            row.wcaDetail.sweptSpent += excess;
+
+          // Step 2 — percentage allocations, applied to whatever's
+          // left after Step 1 (not the original excess) — a period
+          // that pays non-deductible debt first and ALSO allocates
+          // 60%/40% splits the REMAINING pool that way, not the whole
+          // surplus. Repayments/contributions stop at their own
+          // ceiling (a liability's balance, a person's remaining
+          // concessional cap headroom); whatever an entry couldn't
+          // absorb falls through to the NEXT entry — never lost —
+          // exactly like a liability's own extra repayment already
+          // stops at its balance.
+          const poolForPct = remaining;
+          for (const a of surplusPeriod.allocations) {
+            if (remaining <= 0) break;
+            const share = Math.min(remaining, poolForPct * (a.pct / 100));
+            if (share <= 0) continue;
+            let consumed = 0;
+            if (a.targetType === "asset") {
+              consumed = share;
+              wcaBal -= consumed;
+              bal[a.targetId] += consumed;
+              if (meta[a.targetId].cgt) pools[a.targetId] = poolAdd(pools[a.targetId], consumed);
+              if (row) {
+                row.surplusInvested += consumed;
+                row.perAssetDetail[a.targetId].surplusInvested += consumed;
+                row.wcaDetail.sweptInvested += consumed;
+              }
+            } else if (a.targetType === "liability") {
+              consumed = Math.min(share, loanBal[a.targetId]);
+              if (consumed > 0) {
+                loanBal[a.targetId] -= consumed;
+                wcaBal -= consumed;
+                if (row) row.liabilities[a.targetId].surplusRepayment += consumed;
+              }
+            } else if (a.targetType === "superContribution" && row) {
+              // Real pass only — superBal has no measurement-pass
+              // snapshot/restore, same as every other super credit.
+              // Disclosed simplification: capped at the person's
+              // remaining concessional cap headroom and taxed at the
+              // concessional rate like any other concessional
+              // contribution, but — because the allocated amount isn't
+              // known until the WCA's own FY-end balance is, well
+              // after this FY's tax has already been measured — it
+              // does NOT reduce this FY's assessable income the way an
+              // ordinary personal-deductible contribution would. The
+              // cash/super-balance movement is correct; the tax timing
+              // is a documented gap, not a silent one.
+              const target = surplusSuperTargets[a.targetId];
+              const headroom = Math.max(0, superOutcome[target.owner]?.concessionalHeadroomAfterFills ?? 0);
+              consumed = Math.min(share, headroom);
+              if (consumed > 0) {
+                const taxRate = superOutcome[target.owner].contributionsTaxRate;
+                const tax = consumed * taxRate;
+                superBal[target.accountId] += consumed - tax;
+                wcaBal -= consumed;
+                row.superDetail[target.accountId].contributions += consumed;
+                row.superDetail[target.accountId].contributionsTax += tax;
+                if (target.type === "personalDeductible") {
+                  row.superDetail[target.accountId].personalDeductible += consumed;
+                } else {
+                  row.superDetail[target.accountId].salarySacrifice += consumed;
+                  // See the field's own comment: this slice passed
+                  // through wcaBal above, unlike a genuine payroll
+                  // salary sacrifice — conservationCheck.js needs it
+                  // named separately so it isn't also added back.
+                  row.superDetail[target.accountId].surplusSalarySacrifice += consumed;
+                }
+                // So a LATER allocation entry targeting a different
+                // contribution row for the SAME person can't also
+                // believe the full headroom is still available — the
+                // exact class of bug reserveFromSuper closed for
+                // adviser fees/Division 293/296/FHSSS sharing one
+                // account (conservationCheck.js's own header).
+                superOutcome[target.owner].concessionalHeadroomAfterFills -= consumed;
+              }
+            } else if (a.targetType === "goal" && row) {
+              // Real pass only, same as every other goal accrual —
+              // goalAccruedTotal has no measurement-pass equivalent.
+              consumed = share;
+              wcaBal -= consumed;
+              row.goals[a.targetId].contribution += consumed;
+              goalAccruedTotal[a.targetId] += consumed;
+            }
+            remaining -= consumed;
           }
-        } else if (row) {
-          // "accumulate" (default): stays in the WCA — nothing moves,
-          // just recorded for the Funding section's "swept to cash" row.
-          row.surplusAccumulated += excess;
-          row.wcaDetail.sweptToCash += excess;
+
+          // Step 3 — remainder.
+          if (remaining > 0) {
+            if (surplusPeriod.remainderTo === "expenditure") {
+              wcaBal -= remaining;
+              if (row) {
+                row.surplusSpent += remaining;
+                row.wcaDetail.sweptSpent += remaining;
+              }
+            } else if (row) {
+              // "cash" (default): stays in the WCA — nothing moves,
+              // just recorded for the Funding section's own row.
+              row.surplusAccumulated += remaining;
+              row.wcaDetail.sweptToCash += remaining;
+            }
+          }
         }
       }
 
@@ -1674,6 +1880,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // silently missing from the reported closing balance (see the
         // comment where this used to live, earlier in this function).
         for (const id of superIds) superSeries[id][m + 1] = superBal[id];
+        // Surplus/deficit allocation spec, Commit 1: liabSeries is
+        // ALSO snapshotted too early for the same reason — the
+        // per-liability loop (above, earlier this month) sets it right
+        // after the scheduled payment/extraRepayment, but the FY-end
+        // surplus sweep's non-deductible-first step and any liability
+        // allocation both debit loanBal LATER in this same month.
+        // Refreshed here, unconditionally, exactly like superSeries —
+        // cheap, and correct regardless of whether this month actually
+        // carried a surplus repayment.
+        for (const l of liabs) liabSeries[l.id][m + 1] = loanBal[l.id] / inflAt(m + 1);
       }
     }
     return acc;
@@ -1902,6 +2118,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         excessCC: ccResult.excess,
         reportableSuperContributions: grossSS + grossPD + fillTotal,
         lowTaxContributions: Math.min(totalCC, ccResult.capAvailable),
+        // Surplus/deficit allocation spec, Commit 1: remaining
+        // concessional headroom AFTER this FY's toConcessionalCap fills
+        // (fillTotal, above) — the ceiling a surplus allocation to an
+        // existing salary-sacrifice/personal-deductible row can still
+        // fill, resolved here so it can't independently believe it has
+        // the SAME headroom toConcessionalCap already consumed (the
+        // exact class of bug reserveFromSuper closed for adviser fees/
+        // Division 293/296/FHSSS sharing one account).
+        concessionalHeadroomAfterFills: Math.max(0, superCapUsage[p].available - fillTotal),
       };
     }
 

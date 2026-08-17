@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { projectPlan, assetMonthlyRate, assetReturnComponents } from "./deterministic.js";
-import { hydrate, SCHEMA_VERSION, synthDob } from "./planState.js";
+import { hydrate, SCHEMA_VERSION, synthDob, legacySurplusPeriod } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 import { checkYearConservation } from "./conservationCheck.js";
 import { lmiPremium } from "./data/lmiRates.js";
@@ -27,6 +27,17 @@ function childrenOfCount(n, start = { year: 2026, month: 7 }) {
   }));
 }
 
+// Surplus/deficit allocation spec, Commit 1: settings.surplus is now
+// {periods: [...]}, not {mode, assetId} — this shim lets every existing
+// test in this file (and the many other test files with their own
+// mkState()) keep passing the old shorthand unchanged; a test that
+// wants the new period shape directly just passes {periods: [...]}
+// instead, which is used verbatim.
+function surplusPeriodsFor(over) {
+  if (Array.isArray(over?.periods)) return over.periods;
+  return [legacySurplusPeriod(over ?? { mode: "spend", assetId: null })];
+}
+
 function mkState(over = {}) {
   const assets = over.assets ?? [mkAsset()];
   return {
@@ -44,8 +55,9 @@ function mkState(over = {}) {
       ...over.cashflows,
     },
     settings: {
-      surplus: over.surplus ?? { mode: "spend", assetId: null },
+      surplus: { periods: surplusPeriodsFor(over.surplus) },
       fundingOrder: over.fundingOrder ?? assets.filter((a) => a.include).map((a) => a.id),
+      deficit: over.deficit ?? { minimumBalances: {}, sellRule: "order" },
     },
     assumptions: { cpi: over.cpi ?? 0.025, bracketMode: over.bracketMode ?? "indexed", awote: over.awote },
     display: { units: "real" },
@@ -2585,8 +2597,52 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }] : [],
     }));
 
-    const surplusMode = pick(["accumulate", "invest", "spend"]);
-    const surplus = { mode: surplusMode, assetId: surplusMode === "invest" ? assets[0].id : null };
+    // Surplus/deficit allocation (spec 16, Commit 1) — a single period
+    // covering the whole projection (multi-period contiguity is a UI/
+    // migration concern, not an engine money-flow concern), but with
+    // every rule and every targetType independently randomised: debt-
+    // first + debtOrder, a random subset of assets/liabilities/eligible
+    // superContribution rows/goals each getting a random slice of the
+    // remaining percentage, and a random remainder destination. Deficit
+    // gets random per-asset minimum balances and sellRule. Per CLAUDE.md,
+    // this generator must cover every new money-routing path the
+    // conservation invariant is meant to guard.
+    const allocationTargets = [];
+    for (const a of assets) if (Math.random() < 0.4) allocationTargets.push({ targetType: "asset", targetId: a.id });
+    for (const l of liabilities) if (Math.random() < 0.4) allocationTargets.push({ targetType: "liability", targetId: l.id });
+    for (const sc of superContributions) {
+      if ((sc.type === "salarySacrifice" || sc.type === "personalDeductible") && Math.random() < 0.4) {
+        allocationTargets.push({ targetType: "superContribution", targetId: sc.id });
+      }
+    }
+    for (const g of goals) if (Math.random() < 0.4) allocationTargets.push({ targetType: "goal", targetId: g.id });
+
+    let remainingPct = 100;
+    const allocations = [];
+    for (const t of allocationTargets) {
+      if (remainingPct <= 0) break;
+      const pct = rand(0, remainingPct);
+      if (pct > 0.5) {
+        allocations.push({ id: `sa${allocations.length}`, ...t, pct });
+        remainingPct -= pct;
+      }
+    }
+
+    const surplus = {
+      periods: [{
+        id: "sp1",
+        from: { kind: "anchor", anchorId: "start" },
+        to: { kind: "anchor", anchorId: "end" },
+        payNonDeductibleDebtFirst: Math.random() < 0.5,
+        debtOrder: pick(["interestRate", "manual"]),
+        allocations,
+        remainderTo: pick(["cash", "expenditure"]),
+      }],
+    };
+
+    const deficitMinimumBalances = {};
+    for (const a of assets) if (Math.random() < 0.3) deficitMinimumBalances[a.id] = rand(0, 5000);
+    const deficit = { minimumBalances: deficitMinimumBalances, sellRule: pick(["order", "minimumCapitalGain"]) };
 
     // Adviser fees (Implementation/Rates spec, Commit 2) — half the
     // time present, each slice independently possibly targeting a
@@ -2626,6 +2682,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         },
         cashflows: { income, expenses, superContributions },
         surplus,
+        deficit,
         fundingOrder: assets.map((a) => a.id),
       }),
       liabilities,
@@ -4693,5 +4750,314 @@ describe("Monte Carlo rate linkage (What-if spec, Commit 5)", () => {
       expect(withNullMc.yearly[y].liabilities.lb1.ratePct).toBeCloseTo(withoutMc.yearly[y].liabilities.lb1.ratePct, 10);
       expect(withEmptyMc.yearly[y].liabilities.lb1.ratePct).toBeCloseTo(withoutMc.yearly[y].liabilities.lb1.ratePct, 10);
     }
+  });
+});
+
+describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, Commit 1)", () => {
+  const period = (over = {}) => ({
+    id: "sp1", from: { kind: "anchor", anchorId: "start" }, to: { kind: "anchor", anchorId: "end" },
+    payNonDeductibleDebtFirst: false, debtOrder: "interestRate", allocations: [], remainderTo: "cash",
+    ...over,
+  });
+  const ioLoan = (over = {}) => ({
+    id: "lb1", name: "Loan", type: "personal", owner: "client", balance: 2000,
+    interestRatePct: 0, termYears: 25, repayment: "io", ioYears: 25, deductiblePct: 0,
+    linkedAssetId: null, offsetAssetId: null, extraRepayments: [], oneOffRepayments: [],
+    rateType: "variable", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: null, commencedOn: null,
+    ...over,
+  });
+  const surplusState = (over = {}) => mkState({
+    endAge: 40,
+    assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() })],
+    cashflows: { income: [cf({ assetId: null, amount: 1000, toAge: 40 })] }, // ~$12,000/yr surplus, no expenses
+    ...over,
+  });
+
+  it("payNonDeductibleDebtFirst pays down non-deductible debt before any percentage allocation", () => {
+    const s = {
+      ...surplusState({ surplus: { periods: [period({
+        payNonDeductibleDebtFirst: true,
+        allocations: [{ id: "sa1", targetType: "asset", targetId: "a1", pct: 100 }],
+      })] } }),
+      liabilities: [ioLoan({ balance: 2000 })],
+    };
+    const out = projectPlan(s);
+    // ~$12,000 (+WCA interest) of surplus this year — the $2,000 fully
+    // non-deductible loan is repaid FIRST, in full, before the 100%
+    // asset allocation sees any of the remaining pool.
+    expect(out.yearly[0].liabilities.lb1.closing).toBeCloseTo(0, 0);
+    expect(out.yearly[0].liabilities.lb1.surplusRepayment).toBeCloseTo(2000, 0);
+    expect(out.yearly[0].perAssetDetail.a1.closing).toBeGreaterThan(9000);
+    expect(out.yearly[0].perAssetDetail.a1.closing).toBeLessThan(10500);
+  });
+
+  it("without payNonDeductibleDebtFirst, the loan is untouched and the full surplus follows the allocation", () => {
+    const s = {
+      ...surplusState({ surplus: { periods: [period({
+        payNonDeductibleDebtFirst: false,
+        allocations: [{ id: "sa1", targetType: "asset", targetId: "a1", pct: 100 }],
+      })] } }),
+      liabilities: [ioLoan({ balance: 2000 })],
+    };
+    const out = projectPlan(s);
+    // Untouched nominally ($2,000, confirmed by principal/interest/
+    // surplusRepayment all 0 below) but the engine reports closing
+    // balances in REAL dollars: 2000 / 1.025 (one year of CPI) ≈ 1951.22.
+    expect(out.yearly[0].liabilities.lb1.closing).toBeCloseTo(2000 / 1.025, 0);
+    expect(out.yearly[0].liabilities.lb1.surplusRepayment).toBeCloseTo(0, 6);
+    expect(out.yearly[0].perAssetDetail.a1.closing).toBeGreaterThan(11500);
+  });
+
+  it("debtOrder interestRate repays the higher-rate liability first", () => {
+    const s = {
+      ...surplusState({ surplus: { periods: [period({ payNonDeductibleDebtFirst: true, debtOrder: "interestRate" })] } }),
+      liabilities: [
+        ioLoan({ id: "low", balance: 10000, interestRatePct: 2 }),
+        ioLoan({ id: "high", balance: 10000, interestRatePct: 8 }),
+      ],
+    };
+    const out = projectPlan(s);
+    // ~$12,000 surplus: the 8% loan (also $10,000) is repaid first and
+    // fully; the ~$2,000 remainder goes to the 2% loan, which is only
+    // partially repaid — combined balances ($20,000) exceed the pool.
+    expect(out.yearly[0].liabilities.high.surplusRepayment).toBeCloseTo(10000, 0);
+    expect(out.yearly[0].liabilities.low.surplusRepayment).toBeGreaterThan(500);
+    expect(out.yearly[0].liabilities.low.surplusRepayment).toBeLessThan(2000);
+  });
+
+  it("a part-deductible loan's non-deductible-first ceiling is its CURRENT balance times its non-deductible proportion", () => {
+    // 50% deductible, $10,000 balance — only $5,000 is eligible via
+    // this priority channel; a surplus larger than that leaves the
+    // other (deductible) $5,000 untouched by debt-first.
+    const s = {
+      ...surplusState({
+        cashflows: { income: [cf({ assetId: null, amount: 2000, toAge: 40 })] }, // ~$24,000/yr surplus — well over the $5,000 ceiling
+        surplus: { periods: [period({ payNonDeductibleDebtFirst: true })] },
+      }),
+      liabilities: [ioLoan({ balance: 10000, deductiblePct: 50 })],
+    };
+    const out = projectPlan(s);
+    expect(out.yearly[0].liabilities.lb1.surplusRepayment).toBeCloseTo(5000, 0);
+    // Nominal remaining balance is $5,000; reported in real dollars
+    // (one year of CPI): 5000 / 1.025 ≈ 4878.05.
+    expect(out.yearly[0].liabilities.lb1.closing).toBeCloseTo(5000 / 1.025, 0);
+  });
+
+  it("percentage allocations split the pool remaining AFTER debt-first, not the original surplus", () => {
+    const s = {
+      ...surplusState({
+        assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() }), mkAsset({ id: "a2", balance: 0, allocation: zeroRealAlloc() })],
+        fundingOrder: ["a1", "a2"],
+        surplus: { periods: [period({
+          allocations: [
+            { id: "sa1", targetType: "asset", targetId: "a1", pct: 50 },
+            { id: "sa2", targetType: "asset", targetId: "a2", pct: 50 },
+          ],
+        })] },
+      }),
+    };
+    const out = projectPlan(s);
+    const a1 = out.yearly[0].perAssetDetail.a1.closing;
+    const a2 = out.yearly[0].perAssetDetail.a2.closing;
+    expect(a1).toBeCloseTo(a2, -1); // an even 50/50 split of the same pool
+    expect(a1 + a2).toBeGreaterThan(11500); // together, ~the whole surplus
+  });
+
+  it("a liability allocation's overflow (balance smaller than its share) falls through to the remainder, not lost", () => {
+    const s = {
+      ...surplusState({
+        surplus: { periods: [period({
+          allocations: [{ id: "sa1", targetType: "liability", targetId: "lb1", pct: 100 }],
+          remainderTo: "cash",
+        })] },
+      }),
+      liabilities: [ioLoan({ balance: 500 })], // far smaller than the ~$12,000 pool
+    };
+    const out = projectPlan(s);
+    expect(out.yearly[0].liabilities.lb1.closing).toBeCloseTo(0, 0);
+    expect(out.yearly[0].liabilities.lb1.surplusRepayment).toBeCloseTo(500, 0);
+    // The rest lands in the WCA via the remainder, not vanished — the
+    // household's own net position still reconciles (checked below via
+    // the conservation invariant too).
+    expect(out.yearly[0].surplusAccumulated).toBeGreaterThan(9000);
+  });
+
+  it("an allocation to an existing concessional contribution row tops up to the remaining cap headroom, excess falls through", () => {
+    const s = {
+      ...surplusState({
+        plan: { superAccounts: [superAcct({ id: "su1", owner: "client" })] },
+        cashflows: {
+          income: [cf({ assetId: null, amount: 3000, toAge: 40 })], // ~$36,000/yr surplus
+          superContributions: [scRow({
+            id: "pd1", accountId: "su1", type: "personalDeductible", basis: "amount",
+            amount: 30000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          })],
+        },
+        surplus: { periods: [period({
+          allocations: [{ id: "sa1", targetType: "superContribution", targetId: "pd1", pct: 100 }],
+          remainderTo: "cash",
+        })] },
+      }),
+    };
+    const out = projectPlan(s);
+    // Concessional cap $32,500 (FY2026-27); $30,000 already contributed
+    // via the ordinary "amount" row — only $2,500 of headroom remains
+    // for the surplus top-up, net of 15% contributions tax.
+    const su1 = out.yearly[0].superDetail.su1;
+    expect(su1.contributions).toBeCloseTo(30000 + 2500, 0);
+    // Contributions tax applies to the FULL concessional amount, not
+    // just the surplus-funded top-up.
+    expect(su1.contributionsTax).toBeCloseTo((30000 + 2500) * 0.15, 0);
+    // The rest of the surplus (well over $30,000) falls through to the
+    // remainder rather than creating an excess contribution the client
+    // never asked for.
+    expect(out.yearly[0].surplusAccumulated).toBeGreaterThan(20000);
+  });
+
+  it("an allocation to a goal tops it up on top of whatever it's otherwise funded from", () => {
+    const s = {
+      ...surplusState({
+        surplus: { periods: [period({ allocations: [{ id: "sa1", targetType: "goal", targetId: "gl1", pct: 50 }] })] },
+      }),
+      goals: [{ id: "gl1", label: "Goal", targetAmount: 100000, targetAt: { kind: "anchor", anchorId: "end" }, fundedFrom: "surplus", indexBasis: "none", indexExtraPct: 0 }],
+    };
+    const out = projectPlan(s);
+    expect(out.yearly[0].goals.gl1.contribution).toBeGreaterThan(5000);
+  });
+
+  it("remainderTo expenditure discards the leftover; cash leaves it in the WCA", () => {
+    const spend = surplusState({ surplus: { periods: [period({ remainderTo: "expenditure" })] } });
+    const cash = surplusState({ surplus: { periods: [period({ remainderTo: "cash" })] } });
+    const outSpend = projectPlan(spend);
+    const outCash = projectPlan(cash);
+    expect(outSpend.yearly[0].surplusSpent).toBeGreaterThan(9000);
+    expect(outCash.yearly[0].surplusAccumulated).toBeGreaterThan(9000);
+    expect(outSpend.yearly[0].wcaDetail.closing).toBeCloseTo(0, 0);
+    expect(outCash.yearly[0].wcaDetail.closing).toBeGreaterThan(9000);
+  });
+
+  it("minimum balances: deficit funding draws each asset to its own floor, then breaches them in order", () => {
+    const s = {
+      ...mkState({
+        endAge: 40,
+        assets: [
+          mkAsset({ id: "a1", balance: 5000, allocation: zeroRealAlloc() }),
+          mkAsset({ id: "a2", balance: 5000, allocation: zeroRealAlloc() }),
+        ],
+        fundingOrder: ["a1", "a2"],
+        cashflows: { expenses: [cf({ assetId: null, amount: 1000, toAge: 40 })] }, // ~$12,000/yr deficit, no income
+        deficit: { minimumBalances: { a1: 2000, a2: 1000 }, sellRule: "order" },
+      }),
+    };
+    const out = projectPlan(s);
+    // Both assets drawn to their own floor first ($3,000 from a1,
+    // $4,000 from a2 — $7,000 total), THEN — only once both are at
+    // floor — drawn below them in the SAME order for the remaining
+    // ~$5,000: a1 first (to 0), then a2.
+    expect(out.yearly[0].perAssetDetail.a1.closing).toBeCloseTo(0, 0);
+    expect(out.yearly[0].perAssetDetail.a2.closing).toBeLessThan(1000);
+    expect(out.yearly[0].perAssetDetail.a2.closing).toBeGreaterThanOrEqual(0);
+  });
+
+  it("minimumCapitalGain sells the smallest unrealised-gain-ratio asset first; a non-CGT asset always sorts first", () => {
+    const highGain = mkAsset({ id: "hi", balance: 10000, cgtAsset: true, costBase: 1000, allocation: zeroRealAlloc() }); // 90% gain ratio
+    const lowGain = mkAsset({ id: "lo", balance: 10000, cgtAsset: true, costBase: 9000, allocation: zeroRealAlloc() }); // 10% gain ratio
+    const cash = mkAsset({ id: "ca", balance: 20000, cgtAsset: false, costBase: null, allocation: zeroRealAlloc() }); // no CGT — sorts first regardless, sized to fully cover the deficit alone
+    const s = mkState({
+      endAge: 40,
+      assets: [highGain, lowGain, cash],
+      fundingOrder: ["hi", "lo", "ca"], // deliberately NOT in gain-ratio order
+      cashflows: { expenses: [cf({ assetId: null, amount: 1000, toAge: 40 })] },
+      deficit: { minimumBalances: {}, sellRule: "minimumCapitalGain" },
+    });
+    const out = projectPlan(s);
+    // ~$12,000 needed: cash (no CGT) sells first and fully covers it —
+    // the two CGT assets are untouched.
+    expect(out.yearly[0].perAssetDetail.ca.closing).toBeLessThan(9000);
+    expect(out.yearly[0].perAssetDetail.hi.closing).toBeCloseTo(10000, -2);
+    expect(out.yearly[0].perAssetDetail.lo.closing).toBeCloseTo(10000, -2);
+  });
+
+  it("minimumCapitalGain, once cash is exhausted, sells the smaller-gain-ratio CGT asset before the larger one", () => {
+    const highGain = mkAsset({ id: "hi", balance: 10000, cgtAsset: true, costBase: 1000, allocation: zeroRealAlloc() }); // 90% gain ratio
+    const lowGain = mkAsset({ id: "lo", balance: 10000, cgtAsset: true, costBase: 9000, allocation: zeroRealAlloc() }); // 10% gain ratio
+    const s = mkState({
+      endAge: 40,
+      assets: [highGain, lowGain],
+      fundingOrder: ["hi", "lo"],
+      cashflows: { expenses: [cf({ assetId: null, amount: 1500, toAge: 40 })] }, // ~$18,000/yr — draws into the CGT assets
+      deficit: { minimumBalances: {}, sellRule: "minimumCapitalGain" },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].perAssetDetail.lo.closing).toBeLessThan(out.yearly[0].perAssetDetail.hi.closing);
+  });
+
+  it("conservation invariant holds with non-deductible-first, percentage allocations, and minimum balances all active together", () => {
+    const s = {
+      ...mkState({
+        endAge: 42,
+        assets: [
+          mkAsset({ id: "a1", balance: 3000, allocation: zeroRealAlloc() }),
+          mkAsset({ id: "a2", balance: 3000, allocation: zeroRealAlloc() }),
+        ],
+        fundingOrder: ["a1", "a2"],
+        cashflows: { income: [cf({ assetId: null, amount: 1500, toAge: 42 })] },
+        deficit: { minimumBalances: { a1: 500 }, sellRule: "minimumCapitalGain" },
+        surplus: { periods: [period({
+          payNonDeductibleDebtFirst: true,
+          allocations: [
+            { id: "sa1", targetType: "asset", targetId: "a2", pct: 40 },
+            { id: "sa2", targetType: "liability", targetId: "lb1", pct: 40 },
+          ],
+          remainderTo: "cash",
+        })] },
+      }),
+      liabilities: [ioLoan({ balance: 4000, deductiblePct: 30 })],
+    };
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `surplus-allocation combo fixture, year ${y}`);
+  });
+
+  it("migration bit-identity: a real hydrate()d v16 blob (mode invest) reaches the same figures as the equivalent v17 period", () => {
+    const legacyState = {
+      schemaVersion: 16,
+      plan: {
+        household: "single", client: { currentAge: 40 }, partner: null, endAge: 40,
+        start: { year: 2026, month: 7 }, children: [],
+      },
+      assets: [{
+        id: "a1", name: "A1", include: true, owner: "client", distributions: "reinvest", balance: 100000,
+        // zero-real allocation (income = cpi, growth = 0) so this matches
+        // the "surplus invest routes to the nominated asset" fixture's
+        // known-value figure exactly, rather than compounding real growth
+        // on top of it.
+        allocation: { mode: "custom", incomePct: 2.5, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+        icrPct: 0, cgtAsset: false, costBase: null,
+      }],
+      cashflows: {
+        income: [{ id: "i1", label: "x", owner: "client", amount: 1000, frequency: "monthly",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 }, indexBasis: "none", indexExtraPct: 0, category: "salary", incomeType: "other" }],
+        expenses: [], contributions: [], withdrawals: [], lumpSums: [], superContributions: [], superWithdrawals: [],
+      },
+      liabilities: [], properties: [], goals: [],
+      settings: { surplus: { mode: "invest", assetId: "a1" }, fundingOrder: ["a1"] },
+      display: { units: "real" },
+    };
+    const hydrated = hydrate(JSON.stringify(legacyState), PROFILES);
+    expect(hydrated).not.toBeNull();
+    expect(hydrated.settings.surplus.periods).toHaveLength(1);
+    expect(hydrated.settings.surplus.periods[0]).toMatchObject({
+      payNonDeductibleDebtFirst: false,
+      allocations: [{ targetType: "asset", targetId: "a1", pct: 100 }],
+      remainderTo: "cash",
+    });
+    const hydratedOut = projectPlan(hydrated);
+    // The pre-existing "surplus invest routes to the nominated asset"
+    // fixture (this same describe file, deficit funding block) asserts
+    // the identical known-value outcome for the SAME shape via the test
+    // shim's shorthand conversion — this proves the REAL migration path
+    // (raw JSON → hydrate()) reaches that same number, not just the
+    // test helper's own shim.
+    expect(hydratedOut.monthly.combined[12]).toBeCloseTo(100000 + 12000, -3);
   });
 });

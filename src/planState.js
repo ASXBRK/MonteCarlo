@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
@@ -825,7 +825,14 @@ export function createLiability(plan, existing = []) {
     termYears: 25,
     repayment: "pi",      // "pi" | "io" (ioYears of IO, then P&I)
     ioYears: 5,
-    deductible: false,    // interest deducts against the owner's income
+    // Surplus/deficit allocation spec, Commit 1: deductiblePct replaces
+    // the old boolean deductible flag — a part-deductible loan (e.g. a
+    // home loan with a home-office proportion) needs a real percentage,
+    // not just deductible/not, both to compute the deduction itself and
+    // to rank liabilities by non-deductible proportion for the
+    // "pay non-deductible debt first" rule. 0/100 reproduce the old
+    // false/true exactly.
+    deductiblePct: 0,      // % of interest that deducts against the owner's income
     linkedAssetId: null,  // informational; used by D4 purchases
     offsetAssetId: null,  // financial asset whose balance offsets interest
     extraRepayments: [],  // Document Set Commit 5
@@ -910,7 +917,15 @@ export function clampLiability(l, plan, assets, properties = []) {
     // ever actually wrong, but the stored value could silently say
     // something the output never did).
     ioYears: clampInt(l.ioYears ?? 5, 1, termYears),
-    deductible: l.deductible === true,
+    // Surplus/deficit allocation spec, Commit 1: deductiblePct is the
+    // canonical field; a stored boolean `deductible` (pre-migration raw
+    // state, or a test fixture built before this change) still reads
+    // correctly here so nothing HAS to go through hydrate()'s migration
+    // to keep working — true/false map to 100/0, matching the migration
+    // exactly.
+    deductiblePct: typeof l.deductiblePct === "number"
+      ? clampNumber(l.deductiblePct, 0, 100)
+      : (l.deductible === true ? 100 : 0),
     linkedAssetId: allIds.has(l.linkedAssetId) ? l.linkedAssetId : null,
     offsetAssetId: financialIds.has(l.offsetAssetId) ? l.offsetAssetId : null,
     extraRepayments: Array.isArray(l.extraRepayments) ? l.extraRepayments.map((er) => clampExtraRepayment(er, plan)) : [],
@@ -1195,8 +1210,9 @@ export function defaultState(profiles = {}, now = new Date()) {
     properties: [],
     goals: [],
     settings: {
-      surplus: { mode: "accumulate", assetId: null },
+      surplus: { periods: [createSurplusPeriod()] },
       fundingOrder: [asset.id],
+      deficit: { minimumBalances: {}, sellRule: "order" },
     },
     display: {
       units: "real",
@@ -1721,10 +1737,15 @@ export function clampAllToPlan(state, profiles = {}) {
     ),
     superWithdrawals: normaliseSuperWithdrawals(state.cashflows.superWithdrawals, plan, superAccountOwnerById),
   };
-  const settings = normaliseSettings(state.settings, assets);
+  // Liabilities/goals are clamped BEFORE settings — a surplus period's
+  // allocations may target either, and settings needs the final,
+  // already-clamped id sets to validate against, not the raw ones.
   const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
   const properties = normaliseProperties(state.properties, plan);
   const goals = normaliseGoals(state.goals, plan, assets);
+  const settings = normaliseSettings(state.settings, assets, plan, {
+    liabilities, goals, superContributions: cashflows.superContributions,
+  });
   // Flow of initial funds (Commit 2), second stage: targetAssetId needs
   // assets/goals, neither of which clampPlan can see (siblings of
   // plan, not children of it) — refined here, now that both exist.
@@ -1735,24 +1756,182 @@ export function clampAllToPlan(state, profiles = {}) {
   return { ...state, plan: planWithRefinedImplementation, assets, cashflows, settings, liabilities, properties, goals };
 }
 
-// Surplus treatment (Working Cash Account FY-end sweep): "accumulate"
-// (leave it in the WCA — the default), "invest" (move it to a
-// nominated asset), or "spend" (it leaves the model). Any unrecognised
-// or missing value falls back to "accumulate", not "spend" — an
-// invalid setting should never silently start spending the client's
-// money out of the model.
-export function normaliseSettings(settings, assets) {
-  const fundingOrder = normaliseFundingOrder(settings?.fundingOrder, assets);
-  let surplus = settings?.surplus || { mode: "accumulate", assetId: null };
-  if (surplus.mode === "invest") {
-    const valid = assets.some((a) => a.include && isFinancial(a) && a.id === surplus.assetId);
-    surplus = valid ? { mode: "invest", assetId: surplus.assetId } : { mode: "accumulate", assetId: null };
-  } else if (surplus.mode === "spend") {
-    surplus = { mode: "spend", assetId: null };
-  } else {
-    surplus = { mode: "accumulate", assetId: null };
+// --- surplus allocation periods (Surplus and Deficit Allocation spec,
+// Commit 1) ------------------------------------------------------------
+//
+// settings.surplus.mode/assetId (three whole-of-surplus choices) is
+// replaced by settings.surplus.periods: an ordered list of periods,
+// each splitting the FY-end Working Cash Account surplus across
+// multiple destinations by percentage, with an explicit remainder.
+// "Percentages, a remainder, ordering rules and time periods together
+// are a lot of state that can disagree" (the spec's own words) — this
+// module's job is to make that impossible to express: allocations
+// always sum to at most 100%, a dangling target reference is dropped
+// rather than left stale, and there is always at least one period.
+//
+// A period's own from/to are DateRefs like any other Key-Dates-aware
+// field; contiguity/no-gaps across periods is a UI concern (Commit 2
+// makes gaps and overlaps impossible to enter) — this layer only
+// validates each period's own shape, not coverage across the list.
+
+export const DEBT_ORDER_MODES = ["interestRate", "manual"];
+export const REMAINDER_TARGETS = ["cash", "expenditure"];
+export const ALLOCATION_TARGET_TYPES = ["asset", "liability", "superContribution", "goal"];
+export const DEFICIT_SELL_RULES = ["order", "minimumCapitalGain"];
+
+// New periods default to the two rules the spec calls out as worth
+// adopting outright (pay non-deductible debt first, interest-rate
+// ordering) — MIGRATED periods (below) deliberately override both to
+// false/inert, since a migrated scenario must project bit-identically
+// to its pre-migration self, not gain a new behaviour it never asked for.
+export function createSurplusPeriod() {
+  return {
+    id: uid("sp"),
+    from: anchorRef("start"),
+    to: anchorRef("end"),
+    payNonDeductibleDebtFirst: true,
+    debtOrder: "interestRate",
+    allocations: [],
+    remainderTo: "cash",
+  };
+}
+
+export function createAllocationEntry() {
+  return { id: uid("sa"), targetType: "asset", targetId: null, pct: 0 };
+}
+
+// Converts the pre-Commit-1 {mode, assetId} shape into an equivalent
+// single Start→End period — the migration's own conversion, factored
+// out so hydrate() and any raw-state test fixture built around the old
+// shorthand (this codebase's test suite has dozens) share the ONE
+// definition of "what accumulate/invest/spend used to mean" rather
+// than two independently-maintained copies drifting apart.
+// payNonDeductibleDebtFirst is always false here — this reproduces
+// EXISTING behaviour, never a new one a caller didn't ask for.
+export function legacySurplusPeriod(old) {
+  const base = {
+    id: uid("sp"),
+    from: anchorRef("start"),
+    to: anchorRef("end"),
+    payNonDeductibleDebtFirst: false,
+    debtOrder: "interestRate",
+  };
+  if (old?.mode === "invest" && old.assetId) {
+    return { ...base, allocations: [{ id: uid("sa"), targetType: "asset", targetId: old.assetId, pct: 100 }], remainderTo: "cash" };
   }
-  return { surplus, fundingOrder };
+  if (old?.mode === "spend") {
+    return { ...base, allocations: [], remainderTo: "expenditure" };
+  }
+  return { ...base, allocations: [], remainderTo: "cash" }; // "accumulate" or unrecognised
+}
+
+// A single allocation entry: dropped entirely (never coerced to a
+// fallback target) when its target doesn't resolve — an allocation
+// pointing at nothing would silently misdirect real money, unlike a
+// cosmetic field falling back to a default. `ctx` supplies the
+// candidate id sets to validate against (financial assets are the
+// only valid asset target — lifestyle assets are never a cash
+// destination, same rule fundingOrder/surplus-invest already enforce).
+function clampAllocationEntry(a, assets, ctx) {
+  const targetType = ALLOCATION_TARGET_TYPES.includes(a?.targetType) ? a.targetType : null;
+  if (!targetType) return null;
+  const pct = clampNumber(a?.pct, 0, 100);
+  if (pct <= 0) return null;
+  let targetId = null;
+  if (targetType === "asset") {
+    targetId = assets.some((x) => x.include && isFinancial(x) && x.id === a.targetId) ? a.targetId : null;
+  } else if (targetType === "liability") {
+    targetId = (ctx.liabilities ?? []).some((l) => l.id === a.targetId) ? a.targetId : null;
+  } else if (targetType === "superContribution") {
+    // Concessional types only (v1 — see spec's Commit 1 "State" section
+    // and this project's own scope note): a surplus top-up mirrors the
+    // existing toConcessionalCap fill mechanism (fills to the person's
+    // remaining concessional cap headroom, excess falls through), which
+    // only makes sense for a salary-sacrifice or personal-deductible
+    // row. Salary sacrifice itself is pre-tax money that never became
+    // household cash, so in practice this targets a personal-deductible
+    // row — but any existing concessional row is accepted, not just
+    // that one, since the engine treats them identically for this cap.
+    const row = (ctx.superContributions ?? []).find((sc) => sc.id === a.targetId);
+    targetId = row && (row.type === "salarySacrifice" || row.type === "personalDeductible") ? a.targetId : null;
+  } else if (targetType === "goal") {
+    targetId = (ctx.goals ?? []).some((g) => g.id === a.targetId) ? a.targetId : null;
+  }
+  if (!targetId) return null;
+  return { id: typeof a.id === "string" && a.id ? a.id : uid("sa"), targetType, targetId, pct };
+}
+
+// Clamps one period's own shape. `used` allocations are processed in
+// order and capped so their SUM never exceeds 100% — an entry that
+// would push the total over 100% is truncated to whatever headroom
+// remains, and a zero-headroom entry is dropped outright, so there is
+// no state in which stored allocations sum to more than 100% (the
+// spec's own "incapable of displaying" requirement, enforced at the
+// data layer too, not just the UI).
+export function clampSurplusPeriod(p, plan, assets, ctx = {}) {
+  const { from, to } = clampFromTo(p ?? {}, plan.client.currentAge, plan.endAge, plan);
+  const raw = Array.isArray(p?.allocations) ? p.allocations : [];
+  let used = 0;
+  const allocations = [];
+  for (const a of raw) {
+    if (used >= 100) break;
+    const entry = clampAllocationEntry(a, assets, ctx);
+    if (!entry) continue;
+    const pct = Math.min(entry.pct, 100 - used);
+    if (pct <= 0) continue;
+    used += pct;
+    allocations.push({ ...entry, pct });
+  }
+  return {
+    id: typeof p?.id === "string" && p.id ? p.id : uid("sp"),
+    from, to,
+    payNonDeductibleDebtFirst: p?.payNonDeductibleDebtFirst === true,
+    debtOrder: DEBT_ORDER_MODES.includes(p?.debtOrder) ? p.debtOrder : "interestRate",
+    allocations,
+    remainderTo: REMAINDER_TARGETS.includes(p?.remainderTo) ? p.remainderTo : "cash",
+  };
+}
+
+// At least one period always exists, covering the whole projection by
+// default — an empty list would leave a plan year with no resolvable
+// surplus rule at all.
+export function normaliseSurplusPeriods(periods, plan, assets, ctx = {}) {
+  const arr = Array.isArray(periods) && periods.length > 0 ? periods : [createSurplusPeriod()];
+  return arr.map((p) => clampSurplusPeriod(p, plan, assets, ctx));
+}
+
+// Surplus treatment (Working Cash Account FY-end sweep) — a period-based
+// allocation model (Surplus and Deficit Allocation spec, Commit 1)
+// replacing the old three whole-of-surplus choices (accumulate/invest/
+// spend). `ctx` carries the OTHER already-clamped collections a period's
+// allocations may target (liabilities, superContributions, goals) —
+// callers that don't have them yet (a narrower mutation helper acting
+// before a full clampAllToPlan pass) may omit them; any allocation
+// referencing something outside what's supplied simply drops, the same
+// as a genuinely-stale reference would, and gets picked up correctly on
+// the next full clamp.
+//
+// settings.deficit is new alongside the existing (unrenamed)
+// settings.fundingOrder: minimumBalances (leave this much in an asset
+// before moving to the next) and sellRule ("order" = the existing
+// fundingOrder sequence, "minimumCapitalGain" = tax-aware, smallest-
+// unrealised-gain-first). fundingOrder itself is untouched by this
+// phase — still the flat ordered list of financial asset ids.
+export function normaliseSettings(settings, assets, plan, ctx = {}) {
+  const fundingOrder = normaliseFundingOrder(settings?.fundingOrder, assets);
+  const surplus = { periods: normaliseSurplusPeriods(settings?.surplus?.periods, plan, assets, ctx) };
+  const includedIds = new Set(assets.filter((a) => a.include && isFinancial(a)).map((a) => a.id));
+  const rawMinimums = settings?.deficit?.minimumBalances;
+  const minimumBalances = {};
+  for (const id of includedIds) {
+    const v = rawMinimums && typeof rawMinimums === "object" ? rawMinimums[id] : undefined;
+    if (v != null) minimumBalances[id] = clampNumber(v, 0);
+  }
+  const deficit = {
+    minimumBalances,
+    sellRule: DEFICIT_SELL_RULES.includes(settings?.deficit?.sellRule) ? settings.deficit.sellRule : "order",
+  };
+  return { surplus, fundingOrder, deficit };
 }
 
 // --- household transitions ----------------------------------------------
@@ -1799,7 +1978,9 @@ export function deletePartnerOwned(state) {
     withdrawals: cf.withdrawals.filter((w) => !removedIds.has(w.assetId)),
     lumpSums: cf.lumpSums.filter((l) => !removedIds.has(l.assetId)),
   };
-  const settings = normaliseSettings(state.settings, keepAssets);
+  const settings = normaliseSettings(state.settings, keepAssets, state.plan, {
+    liabilities: state.liabilities, goals: state.goals, superContributions: state.cashflows.superContributions,
+  });
   const liabilities = (state.liabilities ?? [])
     .filter((l) => l.owner !== "partner" && l.owner !== "joint")
     .map((l) => ({
@@ -1857,7 +2038,9 @@ export function removeAsset(state, assetId, reassignToId = null) {
     withdrawals: cf.withdrawals.filter((w) => w.assetId !== assetId),
     lumpSums: cf.lumpSums.filter((l) => l.assetId !== assetId),
   };
-  const settings = normaliseSettings(state.settings, assets);
+  const settings = normaliseSettings(state.settings, assets, state.plan, {
+    liabilities: state.liabilities, goals: state.goals, superContributions: state.cashflows.superContributions,
+  });
   const liabilities = (state.liabilities ?? []).map((l) => ({
     ...l,
     linkedAssetId: l.linkedAssetId === assetId ? null : l.linkedAssetId,
@@ -2077,6 +2260,31 @@ function migrateV15toV16(raw) {
   return { ...raw, schemaVersion: 16, plan: { ...raw.plan, children } };
 }
 
+// v16 → v17 (Surplus and Deficit Allocation spec, Commit 1):
+// settings.surplus.{mode, assetId} (three whole-of-surplus choices)
+// becomes settings.surplus.periods (an ordered list — see
+// createSurplusPeriod's own header). Maps to a single period covering
+// Start→End: "invest" → 100% to that asset; "spend" → 100% remainder
+// to expenditure; "accumulate" (or anything unrecognised) → 100%
+// remainder to cash. payNonDeductibleDebtFirst is forced OFF on the
+// migrated period regardless of the spec's own default-true for a
+// NEW period — a migrated scenario never had that rule applied before,
+// and this migration's whole job is bit-identical projections, not
+// opting an existing client into a behaviour they never asked for.
+// Liabilities' `deductible` boolean needs no migration step here:
+// clampLiability already derives deductiblePct from it directly when
+// deductiblePct itself is absent, and only ever copies the fields it
+// explicitly lists — the stale boolean simply doesn't survive the next
+// clamp, migrated or not.
+function migrateV16toV17(raw) {
+  const old = raw?.settings?.surplus ?? { mode: "accumulate", assetId: null };
+  return {
+    ...raw,
+    schemaVersion: 17,
+    settings: { ...raw.settings, surplus: { periods: [legacySurplusPeriod(old)] } },
+  };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -2099,6 +2307,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 13) raw = migrateV13toV14(raw);
     if (raw.schemaVersion === 14) raw = migrateV14toV15(raw);
     if (raw.schemaVersion === 15) raw = migrateV15toV16(raw);
+    if (raw.schemaVersion === 16) raw = migrateV16toV17(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -2113,6 +2322,8 @@ export function hydrate(json, profiles = {}) {
     const incomeRowIds = new Set(income.map((r) => r.id));
 
     const goalsForImplementation = normaliseGoals(raw.goals, plan, assets);
+    const hydratedSuperContributions = hydrateSuperContributions(cf.superContributions, plan, superAccountOwnerById, incomeRowIds);
+    const hydratedLiabilities = normaliseLiabilities(raw.liabilities, plan, assets, raw.properties);
     const state = {
       schemaVersion: SCHEMA_VERSION,
       // Flow of initial funds (Commit 2), second stage — see
@@ -2127,13 +2338,15 @@ export function hydrate(json, profiles = {}) {
         contributions: hydrateCashflows(cf.contributions, plan, assetIds),
         withdrawals: hydrateCashflows(cf.withdrawals, plan, assetIds),
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
-        superContributions: hydrateSuperContributions(cf.superContributions, plan, superAccountOwnerById, incomeRowIds),
+        superContributions: hydratedSuperContributions,
         superWithdrawals: hydrateSuperWithdrawals(cf.superWithdrawals, plan, superAccountOwnerById),
       },
-      liabilities: normaliseLiabilities(raw.liabilities, plan, assets, raw.properties),
+      liabilities: hydratedLiabilities,
       properties: normaliseProperties(raw.properties, plan),
       goals: goalsForImplementation,
-      settings: normaliseSettings(raw.settings, assets),
+      settings: normaliseSettings(raw.settings, assets, plan, {
+        liabilities: hydratedLiabilities, goals: goalsForImplementation, superContributions: hydratedSuperContributions,
+      }),
       display: {
         units: raw.display?.units === "nominal" ? "nominal" : "real",
         reportPeriod: clampReportPeriod(raw.display?.reportPeriod),
