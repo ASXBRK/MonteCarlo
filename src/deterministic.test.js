@@ -2683,13 +2683,25 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const properties = [];
     if (Math.random() < 0.5) {
       const firstHomeBuyer = Math.random() < 0.5;
+      const purchaseAge = randInt(40, endAge);
+      // Main residence exemption and the six-year absence rule (spec 19
+      // Commit 5) — sometimes this PPR gets an absence (moved out after
+      // purchase, sometimes producing income) and a later sale. The
+      // short 40-endAge window rarely lets an absence actually EXCEED
+      // six years (the dedicated describe block covers that day-count
+      // precisely) — this mainly exercises the "still within the
+      // window"/isCgt-flip/pool-seeding code paths under real engine
+      // conditions, which is what the conservation invariant needs.
+      const hasAbsence = purchaseAge < endAge && Math.random() < 0.3;
+      const movedOutAge = hasAbsence ? randInt(purchaseAge + 1, endAge) : null;
+      const saleAge = hasAbsence ? randInt(movedOutAge, endAge) : null;
       properties.push({
         id: "p1", name: "Home", owner: couple ? "joint" : "client",
         state: pick(["NSW", "VIC", "QLD", "WA", "SA", "TAS", "ACT", "NT"]),
         propertyType: "ppr", status: "planned",
         currentValue: 0, acquisitionDate: null, costBase: 0,
         priceToday: rand(300000, 900000),
-        purchaseAt: { kind: "age", age: randInt(40, endAge) },
+        purchaseAt: { kind: "age", age: purchaseAge },
         lvrPct: pick([60, 70, 80, 85, 90, 95]),
         firstHomeBuyer, newBuild: Math.random() < 0.3,
         purchaseCostsPct: rand(0, 3), dutyOverride: null, growthPct: rand(0, 6),
@@ -2700,6 +2712,12 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         firstHomeGuarantee: firstHomeBuyer && Math.random() < 0.5,
         lmiOverride: null,
         lmiPayAtSettlement: Math.random() < 0.5,
+        mainResidence: hasAbsence
+          ? { movedOutAt: { kind: "age", age: movedOutAge }, producingIncome: Math.random() < 0.5, movedBackInAt: null }
+          : { movedOutAt: null, producingIncome: false, movedBackInAt: null },
+        sale: hasAbsence
+          ? { enabled: true, at: { kind: "age", age: saleAge }, agentFeesPct: rand(0, 5), settlementCosts: rand(0, 5000), proceedsDestination: pick(["repayLoanThenAsset", "asset"]), assetId: pick(assets).id }
+          : { enabled: false, at: null, agentFeesPct: 2.5, settlementCosts: 2000, proceedsDestination: "asset", assetId: null },
       });
     }
 
@@ -5701,6 +5719,109 @@ describe("Property sale (spec 19 Commit 4)", () => {
     };
     const a = projectPlan(withField);
     const b = projectPlan(withoutField);
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+  });
+});
+
+describe("Main residence exemption and the six-year absence rule (spec 19 Commit 5)", () => {
+  // Acquired long before the projection starts (2000), moved out in
+  // 2015 — plenty of calendar runway either side of the 6-year mark
+  // (2021) to place a sale on either side of it.
+  const pprProp = (mainResidence, saleAge) => ({
+    id: "p1", name: "Home", owner: "client", state: "NSW",
+    propertyType: "ppr", status: "owned",
+    currentValue: 800000, acquisitionDate: "2000-01-15", costBase: 300000,
+    priceToday: 0, purchaseAt: { kind: "age", age: 41 },
+    lvrPct: 0, firstHomeBuyer: false, newBuild: false,
+    purchaseCostsPct: 0, dutyOverride: null, growthPct: 0,
+    rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expensesDeductible: true, landValuePct: 60, landTaxOverride: 0,
+    mainResidence,
+    sale: { enabled: true, at: { kind: "age", age: saleAge }, agentFeesPct: 0, settlementCosts: 0, proceedsDestination: "asset", assetId: "a1" },
+  });
+  const withPpr = (mainResidence, saleAge, start = { year: 2028, month: 7 }) => ({
+    ...mkState({
+      endAge: 50, start,
+      assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 0 })],
+      plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+    }),
+    properties: [pprProp(mainResidence, saleAge)],
+    liabilities: [],
+  });
+
+  it("fully exempt while occupied (no absence at all)", () => {
+    const out = projectPlan(withPpr(null, 42));
+    const saleY = out.yearly.findIndex((r) => r.properties.p1.saleProceeds > 0);
+    expect(out.yearly[saleY].properties.p1.saleGain).toBe(0);
+  });
+
+  it("still exempt when sold within six years of a producing-income absence", () => {
+    // Client is 40 in plan start FY2028-29 → age 40 lands on 2028-07-01,
+    // so "moved out at 41" resolves to 2029-07-01; six years later is
+    // 2035-07-01 — a sale at age 45 (2033-07-01) is well inside it.
+    // (Plan start is 2028, after the 1 Jul 2027 CGT-regime boundary, so
+    // this fixture's pool never crosses a deemed-reacquisition reset —
+    // isolating the exemption arithmetic from that unrelated mechanic.)
+    const mr = { movedOutAt: { kind: "age", age: 41 }, producingIncome: true, movedBackInAt: null };
+    const out = projectPlan(withPpr(mr, 45));
+    const saleY = out.yearly.findIndex((r) => r.properties.p1.saleProceeds > 0);
+    expect(out.yearly[saleY].properties.p1.saleGain).toBeCloseTo(0, 0);
+  });
+
+  it("partial exemption once the six-year window is exceeded — a real, non-trivial slice of the gain becomes taxable", () => {
+    const mr = { movedOutAt: { kind: "age", age: 41 }, producingIncome: true, movedBackInAt: null };
+    const within = projectPlan(withPpr(mr, 45)); // 4 years after moving out — inside the window
+    const beyond = projectPlan(withPpr(mr, 49)); // 8 years after moving out — 2 years over
+    const saleYWithin = within.yearly.findIndex((r) => r.properties.p1.saleProceeds > 0);
+    const saleYBeyond = beyond.yearly.findIndex((r) => r.properties.p1.saleProceeds > 0);
+    expect(within.yearly[saleYWithin].properties.p1.saleGain).toBeCloseTo(0, 0);
+    // Beyond the window, SOME of the gain is now taxable — the whole
+    // point of the rule — but not necessarily all of it (the first six
+    // years of the absence still get their exemption).
+    const fullGain = beyond.yearly[saleYBeyond].properties.p1.saleValue - 300000;
+    expect(beyond.yearly[saleYBeyond].properties.p1.saleGain).toBeGreaterThan(0);
+    expect(beyond.yearly[saleYBeyond].properties.p1.saleGain).toBeLessThan(fullGain);
+  });
+
+  it("reoccupying before six years resets the clock — a much later sale is still fully exempt", () => {
+    const mr = { movedOutAt: { kind: "age", age: 41 }, producingIncome: true, movedBackInAt: { kind: "age", age: 43 } };
+    const out = projectPlan(withPpr(mr, 49)); // sold 8 years after moving out, but reoccupied at year 3
+    const saleY = out.yearly.findIndex((r) => r.properties.p1.saleProceeds > 0);
+    expect(out.yearly[saleY].properties.p1.saleGain).toBeCloseTo(0, 0);
+  });
+
+  it("an investment property's gain is fully taxable regardless of exemptProportion's own defaults (no mainResidence history to exempt)", () => {
+    const prop = { ...pprProp(null, 42), propertyType: "investment", rent: { amount: 20000, indexBasis: "none", indexExtraPct: 0 } };
+    const out = projectPlan({
+      ...mkState({
+        endAge: 50, start: { year: 2028, month: 7 },
+        assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 0 })],
+        plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+      }),
+      properties: [prop], liabilities: [],
+    });
+    const saleY = out.yearly.findIndex((r) => r.properties.p1.saleProceeds > 0);
+    expect(out.yearly[saleY].properties.p1.saleGain).toBeGreaterThan(0);
+  });
+
+  it("conservation holds for a scenario with a partially-exempt PPR sale", () => {
+    const mr = { movedOutAt: { kind: "age", age: 41 }, producingIncome: true, movedBackInAt: null };
+    const out = projectPlan(withPpr(mr, 49));
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `main residence fixture, year ${y}`);
+  });
+
+  it("regression gate: a ppr property with mainResidence:null behaves exactly as one with the field entirely absent", () => {
+    const withField = pprProp({ movedOutAt: null, producingIncome: false, movedBackInAt: null }, 42);
+    const { mainResidence, ...withoutField } = pprProp(null, 42);
+    const a = projectPlan({
+      ...mkState({ endAge: 50, start: { year: 2028, month: 7 }, assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc() })] }),
+      properties: [withField], liabilities: [],
+    });
+    const b = projectPlan({
+      ...mkState({ endAge: 50, start: { year: 2028, month: 7 }, assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc() })] }),
+      properties: [withoutField], liabilities: [],
+    });
     expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
   });
 });

@@ -779,6 +779,11 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
       enabled: false, at: null, agentFeesPct: 2.5, settlementCosts: 2000,
       proceedsDestination: "repayLoanThenAsset", assetId: null,
     },
+    // Main residence exemption and the six-year absence rule (spec 19
+    // Commit 5) — only meaningful for propertyType "ppr"; disabled by
+    // default (no absence, fully exempt, unchanged from before this
+    // commit — the regression gate).
+    mainResidence: { movedOutAt: null, producingIncome: false, movedBackInAt: null },
   };
 }
 
@@ -882,6 +887,33 @@ export function clampProperty(p, plan) {
     // second-stage check, same two-stage pattern as
     // depositFromEquitySourcePropertyId above.
     sale: clampPropertySale(p.sale, plan),
+    // Main residence exemption and the six-year absence rule (spec 19
+    // Commit 5) — meaningful only for a `ppr` property (an investment/
+    // holiday property is either fully assessable or, if it happens to
+    // have been someone's home before this projection starts, that
+    // history is out of scope — this tool only models an absence that
+    // starts DURING the projection). Only ONE moved-out/moved-back-in
+    // cycle is modelled — the spec's own disclosed limit (no successive
+    // absences); movedOutAt clamps within the CLIENT's age window like
+    // every other property date, movedBackInAt (when set) additionally
+    // can't precede movedOutAt.
+    mainResidence: propertyType === "ppr"
+      ? clampMainResidence(p.mainResidence, plan)
+      : { movedOutAt: null, producingIncome: false, movedBackInAt: null },
+  };
+}
+
+function clampMainResidence(mr, plan) {
+  const movedOutAt = mr?.movedOutAt == null ? null : clampDateRef(mr.movedOutAt, plan.client.currentAge, plan.endAge, plan);
+  let movedBackInAt = null;
+  if (movedOutAt && mr?.movedBackInAt != null) {
+    const movedOutAge = movedOutAt.kind === "age" ? movedOutAt.age : plan.client.currentAge;
+    movedBackInAt = clampDateRef(mr.movedBackInAt, movedOutAge, plan.endAge, plan);
+  }
+  return {
+    movedOutAt,
+    producingIncome: movedOutAt != null && mr?.producingIncome === true,
+    movedBackInAt,
   };
 }
 

@@ -675,6 +675,56 @@ export today, not through the input panel); the Cashflow table doesn't
 yet show sale proceeds as its own line, mirroring land tax's own
 Commit 2 gap.
 
+### Main residence exemption and the six-year absence rule (spec 19, Commit 5)
+`src/mainResidence.js`: a pure day-count module (`exemptProportion`) —
+never moved out ⇒ fully exempt; moved out but not producing income
+(vacant) ⇒ exempt indefinitely, no clock; moved out AND producing
+income (rented) ⇒ exempt for the absence's first six years, the
+remainder (up to reoccupation or the sale, whichever comes first)
+taxable at exempt-days/total-days. Only ONE moved-out/moved-back-in
+cycle is modelled — the spec's own disclosed limit (no successive
+absences, no choice between two properties, no home-office
+apportionment). Property gains a `mainResidence` object (movedOutAt,
+producingIncome, movedBackInAt), meaningful only for `propertyType:
+"ppr"`; `movedBackInAt` can't precede `movedOutAt` (input integrity).
+
+Engine: `isCgt` (deterministic.js) now also fires for a "ppr" property
+WITH an absence event, alongside every non-PPR property — the pool
+seeds and tracks exactly like an investment property's — but the
+exemption reduction (`exemptProportion`) is gated explicitly on
+`propertyType === "ppr"`, not just `isCgt`, since an ordinary
+investment/holiday property's gain must stay fully taxable regardless
+of `exemptProportion`'s own "never moved out ⇒ exempt" default (which
+assumes a PPR history a genuine investment property never had).
+DateRef-anchored events (movedOutAt/movedBackInAt/the sale itself)
+resolve to literal ISO calendar dates at 1 July of their resolved plan
+year — the same convention every other age-anchored one-off in this
+engine already uses — so the pure day-count module works on real
+dates, exactly like `Property.acquisitionDate` already does. A
+still-to-be-purchased property's own eventual purchase date stands in
+for its acquisitionDate (a purchased-then-vacated-then-sold PPR within
+the SAME projection gets a real ownership period, not a silent
+"fully exempt" default from a missing date).
+No new conservation term needed — this changes the SIZE of the
+existing property-sale CGT flow (Commit 4's own term), not its shape;
+verified directly (a dedicated "conservation holds" test) and via the
+existing property-sale randomised fuzz coverage, now also generating a
+PPR absence+sale about 30% of the time.
+A genuine, non-obvious interaction FOUND while testing (not a bug):
+crossing the 1 July 2027 deemed-reacquisition boundary resets a
+property's cost-base pool to its market value AT THAT DATE — for a
+property held flat-nominal (real value declining via CPI) across that
+boundary, the pool can end up ABOVE the eventual sale value, producing
+a genuine capital LOSS even though the nominal purchase price was much
+lower than the sale price. Correct, pre-existing engine behaviour (not
+new to this commit) — it just needed accounting for when hand-picking
+fixture dates that happened to straddle the boundary.
+Known gap, disclosed: no Focus view yet (the spec's own timeline bar +
+CGT-if-sold-by-year line + exempt-days table) — the underlying figures
+(`row.properties[pid].saleGain`, and `mainResidence.js`'s pure
+`exemptProportion` for a what-if year) are all available for one to be
+built from directly, same "engine first" scoping as Commits 2 and 4.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

@@ -55,6 +55,7 @@ import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { fhbgPriceCapExceeded } from "./data/fhbgCaps.js";
 import { landTaxOnValue } from "./data/landTax.js";
 import { etpRatesFor, redundancyTaxFreeAmount, etpTax } from "./data/etpRates.js";
+import { exemptProportion } from "./mainResidence.js";
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
 import { decomposeNetWorthChange } from "./conservationCheck.js";
@@ -298,18 +299,41 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     p.status === "owned" ? p.currentValue > 0 : p.priceToday > 0);
   const yearStartIdx = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
   const julyOf = (y) => (y === 0 ? (state.plan.start.month === 7 ? 0 : null) : yearStartIdx(y));
+  // Main residence exemption (spec 19 Commit 5) — resolves a
+  // mainResidence object's DateRef-anchored events to literal ISO
+  // calendar dates (1 July of each event's resolved plan year, the
+  // SAME "annual one-off fires in July" convention every age-anchored
+  // event in this engine already uses) so mainResidence.js's pure
+  // exemptProportion() can do its day-count arithmetic on real dates,
+  // exactly like Property.acquisitionDate already is.
+  const julyIsoOf = (planYear) => `${fy0 + planYear}-07-01`;
+  const resolveMainResidenceDates = (mr) => {
+    if (!mr?.movedOutAt) return null;
+    const movedOutAt = julyIsoOf(resolveRef(mr.movedOutAt, state.plan, schedule, "client").planYear);
+    const movedBackInAt = mr.movedBackInAt
+      ? julyIsoOf(resolveRef(mr.movedBackInAt, state.plan, schedule, "client").planYear)
+      : null;
+    return { movedOutAt, producingIncome: mr.producingIncome === true, movedBackInAt };
+  };
   const propMeta = {};
   const propVal = {};    // real value; 0 until purchased
   const derivedLoans = []; // purchase loans, activated at settlement
   for (const p of props) {
     const owned = p.status === "owned";
     let purchaseMonth = null;
+    let effectiveAcquisitionDate = p.acquisitionDate;
     if (!owned) {
       // Key Dates: resolved once here (not per month) — an anchor or
       // an explicit age both clamp into the projection window, so this
       // never needs a separate bounds check.
       const y = resolveRef(p.purchaseAt, state.plan, schedule, "client").planYear;
       purchaseMonth = julyOf(y); // null = never fires (convention 5's partial-year skip)
+      // Main residence exemption (spec 19 Commit 5) — a still-to-be-
+      // purchased property has no acquisitionDate yet; its own eventual
+      // purchase date stands in, so a purchased-then-vacated-then-sold
+      // PPR within the SAME projection still gets a real ownership
+      // period rather than silently defaulting to "fully exempt".
+      effectiveAcquisitionDate = julyIsoOf(y);
     }
     // Property sale (spec 19 Commit 4) — same "fires in July of its
     // resolved plan year" resolution as purchaseMonth above. A sale
@@ -337,7 +361,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       saleMonth,
       sale: p.sale,
       invest,
-      isCgt: p.propertyType !== "ppr", // PPR exempt — assessment skipped (disclosed)
+      // PPR is exempt UNLESS it has an absence event (spec 19 Commit 5 —
+      // main residence exemption / six-year rule): a "ppr" property the
+      // owner moved out of still needs its cost-base pool tracked, just
+      // like an investment property, so its gain (at eventual sale) can
+      // be assessed at a REDUCED (not necessarily zero) exempt
+      // proportion — see mainResidence.js and the sale block below.
+      isCgt: p.propertyType !== "ppr" || p.mainResidence?.movedOutAt != null,
+      mainResidence: p.mainResidence,
+      acquisitionDate: effectiveAcquisitionDate,
       newBuild: p.newBuild === true,
       grandfathered,
       rent: p.rent,
@@ -1429,6 +1461,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           propPools[pid] = newPool;
           const netGain = gain - agentFeesReal - settlementCostsReal;
           taxableGain = fyStart < 2027 ? preReformTaxableGain(netGain, newMoneyFraction) : netGain;
+          // Main residence exemption and the six-year absence rule
+          // (spec 19 Commit 5) — ONLY for a "ppr" property (an
+          // investment/holiday property's gain must stay fully taxable
+          // regardless of exemptProportion's own "never moved out ⇒
+          // exempt" default, which assumes a PPR history that doesn't
+          // exist for a property that was never anyone's home). Gated
+          // explicitly on propertyType, not just isCgt (true here for a
+          // ppr-with-absence for this exact reason, but ALSO true for
+          // every ordinary investment/holiday property). saleDate/
+          // acquisitionDate use the same "1 July of the resolved plan
+          // year" calendar-date convention the sale itself fires on.
+          if (propsById[pid].propertyType === "ppr") {
+            const saleDateISO = `${fyStart}-07-01`;
+            const proportion = exemptProportion(pm.acquisitionDate, saleDateISO, resolveMainResidenceDates(pm.mainResidence));
+            taxableGain *= (1 - proportion);
+          }
           for (const per of persons) {
             const s = pm.shares[per];
             if (s) acc[per].netCapitalGain += taxableGain * s;
