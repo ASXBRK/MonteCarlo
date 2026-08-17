@@ -17,6 +17,7 @@ const index = {
 const bare = (clientId, scenarioId) => ({ page: "workspace", clientId, scenarioId, area: null, section: null });
 const input = (clientId, scenarioId, section) => ({ page: "workspace", clientId, scenarioId, area: "input", section });
 const output = (clientId, scenarioId, section) => ({ page: "workspace", clientId, scenarioId, area: "output", section });
+const compare = (clientId, scenarioIds) => ({ page: "compare", clientId, scenarioIds });
 
 describe("parseRoute", () => {
   it("parses the clients and client route shapes", () => {
@@ -35,6 +36,18 @@ describe("parseRoute", () => {
       .toEqual(output("cl-1", "sc-2", "tax"));
   });
 
+  it("parses a compare route, including its scenario-id query list", () => {
+    expect(parseRoute("#/clients/cl-1/compare?s=sc-1,sc-2"))
+      .toEqual(compare("cl-1", ["sc-1", "sc-2"]));
+    expect(parseRoute("#/clients/cl-1/compare?s=sc-1,sc-2,sc-3"))
+      .toEqual(compare("cl-1", ["sc-1", "sc-2", "sc-3"]));
+  });
+
+  it("a compare route with a missing or empty s param parses to an empty scenario list", () => {
+    expect(parseRoute("#/clients/cl-1/compare")).toEqual(compare("cl-1", []));
+    expect(parseRoute("#/clients/cl-1/compare?s=")).toEqual(compare("cl-1", []));
+  });
+
   it("tolerates missing # and trailing slash", () => {
     expect(parseRoute("/clients/")).toEqual({ page: "clients" });
     expect(parseRoute("clients/cl-1")).toEqual({ page: "client", clientId: "cl-1" });
@@ -49,6 +62,7 @@ describe("parseRoute", () => {
     expect(parseRoute("#/clients/cl-1/scenarios/sc-1/deeper")).toBeNull();
     expect(parseRoute("#/clients/cl-1/scenarios/sc-1/bogusArea/setup")).toBeNull();
     expect(parseRoute("#/clients/cl-1/scenarios/sc-1/input/setup/extra")).toBeNull();
+    expect(parseRoute("#/clients/cl-1/compare/extra")).toBeNull();
   });
 
   it("round-trips through formatRoute, including encoding", () => {
@@ -58,6 +72,8 @@ describe("parseRoute", () => {
       bare("cl a", "sc/1"),
       input("cl-1", "sc-2", "liabilities"),
       output("cl-1", "sc-2", "assumptions"),
+      compare("cl-1", ["sc-1", "sc-2"]),
+      compare("cl a", ["sc/1", "sc 2"]),
     ]) {
       expect(parseRoute(formatRoute(r))).toEqual(r);
     }
@@ -81,6 +97,19 @@ describe("resolveRoute", () => {
     // sc-3 belongs to cl-2, not cl-1.
     expect(resolveRoute("#/clients/cl-1/scenarios/sc-3", index)).toBeNull();
     expect(resolveRoute("#/clients/cl-1/scenarios/sc-3/input/setup", index)).toBeNull();
+  });
+
+  it("accepts a compare route and keeps every scenario id belonging to that client", () => {
+    expect(resolveRoute("#/clients/cl-1/compare?s=sc-1,sc-2", index)).toEqual(compare("cl-1", ["sc-1", "sc-2"]));
+  });
+
+  it("a compare route drops unknown/stale scenario ids rather than rejecting the whole route", () => {
+    // sc-3 belongs to cl-2, not cl-1; "nope" doesn't exist at all.
+    expect(resolveRoute("#/clients/cl-1/compare?s=sc-1,sc-3,nope", index)).toEqual(compare("cl-1", ["sc-1"]));
+  });
+
+  it("rejects a compare route for an unknown client, same as any other page", () => {
+    expect(resolveRoute("#/clients/nope/compare?s=sc-1", index)).toBeNull();
   });
 
   it("an invalid section falls back to input/setup without rejecting the route", () => {
@@ -140,7 +169,7 @@ describe("known section/view ids", () => {
       "money-decomposition",
       "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "assumptions",
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
-      "focus-equity", "focus-transfer-schedule", "focus-compare-scenarios",
+      "focus-equity", "focus-transfer-schedule",
       "monte-carlo", "monte-carlo-table",
       "whatif-rate-shock", "whatif-crash", "whatif-income-gap", "whatif-expense-shock",
     ]);

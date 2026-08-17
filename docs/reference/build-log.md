@@ -908,6 +908,35 @@ This closes all three commits of docs/specs/15-input-usability.md.
   was asserting the loan should still exist after its own term ended).
   Docs: `docs/reference/demo-clients.md`.
 
+- **Scenario comparison moved to the client page (Spec 13 Commit 6
+  relocation).** Was a workspace Focus view (`focus-compare-scenarios`,
+  picker + everything on one page); now a client-level page
+  (`#/clients/<cid>/compare?s=<id>,<id>[,<id>]`, no input sidebar).
+  Selection happens on the client page itself: a "Compare" button
+  enters a checkbox selection mode on the scenario list (capped at
+  three), "Compare" navigates to the new route, "Cancel" backs out —
+  never a silent auto-pick. The comparison logic itself
+  (`scenarioComparison.js`'s `planWindowsMatch`/`keyFigureValuesAtYear`/
+  `keyFigureComparisonRows`) is unchanged — this was a relocation plus a
+  view selector, not a rewrite. The single "everything stacked on one
+  page" view became a View selector with 8 options: 6 charts (Net
+  assets, Cashflow surplus, Total assets, Total liabilities, Super
+  balance, Tax paid — each reading the exact field
+  `buildKeyFiguresGroups`' own rows read, never a second derivation) and
+  2 tables (Key figures, Snapshot rows, both byte-identical to the old
+  view's tables). PNG export for chart views; CSV + Copy for Word for
+  table views. `router.js` gained the `compare` route shape (query-
+  string scenario-id list, stale ids dropped rather than treated as
+  fatal — same non-rejecting treatment an invalid area/section already
+  gets); `focus-compare-scenarios` removed from `OUTPUT_VIEWS`/
+  `OUTPUT_NAV.Focus`. Fixed a latent bug surfaced by testing this
+  end-to-end: a scenario with no stored blob yet (the workspace's very
+  first bootstrap scenario, before anything triggers a save) silently
+  dropped out of the comparison instead of showing as the defaults it
+  actually is — `loadScenarioFullState` now falls back to
+  `defaultState()`, the same fallback `loadActiveState()` already uses
+  for the identical situation.
+
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with
 nominal rounding), then Division 296, then Monte Carlo over the full

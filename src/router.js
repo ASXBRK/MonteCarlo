@@ -4,6 +4,9 @@
 // Routes:
 //   #/clients                                        → Clients page
 //   #/clients/<id>                                   → Client page (their scenarios)
+//   #/clients/<cid>/compare?s=<id>,<id>[,<id>]        → Compare page (client-level,
+//                                                       no input sidebar — Spec 13 Commit 6
+//                                                       relocated here, see scenarioComparison.js)
 //   #/clients/<cid>/scenarios/<sid>                   → bare workspace route (caller
 //                                                       resolves the landing section)
 //   #/clients/<cid>/scenarios/<sid>/input/<section>   → an input fact-find page
@@ -22,7 +25,9 @@ export const OUTPUT_VIEWS = [
   "money-decomposition",                                                                                                                                      // Graphs (docs/specs/13-implementation-rates-equity-comparison.md, Commit 4)
   "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "assumptions",                                                             // Tables
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
-  "focus-equity", "focus-transfer-schedule", "focus-compare-scenarios",                                                                                       // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
+  "focus-equity", "focus-transfer-schedule",                                                                                                                  // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
+  // "focus-compare-scenarios" relocated to its own client-level Compare
+  // page (#/clients/<cid>/compare) — no longer a workspace output view.
   // What if (docs/specs/14-what-if.md) — "what if the world is different"
   // (uncontrolled shocks), as opposed to Focus's "what if I did something
   // different" (levers the client controls). Monte Carlo relocated here
@@ -37,6 +42,10 @@ export function formatRoute(route) {
   switch (route?.page) {
     case "client":
       return `#/clients/${encodeURIComponent(route.clientId)}`;
+    case "compare": {
+      const ids = (route.scenarioIds ?? []).map(encodeURIComponent).join(",");
+      return `#/clients/${encodeURIComponent(route.clientId)}/compare?s=${ids}`;
+    }
     case "workspace": {
       const base = `#/clients/${encodeURIComponent(route.clientId)}/scenarios/${encodeURIComponent(route.scenarioId)}`;
       if (route.area === "input" || route.area === "output") {
@@ -52,14 +61,23 @@ export function formatRoute(route) {
 // Structural parse only — no id/section validation beyond shape.
 // Returns null for anything that isn't one of the known route shapes.
 export function parseRoute(hash) {
-  const parts = String(hash ?? "")
-    .replace(/^#/, "")
+  const raw = String(hash ?? "").replace(/^#/, "");
+  const qi = raw.indexOf("?");
+  const pathPart = qi === -1 ? raw : raw.slice(0, qi);
+  const queryPart = qi === -1 ? "" : raw.slice(qi + 1);
+  const parts = pathPart
     .split("/")
     .filter(Boolean)
     .map((p) => { try { return decodeURIComponent(p); } catch { return p; } });
   if (parts[0] !== "clients") return null;
   if (parts.length === 1) return { page: "clients" };
   if (parts.length === 2) return { page: "client", clientId: parts[1] };
+  if (parts.length === 3 && parts[2] === "compare") {
+    const s = new URLSearchParams(queryPart).get("s") ?? "";
+    const scenarioIds = s.split(",").map((id) => id.trim()).filter(Boolean)
+      .map((id) => { try { return decodeURIComponent(id); } catch { return id; } });
+    return { page: "compare", clientId: parts[1], scenarioIds };
+  }
   if (parts.length === 4 && parts[2] === "scenarios") {
     return { page: "workspace", clientId: parts[1], scenarioId: parts[3], area: null, section: null };
   }
@@ -81,6 +99,14 @@ export function resolveRoute(hash, index) {
   const client = index.clients.find((c) => c.id === r.clientId);
   if (!client) return null;
   if (r.page === "client") return r;
+  if (r.page === "compare") {
+    // Unknown/stale scenario ids are dropped rather than treated as
+    // fatal — same non-rejecting treatment an invalid area/section
+    // gets below (the caller shows a "pick scenarios" state for < 2,
+    // never a redirect away from a client whose id IS valid).
+    const scenarioIds = r.scenarioIds.filter((id) => client.scenarios.some((s) => s.id === id));
+    return { ...r, scenarioIds };
+  }
   if (!client.scenarios.some((s) => s.id === r.scenarioId)) return null;
   if (r.area == null) return r; // bare — caller resolves the landing section
   const validSection =

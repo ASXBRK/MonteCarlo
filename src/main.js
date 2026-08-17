@@ -105,6 +105,7 @@ const els = {
   breadcrumb: $("breadcrumb"),
   pageClients: $("pageClients"),
   pageClient: $("pageClient"),
+  pageCompare: $("pageCompare"),
   pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
   taxDetailsSection: $("taxDetailsSection"),
@@ -193,7 +194,6 @@ const els = {
   viewFocusLookups: $("viewFocusLookups"),
   viewFocusEquity: $("viewFocusEquity"),
   viewFocusTransferSchedule: $("viewFocusTransferSchedule"),
-  viewFocusCompareScenarios: $("viewFocusCompareScenarios"),
   viewWhatIfRateShock: $("viewWhatIfRateShock"),
   viewWhatIfCrash: $("viewWhatIfCrash"),
   viewWhatIfIncomeGap: $("viewWhatIfIncomeGap"),
@@ -299,6 +299,7 @@ function navigate(route) {
 function showPage(name) {
   els.pageClients.hidden = name !== "clients";
   els.pageClient.hidden = name !== "client";
+  els.pageCompare.hidden = name !== "compare";
   els.pageWorkspace.hidden = name !== "workspace";
 }
 
@@ -320,8 +321,13 @@ function handleRoute() {
   // than rejected — normalise the visible URL to match, the same way
   // an invalid client/scenario id normalises to #/clients. A genuine
   // bare route (no area/section yet) formats back to the identical
-  // hash here, so this never fires for that case.
+  // hash here, so this never fires for that case. A compare route with
+  // stale scenario ids dropped gets the same treatment.
   if (route.page === "workspace" && route.area != null && formatRoute(route) !== location.hash) {
+    location.replace(formatRoute(route));
+    return;
+  }
+  if (route.page === "compare" && formatRoute(route) !== location.hash) {
     location.replace(formatRoute(route));
     return;
   }
@@ -330,6 +336,7 @@ function handleRoute() {
   showPage(route.page);
   if (route.page === "clients") { renderClientsPage(); return; }
   if (route.page === "client") { renderClientPage(route.clientId); return; }
+  if (route.page === "compare") { renderComparePage(route.clientId, route.scenarioIds); return; }
 
   // workspace
   if (mountedScenarioId !== route.scenarioId) mountWorkspace(route.clientId, route.scenarioId);
@@ -416,7 +423,8 @@ const OUTPUT_NAV = {
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
-    { id: "focus-compare-scenarios", label: "Compare scenarios" },
+    // Compare scenarios relocated to its own client-level Compare page
+    // (Clients > client > Compare) — no longer a workspace Focus view.
   ],
   // What if (docs/specs/14-what-if.md) — "what if the WORLD is
   // different" (uncontrolled shocks: rates, markets, inflation, income
@@ -838,9 +846,21 @@ els.pageClients.addEventListener("click", (e) => {
 
 // --- Client page (a client's scenarios) --------------------------------------
 
+// Compare-selection mode (client page) — module state so it survives
+// the re-renders a checkbox toggle triggers. Tracked per-client so
+// switching clients never carries a stale selection across.
+let compareSelectionMode = false;
+let compareSelectedIds = [];
+let compareModeClientId = null;
+
 function renderClientPage(clientId) {
   const client = findClient(workspace, clientId);
   if (!client) { location.replace("#/clients"); return; }
+  if (compareModeClientId !== clientId) {
+    compareModeClientId = clientId;
+    compareSelectionMode = false;
+    compareSelectedIds = [];
+  }
   renderBreadcrumb([
     { label: "Clients", href: "#/clients" },
     {
@@ -853,28 +873,52 @@ function renderClientPage(clientId) {
     },
   ]);
   const canDelete = client.scenarios.length > 1;
-  const rows = client.scenarios.map((s) => `
-    <div class="list-row list-row-scenario" data-id="${s.id}">
+  const canCompare = client.scenarios.length >= 2;
+  compareSelectedIds = compareSelectedIds.filter((id) => client.scenarios.some((s) => s.id === id));
+
+  const rows = client.scenarios.map((s) => {
+    const checkboxDisabled = !compareSelectedIds.includes(s.id) && compareSelectedIds.length >= 3;
+    return `
+    <div class="list-row ${compareSelectionMode ? "list-row-scenario-cmp" : "list-row-scenario"}" data-id="${s.id}">
+      ${compareSelectionMode ? `
+        <input type="checkbox" data-cmp-scenario="${s.id}"
+          ${compareSelectedIds.includes(s.id) ? "checked" : ""} ${checkboxDisabled ? "disabled" : ""} />
+      ` : ""}
       <a class="list-name" href="${formatRoute({ page: "workspace", clientId, scenarioId: s.id })}">${escapeHTML(s.name)}</a>
       <span class="list-meta">${fmtUpdated(s.updatedAt)}</span>
       <span class="list-actions">
+        ${compareSelectionMode ? "" : `
         <button class="btn-text" type="button" data-action="rename" data-id="${s.id}">Rename</button>
         <button class="btn-text" type="button" data-action="duplicate" data-id="${s.id}">Duplicate</button>
         <button class="btn-text" type="button" data-action="export" data-id="${s.id}">Export</button>
         <button class="btn-text list-danger" type="button" data-action="delete" data-id="${s.id}"
-                ${canDelete ? "" : "disabled"}>Delete</button>
+                ${canDelete ? "" : "disabled"}>Delete</button>`}
       </span>
     </div>
-  `).join("");
+  `;
+  }).join("");
+
+  const actionsHTML = compareSelectionMode
+    ? `
+      <span class="helper-text">${compareSelectedIds.length} selected (2–3)</span>
+      <button class="btn-text" type="button" data-action="confirm-compare" ${compareSelectedIds.length < 2 ? "disabled" : ""}>Compare</button>
+      <button class="btn-text" type="button" data-action="cancel-compare">Cancel</button>
+    `
+    : `
+      <button class="btn-text" type="button" data-action="new-scenario">+ New scenario</button>
+      <button class="btn-text" type="button" data-action="enter-compare" ${canCompare ? "" : "disabled"}
+              title="${canCompare ? "Select scenarios to compare" : "Add another scenario to compare"}">Compare</button>
+    `;
+
   els.pageClient.innerHTML = `
     <header class="page-head">
       <h1>Scenarios</h1>
-      <div class="page-actions">
-        <button class="btn-text" type="button" data-action="new-scenario">+ New scenario</button>
-      </div>
+      <div class="page-actions">${actionsHTML}</div>
     </header>
     <div class="list">
-      <div class="list-head list-head-scenario"><span>Name</span><span>Last updated</span><span></span></div>
+      <div class="list-head ${compareSelectionMode ? "list-head-scenario-cmp" : "list-head-scenario"}">
+        ${compareSelectionMode ? "<span></span>" : ""}<span>Name</span><span>Last updated</span><span></span>
+      </div>
       ${rows}
     </div>
   `;
@@ -934,7 +978,41 @@ els.pageClient.addEventListener("click", (e) => {
       renderClientPage(clientId);
       break;
     }
+    case "enter-compare": {
+      if (client.scenarios.length < 2) break;
+      compareSelectionMode = true;
+      compareSelectedIds = [];
+      renderClientPage(clientId);
+      break;
+    }
+    case "cancel-compare": {
+      compareSelectionMode = false;
+      compareSelectedIds = [];
+      renderClientPage(clientId);
+      break;
+    }
+    case "confirm-compare": {
+      if (compareSelectedIds.length < 2) break;
+      const scenarioIds = compareSelectedIds;
+      compareSelectionMode = false;
+      compareSelectedIds = [];
+      navigate({ page: "compare", clientId, scenarioIds });
+      break;
+    }
   }
+});
+
+els.pageClient.addEventListener("change", (e) => {
+  const cb = e.target.closest("[data-cmp-scenario]");
+  if (!cb) return;
+  const clientId = currentRoute?.clientId;
+  const id = cb.dataset.cmpScenario;
+  if (cb.checked) {
+    if (!compareSelectedIds.includes(id) && compareSelectedIds.length < 3) compareSelectedIds.push(id);
+  } else {
+    compareSelectedIds = compareSelectedIds.filter((x) => x !== id);
+  }
+  renderClientPage(clientId);
 });
 
 function findAsset(aid) {
@@ -5139,7 +5217,6 @@ const VIEW_MOUNTS = {
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
-  "focus-compare-scenarios": () => els.viewFocusCompareScenarios,
   "whatif-rate-shock": () => els.viewWhatIfRateShock,
   "whatif-crash": () => els.viewWhatIfCrash,
   "whatif-income-gap": () => els.viewWhatIfIncomeGap,
@@ -5193,7 +5270,6 @@ function renderActiveView() {
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
-  else if (activeView === "focus-compare-scenarios") renderFocusCompareScenariosView();
   else if (activeView === "whatif-rate-shock") renderWhatIfRateShockView();
   else if (activeView === "whatif-crash") renderWhatIfCrashView();
   else if (activeView === "whatif-income-gap") renderWhatIfIncomeGapView();
@@ -8784,27 +8860,52 @@ els.viewFocusTransferSchedule.addEventListener("click", (e) => {
   }
 });
 
-// --- Commit 6: Scenario comparison ------------------------------------------
+// --- Compare page (client-level; relocated from the Focus "Compare
+// scenarios" view — Spec 13 Commit 6) ----------------------------------
 //
 // "Current is simply another scenario — no new data model" (the spec's
-// own words). Every compared scenario is a full, independent
-// projectPlan() run — the active one reuses the SAME `state`/
-// `projection` every other view already reads (never re-hydrated or
-// re-run); every other scenario is loaded straight from storage
+// own words, unchanged by the relocation). Every compared scenario is
+// a full, independent projectPlan() run, loaded straight from storage
 // (loadScenarioFullState, the same hydrate() path loadActiveState()
-// itself uses) and run through the real engine, never approximated.
-// buildKeyFiguresGroups/incomeCategorySums/expenseCategorySums all
-// accept the {state, projection} ctx added above specifically so this
-// view reuses the EXACT SAME row definitions the Key figures table
-// itself uses — a comparison column can never silently drift from what
-// that scenario's own Key figures view would show.
-let compareScenarioIds = [];
+// itself uses) — never approximated, and NEVER assumed to be the
+// currently-mounted workspace scenario, since this page has no
+// workspace mounted at all (it's a client-level page, no input
+// sidebar). buildKeyFiguresGroups/keyFigureValuesAtYear/
+// keyFigureComparisonRows (scenarioComparison.js) are reused exactly
+// as the Key figures table itself uses them — a comparison column can
+// never silently drift from what that scenario's own Key figures view
+// would show. Scenario SELECTION happens on the client page (checkbox
+// picker, capped at 3); this page only ever reads the ids the URL
+// already carries.
 let compareYear = null;
+let compareSeries = "net-assets"; // a COMPARE_SERIES key (chart) or a COMPARE_TABLES key (table)
+
+// Each series reads a field the engine already computes per year — the
+// SAME fields buildKeyFiguresGroups' own rows read ("Total assets",
+// "Surplus / (deficit)", etc.) — never a second, independently-derived
+// figure.
+const COMPARE_SERIES = {
+  "net-assets": { label: "Net assets", fn: (row) => row.netAssets },
+  "cashflow-surplus": { label: "Cashflow surplus / (deficit)", fn: (row) => row.surplusOrDeficit },
+  "total-assets": { label: "Total assets", fn: (row) => row.closingBalance + row.propertyClosing + row.superClosing + row.wcaClosing },
+  "total-liabilities": { label: "Total liabilities", fn: (row) => row.liabilitiesClosing },
+  "super-balance": { label: "Super balance", fn: (row) => row.superClosing },
+  "tax-paid": { label: "Tax paid", fn: (row) => row.tax },
+};
+const COMPARE_TABLES = { "key-figures": "Key figures", snapshot: "Snapshot rows" };
 
 function loadScenarioFullState(scenarioId) {
   const blob = readRaw(scenarioKey(scenarioId));
-  if (!blob) return null;
-  return hydrate(blob, PROFILES);
+  if (blob) {
+    const s = hydrate(blob, PROFILES);
+    if (s) return s;
+  }
+  // No stored blob yet (e.g. the workspace's very first bootstrap
+  // scenario, before anything has triggered a save) or a corrupt one —
+  // same fallback loadActiveState() uses for the identical situation.
+  // Without this, an untouched scenario would silently drop out of the
+  // comparison instead of showing as the defaults it actually is.
+  return defaultState(PROFILES);
 }
 
 // Mirrors snapshotCtxFor(y) exactly, parameterized for an arbitrary
@@ -8821,12 +8922,11 @@ function snapshotCtxForScenario(s, p, y) {
   };
 }
 
-function loadComparisonScenarios() {
-  return compareScenarioIds.map((id) => {
-    const s = id === workspace.activeScenarioId ? state : loadScenarioFullState(id);
+function loadComparisonScenarios(scenarioIds) {
+  return scenarioIds.map((id) => {
+    const s = loadScenarioFullState(id);
     if (!s) return null;
-    const p = id === workspace.activeScenarioId ? projection : projectPlan(s, PROFILES);
-    return { id, state: s, projection: p };
+    return { id, state: s, projection: projectPlan(s, PROFILES) };
   }).filter(Boolean);
 }
 
@@ -8834,146 +8934,180 @@ function compareScenarioName(scenarios, id) {
   return scenarios.find((sc) => sc.id === id)?.name ?? id;
 }
 
-function renderFocusCompareScenariosView() {
-  const client = findActive(workspace).client;
-  const scenarios = client?.scenarios ?? [];
-  if (scenarios.length < 2) {
-    els.viewFocusCompareScenarios.innerHTML = focusEmptyStateHTML(
-      "Current vs proposed, side by side — add another scenario for this client (Clients page) to compare.", null
-    );
-    return;
-  }
-  // Drop any picks that no longer exist; if fewer than two remain,
-  // default to the active scenario plus the next one in the list —
-  // otherwise the adviser's own picks and order are preserved exactly
-  // (order matters: the FIRST pick is always the delta base).
-  compareScenarioIds = compareScenarioIds.filter((id) => scenarios.some((sc) => sc.id === id));
-  if (compareScenarioIds.length < 2) {
-    compareScenarioIds = scenarios.map((sc) => sc.id)
-      .sort((a, b) => (a === workspace.activeScenarioId ? -1 : b === workspace.activeScenarioId ? 1 : 0))
-      .slice(0, 2);
-  }
+function compareKeyFigureRows(loaded) {
+  const scenarioValues = loaded.map((l) =>
+    keyFigureValuesAtYear(buildKeyFiguresGroups({ state: l.state, projection: l.projection }), compareYear));
+  return keyFigureComparisonRows(scenarioValues);
+}
 
-  const pickerHTML = scenarios.map((sc) => `
-    <label class="cmp-picker-item">
-      <input type="checkbox" data-cmp-scenario="${sc.id}"
-        ${compareScenarioIds.includes(sc.id) ? "checked" : ""}
-        ${!compareScenarioIds.includes(sc.id) && compareScenarioIds.length >= 3 ? "disabled" : ""} />
-      ${escapeHTML(sc.name)}${sc.id === workspace.activeScenarioId ? ` <span class="helper-text">(current)</span>` : ""}
-    </label>
-  `).join("");
+function compareSnapshotColumns(loaded) {
+  return loaded.map((l) => {
+    const ctx = snapshotCtxForScenario(l.state, l.projection, compareYear);
+    const row = l.projection.yearly[compareYear];
+    return { y: compareYear, client: cashflowStatement(row, ctx, "client"), partner: null, total: cashflowStatement(row, ctx, null) };
+  });
+}
 
-  const loaded = loadComparisonScenarios();
-  let bodyHTML;
-  if (loaded.length < 2) {
-    bodyHTML = `<p class="helper-text">Pick at least two scenarios above to compare.</p>`;
-  } else {
-    const base = loaded[0];
-    const mismatched = loaded.slice(1).filter((l) => !planWindowsMatch(base.state.plan, l.state.plan));
-    if (mismatched.length > 0) {
-      const names = mismatched.map((m) => compareScenarioName(scenarios, m.id)).join(", ");
-      bodyHTML = `
-        <p class="helper-warning">
-          "${escapeHTML(compareScenarioName(scenarios, base.id))}" and "${escapeHTML(names)}" have different plan windows
-          (current age, start date, or end age) and can't be meaningfully compared on a single age axis — align
-          their Setup pages first, or pick different scenarios. Plan windows are never approximated to fit.
-        </p>`;
-    } else {
-      const years = base.projection.yearly.length;
-      if (compareYear == null || compareYear >= years) compareYear = 0;
-      const yearOptions = base.projection.yearly.map((_, y) =>
-        `<option value="${y}"${y === compareYear ? " selected" : ""}>${escapeHTML(fyShortLabel(firstFyStartYear(base.state.plan.start) + y))} (age ${base.projection.schedule.clientAges[y]})</option>`
-      ).join("");
-      const names = loaded.map((l) => compareScenarioName(scenarios, l.id));
+function compareKeyFiguresTableHTML(loaded, names) {
+  const comparisonRows = compareKeyFigureRows(loaded);
+  return `
+    <table class="tl">
+      <thead><tr>
+        <th class="tl-corner"></th>${names.map((n) => `<th class="tl-year">${escapeHTML(n)}</th>`).join("")}
+        ${names.slice(1).map((n) => `<th class="tl-year">Δ vs ${escapeHTML(names[0])}</th>`).join("")}
+      </tr></thead>
+      <tbody>
+        ${comparisonRows.map((r) => `
+          <tr>
+            <th class="tl-label">${escapeHTML(r.label)}</th>
+            ${r.values.map((v) => `<td class="tl-num">${v == null ? "–" : fmtLedgerCell(v)}</td>`).join("")}
+            ${r.deltas.map((d) => `<td class="tl-num">${d == null ? "–" : fmtLedgerCell(d)}</td>`).join("")}
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
 
-      const scenarioValues = loaded.map((l) =>
-        keyFigureValuesAtYear(buildKeyFiguresGroups({ state: l.state, projection: l.projection }), compareYear));
-      const comparisonRows = keyFigureComparisonRows(scenarioValues);
-      const keyFiguresTableHTML = `
-        <table class="tl">
-          <thead><tr>
-            <th class="tl-corner"></th>${names.map((n) => `<th class="tl-year">${escapeHTML(n)}</th>`).join("")}
-            ${names.slice(1).map((n) => `<th class="tl-year">Δ vs ${escapeHTML(names[0])}</th>`).join("")}
-          </tr></thead>
-          <tbody>
-            ${comparisonRows.map((r) => `
-              <tr>
-                <th class="tl-label">${escapeHTML(r.label)}</th>
-                ${r.values.map((v) => `<td class="tl-num">${v == null ? "–" : fmtLedgerCell(v)}</td>`).join("")}
-                ${r.deltas.map((d) => `<td class="tl-num">${d == null ? "–" : fmtLedgerCell(d)}</td>`).join("")}
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      `;
+// Snapshot rows, household total only — a disclosed simplification:
+// scenarios being compared can have different household compositions
+// (single vs couple), and a Client/Partner split interleaved across
+// 2-3 scenarios reads as noise; each scenario's own Snapshot view still
+// has the full split.
+function compareSnapshotTableHTML(loaded, names) {
+  const snapshotTable = buildSnapshotTable(compareSnapshotColumns(loaded), { hideEmptyRows: state.display.hideEmptyRows !== false });
+  let lastSection = null;
+  const body = snapshotTable.rows.map((r) => {
+    const sectionRow = r.section !== lastSection
+      ? `<tr class="tl-group"><th colspan="${names.length + 1}">${escapeHTML(r.section)}</th></tr>` : "";
+    lastSection = r.section;
+    const cells = r.cells.map((c) => `<td class="tl-num">${fmtLedgerCell(c.total)}</td>`).join("");
+    return sectionRow + `<tr class="${r.total ? "tl-total" : ""}"><th class="tl-label">${escapeHTML(r.label)}</th>${cells}</tr>`;
+  }).join("");
+  const head = `<tr><th class="tl-corner"></th>${names.map((n) => `<th class="tl-year">${escapeHTML(n)}</th>`).join("")}</tr>`;
+  return `<table class="tl"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
 
-      // Snapshot rows, household total only — a disclosed simplification:
-      // scenarios being compared can have different household
-      // compositions (single vs couple), and a Client/Partner split
-      // interleaved across 2-3 scenarios reads as noise; each
-      // scenario's own Snapshot view still has the full split.
-      const snapshotColumns = loaded.map((l) => {
-        const ctx = snapshotCtxForScenario(l.state, l.projection, compareYear);
-        const row = l.projection.yearly[compareYear];
-        return { y: compareYear, client: cashflowStatement(row, ctx, "client"), partner: null, total: cashflowStatement(row, ctx, null) };
-      });
-      const snapshotTable = buildSnapshotTable(snapshotColumns, { hideEmptyRows: state.display.hideEmptyRows !== false });
-      let lastSection = null;
-      const snapshotBody = snapshotTable.rows.map((r) => {
-        const sectionRow = r.section !== lastSection
-          ? `<tr class="tl-group"><th colspan="${names.length + 1}">${escapeHTML(r.section)}</th></tr>` : "";
-        lastSection = r.section;
-        const cells = r.cells.map((c) => `<td class="tl-num">${fmtLedgerCell(c.total)}</td>`).join("");
-        return sectionRow + `<tr class="${r.total ? "tl-total" : ""}"><th class="tl-label">${escapeHTML(r.label)}</th>${cells}</tr>`;
-      }).join("");
-      const snapshotHead = `<tr><th class="tl-corner"></th>${names.map((n) => `<th class="tl-year">${escapeHTML(n)}</th>`).join("")}</tr>`;
-
-      bodyHTML = `
-        <div class="focus-section">
-          <label>Compare at
-            <select id="compareYearSelect">${yearOptions}</select>
-          </label>
-        </div>
-        <div class="focus-section">
-          <h3>Net assets over time</h3>
-          <div id="compareNetAssetsChart"></div>
-        </div>
-        <div class="focus-section">
-          <h3>Key figures</h3>
-          <div class="tl-wrap">${keyFiguresTableHTML}</div>
-        </div>
-        <div class="focus-section">
-          <h3>Snapshot <span class="helper-text">(household total — see each scenario's own Snapshot view for the Client/Partner split)</span></h3>
-          <div class="tl-wrap"><table class="tl"><thead>${snapshotHead}</thead><tbody>${snapshotBody}</tbody></table></div>
-        </div>
-        <div class="focus-section">
-          <div class="output-actions">
-            <button class="btn-text" type="button" id="compareCopyBtn">Copy for Word</button>
-          </div>
-        </div>
-      `;
-    }
-  }
-
-  els.viewFocusCompareScenarios.innerHTML = `
-    <h2 class="section-heading">Compare scenarios</h2>
-    <p class="helper-text">Scenarios are independent copies — client facts entered in one aren't reflected in another.</p>
-    <div class="focus-panel">
-      <div class="focus-section">
-        <h3>Scenarios (2–3)</h3>
-        <div class="cmp-picker">${pickerHTML}</div>
+function compareExportActionsHTML() {
+  return `
+    <div class="focus-section">
+      <div class="output-actions">
+        <button class="btn-text" type="button" id="compareExportCsvBtn">Export CSV</button>
+        <button class="btn-text" type="button" id="compareCopyBtn">Copy for Word</button>
       </div>
-      ${bodyHTML}
     </div>
   `;
+}
 
-  if (loaded.length >= 2 && loaded.slice(1).every((l) => planWindowsMatch(loaded[0].state.plan, l.state.plan))) {
-    renderCompareNetAssetsChart(loaded, scenarios);
+function renderCompareBody(loaded, scenarios, base) {
+  const years = base.projection.yearly.length;
+  if (compareYear == null || compareYear >= years) compareYear = 0;
+  const names = loaded.map((l) => compareScenarioName(scenarios, l.id));
+
+  const seriesOptions = Object.entries(COMPARE_SERIES).map(([key, s]) =>
+    `<option value="${key}"${key === compareSeries ? " selected" : ""}>${escapeHTML(s.label)}</option>`).join("");
+  const tableOptions = Object.entries(COMPARE_TABLES).map(([key, label]) =>
+    `<option value="${key}"${key === compareSeries ? " selected" : ""}>${escapeHTML(label)} (table)</option>`).join("");
+  const isTable = compareSeries in COMPARE_TABLES;
+  const yearOptions = base.projection.yearly.map((_, y) =>
+    `<option value="${y}"${y === compareYear ? " selected" : ""}>${escapeHTML(fyShortLabel(firstFyStartYear(base.state.plan.start) + y))} (age ${base.projection.schedule.clientAges[y]})</option>`
+  ).join("");
+
+  let viewHTML;
+  if (!isTable) {
+    viewHTML = `
+      <div class="focus-section">
+        <h3>${escapeHTML(COMPARE_SERIES[compareSeries].label)} over time</h3>
+        <div id="compareChart"></div>
+      </div>
+      <div class="focus-section">
+        <div class="output-actions">
+          <button class="btn-text" type="button" id="compareExportPngBtn">Export PNG</button>
+        </div>
+      </div>
+    `;
+  } else {
+    const tableHTML = compareSeries === "key-figures"
+      ? compareKeyFiguresTableHTML(loaded, names)
+      : compareSnapshotTableHTML(loaded, names);
+    viewHTML = `
+      <div class="focus-section">
+        <label>Compare at <select id="compareYearSelect">${yearOptions}</select></label>
+      </div>
+      <div class="focus-section">
+        <h3>${escapeHTML(COMPARE_TABLES[compareSeries])}
+          ${compareSeries === "snapshot" ? `<span class="helper-text">(household total — see each scenario's own Snapshot view for the Client/Partner split)</span>` : ""}
+        </h3>
+        <div class="tl-wrap">${tableHTML}</div>
+      </div>
+      ${compareExportActionsHTML()}
+    `;
+  }
+
+  return `
+    <div class="focus-section">
+      <label>View
+        <select id="compareSeriesSelect">
+          <optgroup label="Chart">${seriesOptions}</optgroup>
+          <optgroup label="Table">${tableOptions}</optgroup>
+        </select>
+      </label>
+    </div>
+    ${viewHTML}
+  `;
+}
+
+function renderComparePage(clientId, scenarioIds) {
+  const client = findClient(workspace, clientId);
+  if (!client) { location.replace("#/clients"); return; }
+  renderBreadcrumb([
+    { label: "Clients", href: "#/clients" },
+    { label: client.name, href: formatRoute({ page: "client", clientId }) },
+    { label: "Compare" },
+  ]);
+
+  const scenarios = client.scenarios;
+  const loaded = scenarios.length >= 2 ? loadComparisonScenarios(scenarioIds) : [];
+  const mismatched = loaded.length >= 2 ? loaded.slice(1).filter((l) => !planWindowsMatch(loaded[0].state.plan, l.state.plan)) : [];
+
+  let bodyHTML;
+  if (scenarios.length < 2) {
+    bodyHTML = `<p class="helper-text">Add another scenario for this client to compare.</p>`;
+  } else if (loaded.length < 2) {
+    bodyHTML = `
+      <p class="helper-text">
+        Pick 2–3 scenarios to compare from the
+        <a href="${formatRoute({ page: "client", clientId })}">client page</a>.
+      </p>`;
+  } else if (mismatched.length > 0) {
+    const names = mismatched.map((m) => compareScenarioName(scenarios, m.id)).join(", ");
+    bodyHTML = `
+      <p class="helper-warning">
+        "${escapeHTML(compareScenarioName(scenarios, loaded[0].id))}" and "${escapeHTML(names)}" have different plan windows
+        (current age, start date, or end age) and can't be meaningfully compared on a single age axis — align
+        their Setup pages first, or pick different scenarios. Plan windows are never approximated to fit.
+      </p>`;
+  } else {
+    bodyHTML = renderCompareBody(loaded, scenarios, loaded[0]);
+  }
+
+  const pickedNames = loaded.map((l) => compareScenarioName(scenarios, l.id));
+  els.pageCompare.innerHTML = `
+    <header class="page-head"><h1>Compare scenarios</h1></header>
+    <p class="helper-text">
+      ${pickedNames.length ? `${escapeHTML(pickedNames.join(" vs "))} — ` : ""}scenarios are independent copies;
+      client facts entered in one aren't reflected in another.
+    </p>
+    <div class="focus-panel">${bodyHTML}</div>
+  `;
+
+  if (loaded.length >= 2 && mismatched.length === 0 && !(compareSeries in COMPARE_TABLES)) {
+    renderCompareChart(loaded, scenarios);
   }
 }
 
-function renderCompareNetAssetsChart(loaded, scenarios) {
-  const el = $("compareNetAssetsChart");
+function renderCompareChart(loaded, scenarios) {
+  const el = $("compareChart");
   if (!el) return;
   if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
   const ages = loaded[0].projection.schedule.clientAges;
@@ -8982,9 +9116,10 @@ function renderCompareNetAssetsChart(loaded, scenarios) {
   // shared global `displayFactor` would silently misconvert a scenario
   // whose CPI assumption differs from the active one.
   const factorFor = (s, y) => (isNominal() ? nominalFactor(endMonthOfYear(y), s.assumptions.cpi) : 1);
+  const seriesFn = COMPARE_SERIES[compareSeries].fn;
   const traces = loaded.map((l, i) => ({
     x: ages,
-    y: l.projection.yearly.map((row, y) => row.netAssets * factorFor(l.state, y)),
+    y: l.projection.yearly.map((row, y) => seriesFn(row) * factorFor(l.state, y)),
     name: compareScenarioName(scenarios, l.id),
     type: "scatter", mode: "lines",
     line: { color: palette[i % palette.length], width: 2 },
@@ -8997,109 +9132,106 @@ function renderCompareNetAssetsChart(loaded, scenarios) {
     legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
     xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
     yaxis: {
-      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      title: { text: `${COMPARE_SERIES[compareSeries].label} (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
       tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
     },
     font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
   }, { displayModeBar: false, responsive: true });
 }
 
-function compareScenariosToHTML(loaded, scenarios) {
+function compareTableToHTML(loaded, scenarios) {
   const names = loaded.map((l) => compareScenarioName(scenarios, l.id));
-  const scenarioValues = loaded.map((l) =>
-    keyFigureValuesAtYear(buildKeyFiguresGroups({ state: l.state, projection: l.projection }), compareYear));
-  const comparisonRows = keyFigureComparisonRows(scenarioValues);
-  const keyFiguresRows = comparisonRows.map((r) => `
-    <tr>
-      <td>${escapeHTML(r.label)}</td>
-      ${r.values.map((v) => `<td>${v == null ? "" : fmtMoney(v)}</td>`).join("")}
-      ${r.deltas.map((d) => `<td>${d == null ? "" : fmtMoney(d)}</td>`).join("")}
-    </tr>
-  `).join("");
-
-  const snapshotColumns = loaded.map((l) => {
-    const ctx = snapshotCtxForScenario(l.state, l.projection, compareYear);
-    const row = l.projection.yearly[compareYear];
-    return { y: compareYear, client: cashflowStatement(row, ctx, "client"), partner: null, total: cashflowStatement(row, ctx, null) };
-  });
-  const snapshotTable = buildSnapshotTable(snapshotColumns, { hideEmptyRows: state.display.hideEmptyRows !== false });
-  const snapshotHTML = snapshotToHTML(snapshotTable, names, false);
-
-  return `
-    <p><strong>Compare scenarios</strong></p>
-    <table border="1" cellspacing="0" cellpadding="4">
-      <tr><th>Key figure</th>${names.map((n) => `<th>${escapeHTML(n)}</th>`).join("")}${names.slice(1).map((n) => `<th>Δ vs ${escapeHTML(names[0])}</th>`).join("")}</tr>
-      ${keyFiguresRows}
-    </table>
-    <p><strong>Snapshot</strong></p>
-    ${snapshotHTML}
-  `;
-}
-
-function exportFocusCompareScenariosCSV() {
-  const client = findActive(workspace).client;
-  const scenarios = client?.scenarios ?? [];
-  const loaded = loadComparisonScenarios();
-  if (loaded.length < 2) return;
-  const base = loaded[0];
-  if (loaded.slice(1).some((l) => !planWindowsMatch(base.state.plan, l.state.plan))) return;
-  const names = loaded.map((l) => compareScenarioName(scenarios, l.id));
-
-  const lines = [["Key figure", ...names, ...names.slice(1).map(() => `Delta vs ${names[0]}`)].map(csvEsc).join(",")];
-  const scenarioValues = loaded.map((l) =>
-    keyFigureValuesAtYear(buildKeyFiguresGroups({ state: l.state, projection: l.projection }), compareYear));
-  for (const r of keyFigureComparisonRows(scenarioValues)) {
-    lines.push([r.label, ...r.values.map((v) => v ?? ""), ...r.deltas.map((d) => d ?? "")].map((v) => csvEsc(String(v))).join(","));
+  if (compareSeries === "key-figures") {
+    const rows = compareKeyFigureRows(loaded).map((r) => `
+      <tr>
+        <td>${escapeHTML(r.label)}</td>
+        ${r.values.map((v) => `<td>${v == null ? "" : fmtMoney(v)}</td>`).join("")}
+        ${r.deltas.map((d) => `<td>${d == null ? "" : fmtMoney(d)}</td>`).join("")}
+      </tr>
+    `).join("");
+    return `
+      <p><strong>Compare scenarios — Key figures</strong></p>
+      <table border="1" cellspacing="0" cellpadding="4">
+        <tr><th>Key figure</th>${names.map((n) => `<th>${escapeHTML(n)}</th>`).join("")}${names.slice(1).map((n) => `<th>Δ vs ${escapeHTML(names[0])}</th>`).join("")}</tr>
+        ${rows}
+      </table>
+    `;
   }
-  lines.push("");
-  const snapshotColumns = loaded.map((l) => {
-    const ctx = snapshotCtxForScenario(l.state, l.projection, compareYear);
-    const row = l.projection.yearly[compareYear];
-    return { y: compareYear, client: cashflowStatement(row, ctx, "client"), partner: null, total: cashflowStatement(row, ctx, null) };
-  });
-  const snapshotTable = buildSnapshotTable(snapshotColumns, { hideEmptyRows: state.display.hideEmptyRows !== false });
-  lines.push(snapshotToCSV(snapshotTable, names, false));
-  downloadCSV("compare-scenarios", lines);
+  const snapshotTable = buildSnapshotTable(compareSnapshotColumns(loaded), { hideEmptyRows: state.display.hideEmptyRows !== false });
+  return `<p><strong>Compare scenarios — Snapshot</strong></p>${snapshotToHTML(snapshotTable, names, false)}`;
 }
 
-els.viewFocusCompareScenarios.addEventListener("change", (e) => {
-  const cb = e.target.closest("[data-cmp-scenario]");
-  if (cb) {
-    const id = cb.dataset.cmpScenario;
-    if (cb.checked) {
-      if (!compareScenarioIds.includes(id) && compareScenarioIds.length < 3) compareScenarioIds.push(id);
-    } else {
-      compareScenarioIds = compareScenarioIds.filter((x) => x !== id);
+function exportComparePNG(client) {
+  const el = $("compareChart");
+  if (typeof Plotly === "undefined" || !el?.data) return;
+  Plotly.toImage(el, { format: "png", width: 1280, height: 640 }).then((dataUrl) => {
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `${sanitiseFilename(client.name)}-compare-${compareSeries}.png`;
+    a.click();
+  });
+}
+
+function exportCompareCSV(loaded, scenarios, client) {
+  const names = loaded.map((l) => compareScenarioName(scenarios, l.id));
+  const lines = [];
+  if (compareSeries === "key-figures") {
+    lines.push(["Key figure", ...names, ...names.slice(1).map(() => `Delta vs ${names[0]}`)].map(csvEsc).join(","));
+    for (const r of compareKeyFigureRows(loaded)) {
+      lines.push([r.label, ...r.values.map((v) => v ?? ""), ...r.deltas.map((d) => d ?? "")].map((v) => csvEsc(String(v))).join(","));
     }
-    renderFocusCompareScenariosView();
-    return;
+  } else {
+    const snapshotTable = buildSnapshotTable(compareSnapshotColumns(loaded), { hideEmptyRows: state.display.hideEmptyRows !== false });
+    lines.push(snapshotToCSV(snapshotTable, names, false));
   }
-  if (e.target.id === "compareYearSelect") {
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${sanitiseFilename(client.name)}-compare-${compareSeries}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+els.pageCompare.addEventListener("change", (e) => {
+  if (!currentRoute || currentRoute.page !== "compare") return;
+  if (e.target.id === "compareSeriesSelect") {
+    compareSeries = e.target.value;
+    renderComparePage(currentRoute.clientId, currentRoute.scenarioIds);
+  } else if (e.target.id === "compareYearSelect") {
     compareYear = Number(e.target.value);
-    renderFocusCompareScenariosView();
+    renderComparePage(currentRoute.clientId, currentRoute.scenarioIds);
   }
 });
 
-els.viewFocusCompareScenarios.addEventListener("click", (e) => {
-  if (e.target.id !== "compareCopyBtn") return;
-  const client = findActive(workspace).client;
-  const scenarios = client?.scenarios ?? [];
-  const loaded = loadComparisonScenarios();
+els.pageCompare.addEventListener("click", (e) => {
+  if (!currentRoute || currentRoute.page !== "compare") return;
+  const btn = e.target.closest("button[id^='compare']");
+  if (!btn) return;
+  const client = findClient(workspace, currentRoute.clientId);
+  if (!client) return;
+  const loaded = loadComparisonScenarios(currentRoute.scenarioIds);
   if (loaded.length < 2) return;
-  const html = compareScenariosToHTML(loaded, scenarios);
-  const plain = "Compare scenarios";
-  if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
-    navigator.clipboard.write([
-      new ClipboardItem({
-        "text/html": new Blob([html], { type: "text/html" }),
-        "text/plain": new Blob([plain], { type: "text/plain" }),
-      }),
-    ]).then(() => {
-      e.target.textContent = "Copied!";
-      setTimeout(() => { e.target.textContent = "Copy for Word"; }, 1500);
-    }).catch(() => window.alert("Couldn't access the clipboard — try again, or use Export CSV instead."));
-  } else {
-    window.alert("Clipboard access isn't available in this browser — use Export CSV instead.");
+  const scenarios = client.scenarios;
+  if (btn.id === "compareExportPngBtn") {
+    exportComparePNG(client);
+  } else if (btn.id === "compareExportCsvBtn") {
+    exportCompareCSV(loaded, scenarios, client);
+  } else if (btn.id === "compareCopyBtn") {
+    const html = compareTableToHTML(loaded, scenarios);
+    const plain = "Compare scenarios";
+    if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+      navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([plain], { type: "text/plain" }),
+        }),
+      ]).then(() => {
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = "Copy for Word"; }, 1500);
+      }).catch(() => window.alert("Couldn't access the clipboard — try again, or use Export CSV instead."));
+    } else {
+      window.alert("Clipboard access isn't available in this browser — use Export CSV instead.");
+    }
   }
 });
 
@@ -9886,7 +10018,6 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-lookups") exportFocusLookupsCSV();
   else if (activeView === "focus-equity") exportFocusEquityCSV();
   else if (activeView === "focus-transfer-schedule") exportFocusTransferScheduleCSV();
-  else if (activeView === "focus-compare-scenarios") exportFocusCompareScenariosCSV();
   else if (activeView === "whatif-rate-shock") exportWhatIfRateShockCSV();
   else if (activeView === "whatif-crash") exportWhatIfCrashCSV();
   else if (activeView === "whatif-income-gap") exportWhatIfIncomeGapCSV();

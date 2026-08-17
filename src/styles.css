@@ -511,6 +511,13 @@ html, body {
   grid-template-columns: 1fr 200px auto;
 }
 
+/* Compare selection mode (client page) — an extra checkbox column
+   ahead of the name. */
+.list-head-scenario-cmp,
+.list-row-scenario-cmp {
+  grid-template-columns: auto 1fr 200px auto;
+}
+
 .list-head {
   font-size: 11px;
   font-weight: 700;
