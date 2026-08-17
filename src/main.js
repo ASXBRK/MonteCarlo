@@ -129,6 +129,7 @@ const els = {
   sideNav: $("sideNav"),
   workspaceCanvas: document.querySelector(".workspace-canvas"),
   outputCanvas: $("outputCanvas"),
+  outputFormToggle: $("outputFormToggle"),
   exportBtn: $("exportBtn"),
   viewProjection: $("viewProjection"),
   viewCashflow: $("viewCashflow"),
@@ -389,25 +390,23 @@ const INPUT_NAV = [
   { id: "investment-cashflows", label: "Investment cashflows" },
   { id: "settings", label: "Settings" },
 ];
+// Navigation, View Consolidation, and Simple Charts (docs/specs/17-
+// navigation-and-charts.md), Commit 1 — one subject per row, each
+// carrying whichever of chart/table it supports (mirrors router.js's
+// OUTPUT_SUBJECT_FORMS exactly; kept as a separate literal here since
+// main.js also needs the label). "composite" and "money-decomposition"
+// fold into Projection's and Net worth's own chart selector (Commit 4)
+// rather than staying separate subjects.
 const OUTPUT_NAV = {
-  Graphs: [
+  Output: [
     { id: "projection", label: "Projection" },
-    { id: "cashflow-bars", label: "Cashflow" },
-    { id: "composite", label: "Cashflow, Assets & Liabilities" },
-    { id: "net-assets", label: "Net assets" },
-    { id: "asset-balances", label: "Asset balances" },
-    { id: "asset-allocation", label: "Asset allocation" },
-    { id: "super-balances", label: "Super balances" },
-    { id: "liabilities-balances", label: "Liabilities" },
-    { id: "money-decomposition", label: "Where the money went" },
-  ],
-  Tables: [
-    { id: "key-figures", label: "Key figures" },
     { id: "cashflow", label: "Cashflow" },
     { id: "assets", label: "Assets" },
-    { id: "tax", label: "Tax" },
-    { id: "super", label: "Super" },
     { id: "liabilities", label: "Liabilities" },
+    { id: "super", label: "Super" },
+    { id: "tax", label: "Tax" },
+    { id: "net-worth", label: "Net worth" },
+    { id: "allocation", label: "Allocation" },
     { id: "snapshot", label: "Snapshot" },
     { id: "assumptions", label: "Assumptions" },
   ],
@@ -447,6 +446,68 @@ const SECTION_LABELS = Object.fromEntries([
   ...Object.values(OUTPUT_NAV).flat().map((n) => [n.id, n.label]),
 ]);
 
+// Subject + form → the pre-spec-17 view id every render/export/mount
+// dispatcher below still keys on. Kept as a thin compatibility layer
+// deliberately: VIEW_MOUNTS, GRAPH_VIEWS, renderActiveView, and the
+// export dispatcher are all untouched by this consolidation — only the
+// SIDEBAR and ROUTE now address a subject rather than one of these
+// directly.
+const SUBJECT_FORM_VIEW = {
+  projection: { chart: "projection" },
+  cashflow: { chart: "cashflow-bars", table: "cashflow" },
+  assets: { chart: "asset-balances", table: "assets" },
+  liabilities: { chart: "liabilities-balances", table: "liabilities" },
+  super: { chart: "super-balances", table: "super" },
+  tax: { table: "tax" },
+  "net-worth": { chart: "net-assets", table: "key-figures" },
+  allocation: { chart: "asset-allocation" },
+  snapshot: { table: "snapshot" },
+  assumptions: { table: "assumptions" },
+};
+
+// The active Output subject (as opposed to `activeView`, the underlying
+// chart/table id) — set by showSection, read by the header's
+// chart/table toggle and its click handler.
+let activeOutputSubject = null;
+
+function outputFormsFor(subject) {
+  return SUBJECT_FORM_VIEW[subject] ? Object.keys(SUBJECT_FORM_VIEW[subject]) : [];
+}
+
+// Resolve which form a subject should show: an explicit route form
+// wins (a shared link), then the scenario's own remembered choice, then
+// the subject's first allowed form.
+function resolveOutputForm(subject, routeForm) {
+  const allowed = outputFormsFor(subject);
+  if (routeForm && allowed.includes(routeForm)) return routeForm;
+  const stored = state.display.outputForm?.[subject];
+  if (stored && allowed.includes(stored)) return stored;
+  return allowed[0];
+}
+
+// Chart/table toggle, in the view header (spec 17 Commit 1) — hidden
+// for a single-form subject rather than shown disabled.
+function renderOutputFormToggle() {
+  const forms = outputFormsFor(activeOutputSubject);
+  els.outputFormToggle.hidden = forms.length < 2;
+  if (forms.length < 2) return;
+  const active = resolveOutputForm(activeOutputSubject, currentRoute?.form);
+  const labels = { chart: "Chart", table: "Table" };
+  els.outputFormToggle.innerHTML = forms.map((f) => `
+    <button class="seg-option${f === active ? " active" : ""}" type="button"
+            role="tab" aria-selected="${f === active}" data-form="${f}">${labels[f]}</button>
+  `).join("");
+  els.outputFormToggle.onclick = (ev) => {
+    const btn = ev.target.closest("[data-form]");
+    if (!btn || btn.dataset.form === active) return;
+    const { client, scenario } = findActive(workspace);
+    navigate({
+      page: "workspace", clientId: client.id, scenarioId: scenario.id,
+      area: "output", section: activeOutputSubject, form: btn.dataset.form,
+    });
+  };
+}
+
 // Input Usability spec, Commit 2 — a section "has untouched fields" if
 // its (always-mounted) DOM contains at least one trackable control
 // whose path isn't in state.meta.touched yet. Read straight off the
@@ -482,10 +543,7 @@ function renderSideNav() {
     <div class="nav-group-label">Input</div>
     ${INPUT_NAV.map((n) => item(n)).join("")}
     <div class="nav-group-label">Output</div>
-    <div class="nav-subgroup-label">Graphs</div>
-    ${OUTPUT_NAV.Graphs.map((n) => item(n, true)).join("")}
-    <div class="nav-subgroup-label">Tables</div>
-    ${OUTPUT_NAV.Tables.map((n) => item(n, true)).join("")}
+    ${OUTPUT_NAV.Output.map((n) => item(n, true)).join("")}
     <div class="nav-subgroup-label">Focus</div>
     ${OUTPUT_NAV.Focus.map((n) => item(n, true)).join("")}
     <div class="nav-subgroup-label">What if</div>
@@ -512,7 +570,20 @@ function showSection(area, section) {
     el.hidden = el.dataset.section !== target;
   }
   if (area === "output") {
-    activeView = OUTPUT_VIEWS.includes(section) ? section : DEFAULT_OUTPUT_VIEW;
+    const subject = OUTPUT_VIEWS.includes(section) ? section : DEFAULT_OUTPUT_VIEW;
+    activeOutputSubject = subject;
+    const forms = SUBJECT_FORM_VIEW[subject];
+    if (forms) {
+      // A dual/single-form subject (spec 17 Commit 1) — resolve which
+      // form to show and remember it for next time, then map to the
+      // legacy view id every render/export/mount dispatcher still uses.
+      const form = resolveOutputForm(subject, currentRoute?.form);
+      state.display.outputForm = { ...state.display.outputForm, [subject]: form };
+      activeView = forms[form];
+    } else {
+      // Focus/What-if ids have no chart/table concept — pass through.
+      activeView = subject;
+    }
     renderActiveView();
   }
 }
@@ -5216,6 +5287,7 @@ function renderActiveView() {
   for (const [name, mount] of Object.entries(VIEW_MOUNTS)) {
     mount().hidden = name !== activeView;
   }
+  renderOutputFormToggle();
   els.exportBtn.textContent = GRAPH_VIEWS.has(activeView) ? "Export PNG" : "Export CSV";
   // Asset allocation is a pure mix (always 100%, whichever way you cut
   // it) — real vs nominal dollars has nothing to say about it, so the

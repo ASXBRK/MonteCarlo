@@ -27,7 +27,7 @@
 export const SCHEMA_VERSION = 17;
 
 import { remainingLE } from "./data/lifeTables.js";
-import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION } from "./router.js";
+import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION, OUTPUT_SUBJECT_FORMS } from "./router.js";
 import { isValidAnchorId } from "./keyDates.js";
 
 // --- id generation ---------------------------------------------------
@@ -1221,6 +1221,11 @@ export function defaultState(profiles = {}, now = new Date()) {
       chartTreatment: defaultChartTreatment(),
       hideEmptyRows: true,
       showIndividualCashflowItems: false,
+      // Navigation/charts spec (17), Commit 1 — which form (chart|table)
+      // each dual-form Output subject last showed, per scenario. Keyed
+      // by subject id; a subject with no entry falls back to its first
+      // allowed form (router.js's OUTPUT_SUBJECT_FORMS).
+      outputForm: {},
     },
     assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed", fhsssEarningsRate: 0.0794 },
     // A newly created scenario starts fully untouched — correct, since
@@ -1321,6 +1326,24 @@ export function clampChartTreatment(raw) {
     lifestyle: pick(raw?.lifestyle, d.lifestyle),
     liabilities: pick(raw?.liabilities, d.liabilities),
   };
+}
+
+// --- Output subject chart/table form (spec 17, Commit 1) ------------------
+//
+// Which form (chart|table) each dual-form Output subject last showed,
+// per scenario — display-level only, same "never touches engine output"
+// guarantee as chartTreatment above. A subject with no stored entry (or
+// a stale one from a form it no longer supports) falls back to its
+// first allowed form via OUTPUT_SUBJECT_FORMS (router.js) rather than
+// being dropped — an entry an old save can't produce should still
+// resolve to something sensible, not vanish silently.
+export function clampOutputForm(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [subject, allowed] of Object.entries(OUTPUT_SUBJECT_FORMS)) {
+    if (allowed.includes(raw[subject])) out[subject] = raw[subject];
+  }
+  return out;
 }
 
 // --- Snapshot view (Document Set Commit 7) ----------------------------
@@ -2355,6 +2378,7 @@ export function hydrate(json, profiles = {}) {
         hideEmptyRows: raw.display?.hideEmptyRows !== false,
         showIndividualCashflowItems: raw.display?.showIndividualCashflowItems === true,
         snapshotYears: clampSnapshotYears(raw.display?.snapshotYears, plan),
+        outputForm: clampOutputForm(raw.display?.outputForm),
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,

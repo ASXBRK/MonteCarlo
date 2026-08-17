@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseRoute, formatRoute, resolveRoute, activeRoute, initialRoute,
-  INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION, DEFAULT_OUTPUT_VIEW,
+  INPUT_SECTIONS, OUTPUT_VIEWS, OUTPUT_SUBJECT_FORMS, DEFAULT_INPUT_SECTION, DEFAULT_OUTPUT_VIEW,
 } from "./router.js";
 
 const index = {
@@ -16,7 +16,11 @@ const index = {
 
 const bare = (clientId, scenarioId) => ({ page: "workspace", clientId, scenarioId, area: null, section: null });
 const input = (clientId, scenarioId, section) => ({ page: "workspace", clientId, scenarioId, area: "input", section });
-const output = (clientId, scenarioId, section) => ({ page: "workspace", clientId, scenarioId, area: "output", section });
+const output = (clientId, scenarioId, section, form) => {
+  const r = { page: "workspace", clientId, scenarioId, area: "output", section };
+  if (form) r.form = form;
+  return r;
+};
 const compare = (clientId, scenarioIds) => ({ page: "compare", clientId, scenarioIds });
 
 describe("parseRoute", () => {
@@ -165,14 +169,82 @@ describe("known section/view ids", () => {
 
   it("exposes the output view list", () => {
     expect(OUTPUT_VIEWS).toEqual([
-      "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars",
-      "money-decomposition",
-      "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "assumptions",
+      "projection", "cashflow", "assets", "liabilities", "super", "tax", "net-worth", "allocation", "snapshot", "assumptions",
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
       "focus-equity", "focus-transfer-schedule",
       "monte-carlo", "monte-carlo-table",
       "whatif-rate-shock", "whatif-crash", "whatif-income-gap", "whatif-expense-shock",
     ]);
-    expect(DEFAULT_OUTPUT_VIEW).toBe("composite");
+    expect(DEFAULT_OUTPUT_VIEW).toBe("projection");
+  });
+
+  it("exposes which form(s) each Output subject supports", () => {
+    expect(OUTPUT_SUBJECT_FORMS).toEqual({
+      projection: ["chart"],
+      cashflow: ["chart", "table"],
+      assets: ["chart", "table"],
+      liabilities: ["chart", "table"],
+      super: ["chart", "table"],
+      tax: ["table"],
+      "net-worth": ["chart", "table"],
+      allocation: ["chart"],
+      snapshot: ["table"],
+      assumptions: ["table"],
+    });
+    // Focus/What-if ids have no chart/table concept.
+    expect(OUTPUT_SUBJECT_FORMS["focus-deposit"]).toBeUndefined();
+    expect(OUTPUT_SUBJECT_FORMS["monte-carlo"]).toBeUndefined();
+  });
+});
+
+// Navigation, View Consolidation, and Simple Charts (spec 17), Commit 1.
+describe("output subject+form routing", () => {
+  it("parses an explicit ?form= query on an output route", () => {
+    expect(parseRoute("#/clients/cl-1/scenarios/sc-2/output/cashflow?form=table"))
+      .toEqual({ page: "workspace", clientId: "cl-1", scenarioId: "sc-2", area: "output", section: "cashflow", form: "table" });
+  });
+
+  it("round-trips an output route carrying a form", () => {
+    const r = { page: "workspace", clientId: "cl-1", scenarioId: "sc-2", area: "output", section: "assets", form: "chart" };
+    expect(parseRoute(formatRoute(r))).toEqual(r);
+  });
+
+  it("an output route with no form omits it from formatRoute's query string", () => {
+    expect(formatRoute({ page: "workspace", clientId: "cl-1", scenarioId: "sc-2", area: "output", section: "tax" }))
+      .toBe("#/clients/cl-1/scenarios/sc-2/output/tax");
+  });
+
+  it("resolveRoute keeps a valid, subject-appropriate form", () => {
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/cashflow?form=table", index))
+      .toEqual(output("cl-1", "sc-2", "cashflow", "table"));
+  });
+
+  it("resolveRoute drops a form the subject doesn't support, leaving it for main.js to fill in", () => {
+    // "tax" is table-only.
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/tax?form=chart", index))
+      .toEqual(output("cl-1", "sc-2", "tax"));
+    // Garbage form value, same treatment.
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/cashflow?form=bogus", index))
+      .toEqual(output("cl-1", "sc-2", "cashflow"));
+  });
+
+  it("resolveRoute redirects a pre-spec-17 legacy id to its new subject+form home", () => {
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/cashflow-bars", index))
+      .toEqual(output("cl-1", "sc-2", "cashflow", "chart"));
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/key-figures", index))
+      .toEqual(output("cl-1", "sc-2", "net-worth", "table"));
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/asset-allocation", index))
+      .toEqual(output("cl-1", "sc-2", "allocation", "chart"));
+    // composite/money-decomposition fold into their new home's chart
+    // form until Commit 4 restores them as in-view chart options.
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/composite", index))
+      .toEqual(output("cl-1", "sc-2", "projection", "chart"));
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/money-decomposition", index))
+      .toEqual(output("cl-1", "sc-2", "net-worth", "chart"));
+  });
+
+  it("an explicit form on a legacy id overrides the legacy default", () => {
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/output/net-assets?form=table", index))
+      .toEqual(output("cl-1", "sc-2", "net-worth", "table"));
   });
 });

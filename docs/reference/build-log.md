@@ -280,6 +280,28 @@ occurrence. UI (Commit 2), outputs and a Focus view (Commit 3), and the
 non-deductible-first advice signal (Commit 4) are tracked in
 "Where we're going" below until they land.
 
+### Navigation and charts (spec 17, Commit 1 — Output subject views)
+The Graphs and Tables sidebar groups (17 entries) collapsed into one
+Output group of 10 subject views (Projection, Cashflow, Assets,
+Liabilities, Super, Tax, Net worth, Allocation, Snapshot, Assumptions),
+each carrying a chart/table toggle in its header where both forms exist.
+No engine change — a thin compatibility layer: the sidebar/route now
+address a canonical subject id, resolved (via `state.display.outputForm`,
+persisted per scenario like every other display-state field, or an
+explicit `?form=` query param for a shareable link) to the SAME
+pre-existing view id every render/export/mount dispatcher already keyed
+on, so none of the 16 individual chart/table render functions needed
+touching. Bookmarked pre-spec-17 links (`cashflow-bars`, `key-figures`,
+etc.) redirect to their new subject+form home rather than bouncing to
+Setup. Audit requested by the spec: the four chart/table pairs
+(cashflow-bars/cashflow, asset-balances/assets, liabilities-balances/
+liabilities, super-balances/super) and the net-assets/key-figures pair
+are format-splits of one subject, not duplicates — exactly the
+consolidation case, not a deletion case. `composite` and
+`money-decomposition` fold into Projection's and Net worth's own chart
+selector in Commit 4; until then they land on the plain chart form of
+their new home.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

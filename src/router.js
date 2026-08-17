@@ -18,12 +18,17 @@ export const INPUT_SECTIONS = [
 ];
 export const DEFAULT_INPUT_SECTION = "setup";
 
-// Output view ids are flat (not nested by Graphs/Tables group) — the
-// grouping is a sidebar presentation concern, not a routing one.
+// Output view ids are flat (not nested by group) — the grouping is a
+// sidebar presentation concern, not a routing one.
+//
+// Navigation, View Consolidation, and Simple Charts (docs/specs/17-
+// navigation-and-charts.md), Commit 1 — Graphs and Tables collapsed
+// into one Output group of SUBJECT views, each carrying whichever of
+// chart/table it supports (OUTPUT_SUBJECT_FORMS below). "composite" and
+// "money-decomposition" fold into Projection's and Net worth's own
+// chart selector (Commit 4) rather than staying separate subjects.
 export const OUTPUT_VIEWS = [
-  "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "super-balances", "liabilities-balances", "cashflow-bars",  // Graphs
-  "money-decomposition",                                                                                                                                      // Graphs (docs/specs/13-implementation-rates-equity-comparison.md, Commit 4)
-  "key-figures", "cashflow", "assets", "tax", "super", "liabilities", "snapshot", "assumptions",                                                             // Tables
+  "projection", "cashflow", "assets", "liabilities", "super", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
   "focus-equity", "focus-transfer-schedule",                                                                                                                  // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
   // "focus-compare-scenarios" relocated to its own client-level Compare
@@ -36,7 +41,42 @@ export const OUTPUT_VIEWS = [
   "monte-carlo", "monte-carlo-table",
   "whatif-rate-shock", "whatif-crash", "whatif-income-gap", "whatif-expense-shock",
 ];
-export const DEFAULT_OUTPUT_VIEW = "composite"; // the composite chart is the default Graphs view (D5)
+export const DEFAULT_OUTPUT_VIEW = "projection";
+
+// Which form(s) each Output subject supports — a subject absent here
+// (Focus/What-if ids) has no chart/table concept at all. The router
+// uses this only to validate/clamp an explicit `?form=` query value;
+// picking the REMEMBERED form when none is given is main.js's job
+// (state.display.outputForm), since the router has no access to it.
+export const OUTPUT_SUBJECT_FORMS = {
+  projection: ["chart"],
+  cashflow: ["chart", "table"],
+  assets: ["chart", "table"],
+  liabilities: ["chart", "table"],
+  super: ["chart", "table"],
+  tax: ["table"],
+  "net-worth": ["chart", "table"],
+  allocation: ["chart"],
+  snapshot: ["table"],
+  assumptions: ["table"],
+};
+
+// Pre-spec-17 flat Graphs/Tables ids — kept so a bookmarked or shared
+// link still lands on the right subject+form rather than bouncing to
+// Setup. "composite" and "money-decomposition" land on the plain chart
+// form of their new home until Commit 4 restores them as in-view chart
+// options.
+const LEGACY_OUTPUT_REDIRECTS = {
+  "cashflow-bars": { section: "cashflow", form: "chart" },
+  "asset-balances": { section: "assets", form: "chart" },
+  "liabilities-balances": { section: "liabilities", form: "chart" },
+  "super-balances": { section: "super", form: "chart" },
+  "net-assets": { section: "net-worth", form: "chart" },
+  "key-figures": { section: "net-worth", form: "table" },
+  "asset-allocation": { section: "allocation", form: "chart" },
+  "composite": { section: "projection", form: "chart" },
+  "money-decomposition": { section: "net-worth", form: "chart" },
+};
 
 export function formatRoute(route) {
   switch (route?.page) {
@@ -49,7 +89,11 @@ export function formatRoute(route) {
     case "workspace": {
       const base = `#/clients/${encodeURIComponent(route.clientId)}/scenarios/${encodeURIComponent(route.scenarioId)}`;
       if (route.area === "input" || route.area === "output") {
-        return `${base}/${route.area}/${encodeURIComponent(route.section ?? "")}`;
+        const path = `${base}/${route.area}/${encodeURIComponent(route.section ?? "")}`;
+        // The form query param makes a specific chart-or-table view of
+        // a subject shareable (spec 17 Commit 1) — only ever present
+        // for output routes, and only when the caller set one.
+        return route.area === "output" && route.form ? `${path}?form=${encodeURIComponent(route.form)}` : path;
       }
       return base; // bare — caller resolves the landing section
     }
@@ -82,7 +126,12 @@ export function parseRoute(hash) {
     return { page: "workspace", clientId: parts[1], scenarioId: parts[3], area: null, section: null };
   }
   if (parts.length === 6 && parts[2] === "scenarios" && (parts[4] === "input" || parts[4] === "output")) {
-    return { page: "workspace", clientId: parts[1], scenarioId: parts[3], area: parts[4], section: parts[5] };
+    const route = { page: "workspace", clientId: parts[1], scenarioId: parts[3], area: parts[4], section: parts[5] };
+    if (parts[4] === "output") {
+      const form = new URLSearchParams(queryPart).get("form");
+      if (form) route.form = form;
+    }
+    return route;
   }
   return null;
 }
@@ -109,11 +158,29 @@ export function resolveRoute(hash, index) {
   }
   if (!client.scenarios.some((s) => s.id === r.scenarioId)) return null;
   if (r.area == null) return r; // bare — caller resolves the landing section
-  const validSection =
-    (r.area === "input" && INPUT_SECTIONS.includes(r.section)) ||
-    (r.area === "output" && OUTPUT_VIEWS.includes(r.section));
-  if (!validSection) return { ...r, area: "input", section: DEFAULT_INPUT_SECTION };
-  return r;
+
+  if (r.area === "input") {
+    if (INPUT_SECTIONS.includes(r.section)) return r;
+    return { page: r.page, clientId: r.clientId, scenarioId: r.scenarioId, area: "input", section: DEFAULT_INPUT_SECTION };
+  }
+
+  // area === "output" — resolve a legacy (pre spec-17) id to its new
+  // subject+form home, then validate/clamp the form against what that
+  // subject actually supports. An unrecognised or absent form is left
+  // OFF the returned route: main.js applies the scenario's own
+  // remembered chart/table choice, which this pure router has no
+  // access to and shouldn't guess.
+  const legacy = LEGACY_OUTPUT_REDIRECTS[r.section];
+  const section = legacy ? legacy.section : r.section;
+  let form = r.form ?? legacy?.form;
+  if (!OUTPUT_VIEWS.includes(section)) {
+    return { page: r.page, clientId: r.clientId, scenarioId: r.scenarioId, area: "input", section: DEFAULT_INPUT_SECTION };
+  }
+  const allowedForms = OUTPUT_SUBJECT_FORMS[section]; // undefined for Focus/What-if ids — no chart/table concept
+  if (!allowedForms || !allowedForms.includes(form)) form = undefined;
+  const out = { page: r.page, clientId: r.clientId, scenarioId: r.scenarioId, area: "output", section };
+  if (form) out.form = form;
+  return out;
 }
 
 // The last active scenario's bare workspace route (caller resolves
