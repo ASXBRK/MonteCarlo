@@ -1097,6 +1097,48 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         if (dedArr && dedArr[m] > 0) acc[p].deductions += dedArr[m];
       }
 
+      // a-adjustments. Adjustment rows (spec 18, Commit 1) — resolved
+      // once per FY by schedule.js into a real-dollar amount, fired
+      // here in July like every other annual row. income.assessable/
+      // deductions are UNGATED (must feed the tax measurement pass,
+      // same reasoning as a-super-deduct/a-deductions above);
+      // income.nonTaxable/expenses feed household cash only (below);
+      // superContributions' balance credit stays row-gated, applied
+      // alongside the toConcessionalCap fills below. tax.* targets are
+      // applied by the caller, before either pass — see the per-year
+      // setup's own comment.
+      let adjIncomeCash = 0;
+      let adjExpenseCash = 0;
+      let adjSuperCashOut = 0;
+      if (m === julyOf(y)) {
+        for (const adj of schedule.adjustments ?? []) {
+          if (y < adj.fromYear || y > adj.toYear) continue;
+          const amt = adj.amountAtYear[y];
+          if (amt === 0) continue;
+          if (adj.target === "income.assessable") {
+            adjIncomeCash += amt;
+            // Owner is guaranteed valid by clampAdjustment in the
+            // normal path; guarded here too so a raw/malformed fixture
+            // (this codebase has plenty, see CLAUDE.md) can't crash the
+            // engine — the cash still arrives, only the tax-base
+            // attribution is skipped if there's nowhere to attribute it.
+            if (acc[adj.owner]) { acc[adj.owner].ordinary += amt; acc[adj.owner].incomeMonths.add(m); }
+          } else if (adj.target === "income.nonTaxable") {
+            adjIncomeCash += amt;
+          } else if (adj.target === "deductions") {
+            if (acc[adj.owner]) acc[adj.owner].deductions += amt;
+          } else if (adj.target === "expenses") {
+            adjExpenseCash += amt;
+          } else if (adj.target === "superContributions") {
+            // Only debit cash if the target account still exists —
+            // otherwise this would destroy money (cash leaves, nothing
+            // is credited anywhere). See the row-gated credit below for
+            // the matching guard on the other side of this transfer.
+            if (superIds.includes(adj.superAccountId)) adjSuperCashOut += amt;
+          }
+        }
+      }
+
       // a-super-credit. Superannuation grows like a financial asset
       // (net-of-earnings-tax rate), then receives contributions net of
       // the 15% contributions tax (concessional) or scaled by the
@@ -1195,6 +1237,31 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               if (fill.type === "personalDeductible") row.superDetail[fill.accountId].personalDeductible += fill.amount;
               else row.superDetail[fill.accountId].salarySacrifice += fill.amount;
             }
+          }
+          // Adjustment rows (spec 18, Commit 1) — superContributions:
+          // a synthetic contribution to a SPECIFIC account, credited
+          // the same shape a toConcessionalCap fill is (flat
+          // concessional tax rate). Disclosed simplification: unlike
+          // an ordinary contribution row, this does NOT check against
+          // the person's remaining concessional cap headroom — an
+          // override is entered deliberately, not capped a second time.
+          // The household cash side (adjSuperCashOut) is already
+          // folded into superContribCashOut below.
+          for (const adj of schedule.adjustments ?? []) {
+            if (adj.target !== "superContributions" || y < adj.fromYear || y > adj.toYear) continue;
+            const amt = adj.amountAtYear[y];
+            if (amt === 0) continue;
+            // Owner is derived from the ACCOUNT itself (not adj.owner)
+            // — the account is the source of truth, and this also
+            // doubles as the "does this account still exist" guard: a
+            // dangling/removed superAccountId (superMeta has no entry)
+            // credits nothing rather than crediting the wrong place.
+            const owner = superMeta[adj.superAccountId]?.owner;
+            if (!owner) continue;
+            const tax = amt * superOutcome[owner].contributionsTaxRate;
+            superBal[adj.superAccountId] += amt - tax;
+            row.superDetail[adj.superAccountId].contributions += amt;
+            row.superDetail[adj.superAccountId].contributionsTax += tax;
           }
         }
         // Explicit super withdrawals (Tier 1.2, Commit 3) — already
@@ -1555,7 +1622,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // cash income the same month it's resolved, exactly like an
       // explicit salary-sacrifice row already does upstream in
       // schedule.js (see a-super-fill above).
-      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner;
+      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
         if (own && own[m] > 0) {
@@ -1564,7 +1631,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         }
         if (fillSalarySacrifice[p] > 0) acc[p].ordinary -= fillSalarySacrifice[p];
       }
-      const exp = schedule.expenses[m];
+      const exp = schedule.expenses[m] + adjExpenseCash;
       const tax = (taxOut ? taxOut[m] : 0) + (m === first ? cgtDue : 0);
       // Personal deductible/non-deductible/spouse super contributions
       // (engine-correctness fix) are paid from household cash, exactly
@@ -1579,7 +1646,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       const superContribCashOut = superIds.reduce((s, id) => {
         const flows = schedule.superFlows[id];
         return s + (flows ? flows.personalDeductible[m] + flows.nonConcessional[m] : 0);
-      }, 0) + fillCashDebit;
+      }, 0) + fillCashDebit + adjSuperCashOut;
       // Adviser fees, outside-super cash (Implementation/Rates spec,
       // Commit 2) — UNGATED, exactly like exp/tax/superContribCashOut
       // above: this can force a deficit-funded asset sale (a real
@@ -2410,6 +2477,34 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // instead of being a fixed number for the life of the projection.
     const dependentChildren = dependentChildrenCountInFY(state.plan.children, fyStart);
 
+    // Adjustment rows (spec 18, Commit 1) — resolved once per FY,
+    // bucketed by person and by which mechanism applies. tax.withheld
+    // adjusts PAYG withheld only (below, where paygWithheld is
+    // computed) — meaningful ONLY for a person with employment income
+    // this FY, since only that branch has a withheld-vs-liability gap
+    // for a timing adjustment to net out through next July's refund/
+    // balancing settlement; a person with no employment income has no
+    // separate "withheld" concept to adjust (a disclosed no-op, not a
+    // silent leak — applying it as a permanent tax change instead would
+    // break the "nets to zero across the two years" guarantee that's
+    // the whole point of this target). tax.incomeTax/medicare/help/cgt
+    // are disclosed as ONE cash-debit mechanism: each overrides "how
+    // much tax this person actually pays this FY", applied below via
+    // the same PAYG-style spread every ordinary tax debit already
+    // uses — which specific line it's labelled against on screen is a
+    // display concern (Commit 2), not a distinct settlement mechanic.
+    const taxAdjustmentTotal = { client: 0, partner: 0 };
+    const withheldAdjustmentTotal = { client: 0, partner: 0 };
+    for (const adj of schedule.adjustments ?? []) {
+      if (y < adj.fromYear || y > adj.toYear) continue;
+      const amt = adj.amountAtYear[y];
+      if (amt === 0) continue;
+      if (adj.target === "tax.withheld") withheldAdjustmentTotal[adj.owner] += amt;
+      else if (adj.target === "tax.incomeTax" || adj.target === "tax.medicare" || adj.target === "tax.help" || adj.target === "tax.cgt") {
+        taxAdjustmentTotal[adj.owner] += amt;
+      }
+    }
+
     taxOutArr.fill(0, yearStart(y), yearEnd(y));
     for (const p of persons) {
       const a = assessPerson({
@@ -2464,7 +2559,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           taxProfile: state.plan[p]?.taxProfile ?? null,
           excessConcessionalContributions: 0,
         });
-        paygWithheld[p] = payg.netIncomeTax;
+        paygWithheld[p] = payg.netIncomeTax + withheldAdjustmentTotal[p];
         // Employer HELP withholding (also PAYG, same mechanism as
         // income tax): estimated on employment income alone — a real
         // payroll system has no visibility into the super/investment-
@@ -2487,6 +2582,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         newPendingRefund[p] = (paygWithheld[p] + helpWithheld[p] + mlsWithheld[p]) - (a.netIncomeTax + helpDue[p] + mlsDue[p]);
       } else {
         spreadTax(a.netIncomeTax + helpDue[p] + mlsDue[p], measured[p].incomeMonths, yearEnd(y) - 1);
+      }
+      // Adjustment rows (spec 18, Commit 1) — the tax.incomeTax/medicare/
+      // help/cgt leak, applied uniformly regardless of which branch
+      // above fired (see this block's own header comment).
+      if (taxAdjustmentTotal[p] !== 0) {
+        spreadTax(taxAdjustmentTotal[p], measured[p].incomeMonths, yearEnd(y) - 1);
       }
       helpBal[p] -= helpDue[p];
     }

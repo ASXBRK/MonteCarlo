@@ -30,6 +30,7 @@ import {
   createChild, createEducationBlock, childCurrentAgeInfo, dependentChildrenCountInFY,
   childEducationPlanYearBounds, normaliseChildren, flatEducationBlocks,
   createSurplusPeriod, legacySurplusPeriod, clampSurplusPeriod, normaliseSurplusPeriods,
+  ADJUSTMENT_TARGETS, createAdjustment, clampAdjustment, normaliseAdjustments,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -1688,5 +1689,92 @@ describe("Input integrity — unenterable states (audit Part C)", () => {
       s.plan, s.assets
     );
     expect(clamped.fundedFrom).toBe(assetId);
+  });
+});
+
+// Adjustment rows (spec 18, Commit 1).
+describe("Adjustment rows", () => {
+  const plan = clampPlan(couplePlan());
+  const superAccounts = [
+    { id: "su1", owner: "client", include: true },
+    { id: "su2", owner: "partner", include: true },
+  ];
+
+  it("createAdjustment defaults to a household expense adjustment covering the whole projection", () => {
+    const a = createAdjustment();
+    expect(a.target).toBe("expenses");
+    expect(a.owner).toBe("household");
+    expect(a.amount).toBe(0);
+    expect(a.note).toBe("");
+  });
+
+  it("an invalid target is dropped entirely, not coerced to a fallback", () => {
+    expect(clampAdjustment({ target: "not.a.real.target", amount: 500 }, plan)).toBeNull();
+    expect(clampAdjustment({ amount: 500 }, plan)).toBeNull();
+  });
+
+  it("expenses is always owner household, regardless of what was stored", () => {
+    const a = clampAdjustment({ target: "expenses", owner: "client", amount: 100, note: "test" }, plan);
+    expect(a.owner).toBe("household");
+  });
+
+  it("a person-scoped target defaults to client and accepts partner when one exists", () => {
+    const client = clampAdjustment({ target: "tax.incomeTax", amount: 500, note: "x" }, plan);
+    expect(client.owner).toBe("client");
+    const partner = clampAdjustment({ target: "tax.incomeTax", owner: "partner", amount: 500, note: "x" }, plan);
+    expect(partner.owner).toBe("partner");
+  });
+
+  it("a partner-owned adjustment falls back to client when the household has no partner", () => {
+    const single = clampPlan({ ...couplePlan(), household: "single", partner: null });
+    const a = clampAdjustment({ target: "income.assessable", owner: "partner", amount: 1000, note: "x" }, single);
+    expect(a.owner).toBe("client");
+  });
+
+  it("superContributions requires a real account and adopts that account's owner — dropped if the account doesn't exist", () => {
+    const valid = clampAdjustment(
+      { target: "superContributions", superAccountId: "su2", amount: 2000, note: "top-up" }, plan, { superAccounts }
+    );
+    expect(valid.owner).toBe("partner");
+    expect(valid.superAccountId).toBe("su2");
+    expect(clampAdjustment({ target: "superContributions", superAccountId: "nope", amount: 2000, note: "x" }, plan, { superAccounts }))
+      .toBeNull();
+    expect(clampAdjustment({ target: "superContributions", amount: 2000, note: "x" }, plan)).toBeNull();
+  });
+
+  it("a person-scoped adjustment's window anchors to that owner's own age, via ownerWindow", () => {
+    const win = ownerWindow(plan, "partner");
+    const a = clampAdjustment(
+      { target: "deductions", owner: "partner", amount: 1000, from: { kind: "age", age: win.from - 50 }, to: { kind: "age", age: win.to + 50 }, note: "x" },
+      plan
+    );
+    expect(a.from.age).toBe(win.from);
+    expect(a.to.age).toBe(win.to);
+  });
+
+  it("indexation clamps the same way every other cashflow row does — defaults to cpi, extra% bounded to [-10,10]", () => {
+    const a = clampAdjustment({ target: "expenses", amount: 100, indexBasis: "bogus", indexExtraPct: 999, note: "x" }, plan);
+    expect(a.indexBasis).toBe("cpi");
+    expect(a.indexExtraPct).toBe(10);
+  });
+
+  it("normaliseAdjustments drops invalid entries and keeps valid ones, tolerating a non-array input", () => {
+    expect(normaliseAdjustments(undefined, plan)).toEqual([]);
+    expect(normaliseAdjustments(null, plan)).toEqual([]);
+    const result = normaliseAdjustments([
+      { target: "expenses", amount: 100, note: "keep" },
+      { target: "bogus", amount: 100, note: "drop" },
+      { target: "superContributions", superAccountId: "nope", amount: 100, note: "drop" },
+    ], plan, { superAccounts });
+    expect(result).toHaveLength(1);
+    expect(result[0].note).toBe("keep");
+  });
+
+  it("ADJUSTMENT_TARGETS covers exactly the registry the spec names", () => {
+    expect(ADJUSTMENT_TARGETS).toEqual([
+      "income.assessable", "income.nonTaxable", "deductions",
+      "tax.incomeTax", "tax.withheld", "tax.medicare", "tax.help", "tax.cgt",
+      "expenses", "superContributions",
+    ]);
   });
 });

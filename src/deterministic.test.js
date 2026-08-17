@@ -2652,6 +2652,48 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // seeded at 0, per the FHSSS-release comment above) and the
     // plain-cash path get exercised over enough runs.
     const superAccountIds = superAccounts.map((sa) => sa.id);
+
+    // Adjustment rows (spec 18, Commit 1) — every registry target
+    // exercised, owner resolved per the target's own rule (household
+    // for expenses, the account's own owner for superContributions,
+    // client/partner otherwise), windows spanning random sub-ranges of
+    // the projection (including a same-year from/to and a dangling
+    // superAccountId when no super account exists this run — the
+    // engine must tolerate both). superContributions amounts are kept
+    // non-negative: unlike every other target, this one mutates a
+    // stateful BALANCE directly (not just a flow), and a large enough
+    // negative override could drive it below zero with no floor —
+    // realistically always a top-up, not a claw-back, so this is a
+    // deliberate scope choice, not a masked bug.
+    const ADJUSTMENT_TARGETS_FOR_TEST = [
+      "income.assessable", "income.nonTaxable", "deductions",
+      "tax.incomeTax", "tax.withheld", "tax.medicare", "tax.help", "tax.cgt",
+      "expenses", "superContributions",
+    ];
+    const adjustments = Array.from({ length: randInt(0, 3) }, (_, i) => {
+      const target = pick(ADJUSTMENT_TARGETS_FOR_TEST);
+      const fromAge = randInt(40, endAge);
+      const toAge = randInt(fromAge, endAge);
+      let owner = "client";
+      let superAccountId = null;
+      if (target === "expenses") {
+        owner = "household";
+      } else if (target === "superContributions") {
+        superAccountId = superAccountIds.length > 0 ? pick(superAccountIds) : "nonexistent";
+        const acct = superAccounts.find((sa) => sa.id === superAccountId);
+        owner = acct ? acct.owner : "client";
+      } else {
+        owner = couple ? pick(["client", "partner"]) : "client";
+      }
+      return {
+        id: `adj${i}`, target, owner, superAccountId,
+        label: "", amount: target === "superContributions" ? rand(0, 5000) : rand(-5000, 5000),
+        from: { kind: "age", age: fromAge }, to: { kind: "age", age: toAge },
+        indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: rand(0, 2),
+        note: "randomised test adjustment",
+      };
+    });
+
     const pickSuperTarget = () => (superAccountIds.length > 0 && Math.random() < 0.7 ? pick(superAccountIds) : null);
     const upfrontTotal = Math.random() < 0.5 ? rand(0, 30000) : 0;
     const upfrontSuperTarget = upfrontTotal > 0 ? pickSuperTarget() : null;
@@ -2678,7 +2720,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           household: couple ? "couple" : "single",
           client, partner, children,
           superAccounts, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
-          adviserFees,
+          adviserFees, adjustments,
         },
         cashflows: { income, expenses, superContributions },
         surplus,
@@ -5059,5 +5101,191 @@ describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, C
     // (raw JSON → hydrate()) reaches that same number, not just the
     // test helper's own shim.
     expect(hydratedOut.monthly.combined[12]).toBeCloseTo(100000 + 12000, -3);
+  });
+});
+
+// Adjustment Rows (docs/specs/18-adjustment-rows.md, Commit 1).
+describe("Adjustment rows (docs/specs/18-adjustment-rows.md, Commit 1)", () => {
+  const adj = (over = {}) => ({
+    id: "adj1", target: "expenses", owner: "household", label: "", amount: 0,
+    from: { kind: "anchor", anchorId: "start" }, to: { kind: "anchor", anchorId: "end" },
+    indexBasis: "cpi", indexExtraPct: 0, note: "test", superAccountId: null,
+    ...over,
+  });
+  // A single, zero-real-growth asset and enough income that the tests
+  // aren't accidentally exercising deficit-funding/unfunded-cashflow at
+  // the same time as the adjustment under test.
+  const adjState = (over = {}) => mkState({
+    endAge: 41,
+    assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() })],
+    cashflows: { income: [cf({ assetId: null, amount: 1000, toAge: 41 })] }, // ~$12,000/yr
+    ...over,
+  });
+
+  it("income.assessable adds to household cash AND to assessable income (a leak of none — it's income)", () => {
+    // Large enough to clear the tax-free threshold on its own — the
+    // shared adjState() baseline uses a raw cf() income row with no
+    // category, which schedule.js reads as cash but not assessable
+    // (this file's tests establish taxable income via employmentRow()
+    // instead where they need it), so baseline tax here is genuinely 0.
+    const withAdj = adjState({ plan: { adjustments: [adj({ target: "income.assessable", owner: "client", amount: 30000, indexBasis: "none" })] } });
+    const without = adjState();
+    const outWith = projectPlan(withAdj);
+    const outWithout = projectPlan(without);
+    expect(outWith.yearly[0].income - outWithout.yearly[0].income).toBeCloseTo(30000, 0);
+    expect(outWith.yearly[0].tax).toBeGreaterThan(outWithout.yearly[0].tax);
+  });
+
+  it("income.nonTaxable adds to household cash but not to assessable income (no extra tax)", () => {
+    const withAdj = adjState({ plan: { adjustments: [adj({ target: "income.nonTaxable", amount: 5000, indexBasis: "none" })] } });
+    const without = adjState();
+    const outWith = projectPlan(withAdj);
+    const outWithout = projectPlan(without);
+    expect(outWith.yearly[0].income - outWithout.yearly[0].income).toBeCloseTo(5000, 0);
+    expect(outWith.yearly[0].tax).toBeCloseTo(outWithout.yearly[0].tax, 0);
+  });
+
+  it("deductions reduces tax with no separate cash effect", () => {
+    // A genuinely taxable, NON-employment income baseline: an
+    // employment-income person's in-year tax is driven by a PAYG
+    // ESTIMATE that deliberately ignores deductions (matching a real
+    // payroll system, per deterministic.js's own comment) — a
+    // deduction there only shows up as a bigger refund the FOLLOWING
+    // July, not in this FY's own row.tax. otherTaxable income (e.g.
+    // interest/dividends) takes the smooth spreadTax path instead,
+    // where the true (deduction-reduced) liability IS this FY's cash.
+    const taxableState = (adjustments) => mkState({
+      endAge: 41,
+      cashflows: { income: [cf({
+        id: "i1", assetId: null, amount: 100000, frequency: "annual",
+        incomeType: "otherTaxable", toAge: 41,
+      })] },
+      plan: { adjustments },
+    });
+    const withAdj = projectPlan(taxableState([adj({ target: "deductions", owner: "client", amount: 5000, indexBasis: "none" })]));
+    const without = projectPlan(taxableState([]));
+    expect(withAdj.yearly[0].income).toBeCloseTo(without.yearly[0].income, 0);
+    expect(withAdj.yearly[0].tax).toBeLessThan(without.yearly[0].tax);
+  });
+
+  it("expenses is a pure household leak, owner forced to household regardless of what's stored", () => {
+    const withAdj = adjState({ plan: { adjustments: [adj({ target: "expenses", amount: 2000, indexBasis: "none" })] } });
+    const without = adjState();
+    const outWith = projectPlan(withAdj);
+    const outWithout = projectPlan(without);
+    expect(outWith.yearly[0].expenses - outWithout.yearly[0].expenses).toBeCloseTo(2000, 0);
+  });
+
+  it("tax.incomeTax/medicare/help/cgt each apply as an additional (signed) cash debit against total tax paid this FY", () => {
+    const more = adjState({ plan: { adjustments: [adj({ target: "tax.incomeTax", owner: "client", amount: 1000, indexBasis: "none" })] } });
+    const less = adjState({ plan: { adjustments: [adj({ target: "tax.medicare", owner: "client", amount: -300, indexBasis: "none" })] } });
+    const baseline = adjState();
+    const outMore = projectPlan(more);
+    const outLess = projectPlan(less);
+    const outBaseline = projectPlan(baseline);
+    expect(outMore.yearly[0].tax - outBaseline.yearly[0].tax).toBeCloseTo(1000, 0);
+    expect(outLess.yearly[0].tax - outBaseline.yearly[0].tax).toBeCloseTo(-300, 0);
+  });
+
+  it("tax.withheld is a timing change only: it nets to zero across the two years it straddles, for a person WITH employment income", () => {
+    const s = (adjustments) => mkState({
+      endAge: 42,
+      plan: { adjustments },
+      cashflows: { income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })] },
+    });
+    const withAdj = projectPlan(s([adj({ target: "tax.withheld", owner: "client", amount: 4000, indexBasis: "none", to: { kind: "age", age: 40 } })]));
+    const baseline = projectPlan(s([]));
+    // Positive amount = MORE withheld (spec: "positive increases the
+    // row") — more tax cash out THIS year, then a matching refund/
+    // balancing credit the following July.
+    const diffY0 = withAdj.yearly[0].tax - baseline.yearly[0].tax;
+    const diffY1 = withAdj.yearly[1].tax - baseline.yearly[1].tax;
+    expect(diffY0).toBeCloseTo(4000, 0);
+    expect(diffY0 + diffY1).toBeCloseTo(0, 0);
+  });
+
+  it("superContributions credits the SPECIFIC account net of contributions tax, debited from household cash — no cap check", () => {
+    // Enough income that the $3,000 contribution is genuinely
+    // affordable (not partly unfunded) — the household-cash assertion
+    // below is only meaningful once affordability isn't in question.
+    const withAdj = adjState({
+      cashflows: { income: [cf({ assetId: null, amount: 3000, toAge: 41 })] },
+      plan: {
+        superAccounts: [superAcct({ id: "su1", owner: "client" })],
+        adjustments: [adj({ target: "superContributions", owner: "client", superAccountId: "su1", amount: 3000, indexBasis: "none" })],
+      },
+    });
+    const without = adjState({
+      cashflows: { income: [cf({ assetId: null, amount: 3000, toAge: 41 })] },
+      plan: { superAccounts: [superAcct({ id: "su1", owner: "client" })] },
+    });
+    const outWith = projectPlan(withAdj);
+    const outWithout = projectPlan(without);
+    const su1 = outWith.yearly[0].superDetail.su1;
+    expect(su1.contributions).toBeCloseTo(3000, 0);
+    expect(su1.contributionsTax).toBeCloseTo(3000 * 0.15, 0);
+    // Credited in July, so the real-dollar closing balance also
+    // reflects a few months' CPI deflation on the flat-nominal net
+    // amount (zeroRealAlloc has no growth) — not exactly 3000*0.85.
+    expect(su1.closing).toBeCloseTo(3000 * 0.85, -3);
+    // adjState's default surplus mode ("spend") sweeps the whole WCA
+    // remainder to expenditure each FY-end, so wcaClosing is always ~0
+    // regardless of the adjustment — surplusSpent is the household-cash
+    // signal here: ~3,000 less gets swept to expenditure once that much
+    // was diverted to the super contribution instead.
+    expect(outWithout.yearly[0].surplusSpent - outWith.yearly[0].surplusSpent).toBeGreaterThan(2500);
+  });
+
+  it("dropped when the target references an account that no longer exists — never silently reassigned", () => {
+    // Raw state bypasses clampAdjustment (this describe block builds raw
+    // state directly, same as every other test in this file) — the
+    // ENGINE must also tolerate a dangling superAccountId gracefully
+    // (schedule.js resolves it regardless of whether planState.js's own
+    // clamp already dropped it), never crediting the wrong account.
+    const s = adjState({ plan: { adjustments: [adj({ target: "superContributions", superAccountId: "nope", amount: 3000, indexBasis: "none" })] } });
+    expect(() => projectPlan(s)).not.toThrow();
+  });
+
+  it("a time-limited adjustment applies only in its own window", () => {
+    const s = adjState({
+      endAge: 43,
+      plan: { adjustments: [adj({
+        // indexBasis "cpi" (constant real) — this test is about the
+        // window, not indexation (which has its own dedicated test).
+        target: "expenses", amount: 2000, indexBasis: "cpi",
+        from: { kind: "age", age: 41 }, to: { kind: "age", age: 41 },
+      })] },
+    });
+    const baseline = adjState({ endAge: 43 });
+    const out = projectPlan(s);
+    const base = projectPlan(baseline);
+    expect(out.yearly[0].expenses).toBeCloseTo(base.yearly[0].expenses, 0); // age 40 — before the window
+    expect(out.yearly[1].expenses - base.yearly[1].expenses).toBeCloseTo(2000, 0); // age 41 — inside it
+    expect(out.yearly[2].expenses).toBeCloseTo(base.yearly[2].expenses, 0); // age 42 — after it
+  });
+
+  it("indexation applies the same way every other cashflow row's does", () => {
+    const s = adjState({
+      endAge: 42,
+      plan: { adjustments: [adj({ target: "expenses", amount: 1000, indexBasis: "none" })] }, // fixed nominal -> decays in real terms
+    });
+    const out = projectPlan(s);
+    const base = adjState({ endAge: 42 });
+    const baseOut = projectPlan(base);
+    const y0 = out.yearly[0].expenses - baseOut.yearly[0].expenses;
+    const y1 = out.yearly[1].expenses - baseOut.yearly[1].expenses;
+    expect(y0).toBeCloseTo(1000, 0);
+    expect(y1).toBeLessThan(y0); // indexBasis "none" decays at CPI in real terms
+  });
+
+  it("a partial first year with no firing July skips the adjustment entirely, same as every other annual row", () => {
+    const s = adjState({
+      start: { year: 2026, month: 9 }, // starts after July -> year 0 has no firing July (convention 5)
+      plan: { adjustments: [adj({ target: "expenses", amount: 2000, indexBasis: "none" })] },
+    });
+    const base = adjState({ start: { year: 2026, month: 9 } });
+    const out = projectPlan(s);
+    const baseOut = projectPlan(base);
+    expect(out.yearly[0].expenses).toBeCloseTo(baseOut.yearly[0].expenses, 0);
   });
 });

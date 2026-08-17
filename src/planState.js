@@ -325,6 +325,7 @@ export function defaultPlan(now = new Date()) {
     adviserFees: defaultAdviserFees(),
     implementation: defaultImplementation(),
     children: [],
+    adjustments: [],
   };
 }
 
@@ -1561,10 +1562,17 @@ export function clampPlan(plan, profiles = {}) {
   // threshold is now derived per FY from each child's own DOB (see
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
-  return {
+  const planSoFar = {
     household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash, children,
     adviserFees, implementation,
   };
+  // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,
+  // since a person-scoped adjustment's window anchors to ownerWindow(),
+  // which needs the fully-resolved client/partner/endAge this function
+  // just finished computing; superContributions targets validate
+  // against superAccounts, already known above.
+  const adjustments = normaliseAdjustments(plan.adjustments, planSoFar, { superAccounts });
+  return { ...planSoFar, adjustments };
 }
 
 // --- Working Cash Account ---------------------------------------------------
@@ -2598,6 +2606,106 @@ function hydrateDeductionRows(arr, plan) {
     indexExtraPct: r.indexExtraPct,
     indexed: r.indexed,
   }, plan));
+}
+
+// --- Adjustment rows (spec 18) ---------------------------------------------
+//
+// Every Xtools display table carries editable override rows — the
+// adviser corrects the one number an imperfect engine got wrong,
+// instead of abandoning the tool. Deliberately narrow: a registry of
+// named ledger fields, not arbitrary paths, so the conservation
+// invariant stays tractable and the feature can't become a way to make
+// any number say anything. "expenses" is the only genuinely
+// household-level target (owner "household"); every other target is
+// person-scoped ("client" | "partner") and anchors to that person's
+// own age window, same as an income/deduction row.
+export const ADJUSTMENT_TARGETS = [
+  "income.assessable", "income.nonTaxable", "deductions",
+  "tax.incomeTax", "tax.withheld", "tax.medicare", "tax.help", "tax.cgt",
+  "expenses", "superContributions",
+];
+export const ADJUSTMENT_TARGET_LABELS = {
+  "income.assessable": "Assessable income",
+  "income.nonTaxable": "Non-taxable income",
+  deductions: "Deductions",
+  "tax.incomeTax": "Income tax",
+  "tax.withheld": "Tax withheld",
+  "tax.medicare": "Medicare levy",
+  "tax.help": "HELP repayment",
+  "tax.cgt": "CGT",
+  expenses: "Expenses",
+  superContributions: "Super contributions",
+};
+const ADJUSTMENT_HOUSEHOLD_TARGETS = new Set(["expenses"]);
+
+export function createAdjustment(over = {}) {
+  return {
+    id: uid("adj"),
+    target: "expenses",
+    owner: "household",
+    label: "",
+    amount: 0,
+    from: anchorRef("start"),
+    to: anchorRef("end"),
+    indexBasis: "none",
+    indexExtraPct: 0,
+    note: "",
+    // Only meaningful (and only clamped/validated) when target is
+    // "superContributions" — spec's "per account" — null otherwise.
+    superAccountId: null,
+    ...over,
+  };
+}
+
+// Dropped entirely (never coerced to a fallback) when it can't resolve
+// to somewhere real — an adjustment landing on nothing would silently
+// misstate the projection, the same "unenterable state" reasoning
+// clampAllocationEntry already applies to a surplus destination.
+// `ctx.superAccounts` supplies the account list for the
+// superContributions target's per-account validation.
+export function clampAdjustment(raw, plan, ctx = {}) {
+  const target = ADJUSTMENT_TARGETS.includes(raw?.target) ? raw.target : null;
+  if (!target) return null;
+
+  let owner;
+  let superAccountId = null;
+  if (ADJUSTMENT_HOUSEHOLD_TARGETS.has(target)) {
+    owner = "household";
+  } else if (target === "superContributions") {
+    const acct = (ctx.superAccounts ?? []).find((s) => s.id === raw?.superAccountId);
+    if (!acct) return null; // no account to adjust — nothing to enter
+    owner = acct.owner;
+    superAccountId = acct.id;
+  } else {
+    owner = raw?.owner === "partner" && plan.partner ? "partner" : "client";
+  }
+
+  const win = owner === "household"
+    ? { from: plan.client.currentAge, to: plan.endAge }
+    : ownerWindow(plan, owner);
+  const { from, to } = clampFromTo(raw, win.from, win.to, plan);
+
+  return {
+    id: typeof raw?.id === "string" && raw.id ? raw.id : uid("adj"),
+    target,
+    owner,
+    superAccountId,
+    label: typeof raw?.label === "string" ? raw.label.slice(0, 200) : "",
+    amount: Number.isFinite(Number(raw?.amount)) ? Number(raw.amount) : 0,
+    from, to,
+    ...clampIndexation(raw),
+    // Required — "an unexplained override is worse than none" (spec).
+    // A missing note doesn't drop the adjustment (that would silently
+    // discard a real edit); it's surfaced as a validation gap for the
+    // UI to block saving/highlight instead (Commit 2's concern).
+    note: typeof raw?.note === "string" ? raw.note.slice(0, 2000) : "",
+  };
+}
+
+export function normaliseAdjustments(raw, plan, ctx = {}) {
+  return (Array.isArray(raw) ? raw : [])
+    .map((a) => clampAdjustment(a, plan, ctx))
+    .filter(Boolean);
 }
 
 // --- derived summaries ---------------------------------------------------

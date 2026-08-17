@@ -361,6 +361,42 @@ needs spec 16's own Commit 3 first. No engine change; the four existing
 charts folded into these two selectors needed no changes at all (same
 compatibility-layer ids Commit 1 established).
 
+### Adjustment rows (spec 18, Commit 1 — model and engine)
+`plan.adjustments`: a narrow registry (10 targets — income.assessable/
+nonTaxable, deductions, tax.incomeTax/withheld/medicare/help/cgt,
+expenses, superContributions), each a signed real-$ amount over a
+DateRef window with required indexation and note. `expenses` is the
+only household-owned target; every other target anchors to its owner's
+own age window (ownerWindow, same as an income/deduction row);
+superContributions resolves its owner from the target ACCOUNT, not the
+stored value, and is dropped entirely if the account doesn't exist —
+same "unenterable state" principle as a surplus-allocation destination.
+Engine: schedule.js resolves each adjustment's bounds AND its indexed
+real-dollar amount per FY (the same convention every other row's
+indexation already follows there, not deferred to deterministic.js);
+deterministic.js applies income/deductions/expenses/superContributions
+inside the FY's July month (ungated where they must feed the tax
+measurement pass), and folds tax.incomeTax/medicare/help/cgt into the
+SAME PAYG-style spread every ordinary tax debit already uses — a
+disclosed simplification: which specific line an amount is labelled
+against is a display concern (Commit 2), not a distinct settlement
+mechanic today. `tax.withheld` adjusts PAYG withheld only (adding to
+`paygWithheld`, before both the in-year debit and the following-July
+refund/balancing settlement read it) — this makes "nets to zero across
+the two years it straddles" fall out of the EXISTING refund mechanism
+with no new code, but is a genuine no-op for a person with no
+employment income this FY (no separate withheld-vs-liability gap
+exists there to adjust), disclosed rather than silently reinterpreted.
+Every target reuses an EXISTING reported ledger field (row.income,
+row.expenses, row.tax, row.superDetail[*].contributionsTax) rather than
+inventing a new pocket, so the conservation invariant needed no new
+named term — verified, not assumed: `randomScenario()` now generates
+every target (owners, windows, and — for superContributions — a
+dangling account id) and the existing invariant holds across hundreds
+of randomised runs unchanged. Regression gate: a scenario with no
+adjustments is bit-identical (the array is empty by default and every
+new term evaluates to zero).
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

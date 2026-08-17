@@ -112,7 +112,7 @@ export function nominalFactor(m, cpi) {
 // CPI+0 → constant real; None+0 → decays at CPI (fixed nominal);
 // AWOTE-linked rows grow in real terms. Rows carrying only the pre-D1
 // `indexed` flag fall back to its CPI/None equivalents.
-function realAmountAt(row, m, cpi, awote) {
+export function realAmountAt(row, m, cpi, awote) {
   let basis = row.indexBasis;
   if (basis == null) basis = row.indexed === false ? "none" : "cpi";
   const basisRate = basis === "awote" ? awote : basis === "cpi" ? cpi : 0;
@@ -651,6 +651,29 @@ export function buildSchedules(state) {
     toYear: resolveRef(p.to, plan, dateSchedule, "client").planYear,
   }));
 
+  // Adjustment rows (spec 18, Commit 1) — resolved into bounds AND the
+  // per-FY real-dollar amount, unlike surplus periods above: an
+  // adjustment IS a dollar amount over time (same shape as an income/
+  // expense row), so it follows the SAME convention every other row's
+  // indexation already does here, rather than deferring the arithmetic
+  // to deterministic.js. Fires once, in July, like every other annual
+  // row — julyMonthIndex returns null for a partial first year that
+  // doesn't start in July (convention 5), so that FY is silently
+  // skipped, matching every other annual flow.
+  const rawAdjustments = Array.isArray(plan.adjustments) ? plan.adjustments : [];
+  const adjustments = rawAdjustments.map((a) => {
+    const anchorOwner = a.owner === "partner" ? "partner" : "client";
+    const fromYear = resolveRef(a.from, plan, dateSchedule, anchorOwner).planYear;
+    const toYear = resolveRef(a.to, plan, dateSchedule, anchorOwner).planYear;
+    const amountAtYear = new Float64Array(planYears);
+    for (let y = Math.max(0, fromYear); y <= Math.min(planYears - 1, toYear); y++) {
+      const jm = julyMonthIndex(plan, y);
+      if (jm == null) continue;
+      amountAtYear[y] = realAmountAt(a, jm, cpi, awote);
+    }
+    return { ...a, fromYear, toYear, amountAtYear };
+  });
+
   return {
     months,
     planYears,
@@ -669,6 +692,7 @@ export function buildSchedules(state) {
     fhsssFlows,
     toConcessionalCapRows,
     surplusPeriods,
+    adjustments,
     superWarnings,
     rowTotals,
     oneOffsByAssetYear,
