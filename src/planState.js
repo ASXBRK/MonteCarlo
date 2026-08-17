@@ -1169,6 +1169,10 @@ export function createSuperAccount(plan, existing = [], profiles = {}, owner = "
     allocation: { mode: "profile", profile: middleProfile },
     icrPct: 0,
     include: true,
+    // Insurance premiums inside super (spec 19 Commit 7) — default CPI
+    // + 3% (the spec's own instruction: premiums typically rise faster
+    // than CPI with age), visible and editable, not buried.
+    insurancePremium: { amount: 0, indexBasis: "cpi", indexExtraPct: 3 },
   };
 }
 
@@ -1185,7 +1189,17 @@ export function clampSuperAccount(sa, plan, profiles = {}) {
     allocation: clampAllocation(sa.allocation, profiles),
     icrPct: clampNumber(sa.icrPct, 0, 100),
     include: sa.include !== false,
+    insurancePremium: clampInsurancePremium(sa.insurancePremium),
   };
+}
+
+function clampInsurancePremium(ip) {
+  const basis = INDEX_BASES.includes(ip?.indexBasis) ? ip.indexBasis : "cpi";
+  // Default +3% (not the general clampIndexation default of 0) — the
+  // spec's own instruction: premiums typically rise faster than CPI
+  // with age.
+  const extra = ip?.indexExtraPct == null ? 3 : clampNumber(ip.indexExtraPct, -10, 10);
+  return { amount: clampNumber(ip?.amount, 0), indexBasis: basis, indexExtraPct: extra };
 }
 
 export function normaliseSuperAccounts(accounts, plan, profiles = {}) {

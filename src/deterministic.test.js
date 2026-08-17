@@ -2551,6 +2551,12 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // half zero-balance — exercises the FHSSS release cap / withdrawFromSuper
       // shortfall path, which a uniform draw over (0, 200000) rarely hits exactly.
       id: `su_${p}`, owner: p, balance: pick([0, rand(0, 200000)]), allocation: randomAllocation(),
+      // Insurance premiums inside super (spec 19 Commit 7) — sometimes
+      // active, sometimes larger than a low starting balance can sustain
+      // (exercising withdrawFromSuper's own floor-at-zero convention).
+      insurancePremium: Math.random() < 0.5
+        ? { amount: rand(200, 3000), indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: rand(0, 5) }
+        : { amount: 0, indexBasis: "cpi", indexExtraPct: 3 },
     }));
 
     // Redundancy and ETP (spec 19 Commit 3) — sometimes one person's
@@ -5951,5 +5957,58 @@ describe("Spouse contributions, co-contribution and LISTO (spec 19 Commit 6)", (
     const b = projectPlan(JSON.parse(JSON.stringify(s)));
     expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
     expect(a.yearly[0].superDetail.su1.govSuperInflow).toBe(0);
+  });
+});
+
+describe("Insurance premiums inside super (spec 19 Commit 7)", () => {
+  const withPremium = (over = {}) => mkState({
+    endAge: 42,
+    plan: { superAccounts: [superAcct({
+      balance: 50000, taxFreeComponent: 10000, // 20% tax-free
+      insurancePremium: { amount: 1000, indexBasis: "none", indexExtraPct: 0 },
+      ...over,
+    })] },
+  });
+
+  it("reduces the balance every year", () => {
+    const out = projectPlan(withPremium());
+    expect(out.yearly[0].superDetail.su1.insurancePremium).toBeCloseTo(1000, 0);
+    expect(out.yearly[0].superDetail.su1.closing).toBeLessThan(50000);
+  });
+
+  it("reduces the taxable and tax-free components proportionally, not preferentially from one", () => {
+    const out = projectPlan(withPremium());
+    // 20% tax-free of the account — the $1,000 premium should reduce
+    // taxFreeClosing by ~20% of itself (~200), not the full amount or
+    // zero.
+    const taxFreeDrop = 10000 - out.yearly[0].superDetail.su1.taxFreeClosing;
+    expect(taxFreeDrop).toBeGreaterThan(0);
+    expect(taxFreeDrop).toBeLessThan(1000);
+    expect(taxFreeDrop).toBeCloseTo(1000 * 0.2, 0);
+  });
+
+  it("does not appear as a withdrawal, and is not assessable income", () => {
+    const out = projectPlan(withPremium());
+    expect(out.yearly[0].superDetail.su1.withdrawals).toBe(0);
+    expect(out.yearly[0].income).toBe(0);
+    expect(out.yearly[0].tax).toBe(0);
+  });
+
+  it("indexation applies — a CPI+3% premium grows faster than a flat one over time", () => {
+    const indexed = projectPlan(withPremium({ insurancePremium: { amount: 1000, indexBasis: "cpi", indexExtraPct: 3 } }));
+    const flat = projectPlan(withPremium({ insurancePremium: { amount: 1000, indexBasis: "none", indexExtraPct: 0 } }));
+    expect(indexed.yearly[1].superDetail.su1.insurancePremium).toBeGreaterThan(flat.yearly[1].superDetail.su1.insurancePremium);
+  });
+
+  it("conservation holds for a scenario with insurance premiums active", () => {
+    const out = projectPlan(withPremium());
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `insurance premium fixture, year ${y}`);
+  });
+
+  it("regression gate: an account with no premium (the default) behaves exactly as before", () => {
+    const a = projectPlan(withPremium({ insurancePremium: { amount: 0, indexBasis: "cpi", indexExtraPct: 3 } }));
+    const { insurancePremium, ...noField } = superAcct({ balance: 50000, taxFreeComponent: 10000 });
+    const b = projectPlan(mkState({ endAge: 42, plan: { superAccounts: [noField] } }));
+    expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
   });
 });

@@ -1215,6 +1215,19 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(clampSuperAccount({ owner: "partner", balance: 0 }, single, PROFILES).owner).toBe("client");
   });
 
+  it("insurancePremium (spec 19 Commit 7) defaults to CPI + 3%, not clampIndexation's usual +0%", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const created = createSuperAccount(plan, [], PROFILES, "client");
+    expect(created.insurancePremium).toEqual({ amount: 0, indexBasis: "cpi", indexExtraPct: 3 });
+    // A bare clamp of a pre-Commit-7 account (no insurancePremium field
+    // at all) gets the same default, not a silently-zeroed indexation.
+    const clamped = clampSuperAccount({ owner: "client", balance: 0 }, plan, PROFILES);
+    expect(clamped.insurancePremium).toEqual({ amount: 0, indexBasis: "cpi", indexExtraPct: 3 });
+    // An explicit amount/indexation round-trips untouched.
+    const withAmount = clampSuperAccount({ owner: "client", balance: 0, insurancePremium: { amount: 1500, indexBasis: "none", indexExtraPct: 0 } }, plan, PROFILES);
+    expect(withAmount.insurancePremium).toEqual({ amount: 1500, indexBasis: "none", indexExtraPct: 0 });
+  });
+
   it("normaliseSuperAccounts defends non-array input", () => {
     expect(normaliseSuperAccounts(null, clampPlan(couplePlan(), PROFILES), PROFILES)).toEqual([]);
   });

@@ -786,6 +786,38 @@ selectable in the existing super contribution row editor with their
 own labels ("Spouse contribution", "Personal (non-deductible)"); this
 commit is engine-complete end to end.
 
+### Insurance premiums inside superannuation (spec 19, Commit 7)
+A super account gained an `insurancePremium: {amount, indexBasis,
+indexExtraPct}` field (`clampInsurancePremium` in planState.js,
+`indexExtraPct` defaulting to 3 rather than `clampIndexation`'s usual 0
+— premiums typically outrun CPI, disclosed via the field's own tooltip
+rather than silently assumed). schedule.js resolves it to a per-account,
+per-month real-dollar Float64Array the same way every other indexed
+figure is resolved (`realAmountAt`, CPI/AWOTE + extra%).
+
+Engine-side, the premium debits the account every July via the
+EXISTING `withdrawFromSuper` helper — no new balance-reduction logic
+needed, since proportionally reducing the tax-free component on a
+withdrawal is exactly what that helper already does for any other
+super outflow. This is a direct balance reduction: not a withdrawal to
+the member, not assessable income, not a contribution against any cap.
+Reported per-account on `row.superDetail[id].insurancePremium`.
+Fund-level tax deductibility of the premium (relevant for TPD/income
+protection inside super, which can generate a small offsetting
+tax benefit to the fund) is NOT modelled — disclosed via the same
+in-app tooltip, consistent with the ICR/costs section already sitting
+next to it in the account card.
+
+`superInsurancePremium` is a new named conservation term (a leak out of
+super with no other pocket receiving it). Extended `randomScenario()`
+(50% chance per super account, random amount/indexation) and verified
+across 1500+ randomised conservation + net-worth-decomposition runs.
+
+UI is complete this commit: a new "Insurance premium" section in
+`superAccountCardHTML` (amount, index basis, +extra% with the
+CPI+3%-default tooltip) alongside three new `applySuperAccountEdit`
+cases, mirroring the account's existing ICR/Costs section.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

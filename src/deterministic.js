@@ -926,6 +926,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // genuine inflow from the government, no household cash movement
       // (a named conservation term — see conservationCheck.js).
       govSuperInflow: 0,
+      // Insurance premiums inside super (spec 19 Commit 7) — a direct
+      // balance reduction, deliberately separate from `withdrawals`
+      // (not a benefit payment — see the debit site's own comment).
+      insurancePremium: 0,
       earnings: 0, earningsTax: 0, withdrawals: 0,
       // Division 293/296 release authority payments — a direct balance
       // reduction, separate from `withdrawals` (a benefit payment) since
@@ -1326,6 +1330,26 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             if (!accountId || want <= 0) continue;
             const paid = withdrawFromSuper(accountId, want);
             row.superDetail[accountId].release += paid;
+          }
+        }
+        // Insurance premiums inside super (spec 19 Commit 7) — resolved
+        // once per FY by schedule.js (July, indexed CPI+3% default),
+        // debited here the SAME way as the release/adviser-fee blocks
+        // just above: a direct balance reduction via the SAME
+        // proportioning withdrawFromSuper uses, reported on its own
+        // field — NOT `withdrawals` (no preservation gate, no
+        // assessable income, not a benefit payment, per the spec's own
+        // words). Fund-level tax deductibility for TPD/income-
+        // protection premiums (which would reduce the fund's own
+        // earnings tax) is NOT modelled — disclosed, the same "ICR
+        // nets into the return rate with no separate fund-tax detail"
+        // simplification this engine already uses elsewhere.
+        if (m === julyOf(y)) {
+          for (const id of superIds) {
+            const premiumAtYear = schedule.superInsurancePremiums?.[id]?.[y] ?? 0;
+            if (premiumAtYear <= 0) continue;
+            const paid = withdrawFromSuper(id, premiumAtYear);
+            row.superDetail[id].insurancePremium += paid;
           }
         }
         for (const id of superIds) {

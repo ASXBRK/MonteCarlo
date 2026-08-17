@@ -38,7 +38,7 @@ import {
   createChild, createEducationBlock, childCurrentAgeInfo, flatEducationBlocks,
   SCHEMA_VERSION,
   ADJUSTMENT_TARGETS, ADJUSTMENT_TARGET_LABELS, createAdjustment,
-  TERMINATION_TYPES,
+  TERMINATION_TYPES, INDEX_BASES,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -4557,6 +4557,30 @@ function superAccountCardHTML(sa) {
           </div>
         </div>
       </div>
+
+      <div class="cf-section">
+        <div class="cf-section-title">Insurance premium ${tooltipHTML("A direct reduction to this account's balance every year — not a withdrawal, not assessable income. Reduces the taxable and tax-free components proportionally. Premiums paid OUTSIDE super are an ordinary expense row instead. Fund-level tax deductibility for TPD/income protection premiums is not modelled.")}</div>
+        <div class="alloc-grid alloc-grid-profile">
+          <div class="cf-cell">
+            <label>Amount ($/yr, today's)</label>
+            <input type="number" min="0" step="100" value="${sa.insurancePremium.amount}"
+                   data-said="${sa.id}" data-sfield="insurancePremium.amount" />
+          </div>
+          <div class="cf-cell">
+            <label>Index basis</label>
+            <select data-said="${sa.id}" data-sfield="insurancePremium.indexBasis">
+              <option value="none"${sa.insurancePremium.indexBasis === "none" ? " selected" : ""}>None</option>
+              <option value="cpi"${sa.insurancePremium.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
+              <option value="awote"${sa.insurancePremium.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+            </select>
+          </div>
+          <div class="cf-cell">
+            <label>+ extra % p.a. (default 3 — premiums typically outrun CPI)</label>
+            <input type="number" min="-10" max="10" step="0.1" value="${sa.insurancePremium.indexExtraPct}"
+                   data-said="${sa.id}" data-sfield="insurancePremium.indexExtraPct" />
+          </div>
+        </div>
+      </div>
     </div>
   </div>`;
 }
@@ -4785,6 +4809,18 @@ function applySuperAccountEdit(sa, field, el, commit) {
         sa.allocation.volBasis = el.value;
         volBasisTouched.add(sa.id);
       }
+      return false;
+    // Insurance premiums inside super (spec 19 Commit 7).
+    case "insurancePremium.amount":
+      sa.insurancePremium.amount = clampNumber(el.value, 0);
+      if (commit) el.value = sa.insurancePremium.amount;
+      return false;
+    case "insurancePremium.indexBasis":
+      if (INDEX_BASES.includes(el.value)) sa.insurancePremium.indexBasis = el.value;
+      return false;
+    case "insurancePremium.indexExtraPct":
+      sa.insurancePremium.indexExtraPct = clampNumber(el.value, -10, 10);
+      if (commit) el.value = sa.insurancePremium.indexExtraPct;
       return false;
     default:
       return false;

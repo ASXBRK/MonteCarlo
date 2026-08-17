@@ -374,6 +374,24 @@ export function buildSchedules(state) {
   // loop below, right where the gated `temp` array is already known).
   const spouseContributionsByOwner = { client: new Float64Array(planYears), partner: new Float64Array(planYears) };
   const personalNccByOwner = { client: new Float64Array(planYears), partner: new Float64Array(planYears) };
+  // Insurance premiums inside super (spec 19 Commit 7) — resolved once
+  // per account here, same "annual row fires in July" convention every
+  // other $ figure in this file follows, rather than deferred to
+  // deterministic.js. A zero-amount premium (the default) never even
+  // enters the map, so an untouched account costs nothing extra to
+  // check downstream.
+  const superInsurancePremiums = {};
+  for (const s of superAccounts) {
+    const premium = s.insurancePremium;
+    if (!premium || !(premium.amount > 0)) continue;
+    const amountAtYear = new Float64Array(planYears);
+    for (let y = 0; y < planYears; y++) {
+      const jm = julyMonthIndex(plan, y);
+      if (jm == null) continue;
+      amountAtYear[y] = realAmountAt(premium, jm, cpi, awote);
+    }
+    superInsurancePremiums[s.id] = amountAtYear;
+  }
   // FHSSS-eligible contributions (Document Set Commit 3), keyed by the
   // CONTRIBUTING person (not account — FHSSS eligibility is a
   // per-person entitlement) and split concessional/non-concessional,
@@ -734,6 +752,7 @@ export function buildSchedules(state) {
     terminationEvents,
     spouseContributionsByOwner,
     personalNccByOwner,
+    superInsurancePremiums,
     superWarnings,
     rowTotals,
     oneOffsByAssetYear,

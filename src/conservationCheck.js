@@ -221,6 +221,11 @@ export function computeYearFlows(out, y) {
   // through super) — the spec's own words: "a genuine inflow with no
   // household cash movement, so they are a named conservation term."
   const govSuperInflow = sumVals(row.superDetail, "govSuperInflow");
+  // Insurance premiums inside super (spec 19 Commit 7) — a genuine
+  // leak: money paid to an insurer, gone from the system entirely (not
+  // a transfer to another pocket the way a withdrawal or a release
+  // authority payment is already accounted for elsewhere).
+  const superInsurancePremium = sumVals(row.superDetail, "insurancePremium");
   // Surplus/deficit allocation spec, Commit 1: a surplus allocation that
   // tops up an existing salary-sacrifice row writes into the SAME
   // `salarySacrifice` field as a genuine payroll-reduced contribution
@@ -362,7 +367,7 @@ export function computeYearFlows(out, y) {
 
   return {
     openingN, closingN, delta: closingN - openingN,
-    income, growth, sgInflow, govSuperInflow,
+    income, growth, sgInflow, govSuperInflow, superInsurancePremium,
     expenses: row.expenses, tax: row.tax, contributionsTax, liabilityInterest,
     surplusSpent: row.surplusSpent, unfundedCashflow: row.unfundedCashflow,
     divReleaseFromSuper,
@@ -400,7 +405,7 @@ export function checkYearConservation(out, y, ctx) {
     - f.expenses - f.tax - f.contributionsTax - f.liabilityInterest
     - f.surplusSpent + f.unfundedCashflow - f.divReleaseFromSuper
     + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
-    - f.propertySaleCosts
+    - f.propertySaleCosts - f.superInsurancePremium
     - f.goalSpend + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash;
 
   const gap = f.delta - expected;
@@ -433,7 +438,8 @@ export function checkYearConservation(out, y, ctx) {
 //     − expenses bucket       (expenses + the FY-end spend sweep, net of
 //                             any recorded-but-unfunded shortfall)
 //     − interest bucket       (liability interest)
-//     − fees bucket           (LMI + adviser fees, from super and cash)
+//     − fees bucket           (LMI + adviser fees, from super and cash,
+//                             + insurance premiums paid inside super)
 //     ± one-offs bucket       (property duty/costs/FHOG, a property
 //                             sale's agent fees + settlement costs, goal
 //                             spend, the FHSSS transfer)
@@ -455,7 +461,7 @@ export function decomposeNetWorthChange(out, y) {
     tax: f.tax + f.contributionsTax + f.divReleaseFromSuper,
     expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,
     interest: f.liabilityInterest,
-    fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash,
+    fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash + f.superInsurancePremium,
     oneOffs: f.propertyOneOffCost - f.propertySaleCosts - f.goalSpend + f.fhsssRelease - f.fhsssSuperDebit,
   };
 }
