@@ -4581,6 +4581,19 @@ function superAccountCardHTML(sa) {
           </div>
         </div>
       </div>
+
+      ${isCouple() ? `
+      <div class="cf-section">
+        <div class="cf-section-title">Contribution splitting ${tooltipHTML("An annual election: moves this % of THIS account's own net concessional contributions from the PRIOR financial year to the owner's spouse's default super account. Legal ceiling 85% (contributions tax already claims the rest). Moves balance only — it is not a new contribution and does not affect either person's contribution cap.")}</div>
+        <div class="alloc-grid alloc-grid-profile">
+          <div class="cf-cell">
+            <label>% of prior FY's concessional contributions split to spouse</label>
+            <input type="number" min="0" max="85" step="1" value="${sa.contributionSplitPct}"
+                   data-said="${sa.id}" data-sfield="contributionSplitPct" />
+          </div>
+        </div>
+      </div>
+      ` : ""}
     </div>
   </div>`;
 }
@@ -4821,6 +4834,14 @@ function applySuperAccountEdit(sa, field, el, commit) {
     case "insurancePremium.indexExtraPct":
       sa.insurancePremium.indexExtraPct = clampNumber(el.value, -10, 10);
       if (commit) el.value = sa.insurancePremium.indexExtraPct;
+      return false;
+    // Contribution splitting (spec 19 Commit 6 completion) — the input
+    // only renders for a couple (superAccountCardHTML), but clamped
+    // here too rather than trusted, same belt-and-braces as every other
+    // field this function handles.
+    case "contributionSplitPct":
+      sa.contributionSplitPct = clampNumber(el.value, 0, 85);
+      if (commit) el.value = sa.contributionSplitPct;
       return false;
     default:
       return false;

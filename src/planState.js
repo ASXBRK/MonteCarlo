@@ -1173,6 +1173,13 @@ export function createSuperAccount(plan, existing = [], profiles = {}, owner = "
     // + 3% (the spec's own instruction: premiums typically rise faster
     // than CPI with age), visible and editable, not buried.
     insurancePremium: { amount: 0, indexBasis: "cpi", indexExtraPct: 3 },
+    // Contribution splitting (spec 19 Commit 6 completion) — an annual
+    // election, as a % of THIS account's own prior-FY net concessional
+    // contributions, moved to the owner's spouse's default account.
+    // 0 = no election (the default — this is opt-in advice, not
+    // automatic). Legal ceiling is 85% (the ATO's own cap, chosen
+    // because ~15% stays behind as the contributions tax already paid).
+    contributionSplitPct: 0,
   };
 }
 
@@ -1190,6 +1197,13 @@ export function clampSuperAccount(sa, plan, profiles = {}) {
     icrPct: clampNumber(sa.icrPct, 0, 100),
     include: sa.include !== false,
     insurancePremium: clampInsurancePremium(sa.insurancePremium),
+    // Meaningless without a spouse — bounded to 0 for a single client
+    // rather than left to silently do nothing downstream (input
+    // integrity: the engine only ever splits to plan.partner, so a
+    // single-client value here would be a number with no effect,
+    // exactly the "looks entered but does nothing" state CLAUDE.md's
+    // input-integrity section rules out).
+    contributionSplitPct: plan.partner ? clampNumber(sa.contributionSplitPct, 0, 85) : 0,
   };
 }
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { projectPlan, assetMonthlyRate, assetReturnComponents } from "./deterministic.js";
-import { hydrate, SCHEMA_VERSION, synthDob, legacySurplusPeriod } from "./planState.js";
+import { hydrate, SCHEMA_VERSION, synthDob, legacySurplusPeriod, clampSuperAccount } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 import { checkYearConservation } from "./conservationCheck.js";
 import { lmiPremium } from "./data/lmiRates.js";
@@ -2557,6 +2557,12 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       insurancePremium: Math.random() < 0.5
         ? { amount: rand(200, 3000), indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: rand(0, 5) }
         : { amount: 0, indexBasis: "cpi", indexExtraPct: 3 },
+      // Contribution splitting (spec 19 Commit 6 completion) — only
+      // meaningful for a couple (clampSuperAccount itself forces 0 for
+      // a single client, mirrored by hand since this raw state bypasses
+      // clamping); 40% chance per account, at a random % up to the
+      // legal 85% ceiling.
+      contributionSplitPct: couple && Math.random() < 0.4 ? rand(1, 85) : 0,
     }));
 
     // Redundancy and ETP (spec 19 Commit 3) — sometimes one person's
@@ -5926,16 +5932,70 @@ describe("Spouse contributions, co-contribution and LISTO (spec 19 Commit 6)", (
     expect(high.yearly[0].superDetail.su1.govSuperInflow).toBe(0);
   });
 
-  it("contribution splitting is NOT modelled — disclosed, not silently assumed (no splitting field exists on a super contribution row)", () => {
-    // Documents the commit's own scope decision; nothing to assert
-    // beyond the schema not offering the field at all.
-    expect(scRow().splitPct).toBeUndefined();
+  it("contribution splitting: moves a % of the PRIOR FY's net concessional contributions to the spouse's account, not this FY's", () => {
+    const s = mkState({
+      endAge: 43, household: "couple",
+      plan: {
+        partner: { currentAge: 40 },
+        superAccounts: [
+          superAcct({ id: "su_client", owner: "client", contributionSplitPct: 50 }),
+          superAcct({ id: "su_partner", owner: "partner" }),
+        ],
+      },
+      cashflows: { income: [employmentRow({ id: "i1", owner: "client", amount: 100000, to: { kind: "age", age: 120 } })] },
+    });
+    const out = projectPlan(s);
+    // Year 0 has no prior FY to split from yet.
+    expect(out.yearly[0].superDetail.su_client.contributionSplitOut).toBe(0);
+    expect(out.yearly[0].superDetail.su_partner.contributionSplitIn).toBe(0);
+    const priorNet = out.yearly[0].superDetail.su_client.concessionalNet;
+    expect(priorNet).toBeGreaterThan(0); // SG alone is concessional
+    // Year 1 splits 50% of year 0's net concessional contribution.
+    expect(out.yearly[1].superDetail.su_client.contributionSplitOut).toBeCloseTo(priorNet * 0.5, 6);
+    expect(out.yearly[1].superDetail.su_partner.contributionSplitIn).toBeCloseTo(priorNet * 0.5, 6);
   });
 
-  it("conservation holds for a scenario with spouse contributions, co-contribution and LISTO all active", () => {
+  it("contribution splitting: a same-total transfer — moves balance without creating a new contribution or touching either side's cap", () => {
+    const withSplit = mkState({
+      endAge: 43, household: "couple",
+      plan: {
+        partner: { currentAge: 40 },
+        superAccounts: [
+          superAcct({ id: "su_client", owner: "client", contributionSplitPct: 85 }),
+          superAcct({ id: "su_partner", owner: "partner" }),
+        ],
+      },
+      cashflows: { income: [employmentRow({ id: "i1", owner: "client", amount: 100000, to: { kind: "age", age: 120 } })] },
+    });
+    const noSplit = { ...withSplit, plan: { ...withSplit.plan, superAccounts: withSplit.plan.superAccounts.map((a) => ({ ...a, contributionSplitPct: 0 })) } };
+    const a = projectPlan(withSplit);
+    const b = projectPlan(noSplit);
+    // The destination account's own contribution/cap-relevant fields are
+    // untouched by the split — only the new contributionSplitIn field moves.
+    expect(a.yearly[1].superDetail.su_partner.contributions).toBeCloseTo(b.yearly[1].superDetail.su_partner.contributions, 6);
+    expect(a.yearly[1].superDetail.su_partner.contributionsTax).toBeCloseTo(b.yearly[1].superDetail.su_partner.contributionsTax, 6);
+    // Total super balance across both accounts is identical either way —
+    // splitting just relabels which account holds it.
+    expect(a.yearly[1].superClosing).toBeCloseTo(b.yearly[1].superClosing, 4);
+  });
+
+  it("contribution splitting: capped at 85% by clampSuperAccount, and forced to 0 for a single client (planState.js)", () => {
+    const couplePlan = { client: { currentAge: 40 }, partner: { currentAge: 40 }, endAge: 90 };
+    const singlePlan = { client: { currentAge: 40 }, endAge: 90 };
+    expect(clampSuperAccount({ ...superAcct(), contributionSplitPct: 200 }, couplePlan).contributionSplitPct).toBe(85);
+    expect(clampSuperAccount({ ...superAcct(), contributionSplitPct: 50 }, singlePlan).contributionSplitPct).toBe(0);
+  });
+
+  it("conservation holds for a scenario with spouse contributions, co-contribution, LISTO and contribution splitting all active", () => {
     const s = mkState({
-      endAge: 41, household: "couple",
-      plan: { partner: { currentAge: 40 }, superAccounts: [superAcct({ id: "su_client", owner: "client" }), superAcct({ id: "su_partner", owner: "partner" })] },
+      endAge: 43, household: "couple",
+      plan: {
+        partner: { currentAge: 40 },
+        superAccounts: [
+          superAcct({ id: "su_client", owner: "client", contributionSplitPct: 40 }),
+          superAcct({ id: "su_partner", owner: "partner" }),
+        ],
+      },
       cashflows: {
         income: [
           employmentRow({ id: "i1", owner: "client", amount: 150000, to: { kind: "age", age: 120 } }),
@@ -5948,7 +6008,7 @@ describe("Spouse contributions, co-contribution and LISTO (spec 19 Commit 6)", (
       },
     });
     const out = projectPlan(s);
-    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `spouse/co-contribution/LISTO fixture, year ${y}`);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `spouse/co-contribution/LISTO/splitting fixture, year ${y}`);
   });
 
   it("regression gate: a scenario with no spouse/personalNonDeductible contributions is unaffected", () => {

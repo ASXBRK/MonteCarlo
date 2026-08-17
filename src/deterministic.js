@@ -926,6 +926,25 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // genuine inflow from the government, no household cash movement
       // (a named conservation term — see conservationCheck.js).
       govSuperInflow: 0,
+      // Net concessional contributions actually credited THIS FY (gross
+      // less contributions tax, from every concessional source — the
+      // ordinary monthly flow, a toConcessionalCap fill, and an
+      // adjustment-row super contribution all feed it). Tracked
+      // separately from `contributions` (which also mixes in accepted
+      // non-concessional) purely so NEXT year's contribution-splitting
+      // election (below) has a single, correct "prior FY concessional"
+      // figure to split a % of, instead of re-deriving it imprecisely
+      // from contributions − contributionsTax (which would double as an
+      // implicit NCC estimate whenever a fill or adjustment landed).
+      concessionalNet: 0,
+      // Contribution splitting (spec 19 Commit 6 completion) — moves a
+      // % of the PRIOR FY's concessionalNet to the owner's spouse's
+      // account, applied at the top of THIS FY (see the top-of-year-
+      // loop block). A same-total transfer between two pockets already
+      // both inside `superClosing` — no conservation term needed (see
+      // conservationCheck.js's header for the same reasoning already
+      // applied to land tax/redundancy/the PPR exemption).
+      contributionSplitOut: 0, contributionSplitIn: 0,
       // Insurance premiums inside super (spec 19 Commit 7) — a direct
       // balance reduction, deliberately separate from `withdrawals`
       // (not a benefit payment — see the debit site's own comment).
@@ -1377,6 +1396,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           const ccTax = ccGross * outcome.contributionsTaxRate;
           const nccAccepted = nccGross * outcome.nccAcceptRatio;
           superBal[id] += (ccGross - ccTax) + nccAccepted;
+          row.superDetail[id].concessionalNet += ccGross - ccTax;
           // Non-concessional contributions build the tax-free
           // component explicitly (Commit 3 proportioning); concessional
           // contributions and growth build the taxable component
@@ -1400,6 +1420,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               superBal[fill.accountId] += fill.amount - tax; // concessional fill — taxable, no taxFree change
               row.superDetail[fill.accountId].contributions += fill.amount;
               row.superDetail[fill.accountId].contributionsTax += tax;
+              row.superDetail[fill.accountId].concessionalNet += fill.amount - tax;
               if (fill.type === "personalDeductible") row.superDetail[fill.accountId].personalDeductible += fill.amount;
               else row.superDetail[fill.accountId].salarySacrifice += fill.amount;
             }
@@ -1428,6 +1449,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             superBal[adj.superAccountId] += amt - tax;
             row.superDetail[adj.superAccountId].contributions += amt;
             row.superDetail[adj.superAccountId].contributionsTax += tax;
+            row.superDetail[adj.superAccountId].concessionalNet += amt - tax;
           }
         }
         // Explicit super withdrawals (Tier 1.2, Commit 3) — already
@@ -2296,6 +2318,50 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   for (let y = 0; y < years; y++) {
     const fyStart = fy0 + y;
 
+    // Contribution splitting (spec 19 Commit 6 completion) — an annual
+    // election, effective as at 1 July, of a % of THIS account's own
+    // PRIOR FY's net concessional contributions moved to the owner's
+    // spouse's default account. Applied here, before anything else this
+    // FY reads superBal (reserveFromSuper, the measured pass, the
+    // Division 293/296 TSB check), because — unlike govSuperInflow,
+    // which depends on THIS year's own not-yet-measured income and so
+    // must wait until after the real pass — the split's basis (last
+    // FY's already-finalised concessionalNet) is fully known before
+    // year y starts, so applying it first has no feedback into this
+    // year's own results; it's the same "resolve before either pass
+    // touches the balance" treatment adviser fees/Division 293/296/
+    // FHSSS already get (see reserveFromSuper's own header). A
+    // same-total transfer between two pockets already both inside
+    // `superClosing` — no conservation term needed, the same reasoning
+    // already applied to land tax/redundancy/the PPR exemption (see
+    // conservationCheck.js). It does NOT create a new contribution or
+    // touch either side's concessional cap (the spec's own words) —
+    // this is a raw balance move, nothing routes through superFlows/
+    // superOutcome. Reported once `row` exists, a few lines below.
+    const contributionSplit = [];
+    if (state.plan.partner && y > 0) {
+      const priorRow = yearly[y - 1];
+      for (const s of superAccounts) {
+        const pct = s.contributionSplitPct;
+        if (!(pct > 0)) continue;
+        const priorNet = priorRow?.superDetail?.[s.id]?.concessionalNet ?? 0;
+        if (!(priorNet > 0)) continue;
+        const destOwner = s.owner === "partner" ? "client" : "partner";
+        const dest = superAccounts.find((d) => d.owner === destOwner);
+        if (!dest) continue; // no eligible spouse account to receive it
+        // Capped at what's actually still in the account — concessionalNet
+        // is a prior-year figure; withdrawals/fees/insurance premiums
+        // since then may have already reduced what's left to move.
+        const amount = Math.min(priorNet * (pct / 100), Math.max(0, superBal[s.id]));
+        if (amount <= 0) continue;
+        superBal[s.id] -= amount;
+        superBal[dest.id] += amount;
+        superSeries[s.id][yearStart(y)] -= amount;
+        superSeries[dest.id][yearStart(y)] += amount;
+        contributionSplit.push({ fromId: s.id, toId: dest.id, amount });
+      }
+    }
+
     // Shared per-account "already spoken for" tally (Implementation/
     // Rates spec, Commit 2 follow-on) — FOUR independent mechanisms can
     // each want to release from super in the SAME year (adviser fees,
@@ -3019,6 +3085,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
+    // Contribution splitting (spec 19 Commit 6 completion) — the actual
+    // balance move already happened at the top of this year's loop
+    // (before `opening`, above, was even read); this just reports it.
+    for (const split of contributionSplit) {
+      row.superDetail[split.fromId].contributionSplitOut += split.amount;
+      row.superDetail[split.toId].contributionSplitIn += split.amount;
+    }
     const real = runYear(y, {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,

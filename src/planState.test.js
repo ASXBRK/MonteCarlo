@@ -1228,6 +1228,18 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(withAmount.insurancePremium).toEqual({ amount: 1500, indexBasis: "none", indexExtraPct: 0 });
   });
 
+  it("contributionSplitPct (spec 19 Commit 6 completion) is clamped to [0, 85] for a couple, and forced to 0 for a single client", () => {
+    const couple = clampPlan(couplePlan(), PROFILES);
+    const single = clampPlan({ ...couplePlan(), household: "single", partner: null }, PROFILES);
+    expect(createSuperAccount(couple, [], PROFILES, "client").contributionSplitPct).toBe(0); // opt-in only
+    expect(clampSuperAccount({ owner: "client", balance: 0, contributionSplitPct: 200 }, couple, PROFILES).contributionSplitPct).toBe(85);
+    expect(clampSuperAccount({ owner: "client", balance: 0, contributionSplitPct: -10 }, couple, PROFILES).contributionSplitPct).toBe(0);
+    // A single client has no spouse to split to — the field would look
+    // entered but do nothing downstream, so it's forced to 0 rather
+    // than left to silently mean nothing (input integrity).
+    expect(clampSuperAccount({ owner: "client", balance: 0, contributionSplitPct: 50 }, single, PROFILES).contributionSplitPct).toBe(0);
+  });
+
   it("normaliseSuperAccounts defends non-array input", () => {
     expect(normaliseSuperAccounts(null, clampPlan(couplePlan(), PROFILES), PROFILES)).toEqual([]);
   });

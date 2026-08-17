@@ -786,6 +786,32 @@ selectable in the existing super contribution row editor with their
 own labels ("Spouse contribution", "Personal (non-deductible)"); this
 commit is engine-complete end to end.
 
+**Follow-up (same session): contribution splitting.** An earlier pass
+through this build mischaracterised splitting as out of scope for
+Commit 6; re-reading the spec found it listed as an in-scope
+requirement (its own test line: "splitting moving balance without
+touching caps") — only co-contribution/LISTO were the spec's *named
+conservation term*, not a statement that splitting itself was deferred.
+Built to close the gap: a new per-account `contributionSplitPct`
+(0–85%, forced to 0 for a single client — clampSuperAccount) is an
+annual election moving that % of the account's own PRIOR FY's net
+concessional contributions to the owner's spouse's default account.
+A new `superDetail[id].concessionalNet` tracks the actual $ credited
+each FY from every concessional source (the ordinary flow, a
+toConcessionalCap fill, and an adjustment-row super contribution all
+feed it) so next year's split has a single correct base to work from.
+Applied at the very top of each year's loop — BEFORE the measured
+pass, reserveFromSuper, or the Division 293/296 TSB check ever read
+`superBal` — since, unlike govSuperInflow, the split's basis (last
+FY's already-finalised figure) creates no same-year feedback loop; it's
+the same "resolve before either pass touches the balance" treatment
+adviser fees/Division 293/296/FHSSS already get. A same-total transfer
+between two pockets already both inside `superClosing` — conservation
+needed NO new named term (verified across 1500+ randomised runs after
+extending `randomScenario()`, same reasoning already applied to land
+tax/redundancy/the PPR exemption). UI: a "Contribution splitting"
+section in `superAccountCardHTML`, shown only for a couple.
+
 ### Insurance premiums inside superannuation (spec 19, Commit 7)
 A super account gained an `insurancePremium: {amount, indexBasis,
 indexExtraPct}` field (`clampInsurancePremium` in planState.js,
