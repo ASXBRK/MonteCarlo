@@ -5288,4 +5288,23 @@ describe("Adjustment rows (docs/specs/18-adjustment-rows.md, Commit 1)", () => {
     const baseOut = projectPlan(base);
     expect(out.yearly[0].expenses).toBeCloseTo(baseOut.yearly[0].expenses, 0);
   });
+
+  it("row.adjustments reports every active adjustment's resolved amount, for the table UI to mark — reporting only, never fed back into money-flow arithmetic", () => {
+    const s = adjState({
+      plan: { adjustments: [
+        adj({ id: "e1", target: "expenses", amount: 500, indexBasis: "none", label: "Bespoke label", note: "why" }),
+        adj({ id: "t1", target: "tax.incomeTax", owner: "client", amount: -100, indexBasis: "none", note: "why2" }),
+      ] },
+    });
+    const out = projectPlan(s);
+    const reported = out.yearly[0].adjustments;
+    expect(reported).toHaveLength(2);
+    const e1 = reported.find((a) => a.id === "e1");
+    expect(e1).toMatchObject({ target: "expenses", owner: "household", label: "Bespoke label", note: "why" });
+    expect(e1.amount).toBeCloseTo(500, 0);
+    const t1 = reported.find((a) => a.id === "t1");
+    expect(t1.amount).toBeCloseTo(-100, 0);
+    // A year outside the window reports nothing for it.
+    expect(out.yearly[0].adjustments.length).toBeGreaterThan(0);
+  });
 });

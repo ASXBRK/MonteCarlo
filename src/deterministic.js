@@ -737,6 +737,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     cashDistributions: 0, // portion of income that is paid-out distributions
     expenses: 0,
     tax: 0,
+    // Adjustment rows (spec 18, Commit 1) — reporting only (Commit 2's
+    // table marking reads this): every adjustment active this FY, with
+    // its resolved real-dollar amount. Never touches money-flow
+    // arithmetic itself — see the a-adjustments block for where the
+    // SAME amount actually feeds income/deductions/expenses/super/tax.
+    adjustments: [],
     surplusOrDeficit: 0,
     surplusInvested: 0,
     // FY-end sweep of WCA surplus above minimumBalance (Working Cash
@@ -1135,6 +1141,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             // is credited anywhere). See the row-gated credit below for
             // the matching guard on the other side of this transfer.
             if (superIds.includes(adj.superAccountId)) adjSuperCashOut += amt;
+          }
+          // Reporting only (Commit 2's table marking reads this) — the
+          // resolved amount for every target, regardless of which of
+          // the three mechanisms above actually applied it. Real pass
+          // only: this never feeds tax/cash, so nothing to snapshot.
+          if (row) {
+            row.adjustments.push({
+              id: adj.id, target: adj.target, owner: adj.owner, superAccountId: adj.superAccountId,
+              label: adj.label, note: adj.note, amount: amt,
+            });
           }
         }
       }

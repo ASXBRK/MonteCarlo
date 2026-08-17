@@ -532,3 +532,76 @@ describe("per-owner breakdown (Document Set Commit 7 — Snapshot view)", () => 
     expect(cashflowStatement(row, ctx)).toEqual(cashflowStatement(row, ctx, null));
   });
 });
+
+// Adjustment rows (spec 18, Commit 2) — the Cashflow/Snapshot section
+// totals are an independent re-derivation from rowTotals/taxDetail, not
+// a read of the engine's own (already-adjusted) row.income/expenses/tax
+// — each of these functions must separately fold row.adjustments in, or
+// the table's own totals would silently disagree with the real
+// projection. adjustmentAtYear() shape (deterministic.js) is just
+// {target, owner, amount, ...}.
+function adj(over = {}) {
+  return { id: "a1", target: "expenses", owner: "household", amount: 100, label: "Test", note: "", superAccountId: null, ...over };
+}
+
+describe("Adjustment rows (spec 18, Commit 2) — folded into section totals", () => {
+  it("income.assessable folds into assessableIncome's total as adjAssessable", () => {
+    const row = mkRow({ adjustments: [adj({ target: "income.assessable", owner: "client", amount: 5000 })] });
+    const a = assessableIncome(row, { y: 0 });
+    expect(a.adjAssessable).toBe(5000);
+    expect(a.total).toBe(5000);
+  });
+
+  it("income.nonTaxable folds into cashReceivedSums' otherTaxFreeIncome, not a separate line", () => {
+    const row = mkRow({ adjustments: [adj({ target: "income.nonTaxable", owner: "client", amount: 800 })] });
+    const c = cashReceivedSums(row, { y: 0 });
+    expect(c.otherTaxFreeIncome).toBe(800);
+    expect(c.adjNonTaxable).toBe(800);
+  });
+
+  it("deductions folds into deductionSums' total as adjDeductions", () => {
+    const row = mkRow({ adjustments: [adj({ target: "deductions", owner: "partner", amount: 1200 })] });
+    const d = deductionSums(row, { y: 0 });
+    expect(d.adjDeductions).toBe(1200);
+    expect(d.total).toBe(1200);
+  });
+
+  it("expenses is household-owned and splits 50/50 for a per-person view, in full for household", () => {
+    const row = mkRow({ adjustments: [adj({ target: "expenses", amount: 400 })] });
+    expect(expenseSums(row, { y: 0 }, "client").adjExpenses).toBe(200);
+    expect(expenseSums(row, { y: 0 }, "partner").adjExpenses).toBe(200);
+    expect(expenseSums(row, { y: 0 }, null).adjExpenses).toBe(400);
+  });
+
+  it("tax.incomeTax, tax.medicare, tax.help each fold into their own taxSums line", () => {
+    const row = mkRow({
+      adjustments: [
+        adj({ target: "tax.incomeTax", owner: "client", amount: 2000 }),
+        adj({ target: "tax.medicare", owner: "client", amount: 300 }),
+        adj({ target: "tax.help", owner: "client", amount: 150 }),
+      ],
+    });
+    const t = taxSums(row, "client");
+    expect(t.incomeTaxAdjustment).toBe(2000);
+    expect(t.medicareAdjustment).toBe(300);
+    expect(t.helpAdjustment).toBe(150);
+    expect(t.incomeTax).toBe(2000); // client.grossTax defaults to 0 in mkRow
+    expect(t.medicareLevy).toBe(300);
+    expect(t.helpRepayment).toBe(150);
+  });
+
+  it("tax.cgt folds into taxSums' incomeTax line (no dedicated CGT line in this vocabulary) but is exposed separately as cgtAdjustment", () => {
+    const row = mkRow({ adjustments: [adj({ target: "tax.cgt", owner: "client", amount: 900 })] });
+    const t = taxSums(row, "client");
+    expect(t.cgtAdjustment).toBe(900);
+    expect(t.incomeTax).toBe(900);
+  });
+
+  it("an adjustment for a DIFFERENT target/owner does not leak into an unrelated total", () => {
+    const row = mkRow({ adjustments: [adj({ target: "expenses", amount: 999 })] });
+    expect(assessableIncome(row, { y: 0 }).total).toBe(0);
+    expect(deductionSums(row, { y: 0 }).total).toBe(0);
+    expect(cashReceivedSums(row, { y: 0 }).total).toBe(0);
+    expect(taxSums(row).total).toBe(0);
+  });
+});

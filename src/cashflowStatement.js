@@ -62,6 +62,19 @@ function sumByCategory(rows, rowTotals, category, y, forOwner = null) {
     .reduce((s, r) => s + (rowTotals[r.id]?.[y] ?? 0), 0);
 }
 
+// Adjustment rows (spec 18) — row.adjustments (deterministic.js) is the
+// resolved, per-FY amount for every adjustment active this year,
+// already tagged with its own target/owner; this just sums the ones
+// matching `target` for forOwner, same shareOf() convention as every
+// other figure here ("household"-owned targets — only `expenses` — are
+// treated as "joint": split 50/50 for a specific person, in full for
+// the consolidated/null case, exactly like WCA interest above).
+function adjustmentSum(row, target, forOwner) {
+  return (row.adjustments ?? [])
+    .filter((a) => a.target === target)
+    .reduce((s, a) => s + a.amount * shareOf(a.owner === "household" ? "joint" : a.owner, forOwner), 0);
+}
+
 // A liability id is property-linked iff it matches "prop-<propertyId>"
 // for one of the plan's properties — same convention main.js's
 // loanName() already uses.
@@ -101,11 +114,20 @@ export function assessableIncome(row, ctx, forOwner = null) {
   const netTaxableCapitalGains = forOwner == null
     ? (row.taxDetail?.netCapitalGain ?? 0)
     : (row.taxDetail?.[forOwner]?.netCapitalGain ?? 0);
-  const total = salary + taxablePensionComponent + otherIncome + governmentPayments + interestIncome
+  const computedTotal = salary + taxablePensionComponent + otherIncome + governmentPayments + interestIncome
     + dividendIncome + frankingCredits + propertyIncomeGross + trustDistribution + foreignIncome + netTaxableCapitalGains;
+  // Adjustment rows (spec 18) — an "income.assessable" adjustment is a
+  // leak-free income term (the registry's own description), so it folds
+  // straight into the section total; `computedTotal` (pre-adjustment) is
+  // kept alongside `total` (post-adjustment) so the Cashflow table's
+  // Commit 2 Computed/Adjustment/Total sub-rows can show all three
+  // without re-deriving one from another.
+  const adjAssessable = adjustmentSum(row, "income.assessable", forOwner);
+  const total = computedTotal + adjAssessable;
   return {
     salary, taxablePensionComponent, otherIncome, governmentPayments, interestIncome, dividendIncome,
-    frankingCredits, propertyIncomeGross, trustDistribution, foreignIncome, netTaxableCapitalGains, total,
+    frankingCredits, propertyIncomeGross, trustDistribution, foreignIncome, netTaxableCapitalGains,
+    computedTotal, adjAssessable, total,
   };
 }
 
@@ -147,13 +169,21 @@ export function deductionSums(row, ctx, forOwner = null) {
   const lumpSumSuperContributions = personalSuperContributionsCash(row, ownerSuperAccounts);
   const salaryPackaging = byCat("salaryPackaging");
   const other = byCat("other");
-  const total = investmentPortfolioInterest + propertyInterestDeductions + propertyDeductions + propertyDepreciation
+  const computedTotal = investmentPortfolioInterest + propertyInterestDeductions + propertyDeductions + propertyDepreciation
     + vehicle + socialClub + insurance + novatedLease + workingExpense + salarySacrifice + lumpSumSuperContributions
     + salaryPackaging + other;
+  // Adjustment rows (spec 18) — a "deductions" adjustment (either sign)
+  // folds into the section total; the engine credits the same amount to
+  // measured[owner].deductions (deterministic.js), so this reconciles
+  // Taxable Income against the real assessment rather than the
+  // pre-adjustment figure. computedTotal kept alongside for Commit 2's
+  // sub-rows, same convention as assessableIncome above.
+  const adjDeductions = adjustmentSum(row, "deductions", forOwner);
+  const total = computedTotal + adjDeductions;
   return {
     investmentPortfolioInterest, propertyInterestDeductions, propertyDeductions, propertyDepreciation,
     vehicle, socialClub, insurance, novatedLease, workingExpense, salarySacrifice, lumpSumSuperContributions,
-    salaryPackaging, other, total,
+    salaryPackaging, other, computedTotal, adjDeductions, total,
   };
 }
 
@@ -165,8 +195,23 @@ export function taxSums(row, forOwner = null) {
   const client = row.taxDetail?.client ?? {};
   const partner = row.taxDetail?.partner ?? {};
   const person = forOwner == null ? null : (row.taxDetail?.[forOwner] ?? {});
-  const incomeTax = forOwner == null ? (client.grossTax ?? 0) + (partner.grossTax ?? 0) : (person.grossTax ?? 0);
-  const medicareLevy = forOwner == null ? (client.medicare ?? 0) + (partner.medicare ?? 0) : (person.medicare ?? 0);
+  // Adjustment rows (spec 18) — tax.* adjustments settle as a lump-sum
+  // cash effect (deterministic.js's spreadTax against taxAdjustmentTotal)
+  // rather than into taxDetail's own per-component fields, so each is
+  // folded in here, at display time, against the specific component its
+  // own target names. tax.cgt has no dedicated line in THIS section
+  // (CGT payable is embedded in the household "Income Tax" row here —
+  // buildTaxGroups' own per-person Tax view is where it gets its own
+  // line) so it folds into incomeTax; exposed separately too so a
+  // caller that DOES break CGT out can still mark it on its own row.
+  const incomeTaxAdjustment = adjustmentSum(row, "tax.incomeTax", forOwner);
+  const medicareAdjustment = adjustmentSum(row, "tax.medicare", forOwner);
+  const helpAdjustment = adjustmentSum(row, "tax.help", forOwner);
+  const cgtAdjustment = adjustmentSum(row, "tax.cgt", forOwner);
+  const incomeTaxComputed = forOwner == null ? (client.grossTax ?? 0) + (partner.grossTax ?? 0) : (person.grossTax ?? 0);
+  const incomeTax = incomeTaxComputed + incomeTaxAdjustment + cgtAdjustment;
+  const medicareLevyComputed = forOwner == null ? (client.medicare ?? 0) + (partner.medicare ?? 0) : (person.medicare ?? 0);
+  const medicareLevy = medicareLevyComputed + medicareAdjustment;
   // Document Set Commit 2.
   const medicareLevySurcharge = forOwner == null
     ? (row.taxDetail?.medicareLevySurcharge ?? 0)
@@ -174,7 +219,8 @@ export function taxSums(row, forOwner = null) {
   // Document Set Commit 1 — compulsory HELP repayment, assessed per
   // person (row.taxDetail.helpRepayment already sums both for the
   // household total).
-  const helpRepayment = forOwner == null ? (row.taxDetail?.helpRepayment ?? 0) : (person.helpRepayment ?? 0);
+  const helpRepaymentComputed = forOwner == null ? (row.taxDetail?.helpRepayment ?? 0) : (person.helpRepayment ?? 0);
+  const helpRepayment = helpRepaymentComputed + helpAdjustment;
   const sapto = 0; // [zero]
   const lito = forOwner == null ? -((client.lito ?? 0) + (partner.lito ?? 0)) : -(person.lito ?? 0);
   const spouseSplittingOffset = 0; // [zero]
@@ -189,6 +235,8 @@ export function taxSums(row, forOwner = null) {
   return {
     incomeTax, medicareLevy, medicareLevySurcharge, helpRepayment, sapto, lito,
     spouseSplittingOffset, frankingCreditOffset, taxablePensionOffset, div293, div296, total,
+    incomeTaxComputed, medicareLevyComputed, helpRepaymentComputed,
+    incomeTaxAdjustment, medicareAdjustment, helpAdjustment, cgtAdjustment,
   };
 }
 
@@ -217,9 +265,20 @@ export function cashReceivedSums(row, ctx, forOwner = null) {
     ? (row.taxDetail?.refundSettled ?? 0)
     : (row.taxDetail?.[forOwner]?.refundSettled ?? 0);
   const afterTaxBonus = byCat("afterTaxBonus");
-  const otherTaxFreeIncome = byCat("otherTaxFreeIncome");
+  // Adjustment rows (spec 18) — "income.nonTaxable" is a non-assessable
+  // cash receipt (the registry's own description), so it folds into the
+  // existing otherTaxFreeIncome line rather than needing a line of its
+  // own; the engine credits it to `inc` the same way (deterministic.js).
+  // otherTaxFreeIncomeComputed (pre-adjustment) is kept alongside for
+  // Commit 2's sub-rows, same convention as the other three functions.
+  const otherTaxFreeIncomeComputed = byCat("otherTaxFreeIncome");
+  const adjNonTaxable = adjustmentSum(row, "income.nonTaxable", forOwner);
+  const otherTaxFreeIncome = otherTaxFreeIncomeComputed + adjNonTaxable;
   const total = regularTakeHomePay + anticipatedTaxReturn + afterTaxBonus + otherTaxFreeIncome;
-  return { regularTakeHomePay, anticipatedTaxReturn, afterTaxBonus, otherTaxFreeIncome, total };
+  return {
+    regularTakeHomePay, anticipatedTaxReturn, afterTaxBonus,
+    otherTaxFreeIncomeComputed, adjNonTaxable, otherTaxFreeIncome, total,
+  };
 }
 
 export function expenseSums(row, ctx, forOwner = null) {
@@ -256,11 +315,18 @@ export function expenseSums(row, ctx, forOwner = null) {
     s + (row.properties?.[p.id]?.expenses ?? 0) * shareOf(p.owner, forOwner), 0);
   const homeMaintenance = byCat("homeMaintenance");
   const other = byCat("other");
-  const total = mortgageRepayments + otherLoanRepayments + nonDiscretionary + discretionary + groceryFuel
+  const computedTotal = mortgageRepayments + otherLoanRepayments + nonDiscretionary + discretionary + groceryFuel
     + holidays + insurance + investmentPropertyExpenses + homeMaintenance + other + education;
+  // Adjustment rows (spec 18) — "expenses" is household-owned (a joint
+  // leak, per the registry), so it's split the same 50/50 way as
+  // education above for a per-person view, in full for the household.
+  // computedTotal (pre-adjustment) kept alongside for Commit 2's
+  // sub-rows, same convention as the other three functions.
+  const adjExpenses = adjustmentSum(row, "expenses", forOwner);
+  const total = computedTotal + adjExpenses;
   return {
     mortgageRepayments, otherLoanRepayments, nonDiscretionary, discretionary, groceryFuel, holidays,
-    insurance, investmentPropertyExpenses, homeMaintenance, other, education, total,
+    insurance, investmentPropertyExpenses, homeMaintenance, other, education, computedTotal, adjExpenses, total,
   };
 }
 

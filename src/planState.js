@@ -2690,7 +2690,12 @@ export function clampAdjustment(raw, plan, ctx = {}) {
     target,
     owner,
     superAccountId,
-    label: typeof raw?.label === "string" ? raw.label.slice(0, 200) : "",
+    // "label; defaults to the target's own label" (spec) — a blank
+    // string is treated as "not set" so the default keeps applying
+    // until the user actually types something, not just once.
+    label: typeof raw?.label === "string" && raw.label.trim()
+      ? raw.label.slice(0, 200)
+      : ADJUSTMENT_TARGET_LABELS[target],
     amount: Number.isFinite(Number(raw?.amount)) ? Number(raw.amount) : 0,
     from, to,
     ...clampIndexation(raw),

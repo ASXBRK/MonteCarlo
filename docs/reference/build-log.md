@@ -397,6 +397,55 @@ of randomised runs unchanged. Regression gate: a scenario with no
 adjustments is bit-identical (the array is empty by default and every
 new term evaluates to zero).
 
+### Adjustment rows (spec 18, Commit 2 — table integration and marking)
+The Cashflow and Tax tables' section totals (`cashflowStatement.js`'s
+`assessableIncome`/`deductionSums`/`taxSums`/`cashReceivedSums`/
+`expenseSums`) are an INDEPENDENT re-derivation from rowTotals/taxDetail,
+not a read of the engine's own already-adjusted `row.income`/`expenses`/
+`tax` — each now folds its matching adjustment(s) in via a shared
+`adjustmentSum(row, target, forOwner)` helper (same `shareOf` 50/50
+convention as every other joint figure there), and exposes BOTH the
+pre-adjustment `computedX` and the post-adjustment `total`/named field so
+a caller can show all three without re-deriving one from another.
+`taxSums`'s tax.incomeTax/medicare/help/cgt fold in similarly — these
+settle in the engine as a lump-sum PAYG-style spread (Commit 1), never
+touching `taxDetail`'s own per-component fields, so `taxSums` is where
+the per-target split actually happens for the Cashflow table; the Tax
+view's own per-person breakdown (`buildTaxGroups`) reads `taxDetail`
+directly, which is why THAT figure is already the "Computed" one with no
+subtraction needed.
+
+main.js's `adjustableRow(label, computedCell, adjCell, target, forOwner,
+opts)` is the single Computed/Adjustment/Total (Xtools "Amount/Special/
+Total") builder both tables use: Total is always Computed + Adjustment,
+never a separately-tracked figure that could drift from the other two.
+Returns the ORIGINAL single row unchanged when nothing is active for
+that target/owner scope — the regression gate (a scenario with no
+adjustments renders byte-identical) falls out of that early return
+rather than needing a separate code path. Both the Adjustment sub-row
+and the Total row carry `data-adj-marker`/`data-adj-owner`/`title`
+(reusing the existing delegated click handler from Commit 1's modal
+groundwork) and a tinted background + trailing pencil via
+`.tl-adjustment-row`/`.tl-adjusted` in styles.css — clicking either row
+opens the same create/edit form. Wired for income.assessable, deductions
+(surfaced on the "Taxable Income" line, since the Deductions section has
+no separate total row of its own), expenses, income.nonTaxable (Cash
+Received's "Other tax free income" — skipped when the individual-rows
+toggle is showing itemised entries instead, a disclosed gap rather than
+a silent one, since the Adjustments panel still lists it), and all four
+tax.* targets (tax.incomeTax and tax.cgt share the Cashflow table's
+single "Income Tax" line, since it carries no separate CGT row there;
+the Tax view's own "Net income tax"/"CGT payable" lines mark them
+separately). `superContributions` and `tax.withheld` are not marked in
+any table — the former has no Super-balance table view in this build yet
+and the latter is a pure timing shift with no ledger line of its own —
+both remain fully visible in the Commit 3 review panel, a disclosed
+scope reduction rather than an invisible one.
+Regression gate: full suite green with the new folding logic exercised
+against zero-adjustment fixtures (identical results) and populated ones
+(reconciling exactly); no engine change, so `randomScenario()`/the
+conservation invariant are unchanged from Commit 1.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

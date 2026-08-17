@@ -30,7 +30,7 @@ import {
   createChild, createEducationBlock, childCurrentAgeInfo, dependentChildrenCountInFY,
   childEducationPlanYearBounds, normaliseChildren, flatEducationBlocks,
   createSurplusPeriod, legacySurplusPeriod, clampSurplusPeriod, normaliseSurplusPeriods,
-  ADJUSTMENT_TARGETS, createAdjustment, clampAdjustment, normaliseAdjustments,
+  ADJUSTMENT_TARGETS, ADJUSTMENT_TARGET_LABELS, createAdjustment, clampAdjustment, normaliseAdjustments,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -1706,6 +1706,17 @@ describe("Adjustment rows", () => {
     expect(a.owner).toBe("household");
     expect(a.amount).toBe(0);
     expect(a.note).toBe("");
+  });
+
+  it("label defaults to the target's own label until the user actually types one", () => {
+    const defaulted = clampAdjustment({ target: "tax.help", amount: 100, note: "x" }, plan);
+    expect(defaulted.label).toBe(ADJUSTMENT_TARGET_LABELS["tax.help"]);
+    const custom = clampAdjustment({ target: "tax.help", amount: 100, label: "My own label", note: "x" }, plan);
+    expect(custom.label).toBe("My own label");
+    // A blank/whitespace label is treated as "not set" — the default
+    // keeps applying rather than showing empty forever.
+    const blank = clampAdjustment({ target: "tax.help", amount: 100, label: "   ", note: "x" }, plan);
+    expect(blank.label).toBe(ADJUSTMENT_TARGET_LABELS["tax.help"]);
   });
 
   it("an invalid target is dropped entirely, not coerced to a fallback", () => {

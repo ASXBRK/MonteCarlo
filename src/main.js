@@ -37,6 +37,7 @@ import {
   incomeCategoryTaxTreatment,
   createChild, createEducationBlock, childCurrentAgeInfo, flatEducationBlocks,
   SCHEMA_VERSION,
+  ADJUSTMENT_TARGETS, ADJUSTMENT_TARGET_LABELS, createAdjustment,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -198,6 +199,26 @@ const els = {
   chartTreatmentSelects: document.querySelectorAll("[data-treatment]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
+  adjustmentsBtn: $("adjustmentsBtn"),
+  adjustmentsCountBadge: $("adjustmentsCountBadge"),
+  adjustmentsModal: $("adjustmentsModal"),
+  adjustmentsList: $("adjustmentsList"),
+  adjustmentsAddBtn: $("adjustmentsAddBtn"),
+  adjustmentForm: $("adjustmentForm"),
+  adjId: $("adjId"),
+  adjTarget: $("adjTarget"),
+  adjOwnerLabel: $("adjOwnerLabel"),
+  adjOwner: $("adjOwner"),
+  adjSuperAccountLabel: $("adjSuperAccountLabel"),
+  adjSuperAccount: $("adjSuperAccount"),
+  adjAmount: $("adjAmount"),
+  adjFromAge: $("adjFromAge"),
+  adjToAge: $("adjToAge"),
+  adjIndexBasis: $("adjIndexBasis"),
+  adjIndexExtraPct: $("adjIndexExtraPct"),
+  adjNote: $("adjNote"),
+  adjCancelBtn: $("adjCancelBtn"),
+  adjDeleteBtn: $("adjDeleteBtn"),
   reviewDefaultsModal: $("reviewDefaultsModal"),
   reviewDefaultsBody: $("reviewDefaultsBody"),
   assetRemoveModal: $("assetRemoveModal"),
@@ -5483,6 +5504,7 @@ function renderActiveView() {
   }
   renderOutputFormToggle();
   renderChartTypeSelect();
+  renderAdjustmentsCountBadge();
   els.exportBtn.textContent = GRAPH_VIEWS.has(activeView) ? "Export PNG" : "Export CSV";
   // Asset allocation is a pure mix (always 100%, whichever way you cut
   // it) — real vs nominal dollars has nothing to say about it, so the
@@ -7370,7 +7392,12 @@ function buildCashflowGroups(forOwner = null) {
     { label: "Foreign Income", cell: (y) => stmt(y).assessable.foreignIncome },
     { label: "Net Taxable Capital Gains", cell: (y) => stmt(y).assessable.netTaxableCapitalGains },
   ];
-  assessableRows.push({ label: "Assessable Income", always: true, cls: "tl-total", cell: (y) => stmt(y).assessable.total });
+  // Adjustment rows (spec 18 Commit 2) — "income.assessable" adjusts
+  // this section's own total; see adjustableRow's header comment.
+  assessableRows.push(...adjustableRow(
+    "Assessable Income", (y) => stmt(y).assessable.computedTotal, (y) => stmt(y).assessable.adjAssessable,
+    "income.assessable", forOwner, { always: true, cls: "tl-total" }
+  ));
 
   // --- DEDUCTIONS --------------------------------------------------------
   const deductionSectionRows = [
@@ -7388,14 +7415,33 @@ function buildCashflowGroups(forOwner = null) {
     ...catRow(deductionRows, rt.deductions, "salaryPackaging", "Salary Packaging (Living Expenses)", (y) => stmt(y).deductions.salaryPackaging).map(negate),
     ...catRow(deductionRows, rt.deductions, "other", "Other", (y) => stmt(y).deductions.other).map(negate),
   ];
-  deductionSectionRows.push({ label: "Taxable Income", always: true, cls: "tl-total", cell: (y) => stmt(y).taxableIncome });
+  // Adjustment rows (spec 18 Commit 2) — "deductions" adjusts the
+  // Deductions section total, which this table surfaces as Taxable
+  // Income rather than a separate "Total Deductions" line; the
+  // adjustment's own contribution there is -adjDeductions (more
+  // deductions ⇒ lower taxable income).
+  deductionSectionRows.push(...adjustableRow(
+    "Taxable Income", (y) => stmt(y).taxableIncome + stmt(y).deductions.adjDeductions, (y) => -stmt(y).deductions.adjDeductions,
+    "deductions", forOwner, { always: true, cls: "tl-total" }
+  ));
 
   // --- TAX -----------------------------------------------------------
   const taxSectionRows = [
-    { label: "Income Tax", cell: (y) => -stmt(y).tax.incomeTax },
-    { label: "Medicare Levy", cell: (y) => -stmt(y).tax.medicareLevy },
+    ...adjustableRow(
+      "Income Tax",
+      (y) => -stmt(y).tax.incomeTaxComputed,
+      (y) => -(stmt(y).tax.incomeTaxAdjustment + stmt(y).tax.cgtAdjustment),
+      ["tax.incomeTax", "tax.cgt"], forOwner
+    ),
+    ...adjustableRow(
+      "Medicare Levy", (y) => -stmt(y).tax.medicareLevyComputed, (y) => -stmt(y).tax.medicareAdjustment,
+      "tax.medicare", forOwner
+    ),
     { label: "Medicare Levy Surcharge", cell: (y) => -stmt(y).tax.medicareLevySurcharge },
-    { label: "HELP Repayment", cell: (y) => -stmt(y).tax.helpRepayment },
+    ...adjustableRow(
+      "HELP Repayment", (y) => -stmt(y).tax.helpRepaymentComputed, (y) => -stmt(y).tax.helpAdjustment,
+      "tax.help", forOwner
+    ),
     { label: "SAPTO", cell: (y) => -stmt(y).tax.sapto },
     { label: "LITO", cell: (y) => -stmt(y).tax.lito },
     { label: "Spouse Splitting Offset", cell: (y) => -stmt(y).tax.spouseSplittingOffset },
@@ -7412,7 +7458,18 @@ function buildCashflowGroups(forOwner = null) {
     { label: "Regular take home pay", cell: (y) => stmt(y).cashReceived.regularTakeHomePay },
     { label: "Anticipated tax return", cell: (y) => stmt(y).cashReceived.anticipatedTaxReturn },
     ...catRow(incomeRows, rt.income, "afterTaxBonus", "After tax bonus", (y) => stmt(y).cashReceived.afterTaxBonus),
-    ...catRow(incomeRows, rt.income, "otherTaxFreeIncome", "Other tax free income", (y) => stmt(y).cashReceived.otherTaxFreeIncome),
+    // Adjustment rows (spec 18 Commit 2) — "income.nonTaxable" folds
+    // into this line (cashflowStatement.js); when individual rows are
+    // shown (showIndividual), those already-itemised rows take over and
+    // an adjustment here would have nowhere visible to attach — a
+    // disclosed simplification, not a silent one (the Adjustments panel
+    // still lists it either way).
+    ...(showIndividual && incomeRows.some((r) => r.category === "otherTaxFreeIncome" && (forOwner == null || r.owner === forOwner))
+      ? catRow(incomeRows, rt.income, "otherTaxFreeIncome", "Other tax free income", (y) => stmt(y).cashReceived.otherTaxFreeIncome)
+      : adjustableRow(
+          "Other tax free income", (y) => stmt(y).cashReceived.otherTaxFreeIncomeComputed, (y) => stmt(y).cashReceived.adjNonTaxable,
+          "income.nonTaxable", forOwner
+        )),
   ];
 
   // --- EXPENSES ----------------------------------------------------------
@@ -7429,7 +7486,12 @@ function buildCashflowGroups(forOwner = null) {
     ...catRow(expenseRows, rt.expenses, "other", "Other", (y) => stmt(y).expenses.other).map(negate),
     { label: "Education Fees", cell: (y) => -stmt(y).expenses.education },
   ];
-  expenseSectionRows.push({ label: "Total Expenses", always: true, cls: "tl-total", cell: (y) => -stmt(y).expenses.total });
+  // Adjustment rows (spec 18 Commit 2) — "expenses" adjusts this
+  // section's own total.
+  expenseSectionRows.push(...adjustableRow(
+    "Total Expenses", (y) => -stmt(y).expenses.computedTotal, (y) => -stmt(y).expenses.adjExpenses,
+    "expenses", forOwner, { always: true, cls: "tl-total" }
+  ));
   expenseSectionRows.push({ label: "SURPLUS INCOME", always: true, cls: "tl-total", cell: (y) => stmt(y).surplusIncome });
 
   // --- One-off amounts (asset-level events, outside the firm's row
@@ -8189,23 +8251,42 @@ function buildTaxGroups(entity = "all") {
     if (released <= 0.005) return "Personal cash";
     return `Super, $${Math.round(fromCash).toLocaleString()} shortfall to cash`;
   };
+  // Adjustment rows (spec 18 Commit 2) — unlike cashflowStatement.js's
+  // stmt(), taxDetail's own per-component fields (incomeTax/medicare/
+  // help/cgt) are NEVER touched by an adjustment (deterministic.js
+  // settles tax.* adjustments as a lump-sum cash effect via spreadTax,
+  // not into these fields) — so td(y,p)?.X is already exactly the
+  // "Computed" figure, and adjustmentAmountFor supplies the sign-matched
+  // Adjustment; adjustableRow derives Total as their sum.
   const personGroup = (p, title) => ({
     title,
     rows: [
       { label: "Taxable income", cell: (y) => td(y, p)?.taxableIncome ?? 0 },
       { label: "Gross tax", cell: (y) => -(td(y, p)?.grossTax ?? 0) },
-      { label: "Medicare levy", cell: (y) => -(td(y, p)?.medicare ?? 0) },
+      ...adjustableRow(
+        "Medicare levy", (y) => -(td(y, p)?.medicare ?? 0), (y) => -adjustmentAmountFor(y, "tax.medicare", p),
+        "tax.medicare", p
+      ),
       { label: "LITO", cell: (y) => td(y, p)?.lito ?? 0 },
       { label: "Franking credits", cell: (y) => td(y, p)?.frankingCredits ?? 0 },
       { label: "Excess concessional super contributions", cell: (y) => td(y, p)?.excessConcessionalContributions ?? 0 },
       { label: "Excess concessional contributions offset (15%)", cell: (y) => td(y, p)?.excessCcOffset ?? 0 },
-      { label: "Net income tax", cell: (y) => -(td(y, p)?.incomeTax ?? 0), cls: "tl-total" },
-      { label: "CGT payable", cell: (y) => -(td(y, p)?.cgt ?? 0) },
+      ...adjustableRow(
+        "Net income tax", (y) => -(td(y, p)?.incomeTax ?? 0), (y) => -adjustmentAmountFor(y, "tax.incomeTax", p),
+        "tax.incomeTax", p, { cls: "tl-total" }
+      ),
+      ...adjustableRow(
+        "CGT payable", (y) => -(td(y, p)?.cgt ?? 0), (y) => -adjustmentAmountFor(y, "tax.cgt", p),
+        "tax.cgt", p
+      ),
       { label: "Division 293 tax payable", cell: (y) => -(td(y, p)?.div293 ?? 0) },
       { label: "Division 296 tax payable", cell: (y) => -(td(y, p)?.div296 ?? 0) },
       { label: "Division 293/296 — paid from", text: true, cell: (y) => divPaidFromText(y, p) },
       { label: "Quarantined rental losses (carried)", cell: (y) => td(y, p)?.quarantinedLossCarry ?? 0 },
-      { label: "HELP repayment", cell: (y) => -(td(y, p)?.helpRepayment ?? 0) },
+      ...adjustableRow(
+        "HELP repayment", (y) => -(td(y, p)?.helpRepayment ?? 0), (y) => -adjustmentAmountFor(y, "tax.help", p),
+        "tax.help", p
+      ),
       { label: "HELP balance (closing)", cell: (y) => td(y, p)?.helpBalanceClosing ?? 0 },
       { label: "Medicare levy surcharge", cell: (y) => -(td(y, p)?.medicareLevySurcharge ?? 0) },
       { label: "FHSSS release (gross)", cell: (y) => td(y, p)?.fhsssRelease ?? 0 },
@@ -10843,6 +10924,221 @@ els.paramsBtn.addEventListener("click", () => openModal());
 els.paramsModal.querySelector(".modal-close").addEventListener("click", () => els.paramsModal.close());
 els.paramsModal.addEventListener("click", (e) => {
   if (e.target === els.paramsModal) els.paramsModal.close();
+});
+
+// --- Adjustment rows (docs/specs/18-adjustment-rows.md, Commits 2-3) --------
+//
+// A single modal, used two ways: the "Adjustments" button in the output
+// header opens it showing every adjustment in the scenario (Commit 3's
+// review panel, with a count badge that appears whenever any exist); a
+// marked table row's own icon (renderAdjustmentMarker, below) opens the
+// SAME modal pre-filtered into a create/edit form for that row's target
+// (Commit 2's "edit affordance") — one editing surface, not two.
+
+function adjustmentOwnerLabel(a) {
+  if (a.owner === "household") return "Household";
+  return a.owner === "partner" ? partnerName() : clientName();
+}
+
+function ageRefLabel(ref) {
+  // The editor only ever writes age-based DateRefs (see the form
+  // below); an anchor-based one (from a source other than this editor)
+  // is shown by its anchor id rather than crashing.
+  return ref?.kind === "age" ? String(ref.age) : (ref?.anchorId ?? "?");
+}
+
+function renderAdjustmentsCountBadge() {
+  const n = (state.plan.adjustments ?? []).length;
+  els.adjustmentsCountBadge.hidden = n === 0;
+  els.adjustmentsCountBadge.textContent = String(n);
+}
+
+function renderAdjustmentsList() {
+  const list = state.plan.adjustments ?? [];
+  if (list.length === 0) {
+    els.adjustmentsList.innerHTML = `<p class="helper-text">No adjustments in this scenario yet.</p>`;
+    return;
+  }
+  els.adjustmentsList.innerHTML = list.map((a) => `
+    <div class="adjustment-list-row">
+      <div>
+        <div class="adj-label">${escapeHTML(a.label)} — ${escapeHTML(adjustmentOwnerLabel(a))}</div>
+        <div class="adj-meta">${fmtMoney(a.amount)} · age ${ageRefLabel(a.from)}–${ageRefLabel(a.to)}
+          · <span title="${escapeHTML(a.note)}">${escapeHTML(a.note.length > 60 ? a.note.slice(0, 60) + "…" : a.note)}</span></div>
+      </div>
+      <button type="button" class="btn-text" data-adj-edit="${a.id}">Edit</button>
+    </div>
+  `).join("");
+}
+
+function adjustmentFieldsForTarget(target) {
+  const isHousehold = target === "expenses";
+  const isSuperContribution = target === "superContributions";
+  els.adjOwnerLabel.hidden = isHousehold || isSuperContribution;
+  els.adjSuperAccountLabel.hidden = !isSuperContribution;
+  if (isSuperContribution) {
+    const accounts = (state.plan.superAccounts ?? []).filter((s) => s.include);
+    els.adjSuperAccount.innerHTML = accounts.map((s) => `<option value="${s.id}">${escapeHTML(s.name)} (${s.owner === "partner" ? escapeHTML(partnerName()) : escapeHTML(clientName())})</option>`).join("")
+      || `<option value="">No super accounts yet</option>`;
+  }
+}
+
+// Opens the shared editor. target/prefillOwner seed a NEW adjustment
+// (Commit 2's row-marker "+" affordance); an existing id (via the
+// review list's Edit button) loads that adjustment instead.
+function openAdjustmentEditor({ id = null, target = ADJUSTMENT_TARGETS[0], owner = null } = {}) {
+  els.adjustmentsModal.showModal();
+  renderAdjustmentsList();
+  els.adjTarget.innerHTML = adjustmentTargetOptionsHTML();
+  const existing = id ? (state.plan.adjustments ?? []).find((a) => a.id === id) : null;
+  els.adjId.value = existing?.id ?? "";
+  els.adjTarget.value = existing?.target ?? target;
+  adjustmentFieldsForTarget(els.adjTarget.value);
+  els.adjOwner.value = existing?.owner === "partner" ? "partner" : (owner === "partner" ? "partner" : "client");
+  if (existing?.superAccountId) els.adjSuperAccount.value = existing.superAccountId;
+  els.adjAmount.value = existing?.amount ?? 0;
+  els.adjFromAge.value = existing ? ageRefLabel(existing.from) : state.plan.client.currentAge;
+  els.adjToAge.value = existing ? ageRefLabel(existing.to) : state.plan.endAge;
+  els.adjIndexBasis.value = existing?.indexBasis ?? "cpi";
+  els.adjIndexExtraPct.value = existing?.indexExtraPct ?? 0;
+  els.adjNote.value = existing?.note ?? "";
+  els.adjDeleteBtn.hidden = !existing;
+  els.adjustmentForm.hidden = false;
+  requestAnimationFrame(() => els.adjustmentForm.scrollIntoView({ behavior: "smooth", block: "start" }));
+}
+
+function adjustmentTargetOptionsHTML() {
+  return ADJUSTMENT_TARGETS.map((t) => `<option value="${t}">${escapeHTML(ADJUSTMENT_TARGET_LABELS[t])}</option>`).join("");
+}
+
+function closeAdjustmentForm() {
+  els.adjustmentForm.hidden = true;
+  els.adjustmentForm.reset();
+}
+
+els.adjustmentsBtn.addEventListener("click", () => {
+  els.adjustmentsModal.showModal();
+  renderAdjustmentsList();
+  els.adjustmentForm.hidden = true;
+});
+els.adjustmentsAddBtn.addEventListener("click", () => openAdjustmentEditor());
+els.adjustmentsModal.querySelector(".modal-close").addEventListener("click", () => els.adjustmentsModal.close());
+els.adjustmentsModal.addEventListener("click", (e) => {
+  if (e.target === els.adjustmentsModal) els.adjustmentsModal.close();
+  const editBtn = e.target.closest("[data-adj-edit]");
+  if (editBtn) openAdjustmentEditor({ id: editBtn.dataset.adjEdit });
+});
+els.adjTarget.addEventListener("change", () => adjustmentFieldsForTarget(els.adjTarget.value));
+els.adjCancelBtn.addEventListener("click", () => closeAdjustmentForm());
+
+els.adjustmentForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (!els.adjNote.value.trim()) { els.adjNote.focus(); return; } // required — spec's own words
+  const target = els.adjTarget.value;
+  const raw = {
+    id: els.adjId.value || undefined,
+    target,
+    owner: target === "expenses" ? "household" : els.adjOwner.value,
+    superAccountId: target === "superContributions" ? els.adjSuperAccount.value : null,
+    label: "",
+    amount: clampNumber(els.adjAmount.value, -1e9, 1e9),
+    from: { kind: "age", age: clampInt(els.adjFromAge.value, 0, 120) },
+    to: { kind: "age", age: clampInt(els.adjToAge.value, 0, 120) },
+    indexBasis: els.adjIndexBasis.value,
+    indexExtraPct: clampNumber(els.adjIndexExtraPct.value, -10, 10),
+    note: els.adjNote.value.trim(),
+  };
+  const existingId = els.adjId.value;
+  const list = state.plan.adjustments ?? [];
+  state.plan.adjustments = existingId
+    ? list.map((a) => (a.id === existingId ? { ...raw, id: existingId } : a))
+    : [...list, { ...raw, id: uid("adj") }];
+  state.plan = clampPlan(state.plan, PROFILES);
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+  closeAdjustmentForm();
+  renderAdjustmentsList();
+  renderAdjustmentsCountBadge();
+});
+
+els.adjDeleteBtn.addEventListener("click", () => {
+  const id = els.adjId.value;
+  if (!id) return;
+  if (!window.confirm("Delete this adjustment?")) return;
+  state.plan.adjustments = (state.plan.adjustments ?? []).filter((a) => a.id !== id);
+  state.plan = clampPlan(state.plan, PROFILES);
+  state = clampAllToPlan(state, PROFILES);
+  saveState();
+  refreshOutputs();
+  closeAdjustmentForm();
+  renderAdjustmentsList();
+  renderAdjustmentsCountBadge();
+});
+
+// Reused by Cashflow/Tax's row marking (Commit 2): the sum of every
+// active adjustment matching `target` (and `owner`, when given) for
+// plan-year y, plus the small marker icon's HTML (empty when nothing
+// is active that year — the spec's "hidden by default", not disabled).
+function adjustmentAmountFor(y, target, owner = null) {
+  const row = projection.yearly[y];
+  return (row?.adjustments ?? [])
+    .filter((a) => a.target === target && (owner == null || a.owner === owner))
+    .reduce((s, a) => s + a.amount, 0);
+}
+// adjustmentRowAttrs(target, forOwner) → the <tr> attributes that both
+// mark an adjusted row (a tinted background via .tl-adjustment-row/
+// .tl-adjusted in styles.css) and make the WHOLE row clickable to open
+// the editor (the delegated listener below matches [data-adj-marker] on
+// any element, tr included) — the note becomes its tooltip, per the
+// spec's "distinct icon and a tinted cell... the note as its tooltip".
+// target may be a single target or an array (a displayed row can fold
+// more than one target, e.g. Cashflow's "Income Tax" carries both
+// tax.incomeTax and tax.cgt — there's no separate CGT line there).
+function adjustmentRowAttrs(target, forOwner) {
+  const targets = Array.isArray(target) ? target : [target];
+  const active = (state.plan.adjustments ?? []).find((a) => targets.includes(a.target)
+    && (forOwner == null || a.owner === forOwner || a.owner === "household"));
+  if (!active) return "";
+  return ` data-adj-marker="${active.target}"${active.owner && active.owner !== "household" ? ` data-adj-owner="${active.owner}"` : ""}` +
+    ` title="${escapeHTML(active.note)}"`;
+}
+
+// adjustableRow(label, computedCell, adjCell, target, forOwner, rowOpts)
+// — Commit 2's "own sub-row beneath the computed figure (Computed /
+// Adjustment / Total)" pattern, from the Xtools Amount/Special/Total
+// convention the spec cites. `computedCell` is the pre-adjustment
+// figure (what the engine alone would have shown); `adjCell` is the
+// already sign-matched (same display convention as computedCell) sum of
+// active adjustments; Total = Computed + Adjustment always, so the three
+// rows can never disagree with each other or with the engine's own
+// (already-adjusted) figures elsewhere. Returns the single unmodified
+// row when nothing is active for this target/owner — a scenario with no
+// adjustments therefore renders byte-identical to before Commit 2, the
+// spec's own regression gate.
+function adjustableRow(label, computedCell, adjCell, target, forOwner, rowOpts = {}) {
+  const targets = Array.isArray(target) ? target : [target];
+  const { cls: baseCls, ...restOpts } = rowOpts;
+  const active = (state.plan.adjustments ?? []).some((a) => targets.includes(a.target)
+    && (forOwner == null || a.owner === forOwner || a.owner === "household"));
+  if (!active) return [{ label, cell: computedCell, cls: baseCls, ...restOpts }];
+  const totalCell = (y) => computedCell(y) + adjCell(y);
+  const attrs = adjustmentRowAttrs(targets, forOwner);
+  return [
+    { label: `${label} — Computed`, cell: computedCell, cls: baseCls, ...restOpts },
+    { label: `${label} — Adjustment`, cell: adjCell, cls: "tl-adjustment-row", rowAttrs: attrs, ...restOpts },
+    { label, cell: totalCell, cls: [baseCls, "tl-adjusted"].filter(Boolean).join(" "), rowAttrs: attrs, ...restOpts },
+  ];
+}
+// Delegated once, on the whole output canvas, since Cashflow/Tax
+// re-render their DOM on every edit — a per-row listener would leak.
+els.outputCanvas.addEventListener("click", (e) => {
+  const marker = e.target.closest("[data-adj-marker]");
+  if (!marker) return;
+  const target = marker.dataset.adjMarker;
+  const owner = marker.dataset.adjOwner || null;
+  const existing = (state.plan.adjustments ?? []).find((a) => a.target === target && (owner == null || a.owner === owner));
+  openAdjustmentEditor(existing ? { id: existing.id } : { target, owner });
 });
 
 // Bracket-mode toggle (Parameters modal): indexed real-constant vs

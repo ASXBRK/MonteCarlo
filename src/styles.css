@@ -1452,6 +1452,39 @@ html, body {
   padding: 0 10px 0 18px;
 }
 
+/* Adjustment rows (spec 18) — the editor form, and the visible marking
+   applied to every table row an active adjustment touches. */
+.adjustment-form {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+.adjustment-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; }
+.adjustment-window { display: flex; gap: 16px; }
+.adjustment-window label { flex: 1 1 0; }
+.adjustment-form-actions { display: flex; gap: 8px; margin-top: 4px; }
+.adjustment-list-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 8px 4px; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.adjustment-list-row .adj-label { font-weight: 600; flex: 1 1 auto; }
+.adjustment-list-row .adj-meta { color: var(--ink-soft); font-size: 12px; }
+/* A cell/row an adjustment actually touched this year — a distinct
+   icon and a tinted background, the note as its tooltip (spec: "use
+   the same treatment consistently"). */
+.tl-adjusted-icon {
+  display: inline-block; margin-left: 4px; font-size: 11px;
+  color: #b8860b; cursor: pointer;
+}
+tr.tl-adjustment-row { background: #fbf3de; }
+tr.tl-adjustment-row .tl-label { font-weight: 500; font-style: italic; color: var(--ink-soft); }
+/* The Total row of a Computed/Adjustment/Total trio (Commit 2) — same
+   tint, plus a pencil after the label so it reads distinctly from the
+   trio's own Adjustment sub-row above it. Both rows carry
+   [data-adj-marker] and open the same editor on click. */
+tr.tl-adjusted td.tl-num { background: #fdf6e3; }
+tr.tl-adjusted .tl-label::after { content: " \270E"; color: #b8860b; font-size: 11px; }
+tr[data-adj-marker] { cursor: pointer; }
+
 /* Chart-type dropdown (spec 17, Commit 4) — same visual weight as the
    btn-text controls it sits beside in .output-actions. */
 .chart-type-select {
