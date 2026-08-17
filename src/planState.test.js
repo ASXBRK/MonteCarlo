@@ -131,6 +131,59 @@ describe("Property depreciation (PAYG withholding, tax refund timing, and deduct
   });
 });
 
+describe("Smart defaults (spec 19, Commit 1) — property rent/expenses recompute until overridden", () => {
+  it("a brand-new property's rent/expenses derive from value and stay isDefault:true", () => {
+    const plan = couplePlan();
+    const p = createProperty(plan, []);
+    expect(p.rent.isDefault).toBe(true);
+    expect(p.expenses.isDefault).toBe(true);
+    const clamped = clampProperty({ ...p, propertyType: "investment", currentValue: 500000 }, plan);
+    expect(clamped.rent.amount).toBeCloseTo(500000 * 0.04, 6); // 4% of property value
+    expect(clamped.expenses.amount).toBeCloseTo(clamped.rent.amount * 0.2, 6); // 20% of gross rent
+  });
+
+  it("recomputes again on a later clamp as value changes, while still isDefault", () => {
+    const plan = couplePlan();
+    let p = clampProperty({ ...createProperty(plan, []), propertyType: "investment", currentValue: 500000 }, plan);
+    expect(p.rent.amount).toBeCloseTo(20000, 6);
+    p = clampProperty({ ...p, currentValue: 800000 }, plan);
+    expect(p.rent.amount).toBeCloseTo(32000, 6); // still tracking — 4% of the NEW value
+    expect(p.expenses.amount).toBeCloseTo(32000 * 0.2, 6);
+  });
+
+  it("typing an amount directly (main.js sets isDefault:false) freezes it — no further recompute", () => {
+    const plan = couplePlan();
+    let p = clampProperty({ ...createProperty(plan, []), propertyType: "investment", currentValue: 500000 }, plan);
+    // Simulate main.js's field handler: user types a rent figure.
+    p = clampProperty({ ...p, rent: { ...p.rent, amount: 15000, isDefault: false }, currentValue: 900000 }, plan);
+    expect(p.rent.amount).toBe(15000); // untouched by the value change
+    expect(p.rent.isDefault).toBe(false);
+    // expenses is still tracking rent's amount, which is now the user's own 15000.
+    expect(p.expenses.amount).toBeCloseTo(15000 * 0.2, 6);
+  });
+
+  it("regression gate: a pre-Commit-1 property blob (no isDefault field at all) is treated as already user-entered, not overwritten", () => {
+    const plan = couplePlan();
+    const raw = {
+      ...createProperty(plan, []), propertyType: "investment", currentValue: 500000,
+      rent: { amount: 20000, indexBasis: "cpi", indexExtraPct: 0 }, // no isDefault key — pre-existing saved state
+      expenses: { amount: 3000, indexBasis: "cpi", indexExtraPct: 0 },
+    };
+    const clamped = clampProperty(raw, plan);
+    expect(clamped.rent.amount).toBe(20000); // NOT recomputed to 4% of value (20000)
+    expect(clamped.expenses.amount).toBe(3000); // NOT recomputed to 20% of rent (4000)
+    expect(clamped.rent.isDefault).toBe(false);
+    expect(clamped.expenses.isDefault).toBe(false);
+  });
+
+  it("a planned purchase derives from priceToday, not currentValue", () => {
+    const plan = couplePlan();
+    const p = createProperty(plan, []);
+    const clamped = clampProperty({ ...p, propertyType: "investment", status: "planned", priceToday: 600000, currentValue: 0 }, plan);
+    expect(clamped.rent.amount).toBeCloseTo(600000 * 0.04, 6);
+  });
+});
+
 describe("clampDeductionRow", () => {
   it("clamps owner to the household window and defaults an invalid category to 'other'", () => {
     const plan = couplePlan();

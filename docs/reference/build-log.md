@@ -473,6 +473,35 @@ not in another" — the spec's own words) without disturbing any other
 touched path or the source scenario.
 Regression gate: no engine change; full suite green.
 
+### Smart defaults (spec 19, Commit 1 — registry, provenance, and derived recomputation)
+`src/smartDefaults.js`: a pure registry naming each defaulted field's
+kind (house view / legislated / derived) and a `describe(ctx)` sentence
+matching the spec's own worked examples exactly ("Default: 5.5% — house
+view (Residential Property profile growth component)"). Of the seven
+fields the spec lists, five (property growth, purchase costs, LVR, agent
+fees, education indexation) derive from a CONSTANT that never changes
+mid-session (a fixed % or the firm's own profile assumption) — for
+those, "recomputes when its inputs change" is vacuous, so only the
+provenance tooltip matters, wired via the existing `tooltipHTML()`
+affordance (spec 15). The other two — property rent (4% of value) and
+expenses (20% of gross rent) — genuinely cross-reference another
+user-editable field, so THOSE get real recompute-until-overridden
+tracking: a new `isDefault` flag on each `Property.rent`/`.expenses`
+sub-object (planState.js), true only on a brand-new property
+(`createProperty`); `clampProperty` recomputes the amount from its
+source on every clamp while the flag holds, and main.js's field handler
+sets it false the instant the user types an amount directly, never
+re-arming. Regression gate: a pre-Commit-1 property blob has no
+`isDefault` key at all — defaulting the check to `=== true` (not
+`!== false`) means an absent flag reads as "already user-entered", so
+every existing saved rent/expenses figure passes through clampProperty
+unchanged rather than being silently overwritten by the new derivation
+— verified directly (a raw fixture with rent=20000/expenses=3000 and no
+`isDefault` key stays exactly 20000/3000 after clamping, not the 4%/20%
+derived figures). No new money flow (a derived default replaces a
+manual entry; it doesn't add a leak), so no `randomScenario()`/
+conservation-invariant change needed.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

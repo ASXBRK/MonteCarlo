@@ -705,9 +705,12 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
     dutyOverride: null,      // $ | null
     // both:
     growthPct: defaultGrowthPct, // nominal % p.a.
-    // investment only (D1 indexation controls on each):
-    rent: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
-    expenses: { amount: 0, indexBasis: "cpi", indexExtraPct: 0 },
+    // investment only (D1 indexation controls on each). isDefault
+    // (spec 19 Commit 1's smart defaults): true means the amount is
+    // still being derived (4% of value / 20% of rent — clampProperty)
+    // rather than user-entered; clampProperty fills the actual amount.
+    rent: { amount: 0, indexBasis: "cpi", indexExtraPct: 0, isDefault: true },
+    expenses: { amount: 0, indexBasis: "cpi", indexExtraPct: 0, isDefault: true },
     expensesDeductible: true,
     // Investment only — an annual deduction to the owner, alongside
     // deductible loan interest and expenses (PAYG withholding, tax
@@ -732,9 +735,32 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
 }
 
 export function clampProperty(p, plan) {
-  const flow = (f) => ({ amount: clampNumber(f?.amount, 0), ...clampIndexation(f ?? {}) });
+  // Smart defaults (spec 19 Commit 1) — rent and expenses are the only
+  // two DERIVED defaults here whose SOURCE VALUE changes during a
+  // session (property value, and rent itself), so they're the only
+  // fields that need "recomputes until overridden" tracking rather than
+  // a one-off fixed constant (growthPct/purchaseCostsPct/lvrPct all
+  // derive from something that never changes mid-session — see
+  // smartDefaults.js's own header for why). `isDefault` means "still
+  // tracking"; the property section's amount input sets it false the
+  // moment the user types a value directly (main.js), and it never
+  // re-arms — "once overridden it stops tracking". Default to FALSE
+  // (not true) when absent: every property created before this commit
+  // has an explicit rent/expenses amount with no isDefault flag at all,
+  // and treating that as "still tracking" would silently overwrite an
+  // entered figure — the regression gate (bit-identical without the new
+  // feature) requires opt-IN, so only createProperty's brand-new
+  // isDefault:true literal ever starts tracking.
+  const flow = (f) => ({
+    amount: clampNumber(f?.amount, 0), isDefault: f?.isDefault === true, ...clampIndexation(f ?? {}),
+  });
   const propertyType = PROPERTY_TYPES.includes(p.propertyType) ? p.propertyType : "ppr";
   const status = p.status === "planned" ? "planned" : "owned";
+  const valueForDefaults = status === "planned" ? clampNumber(p.priceToday, 0) : clampNumber(p.currentValue, 0);
+  let rent = flow(p.rent);
+  if (rent.isDefault) rent = { ...rent, amount: valueForDefaults * 0.04 }; // 4% of property value
+  let expenses = flow(p.expenses);
+  if (expenses.isDefault) expenses = { ...expenses, amount: rent.amount * 0.2 }; // 20% of gross rent
   return {
     id: typeof p.id === "string" && p.id ? p.id : uid("pr"),
     name: typeof p.name === "string" && p.name.trim() ? p.name : "Property",
@@ -765,8 +791,8 @@ export function clampProperty(p, plan) {
     lmiOverride: p.lmiOverride == null ? null : clampNumber(p.lmiOverride, 0),
     lmiPayAtSettlement: p.lmiPayAtSettlement === true,
     growthPct: clampNumber(p.growthPct ?? 5, -10, 30),
-    rent: flow(p.rent),
-    expenses: flow(p.expenses),
+    rent,
+    expenses,
     expensesDeductible: p.expensesDeductible !== false,
     depreciation: clampNumber(p.depreciation, 0),
     // Document Set Commit 3 (FHSSS) — input integrity: releasing FHSSS

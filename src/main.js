@@ -50,6 +50,7 @@ import { nominalFactor, firstFyStartYear } from "./schedule.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
+import { describeDefault } from "./smartDefaults.js";
 import { buildSnapshotColumns, buildSnapshotTable, snapshotToHTML, snapshotToCSV } from "./snapshot.js";
 import {
   eligibleDepositProperties, buildDepositFocus, solveDepositContribution, solveWhenCouldIBuy,
@@ -4098,8 +4099,16 @@ function propertyCardHTML(p) {
   const cell = (label, inner) => `<div class="cf-cell"><label>${label}</label>${inner}</div>`;
   const num = (label, field, value, attrs = 'min="0" step="1000"') =>
     cell(label, `<input type="number" ${attrs} value="${value}" data-pid="${p.id}" data-pfield="${field}" />`);
+  // Smart defaults (spec 19 Commit 1) — a derived amount still tracking
+  // (isDefault) carries the registry's own provenance sentence as a
+  // tooltip; once overridden, the field is unremarkable (no tooltip),
+  // same "distinct while it's a default, ordinary once entered"
+  // treatment as untouched fields elsewhere.
   const flowCells = (label, field, flow) => `
-    ${num(`${label} ($/yr, today's)`, `${field}.amount`, flow.amount)}
+    ${num(
+      `${label} ($/yr, today's)${flow.isDefault ? ` ${tooltipHTML(describeDefault(`property.${field}Amount`, { value: flow.amount }))}` : ""}`,
+      `${field}.amount`, flow.amount
+    )}
     ${cell(`${label} index basis`, `
       <select data-pid="${p.id}" data-pfield="${field}.indexBasis">
         <option value="none"${flow.indexBasis === "none" ? " selected" : ""}>None</option>
@@ -4131,7 +4140,7 @@ function propertyCardHTML(p) {
               <button class="seg-option${owned ? " active" : ""}" type="button" data-prop-action="status" data-pid="${p.id}" data-value="owned">Owned</button>
               <button class="seg-option${!owned ? " active" : ""}" type="button" data-prop-action="status" data-pid="${p.id}" data-value="planned">Planned purchase</button>
             </div>`)}
-          ${num("Growth (% p.a. nominal)", "growthPct", p.growthPct, 'min="-10" max="30" step="0.1"')}
+          ${num(`Growth (% p.a. nominal) ${tooltipHTML(describeDefault("property.growthPct", { value: (PROFILES["Residential Property"]?.growthReturn ?? 0.05) * 100 }))}`, "growthPct", p.growthPct, 'min="-10" max="30" step="0.1"')}
           ${num("Equity ceiling (%)", "equityCeilingPct", p.equityCeilingPct ?? 80, 'min="0" max="100" step="1"')}
           ${owned ? `
             ${num("Current value ($)", "currentValue", p.currentValue)}
@@ -4140,8 +4149,8 @@ function propertyCardHTML(p) {
           ` : `
             ${num("Price today ($)", "priceToday", p.priceToday)}
             ${cell("Purchase at", dateRefControlHTML(p.purchaseAt, "client", `data-pid="${p.id}" data-pfield="purchaseAt"`, state.plan.client.currentAge, state.plan.endAge))}
-            ${num("LVR (%)", "lvrPct", p.lvrPct, 'min="0" max="100" step="1"')}
-            ${num("Purchase costs (%)", "purchaseCostsPct", p.purchaseCostsPct, 'min="0" max="10" step="0.1"')}
+            ${num(`LVR (%) ${tooltipHTML(describeDefault("property.lvrPct"))}`, "lvrPct", p.lvrPct, 'min="0" max="100" step="1"')}
+            ${num(`Purchase costs (%) ${tooltipHTML(describeDefault("property.purchaseCostsPct"))}`, "purchaseCostsPct", p.purchaseCostsPct, 'min="0" max="10" step="0.1"')}
             ${num("Duty override ($, blank = schedule)", "dutyOverride", p.dutyOverride ?? "", 'min="0" step="100"')}
             ${cell("First home buyer", `<label class="ptg-check"><input type="checkbox"${p.firstHomeBuyer ? " checked" : ""} data-pid="${p.id}" data-pfield="firstHomeBuyer" /><span>Yes</span></label>`)}
             ${cell("New build", `<label class="ptg-check"><input type="checkbox"${p.newBuild ? " checked" : ""} data-pid="${p.id}" data-pfield="newBuild" /><span>Yes</span></label>`)}
@@ -4280,7 +4289,11 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field.includes(".")) {
     const [group, sub] = field.split(".");
     if ((group === "rent" || group === "expenses") && p[group]) {
-      if (sub === "amount") p[group].amount = clampNumber(v, 0);
+      // Smart defaults (spec 19 Commit 1) — typing an amount directly
+      // is the override that stops this field tracking its derived
+      // value (4% of property value / 20% of gross rent); it never
+      // re-arms from here.
+      if (sub === "amount") { p[group].amount = clampNumber(v, 0); p[group].isDefault = false; }
       else if (sub === "indexBasis") p[group].indexBasis = v;
       else if (sub === "indexExtraPct") p[group].indexExtraPct = clampNumber(v, -10, 10);
     }
