@@ -877,6 +877,37 @@ This closes all three commits of docs/specs/15-input-usability.md.
   `src/workedExample.test.js` (FY2025–26 rerun; HELP-uniqueness proof)
   lock all three findings in as regression-tested claims, not prose.
 
+- **Demo clients as committed fixtures.** Three clients under `src/demo/`
+  (First home buyer; Family with a mortgage; High earner pre-retirement),
+  each built through the real factories + `clampAllToPlan`, never a
+  hand-written state object, with a "Load demo clients" action on the
+  Clients page (reuses `importFile`'s "client" kind wholesale — Replace/
+  Add-as-copy/Cancel on a name clash, never a silent overwrite).
+  `src/demo/demo.test.js` is structural only, per the explicit
+  instruction — no dollar-figure or snapshot assertions, since a bug fix
+  is supposed to move the demo numbers. Found and fixed two real bugs
+  surfaced by building these: (1) `client: { ...base.plan.client,
+  currentAge: N, ... }` silently did nothing, because `defaultState`'s
+  default client carries a real `dob` string and `clampPerson` derives
+  `currentAge` from `dob` whenever one is present — the override pattern
+  now omits the stale `dob` entirely so the explicit `currentAge` wins,
+  across all three demo files (this is exactly the class of bug the
+  Input integrity section warns about: a wrong value accepted with no
+  visible cue, here at construction time rather than in the UI). (2) An
+  annual-frequency income/expense/contribution row fires once, in July
+  (`schedule.js`'s `applyRegular`) — every demo client is anchored to
+  today's date, so plan year 0 is almost always a partial FY with no
+  July, and an annual row contributed nothing at all in year one. Every
+  salary, living-expense, and amount-basis contribution row is now
+  monthly. Two tests were also fixed to stop asserting against a
+  structurally-partial year 0: Division 293 and the concessional-cap
+  comparison now read plan year 1 (the first full FY), and the purchase-
+  liability check reads the year right after settlement rather than the
+  final projection year (a 25–30yr purchase loan is long paid off by the
+  end of a ~50-year projection to end-of-life — checking the last year
+  was asserting the loan should still exist after its own term ended).
+  Docs: `docs/reference/demo-clients.md`.
+
 ### In flight
 Super threshold indexation per figure (AWOTE / CPI / unindexed, with
 nominal rounding), then Division 296, then Monte Carlo over the full

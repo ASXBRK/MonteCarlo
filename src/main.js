@@ -36,6 +36,7 @@ import {
   INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
   incomeCategoryTaxTreatment,
   createChild, createEducationBlock, childCurrentAgeInfo, flatEducationBlocks,
+  SCHEMA_VERSION,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -81,8 +82,9 @@ import {
   newClient, renameClient, deleteClient, switchClient,
   newScenario, duplicateScenario, renameScenario, deleteScenario,
   switchScenario, touchScenario,
-  exportClientFile, exportScenarioFile, importFile,
+  exportClientFile, exportScenarioFile, importFile, EXPORT_FORMAT,
 } from "./workspace.js";
+import { buildDemoClients } from "./demo/index.js";
 import {
   formatRoute, resolveRoute, initialRoute,
   INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION, DEFAULT_OUTPUT_VIEW,
@@ -689,6 +691,69 @@ function fmtUpdated(ts) {
 
 const clientUpdatedAt = (c) => Math.max(0, ...c.scenarios.map((s) => s.updatedAt || 0));
 
+// Demo clients (committed fixtures, see src/demo/) — loaded fresh from
+// the real factories each time, exactly like a JSON import. Reuses
+// importFile's "client" kind wholesale: never a hand-rolled insertion
+// path, so a schema change or a workspace-shape change breaks here at
+// the same place it'd break a real import, not somewhere new.
+//
+// Never silently overwrites: a name clash asks Replace vs Add-as-copy
+// (or Cancel) up front — imported-alongside copies get importFile's
+// own " (imported)" suffix, exactly like a JSON client import would.
+function loadDemoClients() {
+  const demo = buildDemoClients(new Date());
+  const existingNames = new Set(workspace.clients.map((c) => c.name));
+  const clashes = demo.filter((d) => existingNames.has(d.name));
+
+  let replace = false;
+  if (clashes.length > 0) {
+    const names = clashes.map((d) => d.name).join(", ");
+    const raw = window.prompt(
+      `${clashes.length === 1 ? "A demo client" : "Demo clients"} already loaded: ${names}.\n\n` +
+      `1. Replace — delete the existing client(s) and load fresh demo data\n` +
+      `2. Add as copies — load alongside, distinguished by name\n` +
+      `3. Cancel\n\nEnter a number:`,
+      "2"
+    );
+    const choice = raw == null ? null : raw.trim();
+    if (choice == null || choice === "3" || choice === "") return;
+    replace = choice === "1";
+  }
+
+  let idx = workspace;
+  const writes = [];
+  for (const d of demo) {
+    if (replace) {
+      const existing = idx.clients.find((c) => c.name === d.name);
+      if (existing) {
+        const r = deleteClient(idx, existing.id);
+        // deleteClient refuses to remove the workspace's LAST client —
+        // if that's the only thing standing in the way, fall through
+        // to importFile's own add-as-copy naming instead of failing
+        // outright; never leaves the workspace empty, never overwrites.
+        if (r) {
+          for (const sid of r.removedScenarioIds) removeRaw(scenarioKey(sid));
+          idx = r.index;
+        }
+      }
+    }
+    const file = {
+      kind: "client",
+      formatVersion: EXPORT_FORMAT,
+      name: d.name,
+      scenarios: d.scenarios.map((s) => ({ name: s.name, state: { ...s.state, schemaVersion: SCHEMA_VERSION } })),
+    };
+    const res = importFile(idx, file, { hydrateState: (json) => hydrate(json, PROFILES), now: Date.now() });
+    if (res.error) { window.alert(`Couldn't load "${d.name}": ${res.error}`); continue; }
+    writes.push(...res.writes);
+    idx = res.index;
+  }
+  for (const w of writes) writeRaw(scenarioKey(w.scenarioId), serialize(w.state));
+  workspace = idx;
+  saveWorkspace();
+  renderClientsPage();
+}
+
 function renderClientsPage() {
   renderBreadcrumb([]); // root page — no breadcrumb
   const canDelete = workspace.clients.length > 1;
@@ -711,6 +776,7 @@ function renderClientsPage() {
       <div class="page-actions">
         <button class="btn-text" type="button" data-action="new-client">+ New client</button>
         <button class="btn-text" type="button" data-action="import">Import JSON…</button>
+        <button class="btn-text" type="button" data-action="load-demo">Load demo clients</button>
       </div>
     </header>
     <div class="list">
@@ -735,6 +801,9 @@ els.pageClients.addEventListener("click", (e) => {
     }
     case "import":
       importInput.click();
+      break;
+    case "load-demo":
+      loadDemoClients();
       break;
     case "rename": {
       const client = findClient(workspace, id);
