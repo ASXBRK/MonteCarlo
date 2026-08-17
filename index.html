@@ -139,9 +139,14 @@
                   </div>
                 </details>
               </div>
-              <div id="viewNetAssets" hidden><div id="chartNetAssets"></div></div>
+              <div id="viewNetAssets" hidden>
+                <div id="netAssetsPersonSelector" class="seg-toggle entity-select" role="tablist" aria-label="Client, partner, or consolidated" hidden></div>
+                <div id="chartNetAssets"></div>
+                <p id="netAssetsNote" class="chart-note-inline"></p>
+              </div>
               <div id="viewAssetBalances" hidden><div id="chartAssetBalances"></div></div>
               <div id="viewAssetAllocation" hidden>
+                <div id="allocationPersonSelector" class="seg-toggle entity-select" role="tablist" aria-label="Client, partner, or consolidated" hidden></div>
                 <div id="chartAssetAllocation"></div>
                 <p id="assetAllocationNote" class="chart-note-inline"></p>
               </div>
@@ -163,13 +168,23 @@
               <div id="viewLiabilitiesBalances" hidden><div id="chartLiabilitiesBalances"></div></div>
               <div id="viewCashflowBars" hidden><div id="chartCashflowBars"></div></div>
               <div id="viewMoneyDecomposition" hidden></div>
-              <div id="viewKeyFigures" hidden><div id="keyFiguresTable"></div></div>
-              <div id="viewCashflow" hidden></div>
+              <div id="viewKeyFigures" hidden>
+                <div id="keyFiguresPersonSelector" class="seg-toggle entity-select" role="tablist" aria-label="Client, partner, or consolidated" hidden></div>
+                <div id="keyFiguresTable"></div>
+                <p id="keyFiguresNote" class="chart-note-inline"></p>
+              </div>
+              <div id="viewCashflow" hidden>
+                <div id="cashflowEntity" class="seg-toggle entity-select" role="tablist" aria-label="Client, partner, or consolidated" hidden></div>
+                <div id="cashflowTable"></div>
+              </div>
               <div id="viewAssets" hidden>
                 <div id="assetsEntity" class="seg-toggle entity-select" role="tablist" aria-label="Asset"></div>
                 <div id="assetsTable"></div>
               </div>
-              <div id="viewTax" hidden></div>
+              <div id="viewTax" hidden>
+                <div id="taxEntity" class="seg-toggle entity-select" role="tablist" aria-label="Client, partner, or consolidated" hidden></div>
+                <div id="taxTable"></div>
+              </div>
               <div id="viewSuper" hidden>
                 <div id="superEntity" class="seg-toggle entity-select" role="tablist" aria-label="Super account"></div>
                 <div id="superTable"></div>
@@ -192,6 +207,7 @@
               </div>
               <div id="viewSnapshot" hidden>
                 <div id="snapshotYearPicker"></div>
+                <div id="snapshotPersonSelector" class="seg-toggle entity-select" role="tablist" aria-label="Client, partner, or consolidated" hidden></div>
                 <div id="snapshotTable"></div>
               </div>
               <div id="viewAssumptions" hidden></div>

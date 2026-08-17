@@ -133,8 +133,12 @@ const els = {
   exportBtn: $("exportBtn"),
   viewProjection: $("viewProjection"),
   viewCashflow: $("viewCashflow"),
+  cashflowEntity: $("cashflowEntity"),
+  cashflowTable: $("cashflowTable"),
   viewAssets: $("viewAssets"),
   viewTax: $("viewTax"),
+  taxEntity: $("taxEntity"),
+  taxTable: $("taxTable"),
   viewSuper: $("viewSuper"),
   viewLiabilities: $("viewLiabilities"),
   viewAssumptions: $("viewAssumptions"),
@@ -146,13 +150,16 @@ const els = {
   liabilitiesTable: $("liabilitiesTable"),
   viewSnapshot: $("viewSnapshot"),
   snapshotYearPicker: $("snapshotYearPicker"),
+  snapshotPersonSelector: $("snapshotPersonSelector"),
   snapshotTable: $("snapshotTable"),
   viewSuperBalances: $("viewSuperBalances"),
   viewLiabilitiesBalances: $("viewLiabilitiesBalances"),
   viewCashflowBars: $("viewCashflowBars"),
   viewMoneyDecomposition: $("viewMoneyDecomposition"),
   viewKeyFigures: $("viewKeyFigures"),
+  keyFiguresPersonSelector: $("keyFiguresPersonSelector"),
   keyFiguresTable: $("keyFiguresTable"),
+  keyFiguresNote: $("keyFiguresNote"),
   showAssetsToggle: $("showAssetsToggle"),
   shortfallNote: $("shortfallNote"),
   periodFromAge: $("periodFromAge"),
@@ -164,8 +171,11 @@ const els = {
   showIndividualItemsToggle: $("showIndividualItemsToggle"),
   viewComposite: $("viewComposite"),
   viewNetAssets: $("viewNetAssets"),
+  netAssetsPersonSelector: $("netAssetsPersonSelector"),
+  netAssetsNote: $("netAssetsNote"),
   viewAssetBalances: $("viewAssetBalances"),
   viewAssetAllocation: $("viewAssetAllocation"),
+  allocationPersonSelector: $("allocationPersonSelector"),
   viewMonteCarlo: $("viewMonteCarlo"),
   runMonteCarloBtn: $("runMonteCarloBtn"),
   cancelMonteCarloBtn: $("cancelMonteCarloBtn"),
@@ -688,8 +698,8 @@ function unmountWorkspace() {
   for (const el of [els.planBar, els.taxDetailsSection, els.childrenSection, els.implementationSection, els.incomeSection, els.deductionsSection, els.expensesSection, els.assets,
                     els.lifestyleSection, els.liabilitiesSection, els.goalsSection, els.propertySection,
                     els.investSection, els.settingsPanel, els.summaryStrip,
-                    els.viewCashflow, els.assetsEntity, els.assetsTable,
-                    els.viewTax, els.viewAssumptions, els.snapshotYearPicker, els.snapshotTable]) {
+                    els.cashflowEntity, els.cashflowTable, els.assetsEntity, els.assetsTable,
+                    els.taxEntity, els.taxTable, els.viewAssumptions, els.snapshotYearPicker, els.snapshotTable]) {
     el.innerHTML = "";
   }
   els.shortfallNote.hidden = true;
@@ -5251,8 +5261,19 @@ let projection = null;
 let activeView = "composite"; // the composite chart is the default Graphs view (D5)
 let showAssets = false;
 let assetsEntity = "all"; // Assets view entity selector: "all" | assetId
-let superEntity = "all"; // Super view entity selector: "all" | super account id
+let superEntity = "all"; // Super view entity selector: "all" | "client" | "partner" | super account id
 let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liability id
+
+// Navigation, View Consolidation, and Simple Charts (spec 17), Commit 3
+// — Client/Partner/Consolidated selectors, one module-level var per
+// view (unpersisted, matching every existing entity selector above —
+// none of them survive a reload either).
+let cashflowPersonEntity = "all";
+let taxPersonEntity = "all";
+let allocationPersonEntity = "all";
+let netAssetsPersonEntity = "all";
+let keyFiguresPersonEntity = "all";
+let snapshotPersonEntity = "all";
 
 // Monte Carlo (Session B): unlike the deterministic engine above,
 // 2,000 paths through the full tax-aware year loop is NOT sub-
@@ -5779,15 +5800,73 @@ els.chartTreatmentSelects.forEach((sel) => {
   });
 });
 
+// --- Net worth, per owner (spec 17 Commit 3) ---------------------------------
+//
+// A NEW derivation — the engine only ever computes the household total
+// (row.netAssets). Financial/lifestyle assets, property, and ordinary
+// liabilities carry an owner and split 50/50 when "joint", the same
+// disclosed convention cashflowStatement.js's shareOf already uses for
+// the Cashflow/Snapshot views. Super and HELP are never joint and split
+// exactly. The Working Cash Account has NO owner anywhere in the
+// ledger — deliberately excluded from the per-person figure rather than
+// arbitrarily split or silently folded in (spec's own fallback: "show
+// it in all three modes with a note"), so Client + Partner does NOT
+// reconcile to the household total by exactly the WCA balance — always
+// shown alongside as its own line so nothing is hidden.
+function ownerShareOf(owner, forOwner) {
+  if (forOwner == null) return 1;
+  if (owner === "joint") return 0.5;
+  return owner === forOwner ? 1 : 0;
+}
+
+// Net worth excluding working cash, for forOwner ("client"|"partner")
+// or the whole household (forOwner == null, identical to row.netAssets
+// minus nothing — included for symmetry with the per-owner case, which
+// callers use to decide whether to show the WCA-exclusion note).
+function ownerNetWorthExWca(y, forOwner) {
+  const yl = projection.yearly;
+  const row = yl[y];
+  const properties = state.properties ?? [];
+  const liabilities = state.liabilities ?? [];
+  const financial = state.assets.filter((a) => a.include)
+    .reduce((s, a) => s + (row.perAssetDetail[a.id]?.closing ?? 0) * ownerShareOf(a.owner, forOwner), 0);
+  const property = properties
+    .reduce((s, p) => s + (row.properties?.[p.id]?.value ?? 0) * ownerShareOf(p.owner, forOwner), 0);
+  const superBal = forOwner == null
+    ? row.superClosing
+    : (state.plan.superAccounts ?? []).filter((sa) => sa.owner === forOwner)
+      .reduce((s, sa) => s + (row.superDetail[sa.id]?.closing ?? 0), 0);
+  let liabTotal = 0;
+  for (const lid of Object.keys(row.liabilities ?? {})) {
+    const closing = row.liabilities[lid].closing;
+    if (lid === "help_client") liabTotal += forOwner == null || forOwner === "client" ? closing : 0;
+    else if (lid === "help_partner") liabTotal += forOwner == null || forOwner === "partner" ? closing : 0;
+    else {
+      const prop = properties.find((p) => `prop-${p.id}` === lid);
+      const owner = prop ? prop.owner : liabilities.find((l) => l.id === lid)?.owner;
+      liabTotal += closing * ownerShareOf(owner, forOwner);
+    }
+  }
+  return financial + property + superBal - liabTotal;
+}
+
 // --- View: Net assets chart (D5) ---------------------------------------------
 
 function renderNetAssetsChart() {
+  if (netAssetsPersonEntity !== "all" && !isCouple()) netAssetsPersonEntity = "all";
+  renderPersonSelector(els.netAssetsPersonSelector, netAssetsPersonEntity, (id) => { netAssetsPersonEntity = id; renderNetAssetsChart(); });
+  const forOwner = netAssetsPersonEntity === "all" ? null : netAssetsPersonEntity;
   const el = $("chartNetAssets");
   if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
   const yearIdxs = selectedYearIndices();
   const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
   const factor = (y) => displayFactor(endMonthOfYear(y));
-  const netAssets = yearIdxs.map((y) => projection.yearly[y].netAssets * factor(y));
+  const netAssets = forOwner == null
+    ? yearIdxs.map((y) => projection.yearly[y].netAssets * factor(y))
+    : yearIdxs.map((y) => ownerNetWorthExWca(y, forOwner) * factor(y));
+  els.netAssetsNote.textContent = forOwner != null
+    ? `Excludes the household's Working Cash Account balance (no per-person attribution exists for it) — ${clientName()}'s and ${partnerName()}'s figures do not sum to the consolidated total for this reason.`
+    : "";
 
   Plotly.react(el, [{
     x: ages, y: netAssets, name: "Net assets",
@@ -5861,12 +5940,24 @@ function renderAssetBalancesChart() {
 // toggle is suppressed for this view (renderActiveView).
 
 function renderAssetAllocationChart() {
+  if (allocationPersonEntity !== "all" && !isCouple()) allocationPersonEntity = "all";
+  renderPersonSelector(els.allocationPersonSelector, allocationPersonEntity, (id) => { allocationPersonEntity = id; renderAssetAllocationChart(); });
   const el = $("chartAssetAllocation");
   if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
   const yearIdxs = selectedYearIndices();
   const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  // A jointly-owned holding is never split here (it would double-count
+  // toward both people's mix) — it's included at full weight in BOTH
+  // Client's and Partner's view, disclosed below, since a 100%-
+  // normalised MIX is unaffected either way (a 50/50 split of a joint
+  // holding produces the identical weightPct as including it whole —
+  // only the chart's dollar totals, which this view doesn't show,
+  // would differ). Super accounts are never joint.
+  const forOwner = allocationPersonEntity === "all" ? null : allocationPersonEntity;
+  const filteredAssets = forOwner == null ? state.assets : state.assets.filter((a) => a.owner === forOwner || a.owner === "joint");
+  const filteredSuper = forOwner == null ? (state.plan.superAccounts ?? []) : (state.plan.superAccounts ?? []).filter((s) => s.owner === forOwner);
   const { perYear, usesCustom } = allocationSeries(
-    yearIdxs.map((y) => projection.yearly[y]), state.assets, state.plan.superAccounts ?? [], PROFILES
+    yearIdxs.map((y) => projection.yearly[y]), filteredAssets, filteredSuper, PROFILES
   );
   const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#d97b2f"];
 
@@ -5893,9 +5984,14 @@ function renderAssetAllocationChart() {
     font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
   }, { displayModeBar: false, responsive: true });
 
-  $("assetAllocationNote").textContent = usesCustom
-    ? "Assets and super accounts with a custom allocation are shown using their selected volatility-basis profile's class weights (the same profile Monte Carlo variability borrows from)."
-    : "";
+  const notes = [];
+  if (usesCustom) {
+    notes.push("Assets and super accounts with a custom allocation are shown using their selected volatility-basis profile's class weights (the same profile Monte Carlo variability borrows from).");
+  }
+  if (forOwner != null && state.assets.some((a) => a.owner === "joint" && a.include && a.class !== "lifestyle")) {
+    notes.push(`Jointly-owned assets are included at full weight in both ${clientName()}'s and ${partnerName()}'s mix (a 100%-normalised mix is unaffected by a joint holding's split either way).`);
+  }
+  $("assetAllocationNote").textContent = notes.join(" ");
 }
 
 // --- View: Monte Carlo (Session B) -------------------------------------------
@@ -6773,10 +6869,53 @@ function expenseCategorySums(y, ctx = { state, projection }) {
 // Takes an optional {state, projection} ctx (see incomeCategorySums'
 // own comment) — Scenario comparison (Commit 6) is what needs it;
 // every pre-Commit-6 call site is unaffected (same default globals).
-function buildKeyFiguresGroups(ctx = { state, projection }) {
-  const { projection: p } = ctx;
+// entity ("all" | "client" | "partner", spec 17 Commit 3) — Total
+// assets/liabilities/NET ASSETS and Super/HELP balance split via
+// ownerNetWorthExWca's convention (financial/property joint→50/50,
+// super/HELP exact). Total income/expenses/tax/Surplus have no
+// forOwner path anywhere (cashflowCategories.js computes household
+// scalars only) and Working cash has no owner at all — both stay
+// household-level regardless of entity, per the spec's own fallback.
+function buildKeyFiguresGroups(ctx = { state, projection }, entity = "all") {
+  const { projection: p, state: s } = ctx;
   const yl = p.yearly;
-  const totalAssets = (y) => yl[y].closingBalance + yl[y].propertyClosing + yl[y].superClosing + yl[y].wcaClosing;
+  const forOwner = entity === "all" ? null : entity;
+  const properties = s.properties ?? [];
+  const liabilities = s.liabilities ?? [];
+  // Consolidated ("all") includes working cash, exactly as before this
+  // commit; a per-person split excludes it (no owner attribution exists
+  // for the WCA) rather than guessing, per the header comment above.
+  const totalAssets = (y) => {
+    const row = yl[y];
+    if (forOwner == null) return row.closingBalance + row.propertyClosing + row.superClosing + row.wcaClosing;
+    const financial = s.assets.filter((a) => a.include)
+      .reduce((sum, a) => sum + (row.perAssetDetail[a.id]?.closing ?? 0) * ownerShareOf(a.owner, forOwner), 0);
+    const property = properties.reduce((sum, pr) => sum + (row.properties?.[pr.id]?.value ?? 0) * ownerShareOf(pr.owner, forOwner), 0);
+    const superBal = (s.plan.superAccounts ?? []).filter((sa) => sa.owner === forOwner)
+      .reduce((sum, sa) => sum + (row.superDetail[sa.id]?.closing ?? 0), 0);
+    return financial + property + superBal;
+  };
+  const totalLiabilities = (y) => {
+    const row = yl[y];
+    if (forOwner == null) return row.liabilitiesClosing;
+    let total = 0;
+    for (const lid of Object.keys(row.liabilities ?? {})) {
+      const closing = row.liabilities[lid].closing;
+      if (lid === "help_client") total += forOwner === "client" ? closing : 0;
+      else if (lid === "help_partner") total += forOwner === "partner" ? closing : 0;
+      else {
+        const prop = properties.find((pr) => `prop-${pr.id}` === lid);
+        const owner = prop ? prop.owner : liabilities.find((l) => l.id === lid)?.owner;
+        total += closing * ownerShareOf(owner, forOwner);
+      }
+    }
+    return total;
+  };
+  // Consolidated NET ASSETS is exactly row.netAssets (includes working
+  // cash) — unchanged from before this commit. A per-person figure
+  // excludes it (no owner attribution exists for the WCA), per the
+  // header comment above.
+  const netAssets = (y) => forOwner == null ? yl[y].netAssets : totalAssets(y) - totalLiabilities(y);
   const totalIncome = (y) => {
     const s = incomeCategorySums(y, ctx);
     return s.employment + s.rental + s.investment + s.wcaInterest + s.other;
@@ -6785,29 +6924,40 @@ function buildKeyFiguresGroups(ctx = { state, projection }) {
     const s = expenseCategorySums(y, ctx);
     return s.living + s.investmentExpenses + s.loanInterest + s.loanPrincipal + s.tax + s.superContributions;
   };
+  const superBalance = (y) => forOwner == null
+    ? yl[y].superClosing
+    : (s.plan.superAccounts ?? []).filter((sa) => sa.owner === forOwner).reduce((sum, sa) => sum + (yl[y].superDetail[sa.id]?.closing ?? 0), 0);
+  const householdSuffix = forOwner == null ? "" : " (household)";
   const rows = [
     { label: "Total assets", cell: totalAssets, always: true },
-    { label: "Total liabilities", cell: (y) => -yl[y].liabilitiesClosing, always: true },
-    { label: "NET ASSETS", cell: (y) => yl[y].netAssets, always: true, cls: "tl-total" },
-    { label: "Total income", cell: totalIncome, always: true },
-    { label: "Total expenses", cell: (y) => -totalExpenses(y), always: true },
-    { label: "Total tax", cell: (y) => -yl[y].tax, always: true },
-    { label: "Surplus / (deficit)", cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
-    { label: "Super balance", cell: (y) => yl[y].superClosing, always: true },
-    { label: "Working cash balance", cell: (y) => yl[y].wcaClosing, always: true },
+    { label: "Total liabilities", cell: (y) => -totalLiabilities(y), always: true },
+    { label: forOwner == null ? "NET ASSETS" : "NET ASSETS (excl. working cash)", cell: netAssets, always: true, cls: "tl-total" },
+    { label: `Total income${householdSuffix}`, cell: totalIncome, always: true },
+    { label: `Total expenses${householdSuffix}`, cell: (y) => -totalExpenses(y), always: true },
+    { label: `Total tax${householdSuffix}`, cell: (y) => -yl[y].tax, always: true },
+    { label: `Surplus / (deficit)${householdSuffix}`, cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
+    { label: "Super balance", cell: superBalance, always: true },
+    { label: `Working cash balance${householdSuffix}`, cell: (y) => yl[y].wcaClosing, always: true },
     // Document Set Commit 1 — joins the table only while any HELP debt
     // exists (no `always: true`, unlike every row above): a client
     // with no HELP balance never sees this row at all.
     {
       label: "HELP balance",
-      cell: (y) => (yl[y].taxDetail.client?.helpBalanceClosing ?? 0) + (yl[y].taxDetail.partner?.helpBalanceClosing ?? 0),
+      cell: (y) => forOwner == null
+        ? (yl[y].taxDetail.client?.helpBalanceClosing ?? 0) + (yl[y].taxDetail.partner?.helpBalanceClosing ?? 0)
+        : (yl[y].taxDetail[forOwner]?.helpBalanceClosing ?? 0),
     },
   ];
   return [{ title: null, rows }];
 }
 
 function renderKeyFiguresView() {
-  renderTransposed(els.keyFiguresTable, buildKeyFiguresGroups());
+  if (keyFiguresPersonEntity !== "all" && !isCouple()) keyFiguresPersonEntity = "all";
+  renderPersonSelector(els.keyFiguresPersonSelector, keyFiguresPersonEntity, (id) => { keyFiguresPersonEntity = id; renderKeyFiguresView(); });
+  renderTransposed(els.keyFiguresTable, buildKeyFiguresGroups({ state, projection }, keyFiguresPersonEntity));
+  els.keyFiguresNote.textContent = keyFiguresPersonEntity !== "all"
+    ? "Working cash, income, expenses, tax, and surplus/(deficit) have no per-person attribution and are shown at the household level regardless of the selection above; NET ASSETS here excludes working cash for the same reason."
+    : "";
 }
 
 // Two input sections plus the resolution (Working Cash Account fix,
@@ -6835,7 +6985,13 @@ function renderKeyFiguresView() {
 // derived+category rows (Interest Income, Dividend Income) always stay
 // combined either way; expanding those specifically isn't supported
 // (a disclosed simplification, not a bug).
-function buildCashflowGroups() {
+// forOwner ("client" | "partner" | null, spec 17 Commit 3) — filters
+// every splittable row to that person via cashflowStatement()'s own
+// forOwner param (Document Set Commit 7's Snapshot mechanism, reused
+// here rather than a second copy). One-off amounts, Funding, and Goals
+// have no owner attribution anywhere in the ledger — the spec's own
+// fallback ("show it in all three modes with a note") applies to them.
+function buildCashflowGroups(forOwner = null) {
   const yl = projection.yearly;
   const rt = projection.schedule.rowTotals;
   const couple = isCouple();
@@ -6855,13 +7011,17 @@ function buildCashflowGroups() {
     deductionRows, rowTotalsDeductions: rt.deductions,
     properties, liabilities, superAccounts, y,
     educationBlocks: flatEducationBlocks(state.plan), rowTotalsEducation: rt.education,
-  });
+  }, forOwner);
 
-  const ownerLabel = (r) => couple ? `${r.label} (${r.owner === "partner" ? partnerName() : clientName()})` : r.label;
+  // The per-owner suffix is redundant (and confusing) once the whole
+  // view is already filtered to one person.
+  const ownerLabel = (r) => (couple && forOwner == null) ? `${r.label} (${r.owner === "partner" ? partnerName() : clientName()})` : r.label;
   // One row per category (collapsed default), or one row per
   // individually entered row of that category — same total either way.
+  // Income/expense/deduction rows are never joint (planState.js), so a
+  // plain owner match is exact, not a share.
   const catRow = (rows, rowTotals, category, label, aggregateCell) => {
-    const matching = rows.filter((r) => r.category === category);
+    const matching = rows.filter((r) => r.category === category && (forOwner == null || r.owner === forOwner));
     if (!showIndividual || matching.length === 0) return [{ label, cell: aggregateCell }];
     return matching.map((r) => ({ label: ownerLabel(r), cell: (y) => rowTotals[r.id]?.[y] ?? 0 }));
   };
@@ -6975,18 +7135,25 @@ function buildCashflowGroups() {
   // living expenses even though a goal contribution is, mechanically,
   // a household cash outflow.
   const goalRows = state.goals ?? [];
+  // Goals, One-off amounts, and Funding have no owner attribution
+  // anywhere in the ledger (spec 17 Commit 3's own fallback: "show it
+  // in all three modes with a note rather than hiding it or splitting
+  // it arbitrarily") — shown in full regardless of forOwner, titled to
+  // say so once a person is selected rather than silently looking like
+  // a per-person figure.
+  const householdSuffix = forOwner == null ? "" : " (household)";
   if (goalRows.length) {
     const rows = goalRows.map((g) => ({ label: g.label, cell: (y) => -(yl[y].goals?.[g.id]?.contribution ?? 0) }));
     rows.push({ label: "Total goal contributions", always: true, cls: "tl-total",
       cell: (y) => -goalRows.reduce((s, g) => s + (yl[y].goals?.[g.id]?.contribution ?? 0), 0) });
-    groups.push({ title: "Goals", rows });
+    groups.push({ title: `Goals${householdSuffix}`, rows });
   }
-  if (oneOffRows.length) groups.push({ title: "One-off amounts", rows: oneOffRows });
+  if (oneOffRows.length) groups.push({ title: `One-off amounts${householdSuffix}`, rows: oneOffRows });
   // Surplus/deficit allocation spec: with multiple periods/destinations
   // possible in a single year, a single named target no longer applies
   // — Commit 3 ("Outputs") breaks the surplus row into one line per
   // destination; this aggregate view is the interim shape.
-  groups.push({ title: "Funding", rows: [
+  groups.push({ title: `Funding${householdSuffix}`, rows: [
     { label: "Surplus invested", cell: (y) => yl[y].surplusInvested },
     { label: "Surplus swept to cash", cell: (y) => yl[y].surplusAccumulated },
     { label: "Surplus spent", cell: (y) => yl[y].surplusSpent },
@@ -7067,8 +7234,14 @@ els.viewCashflow.addEventListener("keydown", (e) => {
 });
 
 function renderCashflowView() {
-  renderTransposed(els.viewCashflow, buildCashflowGroups(),
-    accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer());
+  if (cashflowPersonEntity !== "all" && !isCouple()) cashflowPersonEntity = "all";
+  renderPersonSelector(els.cashflowEntity, cashflowPersonEntity, (id) => { cashflowPersonEntity = id; renderCashflowView(); });
+  const forOwner = cashflowPersonEntity === "all" ? null : cashflowPersonEntity;
+  const note = forOwner
+    ? `<p class="chart-note-inline">Working cash interest, pooled cash distributions, and education fees are split 50/50 between ${clientName()} and ${partnerName()} (no per-person attribution exists for these); Goals, One-off amounts, and Funding are household-level and shown in full.</p>`
+    : "";
+  renderTransposed(els.cashflowTable, buildCashflowGroups(forOwner),
+    note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer());
 }
 
 // --- View: Assets ---------------------------------------------------------------
@@ -7086,6 +7259,25 @@ function renderEntitySelector(mountEl, entities, active, onSelect) {
     if (!btn || btn.dataset.entity === active) return;
     onSelect(btn.dataset.entity);
   };
+}
+
+// Navigation, View Consolidation, and Simple Charts (spec 17), Commit 3
+// — Client/Partner/Consolidated selector, the same renderEntitySelector
+// widget the Assets/Super/Liabilities views already use, with a fixed
+// "all"|"client"|"partner" entity set. Shown only for a couple (spec:
+// "shown only when the household is a couple") — a single-person
+// household has nothing to select between, so the control is hidden
+// entirely rather than shown with one meaningless option.
+function renderPersonSelector(mountEl, active, onSelect) {
+  if (!mountEl) return;
+  if (!isCouple()) { mountEl.hidden = true; return; }
+  mountEl.hidden = false;
+  renderEntitySelector(
+    mountEl,
+    [{ id: "all", label: "Consolidated" }, { id: "client", label: clientName() }, { id: "partner", label: partnerName() }],
+    active,
+    onSelect
+  );
 }
 
 function assetDetailRows(get) {
@@ -7267,50 +7459,70 @@ function superPersonGroup(p, title) {
   };
 }
 
+// entity: "all" | "client" | "partner" | a specific account id. Super
+// accounts are never joint (planState.js), so filtering by owner is an
+// exact split, not a share — unlike most of the other five views in
+// spec 17 Commit 3.
 function buildSuperGroups(entity) {
   const yl = projection.yearly;
   const included = (state.plan.superAccounts ?? []).filter((s) => s.include);
+  const couple = isCouple();
+  const clientGroup = superPersonGroup("client", clientName());
+  const partnerGroup = couple ? superPersonGroup("partner", partnerName()) : null;
+  const personGroups = [clientGroup, ...(partnerGroup ? [partnerGroup] : [])];
 
-  const personGroups = [superPersonGroup("client", clientName())];
-  if (isCouple()) personGroups.push(superPersonGroup("partner", partnerName()));
-
-  if (entity === "all") {
-    const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, release: 0, closing: 0 };
-    const combined = superDetailRows((y) => included.reduce((s, a) => {
+  const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, release: 0, closing: 0 };
+  const combinedGroupsFor = (accounts, title) => {
+    const combined = superDetailRows((y) => accounts.reduce((s, a) => {
       const d = yl[y].superDetail[a.id] ?? zero;
       for (const k in s) s[k] += d[k] ?? 0;
       return s;
     }, { ...zero }));
     combined.push({
       label: "Closing balance", always: true, cls: "tl-total",
-      cell: (y) => included.reduce((s, a) => s + (yl[y].superDetail[a.id]?.closing ?? 0), 0),
+      cell: (y) => accounts.reduce((s, a) => s + (yl[y].superDetail[a.id]?.closing ?? 0), 0),
     });
-    const closingRow = (a) => ({ label: a.name, cell: (y) => yl[y].superDetail[a.id]?.closing ?? 0 });
-    const byAccount = included.map(closingRow);
-    byAccount.push({ label: "Total", always: true, cls: "tl-total", cell: (y) => yl[y].superClosing });
+    const byAccount = accounts.map((a) => ({ label: a.name, cell: (y) => yl[y].superDetail[a.id]?.closing ?? 0 }));
+    byAccount.push({
+      label: "Total", always: true, cls: "tl-total",
+      cell: (y) => accounts.reduce((s, a) => s + (yl[y].superDetail[a.id]?.closing ?? 0), 0),
+    });
     return [
-      { title: "Combined", rows: combined },
+      { title, rows: combined },
       { title: "Closing balance by account", rows: byAccount },
-      ...personGroups,
     ];
+  };
+
+  if (entity === "client") {
+    return [...combinedGroupsFor(included.filter((s) => s.owner === "client"), `Combined — ${clientName()}`), clientGroup];
+  }
+  if (entity === "partner" && couple) {
+    return [...combinedGroupsFor(included.filter((s) => s.owner === "partner"), `Combined — ${partnerName()}`), partnerGroup];
+  }
+  if (entity === "all") {
+    return [...combinedGroupsFor(included, "Combined"), ...personGroups];
   }
 
-  const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, release: 0, closing: 0, taxFreeClosing: 0 };
+  const zeroAccount = { ...zero, taxFreeClosing: 0 };
   const name = included.find((a) => a.id === entity)?.name ?? "Super account";
-  const rows = superDetailRows((y) => yl[y].superDetail[entity] ?? zero);
-  rows.push({ label: "Closing balance", cell: (y) => (yl[y].superDetail[entity] ?? zero).closing, always: true, cls: "tl-total" });
-  rows.push({ label: "of which tax-free", cell: (y) => (yl[y].superDetail[entity] ?? zero).taxFreeClosing });
+  const rows = superDetailRows((y) => yl[y].superDetail[entity] ?? zeroAccount);
+  rows.push({ label: "Closing balance", cell: (y) => (yl[y].superDetail[entity] ?? zeroAccount).closing, always: true, cls: "tl-total" });
+  rows.push({ label: "of which tax-free", cell: (y) => (yl[y].superDetail[entity] ?? zeroAccount).taxFreeClosing });
   return [{ title: name, rows }, ...personGroups];
 }
 
 function renderSuperTableView() {
   const included = (state.plan.superAccounts ?? []).filter((s) => s.include);
-  if (superEntity !== "all" && !included.some((s) => s.id === superEntity)) {
-    superEntity = "all"; // entity was removed/excluded
-  }
+  const couple = isCouple();
+  const validEntities = ["all", ...(couple ? ["client", "partner"] : []), ...included.map((s) => s.id)];
+  if (!validEntities.includes(superEntity)) superEntity = "all"; // entity removed/excluded, or no longer a couple
   renderEntitySelector(
     els.superEntity,
-    [{ id: "all", label: "Consolidated" }, ...included.map((s) => ({ id: s.id, label: s.name }))],
+    [
+      { id: "all", label: "Consolidated" },
+      ...(couple ? [{ id: "client", label: clientName() }, { id: "partner", label: partnerName() }] : []),
+      ...included.map((s) => ({ id: s.id, label: s.name })),
+    ],
     superEntity,
     (id) => { superEntity = id; renderSuperTableView(); }
   );
@@ -7475,12 +7687,32 @@ function renderSnapshotYearPicker() {
   `;
 }
 
+// Client/Partner/Consolidated selector (spec 17 Commit 3) — Snapshot
+// already computed all three sub-values via cashflowStatement's own
+// forOwner mechanism (buildSnapshotColumns); this projects that result
+// down to whichever one the selector shows. buildSnapshotTable/
+// snapshotToHTML/snapshotToCSV are unchanged — in single-entity mode
+// they're simply called the same way a single-person household already
+// calls them (reading only `.total`), so the well-tested snapshot.js
+// module needed no changes at all.
+function snapshotColumnsForEntity(columns, entity) {
+  if (entity === "all") return columns;
+  return columns.map((c) => {
+    const chosen = entity === "client" ? c.client : c.partner;
+    return { y: c.y, client: chosen, partner: null, total: chosen };
+  });
+}
+
 function renderSnapshotView() {
   ensureSnapshotYears();
   renderSnapshotYearPicker();
   const planYears = snapshotResolvedPlanYears();
   const couple = isCouple();
-  const columns = buildSnapshotColumns(projection.yearly, snapshotCtxFor, planYears, couple);
+  if (snapshotPersonEntity !== "all" && !couple) snapshotPersonEntity = "all";
+  renderPersonSelector(els.snapshotPersonSelector, snapshotPersonEntity, (id) => { snapshotPersonEntity = id; renderSnapshotView(); });
+  const showAll = snapshotPersonEntity === "all";
+  const rawColumns = buildSnapshotColumns(projection.yearly, snapshotCtxFor, planYears, couple);
+  const columns = snapshotColumnsForEntity(rawColumns, snapshotPersonEntity);
   if (columns.length === 0) {
     els.snapshotTable.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Add at least one year above to see the snapshot.</p>`;
     return;
@@ -7489,7 +7721,7 @@ function renderSnapshotView() {
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const headCols = columns.flatMap((c) => {
     const label = projection.schedule.fyLabels[c.y];
-    return couple ? [`${label} — ${clientName()}`, `${label} — ${partnerName()}`, `${label} — Total`] : [label];
+    return showAll && couple ? [`${label} — ${clientName()}`, `${label} — ${partnerName()}`, `${label} — Total`] : [label];
   });
   const head = `<tr><th class="tl-corner"></th>${headCols.map((h) => `<th class="tl-year">${escapeHTML(h)}</th>`).join("")}</tr>`;
   let lastSection = null;
@@ -7500,7 +7732,7 @@ function renderSnapshotView() {
     const cells = table.rows.length && columns.map((c, i) => {
       const cell = r.cells[i];
       const f = factor(c.y);
-      return couple
+      return showAll && couple
         ? `<td class="tl-num">${fmtLedgerCell(cell.client * f)}</td><td class="tl-num">${fmtLedgerCell(cell.partner * f)}</td><td class="tl-num">${fmtLedgerCell(cell.total * f)}</td>`
         : `<td class="tl-num">${fmtLedgerCell(cell.total * f)}</td>`;
     }).join("");
@@ -7520,13 +7752,18 @@ function snapshotColumnLabels() {
 function snapshotExportTable() {
   const planYears = snapshotResolvedPlanYears();
   const couple = isCouple();
-  const columns = buildSnapshotColumns(projection.yearly, snapshotCtxFor, planYears, couple);
+  const showAll = snapshotPersonEntity === "all";
+  const rawColumns = buildSnapshotColumns(projection.yearly, snapshotCtxFor, planYears, couple);
+  const columns = snapshotColumnsForEntity(rawColumns, snapshotPersonEntity);
   const scaled = columns.map((c) => {
     const f = factorFor(c.y);
     const scaleStmt = (s) => s && JSON.parse(JSON.stringify(s), (k, v) => typeof v === "number" ? v * f : v);
     return { y: c.y, client: scaleStmt(c.client), partner: scaleStmt(c.partner), total: scaleStmt(c.total) };
   });
-  return { table: buildSnapshotTable(scaled, { hideEmptyRows: state.display.hideEmptyRows !== false }), couple };
+  // The export's own couple flag drives its 3-column-vs-1-column
+  // choice (snapshotToHTML/snapshotToCSV) — a specific person selected
+  // is presented the same way a single-person household already is.
+  return { table: buildSnapshotTable(scaled, { hideEmptyRows: state.display.hideEmptyRows !== false }), couple: showAll && couple };
 }
 function factorFor(y) { return displayFactor(endMonthOfYear(y)); }
 
@@ -7599,7 +7836,13 @@ function exportSnapshotCSV() {
 
 // --- View: Tax (C4) -----------------------------------------------------------
 
-function buildTaxGroups() {
+// entity ("all" | "client" | "partner", spec 17 Commit 3) — this view
+// was already fully split per person (row.taxDetail.client/.partner);
+// the selector just picks which of the existing groups render. The
+// Household group (Div 293/296/HELP/MLS/FHSSS totals, already summed
+// across both people on the row) has no per-person figure to show —
+// it's the spec's own "show it in all three modes with a note" case.
+function buildTaxGroups(entity = "all") {
   const yl = projection.yearly;
   const td = (y, p) => yl[y].taxDetail?.[p] ?? null;
   // Division 293/296 "paid from" indication (release-from-super
@@ -7639,10 +7882,11 @@ function buildTaxGroups() {
       { label: "FHSSS tax offset (30%)", cell: (y) => td(y, p)?.fhsssOffset ?? 0 },
     ],
   });
-  const groups = [personGroup("client", clientName())];
-  if (isCouple()) groups.push(personGroup("partner", partnerName()));
+  const groups = [];
+  if (entity === "all" || entity === "client") groups.push(personGroup("client", clientName()));
+  if (isCouple() && (entity === "all" || entity === "partner")) groups.push(personGroup("partner", partnerName()));
   groups.push({
-    title: "Household",
+    title: entity === "all" ? "Household" : "Household (not split by person)",
     rows: [
       { label: "Division 293 tax payable", cell: (y) => -yl[y].taxDetail.div293 },
       { label: "Division 296 tax payable", cell: (y) => -yl[y].taxDetail.div296 },
@@ -7663,8 +7907,10 @@ const accruedDiv296Footer = () => {
 };
 
 function renderTaxView() {
+  if (taxPersonEntity !== "all" && !isCouple()) taxPersonEntity = "all";
+  renderPersonSelector(els.taxEntity, taxPersonEntity, (id) => { taxPersonEntity = id; renderTaxView(); });
   const note = `<p class="chart-note-inline">Income tax rows accrue in the year shown (spread through the year, PAYG-style). CGT, Division 293 and Division 296 payable show the year of <em>payment</em> — each is assessed in one year and paid the following July.</p>`;
-  renderTransposed(els.viewTax, buildTaxGroups(), note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer());
+  renderTransposed(els.taxTable, buildTaxGroups(taxPersonEntity), note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer());
 }
 
 // --- View: Assumptions (C4) -----------------------------------------------------
@@ -10143,10 +10389,10 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "cashflow-bars") exportChartPNG("chartCashflowBars", "cashflow-bars");
   else if (activeView === "monte-carlo") exportChartPNG("chartMonteCarlo", "monte-carlo");
   else if (activeView === "money-decomposition") exportMoneyDecompositionCSV();
-  else if (activeView === "key-figures") exportTransposedCSV("key-figures", buildKeyFiguresGroups());
-  else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups());
+  else if (activeView === "key-figures") exportTransposedCSV("key-figures", buildKeyFiguresGroups({ state, projection }, keyFiguresPersonEntity));
+  else if (activeView === "cashflow") exportTransposedCSV("cashflow", buildCashflowGroups(cashflowPersonEntity === "all" ? null : cashflowPersonEntity));
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
-  else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups());
+  else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups(taxPersonEntity));
   else if (activeView === "super") exportTransposedCSV("super", buildSuperGroups(superEntity));
   else if (activeView === "liabilities") exportTransposedCSV("liabilities", buildLiabilitiesGroups(liabilitiesEntity));
   else if (activeView === "snapshot") exportSnapshotCSV();

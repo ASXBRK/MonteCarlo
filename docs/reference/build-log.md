@@ -315,6 +315,31 @@ collapsed group. A collapsed group's header still carries an aggregate
 item count and untouched-badge OR ("Assets ●1" style) for input groups,
 matching the spec's "a collapsed group still signals what is inside."
 
+### Navigation and charts (spec 17, Commit 3 — Client/Partner/Consolidated selector)
+Added the shared Consolidated/Client/Partner selector (`renderPersonSelector`,
+hidden entirely for a single-person household) to Cashflow, Tax, Super,
+Allocation, Net worth (both forms), and Snapshot. Tax and Super were
+already internally split per person (`row.taxDetail.client/.partner`,
+never-joint super accounts) — the selector just picks which existing
+group renders; Cashflow reused `cashflowStatement.js`'s own `forOwner`
+parameter (Document Set Commit 7's Snapshot mechanism), so threading it
+through was the entire change; Snapshot's existing three-column
+mechanism is that same `forOwner` machinery, so the selector projects
+its already-computed Client/Partner/Total result down to one column
+rather than touching the well-tested `snapshot.js` module at all.
+**Net worth is a genuinely new derivation** — the engine only ever
+computes the household total (`row.netAssets`) — built from each
+holding's own owner (joint assets/property/liabilities split 50/50,
+matching `cashflowStatement.js`'s existing convention; super and HELP
+are never joint and split exactly); the Working Cash Account has no
+owner anywhere in the ledger and is deliberately left OUT of a
+per-person NET ASSETS figure (labelled "excl. working cash", with a
+note) rather than split arbitrarily, so Client + Partner does not sum
+to the household figure by exactly that amount, disclosed on screen.
+Cashflow's Funding/One-off/Goals groups and Tax's Household group are
+similarly shown in full regardless of the selection, titled to say so.
+No engine change.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real
