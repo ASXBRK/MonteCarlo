@@ -446,6 +446,33 @@ against zero-adjustment fixtures (identical results) and populated ones
 (reconciling exactly); no engine change, so `randomScenario()`/the
 conservation invariant are unchanged from Commit 1.
 
+### Adjustment rows (spec 18, Commit 3 — review panel and disclosure)
+The Adjustments modal (built as part of Commit 2's editor groundwork)
+already covered the review list, count badge, and edit/delete — Commit 3
+adds: a "View" jump-to link per adjustment row to whichever output
+subject (Cashflow or Tax) Commit 2 marked its target on (superContributions
+and tax.withheld have no table row of their own, so no link, not a dead
+one); a "This projection includes N manual adjustments" one-line
+disclosure footer on the Cashflow table, Tax table, Snapshot table, the
+Snapshot Word-clipboard export, and every CSV export (a scenario
+property, so it appears regardless of which view is exported); and
+integration with the spec-15 Review Defaults panel.
+
+Adjustments live in a modal, not a rendered `[data-section]` input area,
+so they're outside that panel's generic DOM-attribute scan — instead,
+each adjustment gets its own `adjustments.<id>` touched-path (marked
+touched on create/edit, per spec 15's "changed OR confirmed" rule, and
+untracked on delete) and the Review Defaults panel lists any untouched
+one explicitly, with its own jump-to (opens the adjustment editor
+directly) and mark-reviewed. Duplicating a scenario copies the raw
+serialized blob byte-for-byte including `meta.touched` — `duplicate`
+now strips `adjustments.*` paths from the COPY specifically
+(`untouchAdjustmentsInBlob`), so every adjustment reappears unreviewed
+in the new scenario ("an override that made sense in one scenario may
+not in another" — the spec's own words) without disturbing any other
+touched path or the source scenario.
+Regression gate: no engine change; full suite green.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

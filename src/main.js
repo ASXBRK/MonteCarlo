@@ -1222,7 +1222,8 @@ els.pageClient.addEventListener("click", (e) => {
       const r = duplicateScenario(workspace, clientId, sid, Date.now());
       // Deep copy via the serialized blob — never a shared reference. A
       // scenario with no blob yet duplicates as defaults, matching load.
-      writeRaw(scenarioKey(r.scenarioId), readRaw(scenarioKey(sid)) ?? serialize(defaultState(PROFILES)));
+      const srcBlob = readRaw(scenarioKey(sid)) ?? serialize(defaultState(PROFILES));
+      writeRaw(scenarioKey(r.scenarioId), untouchAdjustmentsInBlob(srcBlob));
       workspace = r.index;
       saveWorkspace();
       renderClientPage(clientId);
@@ -1461,6 +1462,26 @@ function markTouched(path) {
   if (!state.meta.touched.includes(path)) state.meta.touched.push(path);
 }
 
+// Adjustment rows (spec 18 Commit 3) — "adjustments survive scenario
+// duplication and are listed as untouched in the review panel when
+// copied, since an override that made sense in one scenario may not in
+// another" (spec's own words). Duplication otherwise copies the raw
+// serialized blob byte-for-byte, including meta.touched — this strips
+// just the adjustments.* touched paths from the COPY, so every
+// adjustment the source scenario had already reviewed reappears
+// unreviewed in the new one, without disturbing any other touched path.
+function untouchAdjustmentsInBlob(blob) {
+  try {
+    const parsed = JSON.parse(blob);
+    if (Array.isArray(parsed?.meta?.touched)) {
+      parsed.meta.touched = parsed.meta.touched.filter((p) => !p.startsWith("adjustments."));
+    }
+    return JSON.stringify(parsed);
+  } catch {
+    return blob;
+  }
+}
+
 // Fired in the CAPTURE phase on the whole canvas, ahead of every
 // section's own bubble-phase handler — so by the time that handler
 // calls saveState()+renderAll(), state.meta.touched already reflects
@@ -1628,11 +1649,16 @@ function renderReviewDefaults() {
       bySection.get(sectionId).push({ path, label: fieldLabelText(el), value: fieldDisplayValue(el) });
     }
   }
-  if (bySection.size === 0) {
+  // Adjustment rows (spec 18 Commit 3) — adjustments live in a modal,
+  // not a rendered [data-section] input area, so they can't be
+  // discovered by the generic DOM scan above; listed here explicitly
+  // instead, same untouched/jump-to/mark-reviewed shape.
+  const untouchedAdjustments = (state.plan.adjustments ?? []).filter((a) => !isTouched(`adjustments.${a.id}`));
+  if (bySection.size === 0 && untouchedAdjustments.length === 0) {
     els.reviewDefaultsBody.innerHTML = `<p class="muted">Every field in this scenario has been reviewed.</p>`;
     return;
   }
-  els.reviewDefaultsBody.innerHTML = [...bySection.entries()].map(([sectionId, fields]) => `
+  const sectionsHTML = [...bySection.entries()].map(([sectionId, fields]) => `
     <section class="review-section">
       <h3>${escapeHTML(SECTION_LABELS[sectionId] ?? sectionId)} <span class="nav-badge">${fields.length}</span></h3>
       <ul class="review-field-list">
@@ -1646,6 +1672,21 @@ function renderReviewDefaults() {
       </ul>
     </section>
   `).join("");
+  const adjustmentsHTML = untouchedAdjustments.length === 0 ? "" : `
+    <section class="review-section">
+      <h3>Adjustments <span class="nav-badge">${untouchedAdjustments.length}</span></h3>
+      <ul class="review-field-list">
+        ${untouchedAdjustments.map((a) => `
+          <li>
+            <button type="button" class="btn-text review-jump" data-jump-adjustment="${a.id}">${escapeHTML(a.label)} — ${escapeHTML(adjustmentOwnerLabel(a))}</button>
+            <span class="review-field-value">${fmtMoney(a.amount)}</span>
+            <button type="button" class="btn-text review-mark" data-mark-path="adjustments.${a.id}">Mark reviewed</button>
+          </li>
+        `).join("")}
+      </ul>
+    </section>
+  `;
+  els.reviewDefaultsBody.innerHTML = sectionsHTML + adjustmentsHTML;
 }
 
 function openReviewDefaultsModal() {
@@ -1660,6 +1701,12 @@ els.sideNav.addEventListener("click", (e) => {
 els.reviewDefaultsModal.querySelector(".modal-close").addEventListener("click", () => els.reviewDefaultsModal.close());
 els.reviewDefaultsModal.addEventListener("click", (e) => {
   if (e.target === els.reviewDefaultsModal) { els.reviewDefaultsModal.close(); return; }
+  const jumpAdjustment = e.target.closest("[data-jump-adjustment]");
+  if (jumpAdjustment) {
+    els.reviewDefaultsModal.close();
+    openAdjustmentEditor({ id: jumpAdjustment.dataset.jumpAdjustment });
+    return;
+  }
   const jump = e.target.closest(".review-jump");
   if (jump) {
     els.reviewDefaultsModal.close();
@@ -7114,6 +7161,12 @@ function exportTransposedCSV(viewName, groups) {
       lines.push([esc(r.label), ...cells].join(","));
     }
   }
+  // Adjustment rows (spec 18 Commit 3) — "any export produced from a
+  // scenario containing adjustments carries a one-line footer... not a
+  // warning, a fact" — applies regardless of which view is exported,
+  // since the adjustment is a property of the scenario, not the view.
+  const adjCount = (state.plan.adjustments ?? []).length;
+  if (adjCount > 0) lines.push("", esc(`This projection includes ${adjCount} manual adjustment${adjCount === 1 ? "" : "s"}.`));
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -7121,6 +7174,15 @@ function exportTransposedCSV(viewName, groups) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
+
+// Adjustment rows (spec 18 Commit 3) — "Any view or export produced
+// from a scenario containing adjustments carries a one-line footer...
+// Not a warning, a fact." Shared by every view/export Commit 2 marks
+// rows on, so the wording (and the count) can never drift between them.
+const adjustmentsDisclosureFooter = () => {
+  const n = (state.plan.adjustments ?? []).length;
+  return n === 0 ? "" : `<div class="ledger-foot">This projection includes ${n} manual adjustment${n === 1 ? "" : "s"}.</div>`;
+};
 
 const accruedCgtFooter = () => {
   const accrued = projection.accruedCgtAtEnd * displayFactor(projection.schedule.months);
@@ -7633,7 +7695,7 @@ function renderCashflowView() {
     ? `<p class="chart-note-inline">Working cash interest, pooled cash distributions, and education fees are split 50/50 between ${clientName()} and ${partnerName()} (no per-person attribution exists for these); Goals, One-off amounts, and Funding are household-level and shown in full.</p>`
     : "";
   renderTransposed(els.cashflowTable, buildCashflowGroups(forOwner),
-    note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer());
+    note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer() + adjustmentsDisclosureFooter());
 }
 
 // --- View: Assets ---------------------------------------------------------------
@@ -8130,7 +8192,7 @@ function renderSnapshotView() {
     }).join("");
     return sectionRow + `<tr class="${r.total ? "tl-total" : ""}"><th class="tl-label">${escapeHTML(r.label)}</th>${cells}</tr>`;
   }).join("");
-  els.snapshotTable.innerHTML = `<div class="tl-wrap"><table class="tl"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+  els.snapshotTable.innerHTML = `<div class="tl-wrap"><table class="tl"><thead>${head}</thead><tbody>${body}</tbody></table></div>${adjustmentsDisclosureFooter()}`;
 }
 
 function snapshotColumnLabels() {
@@ -8197,7 +8259,10 @@ els.snapshotYearPicker?.addEventListener("click", (e) => {
   }
   if (e.target.id === "snapshotCopyBtn") {
     const { table, couple } = snapshotExportTable();
-    const html = snapshotToHTML(table, snapshotColumnLabels(), couple);
+    // Adjustment rows (spec 18 Commit 3) — appended at the call site
+    // rather than inside snapshot.js's own pure HTML builder, so that
+    // module stays free of main.js's plan-level state.
+    const html = snapshotToHTML(table, snapshotColumnLabels(), couple) + adjustmentsDisclosureFooter();
     const plain = table.rows.map((r) => r.label).join("\n");
     if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
       navigator.clipboard.write([
@@ -8321,7 +8386,7 @@ function renderTaxView() {
   if (taxPersonEntity !== "all" && !isCouple()) taxPersonEntity = "all";
   renderPersonSelector(els.taxEntity, taxPersonEntity, (id) => { taxPersonEntity = id; renderTaxView(); });
   const note = `<p class="chart-note-inline">Income tax rows accrue in the year shown (spread through the year, PAYG-style). CGT, Division 293 and Division 296 payable show the year of <em>payment</em> — each is assessed in one year and paid the following July.</p>`;
-  renderTransposed(els.taxTable, buildTaxGroups(taxPersonEntity), note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer());
+  renderTransposed(els.taxTable, buildTaxGroups(taxPersonEntity), note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer() + adjustmentsDisclosureFooter());
 }
 
 // --- View: Assumptions (C4) -----------------------------------------------------
@@ -10953,22 +11018,38 @@ function renderAdjustmentsCountBadge() {
   els.adjustmentsCountBadge.textContent = String(n);
 }
 
+// The output subject a target's own row lives on (spec 18 Commit 3's
+// "jump-to link") — every target except superContributions/tax.withheld
+// appears somewhere in Cashflow or Tax (Commit 2); those two have no
+// table row of their own to jump to (see build-log's Commit 2 entry),
+// so the list shows their amount/window/note with no link, not a
+// dead one.
+function adjustmentJumpSubject(target) {
+  if (target.startsWith("tax.")) return "tax";
+  if (target === "superContributions" || target === "tax.withheld") return null;
+  return "cashflow";
+}
+
 function renderAdjustmentsList() {
   const list = state.plan.adjustments ?? [];
   if (list.length === 0) {
     els.adjustmentsList.innerHTML = `<p class="helper-text">No adjustments in this scenario yet.</p>`;
     return;
   }
-  els.adjustmentsList.innerHTML = list.map((a) => `
+  els.adjustmentsList.innerHTML = list.map((a) => {
+    const subject = adjustmentJumpSubject(a.target);
+    return `
     <div class="adjustment-list-row">
       <div>
         <div class="adj-label">${escapeHTML(a.label)} — ${escapeHTML(adjustmentOwnerLabel(a))}</div>
         <div class="adj-meta">${fmtMoney(a.amount)} · age ${ageRefLabel(a.from)}–${ageRefLabel(a.to)}
           · <span title="${escapeHTML(a.note)}">${escapeHTML(a.note.length > 60 ? a.note.slice(0, 60) + "…" : a.note)}</span></div>
       </div>
+      ${subject ? `<button type="button" class="btn-text" data-adj-view="${subject}">View</button>` : ""}
       <button type="button" class="btn-text" data-adj-edit="${a.id}">Edit</button>
     </div>
-  `).join("");
+  `;
+  }).join("");
 }
 
 function adjustmentFieldsForTarget(target) {
@@ -11026,7 +11107,15 @@ els.adjustmentsModal.querySelector(".modal-close").addEventListener("click", () 
 els.adjustmentsModal.addEventListener("click", (e) => {
   if (e.target === els.adjustmentsModal) els.adjustmentsModal.close();
   const editBtn = e.target.closest("[data-adj-edit]");
-  if (editBtn) openAdjustmentEditor({ id: editBtn.dataset.adjEdit });
+  if (editBtn) { openAdjustmentEditor({ id: editBtn.dataset.adjEdit }); return; }
+  // Commit 3's "jump-to link" — the review list's own View button, to
+  // the output subject Commit 2 marked that adjustment's row on.
+  const viewBtn = e.target.closest("[data-adj-view]");
+  if (viewBtn) {
+    els.adjustmentsModal.close();
+    const { client, scenario } = findActive(workspace);
+    navigate({ page: "workspace", clientId: client.id, scenarioId: scenario.id, area: "output", section: viewBtn.dataset.adjView, form: "table" });
+  }
 });
 els.adjTarget.addEventListener("change", () => adjustmentFieldsForTarget(els.adjTarget.value));
 els.adjCancelBtn.addEventListener("click", () => closeAdjustmentForm());
@@ -11049,12 +11138,17 @@ els.adjustmentForm.addEventListener("submit", (e) => {
     note: els.adjNote.value.trim(),
   };
   const existingId = els.adjId.value;
+  const finalId = existingId || uid("adj");
   const list = state.plan.adjustments ?? [];
   state.plan.adjustments = existingId
     ? list.map((a) => (a.id === existingId ? { ...raw, id: existingId } : a))
-    : [...list, { ...raw, id: uid("adj") }];
+    : [...list, { ...raw, id: finalId }];
   state.plan = clampPlan(state.plan, PROFILES);
   state = clampAllToPlan(state, PROFILES);
+  // Input Usability convention (spec 15): a path is touched when the
+  // user changes OR confirms it — creating/editing an adjustment is
+  // exactly that, for its own `adjustments.<id>` path (Commit 3).
+  markTouched(`adjustments.${finalId}`);
   saveState();
   refreshOutputs();
   closeAdjustmentForm();
@@ -11069,6 +11163,7 @@ els.adjDeleteBtn.addEventListener("click", () => {
   state.plan.adjustments = (state.plan.adjustments ?? []).filter((a) => a.id !== id);
   state.plan = clampPlan(state.plan, PROFILES);
   state = clampAllToPlan(state, PROFILES);
+  if (state.meta?.touched) state.meta.touched = state.meta.touched.filter((p) => p !== `adjustments.${id}`);
   saveState();
   refreshOutputs();
   closeAdjustmentForm();
