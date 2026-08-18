@@ -9833,10 +9833,37 @@ function renderFocusSurplusAllocationView() {
     `;
   }
 
+  // Non-deductible-first benefit (spec 16, Commit 4) — a figure and a
+  // sentence, never framed as a recommendation: it states the
+  // difference and why (non-deductible interest is paid from after-tax
+  // income; deductible interest is not), and leaves the conclusion to
+  // the adviser, per the locked non-prescriptive convention. Absent
+  // entirely (not a zero) when it doesn't apply — see
+  // nonDeductibleFirstBenefit's own gating.
+  const ndfBenefit = nonDeductibleFirstBenefit(state, projection);
+  const ndfHTML = ndfBenefit ? `
+    <div class="focus-section">
+      <p class="helper-text">
+        Paying non-deductible debt first ${
+          Math.abs(ndfBenefit.interestSaved) < 1
+            ? "makes no material difference to total interest paid here"
+            : `means this projection pays ${fmtMoney(Math.round(Math.abs(ndfBenefit.interestSaved)))}
+               ${ndfBenefit.interestSaved > 0 ? "less" : "more"} total interest over its life`
+        } than sending the same surplus pro-rata across all debt instead.
+        Non-deductible interest is paid from after-tax income; deductible
+        interest is not — that is the basis for prioritising it, independent
+        of which path happens to produce less total interest in a given
+        scenario (that depends on the relative interest rates involved, not
+        just deductibility). ${escapeHTML(ndfBenefit.note)}
+      </p>
+    </div>
+  ` : "";
+
   els.viewFocusSurplusAllocation.innerHTML = `
     <h2 class="section-heading">Surplus allocation</h2>
     <p class="helper-text">Where the Working Cash Account's FY-end surplus actually went, year by year, per the periods configured in Settings.</p>
     ${compareHTML}
+    ${ndfHTML}
     <div id="focusSurplusTable"></div>
   `;
   renderTransposed(document.getElementById("focusSurplusTable"), focusSurplusAllocationTableHTML());

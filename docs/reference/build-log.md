@@ -395,6 +395,33 @@ the new per-destination Funding rows, the Focus view renders with a
 correct comparison figure and a populated per-year table, all with zero
 console errors.
 
+### Surplus and deficit allocation (spec 16, Commit 4 of 4 — non-deductible-first advice signal)
+Wires up `nonDeductibleFirstBenefit` (shipped and tested in Commit 3)
+into the Focus → Surplus allocation view: one paragraph, present only
+when at least one configured period has the rule on and the client
+holds both a deductible and a non-deductible liability. States the
+total-interest difference against the pro-rata counterfactual and WHY
+non-deductible-first is prioritised (after-tax cost) — deliberately
+does **not** claim this always means less total interest paid, since it
+doesn't: whichever debt happens to carry the higher rate wins that
+particular comparison, independent of deductibility, and a real
+browser test in this same session produced exactly that case (a
+non-deductible loan at a LOWER rate than the deductible one, non-
+deductible-first paying $45,999 MORE total interest here) — the
+paragraph's wording handles both signs and neither implies a
+"winner," per the locked non-prescriptive convention (no advice
+language, no winner-labels).
+No engine or model change; no new tests (Commit 3's own test file
+already covers both the "more" and "less" cases via
+`nonDeductibleFirstBenefit`'s own unit tests). Regression gate: full
+suite green unchanged (1144 tests). Verified in a real browser with a
+scenario carrying two liabilities (one deductible at 5%, one
+non-deductible at 8%) and real income: the paragraph rendered
+correctly with the "more interest" wording for the constructed case
+where it's true, zero console errors.
+
+This closes out spec 16 in full (Commits 1–4).
+
 ### Navigation and charts (spec 17, Commit 1 — Output subject views)
 The Graphs and Tables sidebar groups (17 entries) collapsed into one
 Output group of 10 subject views (Projection, Cashflow, Assets,
