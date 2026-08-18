@@ -54,6 +54,10 @@ import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
 import { describeDefault } from "./smartDefaults.js";
+import {
+  surplusDestinationBreakdown, buildSurplusAllocationFocus,
+  projectSingleDestinationAlternative, nonDeductibleFirstBenefit,
+} from "./focusSurplusAllocation.js";
 import { buildSnapshotColumns, buildSnapshotTable, snapshotToHTML, snapshotToCSV } from "./snapshot.js";
 import {
   eligibleDepositProperties, buildDepositFocus, solveDepositContribution, solveWhenCouldIBuy,
@@ -246,6 +250,7 @@ const els = {
   viewFocusFhsss: $("viewFocusFhsss"),
   viewFocusSalarySacrifice: $("viewFocusSalarySacrifice"),
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
+  viewFocusSurplusAllocation: $("viewFocusSurplusAllocation"),
   viewFocusLookups: $("viewFocusLookups"),
   viewFocusEquity: $("viewFocusEquity"),
   viewFocusTransferSchedule: $("viewFocusTransferSchedule"),
@@ -487,6 +492,7 @@ const OUTPUT_NAV = {
     { id: "focus-fhsss", label: "FHSSS" },
     { id: "focus-salary-sacrifice", label: "Salary sacrifice" },
     { id: "focus-debt-payoff", label: "Debt payoff" },
+    { id: "focus-surplus-allocation", label: "Surplus allocation" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
@@ -3311,44 +3317,18 @@ function renderCashflows() {
 
 // --- Surplus and deficit allocation (spec 16, Commits 2-4) -----------------
 //
-// Shared by the settings editor (this section), the Cashflow table's
-// Funding group (Commit 3), and the Focus → Surplus allocation view
-// (Commit 3/4) — ONE reader of "where did this FY's surplus actually
-// go", built from the engine's own already-resolved per-target
-// reporting fields (row.perAssetDetail[*].surplusInvested,
-// row.liabilities[*].surplusRepayment, row.superDetail[*].
-// surplus{SalarySacrifice,PersonalDeductible}, row.goals[*].
-// surplusContribution, row.surplusSpent, row.surplusAccumulated) rather
-// than re-deriving the allocation logic — a liability funded via the
-// automatic non-deductible-first step and one funded via an explicit
-// allocation both land in the SAME reported field (a real, deliberate
+// surplusDestinationBreakdown (imported from focusSurplusAllocation.js,
+// this file's own pure module) is shared by the settings editor (this
+// section), the Cashflow table's Funding group (Commit 3), and the
+// Focus → Surplus allocation view (Commit 3/4) — ONE reader of "where
+// did this FY's surplus actually go", built from the engine's own
+// already-resolved per-target reporting fields rather than re-deriving
+// the allocation logic — a liability funded via the automatic
+// non-deductible-first step and one funded via an explicit allocation
+// both land in the SAME reported field (a real, deliberate
 // simplification: both are "surplus-driven", the spec's own phrase, and
 // distinguishing the mechanism after the fact would need new engine
 // state for no real benefit to what's displayed).
-function surplusDestinationBreakdown(row) {
-  if (!row) return [];
-  const out = [];
-  for (const a of state.assets) {
-    const amt = row.perAssetDetail?.[a.id]?.surplusInvested ?? 0;
-    if (amt > 0.005) out.push({ label: a.name, amount: amt });
-  }
-  for (const l of state.liabilities ?? []) {
-    const amt = row.liabilities?.[l.id]?.surplusRepayment ?? 0;
-    if (amt > 0.005) out.push({ label: l.name, amount: amt });
-  }
-  for (const sa of state.plan.superAccounts ?? []) {
-    const d = row.superDetail?.[sa.id];
-    const amt = (d?.surplusSalarySacrifice ?? 0) + (d?.surplusPersonalDeductible ?? 0);
-    if (amt > 0.005) out.push({ label: sa.name, amount: amt });
-  }
-  for (const g of state.goals ?? []) {
-    const amt = row.goals?.[g.id]?.surplusContribution ?? 0;
-    if (amt > 0.005) out.push({ label: g.label, amount: amt });
-  }
-  if (row.surplusSpent > 0.005) out.push({ label: "Expenditure", amount: row.surplusSpent });
-  if (row.surplusAccumulated > 0.005) out.push({ label: "Cash", amount: row.surplusAccumulated });
-  return out;
-}
 
 // Every legal allocation destination, grouped by type, encoded as a
 // single select value "type:id" — one control per allocation row
@@ -3421,7 +3401,7 @@ function surplusResolvedEffectHTML(p) {
   const y = resolveRef(p.from, state.plan, schedule, "client").planYear;
   const row = projection.yearly?.[y];
   if (!row) return "";
-  const items = surplusDestinationBreakdown(row);
+  const items = surplusDestinationBreakdown(row, state);
   if (!items.length) {
     return `<p class="helper-text">Resolved effect, ${schedule.fyLabels[y]}: no surplus was swept this year under this period's rules.</p>`;
   }
@@ -5961,6 +5941,7 @@ const VIEW_MOUNTS = {
   "focus-fhsss": () => els.viewFocusFhsss,
   "focus-salary-sacrifice": () => els.viewFocusSalarySacrifice,
   "focus-debt-payoff": () => els.viewFocusDebtPayoff,
+  "focus-surplus-allocation": () => els.viewFocusSurplusAllocation,
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
@@ -6025,6 +6006,7 @@ function renderActiveView() {
   else if (activeView === "focus-fhsss") renderFocusFhsssView();
   else if (activeView === "focus-salary-sacrifice") renderFocusSalarySacrificeView();
   else if (activeView === "focus-debt-payoff") renderFocusDebtPayoffView();
+  else if (activeView === "focus-surplus-allocation") renderFocusSurplusAllocationView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
@@ -8036,18 +8018,44 @@ function buildCashflowGroups(forOwner = null) {
     groups.push({ title: `Goals${householdSuffix}`, rows });
   }
   if (oneOffRows.length) groups.push({ title: `One-off amounts${householdSuffix}`, rows: oneOffRows });
-  // Surplus/deficit allocation spec: with multiple periods/destinations
-  // possible in a single year, a single named target no longer applies
-  // — Commit 3 ("Outputs") breaks the surplus row into one line per
-  // destination; this aggregate view is the interim shape.
+  // Surplus/deficit allocation spec, Commit 3: the surplus half of
+  // Funding breaks into one row per destination — see
+  // surplusPerDestinationRows's own header (shared with the Focus →
+  // Surplus allocation view, so the two never disagree).
   groups.push({ title: `Funding${householdSuffix}`, rows: [
-    { label: "Surplus invested", cell: (y) => yl[y].surplusInvested },
-    { label: "Surplus swept to cash", cell: (y) => yl[y].surplusAccumulated },
-    { label: "Surplus spent", cell: (y) => yl[y].surplusSpent },
+    ...surplusPerDestinationRows(yl),
     { label: "Deficit funded from assets", cell: (y) => -yl[y].deficitFundedFromAssets },
     { label: "Unfunded cashflow", cell: (y) => yl[y].unfundedCashflow },
   ] });
   return groups;
+}
+
+// One row per surplus destination that EXISTS in the plan (asset/
+// liability/super account/goal), each reading the SAME per-target
+// reporting field surplusDestinationBreakdown() reads elsewhere, plus
+// the two destination-agnostic outcomes (spent, swept to cash) — a row
+// a period's allocations never actually reach in a given FY reads zero
+// and disappears under the existing all-zero-rows-hidden convention,
+// rather than needing its own presence check here. Shared by the
+// Cashflow table's Funding group and the Focus → Surplus allocation
+// view (Commit 3) so the two can never disagree about the row set.
+function surplusPerDestinationRows(yl) {
+  const financialAssets = state.assets.filter((a) => a.include && a.class !== "lifestyle");
+  return [
+    ...financialAssets.map((a) => ({
+      label: `Surplus → ${a.name}`, cell: (y) => yl[y].perAssetDetail?.[a.id]?.surplusInvested ?? 0,
+    })),
+    ...(state.liabilities ?? []).map((l) => ({
+      label: `Surplus → ${l.name}`, cell: (y) => yl[y].liabilities?.[l.id]?.surplusRepayment ?? 0,
+    })),
+    ...(state.plan.superAccounts ?? []).map((sa) => ({
+      label: `Surplus → ${sa.name}`,
+      cell: (y) => (yl[y].superDetail?.[sa.id]?.surplusSalarySacrifice ?? 0) + (yl[y].superDetail?.[sa.id]?.surplusPersonalDeductible ?? 0),
+    })),
+    ...(state.goals ?? []).map((g) => ({ label: `Surplus → ${g.label}`, cell: (y) => yl[y].goals?.[g.id]?.surplusContribution ?? 0 })),
+    { label: "Surplus spent", cell: (y) => yl[y].surplusSpent },
+    { label: "Surplus swept to cash", cell: (y) => yl[y].surplusAccumulated },
+  ];
 }
 
 // catRow()'s expanded (individual-item) rows read POSITIVE row totals
@@ -8434,6 +8442,14 @@ function liabilityDetailRows(get, opts = {}) {
     // the balance each month. Zero (and so hidden by the all-zero-rows
     // convention) for a loan with no extra/one-off repayments configured.
     { label: "Extra repayments", cell: (y) => -get(y).extraRepayment },
+    // Surplus and deficit allocation spec, Commit 3: a repayment the
+    // FY-end surplus sweep made — via the automatic pay-non-deductible-
+    // debt-first step, an explicit period allocation, or both combined
+    // — is a different DECISION from an "Extra repayments" row the
+    // client entered directly, so it gets its own line rather than
+    // folding into that figure. Zero (and so hidden by the all-zero-
+    // rows convention) for a loan no period ever routed surplus to.
+    { label: "Surplus-driven repayment", cell: (y) => -(get(y).surplusRepayment ?? 0) },
     { label: "Offset balance applied", cell: (y) => get(y).offsetApplied },
     // Fixed-rate rollover (Implementation/Rates spec, Commit 1) — the
     // nominal annual rate actually applying that year. Suppressed in
@@ -8466,7 +8482,7 @@ function liabilitiesPayoffFooter(liabIds) {
 function buildLiabilitiesGroups(entity) {
   const yl = projection.yearly;
   const liabIds = Object.keys(yl[0]?.liabilities ?? {});
-  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, indexation: 0, ratePct: 0 };
+  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, surplusRepayment: 0, indexation: 0, ratePct: 0 };
 
   if (entity === "all") {
     const combined = liabilityDetailRows((y) => liabIds.reduce((s, lid) => {
@@ -9766,6 +9782,78 @@ els.viewFocusDebtPayoff.addEventListener("click", (e) => {
   saveState();
   refreshOutputs();
 });
+
+// --- Surplus and deficit allocation, Focus view (spec 16, Commit 3) --------
+//
+// "Where did the surplus actually go, year by year" (buildSurplusAllocationFocus)
+// plus "should we put it all on one thing instead?" (projectSingleDestinationAlternative)
+// — both pure, both reading/re-running the SAME real projectPlan(), never a
+// separate calculation (the Focus governing principle). The non-deductible-
+// first benefit paragraph (Commit 4) is added to this SAME view once that
+// commit lands — see this function's own note below.
+
+let focusSurplusCompareTarget = null;
+
+function focusSurplusAllocationTableHTML() {
+  return [{ title: null, rows: surplusPerDestinationRows(projection.yearly) }];
+}
+
+function renderFocusSurplusAllocationView() {
+  const focus = buildSurplusAllocationFocus({ out: projection, state });
+  if (focus.totalSwept <= 0.005) {
+    els.viewFocusSurplusAllocation.innerHTML = focusEmptyStateHTML(
+      "No surplus has been swept anywhere in this projection yet — check the Working Cash Account's minimum balance and the surplus periods in Settings.",
+      "settings"
+    );
+    return;
+  }
+  const { assets, liabilities, superRows, goals } = surplusEligibleTargets();
+  if (!focusSurplusCompareTarget) focusSurplusCompareTarget = surplusDefaultTarget();
+  const compareOptions = surplusAllocationTargetOptionsHTML(focusSurplusCompareTarget.targetType, focusSurplusCompareTarget.targetId);
+  const canCompare = assets.length + liabilities.length + superRows.length + goals.length > 0;
+
+  let compareHTML = "";
+  if (canCompare) {
+    const alt = projectSingleDestinationAlternative(state, focusSurplusCompareTarget);
+    const actualNetWorth = projection.yearly[projection.yearly.length - 1].netAssets;
+    const altNetWorth = alt.yearly[alt.yearly.length - 1].netAssets;
+    const delta = altNetWorth - actualNetWorth;
+    compareHTML = `
+      <div class="focus-section">
+        <label>Compare against sending 100% of surplus, every year, to:</label>
+        <select id="focusSurplusCompareSelect">${compareOptions}</select>
+        <p class="helper-text">
+          As configured, closing net worth is ${fmtMoney(Math.round(actualNetWorth))}.
+          Sending everything to this one destination instead would leave
+          ${fmtMoney(Math.round(altNetWorth))} —
+          ${delta === 0 ? "no difference" : `${delta > 0 ? fmtMoney(Math.round(delta)) + " more" : fmtMoney(Math.round(-delta)) + " less"}`}.
+          This is one alternative, not a recommendation — the right split depends on goals a single net-worth figure doesn't capture (liquidity, debt-free timing, super access age).
+        </p>
+      </div>
+    `;
+  }
+
+  els.viewFocusSurplusAllocation.innerHTML = `
+    <h2 class="section-heading">Surplus allocation</h2>
+    <p class="helper-text">Where the Working Cash Account's FY-end surplus actually went, year by year, per the periods configured in Settings.</p>
+    ${compareHTML}
+    <div id="focusSurplusTable"></div>
+  `;
+  renderTransposed(document.getElementById("focusSurplusTable"), focusSurplusAllocationTableHTML());
+}
+
+els.viewFocusSurplusAllocation.addEventListener("change", (e) => {
+  if (e.target.id !== "focusSurplusCompareSelect") return;
+  const [targetType, targetId] = e.target.value.split(":");
+  focusSurplusCompareTarget = { targetType, targetId };
+  renderFocusSurplusAllocationView();
+});
+
+function exportFocusSurplusAllocationCSV() {
+  const focus = buildSurplusAllocationFocus({ out: projection, state });
+  if (focus.totalSwept <= 0.005) return;
+  exportTransposedCSV("focus-surplus-allocation", focusSurplusAllocationTableHTML());
+}
 
 // --- Commit 6: Standalone lookups -------------------------------------------
 //
@@ -11316,6 +11404,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-fhsss") exportFocusFhsssCSV();
   else if (activeView === "focus-salary-sacrifice") exportFocusSalarySacrificeCSV();
   else if (activeView === "focus-debt-payoff") exportFocusDebtPayoffCSV();
+  else if (activeView === "focus-surplus-allocation") exportFocusSurplusAllocationCSV();
   else if (activeView === "focus-lookups") exportFocusLookupsCSV();
   else if (activeView === "focus-equity") exportFocusEquityCSV();
   else if (activeView === "focus-transfer-schedule") exportFocusTransferScheduleCSV();

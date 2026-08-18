@@ -339,6 +339,62 @@ suite): split a period, added/edited/removed an allocation row, toggled
 pay-non-deductible-debt-first, set a deficit minimum balance, changed the
 sell rule — no console errors, correct resolved-$ figures at every step.
 
+### Surplus and deficit allocation (spec 16, Commit 3 of 4 — outputs and Focus view)
+Cashflow table: the Funding group's single "Surplus invested/swept/spent"
+lines are replaced by `surplusPerDestinationRows(yl)` — one row per
+destination that EXISTS in the plan (every financial asset, every
+liability, every super account, every goal, plus the two destination-
+agnostic outcomes), each reading the same per-target reporting field
+`surplusDestinationBreakdown()` reads elsewhere; a destination no
+period's rules ever actually reach in a given FY reads zero and
+disappears under the pre-existing all-zero-rows-hidden convention,
+rather than needing its own presence check. Shared between the Cashflow
+table and the new Focus view below so the two can never disagree about
+the row set. Liabilities table: a new "Surplus-driven repayment" row,
+reading the existing `surplusRepayment` field, distinct from "Extra
+repayments" (the client's own entered figure) — a real gap closed in
+the SAME "Combined" (all-loans-summed) accumulator this commit found:
+its own zero-skeleton object was missing the field entirely, which
+would have silently summed to zero regardless of the per-loan value.
+Money decomposition ("Where the money went"): confirmed still
+reconciles exactly — `decomposeNetWorthChange` is built from the SAME
+named terms the conservation invariant already uses, and this whole
+commit adds no new term (both new reporting fields are read-only
+duplicates), so the "reconciles exactly" test that already runs
+`randomScenario()`-generated allocation plans through it needed no
+changes and still passes.
+
+New pure module `src/focusSurplusAllocation.js` (7 tests): 
+`surplusDestinationBreakdown` (the shared reader, now imported by
+main.js rather than duplicated locally as it briefly was in Commit 2),
+`buildSurplusAllocationFocus` (year-by-year totals for the new Focus
+view), and `projectSingleDestinationAlternative` — a REAL second
+`projectPlan()` run (via `clampAllToPlan`, the same pattern
+`focusDebtPayoff.js`'s own counterfactual already establishes) with
+every configured period replaced by one sending 100% of surplus to a
+single nominated destination, for the "should we put it all on the
+mortgage or split it?" comparison the spec names outright. The new
+Focus → Surplus allocation view shows the per-destination table
+(reusing `renderTransposed`/`exportTransposedCSV`, the same generic
+transposed-table machinery the Output tables use, for a free CSV export
+and nominal/real toggle) plus the comparison figure and its own explicit
+non-prescriptive framing ("one alternative, not a recommendation").
+`nonDeductibleFirstBenefit` (Commit 4's own calculation) shipped in this
+same file and is fully tested here too, but its UI wiring is deliberately
+deferred to Commit 4's own commit, per the specs' own gating.
+
+New route id `focus-surplus-allocation` needed adding to
+`router.js`'s `OUTPUT_VIEWS` list — Focus view ids ARE output views for
+routing purposes (a real, previously-unremarked gotcha this commit hit
+directly: the view rendered an empty container with no error at all
+until this was found, because `showSection` silently falls back to the
+default output view for any section id `OUTPUT_VIEWS` doesn't list).
+Regression gate: full suite green (1144 tests, +7 new); no engine
+change. Verified in a real browser: Cashflow table (table form) shows
+the new per-destination Funding rows, the Focus view renders with a
+correct comparison figure and a populated per-year table, all with zero
+console errors.
+
 ### Navigation and charts (spec 17, Commit 1 — Output subject views)
 The Graphs and Tables sidebar groups (17 entries) collapsed into one
 Output group of 10 subject views (Projection, Cashflow, Assets,

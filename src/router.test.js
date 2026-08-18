@@ -172,6 +172,7 @@ describe("known section/view ids", () => {
       "projection", "cashflow", "assets", "liabilities", "super", "tax", "net-worth", "allocation", "snapshot", "assumptions",
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
       "focus-equity", "focus-transfer-schedule",
+      "focus-surplus-allocation",
       "monte-carlo", "monte-carlo-table",
       "whatif-rate-shock", "whatif-crash", "whatif-income-gap", "whatif-expense-shock",
     ]);
