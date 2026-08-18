@@ -32,6 +32,7 @@ export const OUTPUT_VIEWS = [
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
   "focus-equity", "focus-transfer-schedule",                                                                                                                  // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
   "focus-surplus-allocation",                                                                                                                                 // Focus (docs/specs/16-surplus-allocation.md, Commit 3)
+  "focus-ppr-exemption",                                                                                                                                      // Focus (docs/specs/19-engine-completion.md, Commit 5's own Focus view)
   // "focus-compare-scenarios" relocated to its own client-level Compare
   // page (#/clients/<cid>/compare) — no longer a workspace output view.
   // What if (docs/specs/14-what-if.md) — "what if the world is different"

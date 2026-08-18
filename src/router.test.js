@@ -173,6 +173,7 @@ describe("known section/view ids", () => {
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
       "focus-equity", "focus-transfer-schedule",
       "focus-surplus-allocation",
+      "focus-ppr-exemption",
       "monte-carlo", "monte-carlo-table",
       "whatif-rate-shock", "whatif-crash", "whatif-income-gap", "whatif-expense-shock",
     ]);

@@ -1022,6 +1022,65 @@ correctly auto-selected and visible), set agent fees/destination,
 enabled "moved out" and "moved back in" — all fields render and persist
 correctly, zero console errors at every step.
 
+### Main residence exemption: the Focus view spec 19 Commit 5 named but never built
+Closes the last piece of that gap. New pure module
+`src/focusMainResidenceExemption.js` (11 tests):
+
+- `mainResidenceStatusAt` — the four statuses the spec names (main
+  residence / absent-covered / absent-exceeded / investment) at a given
+  calendar date, built on `mainResidence.js`'s own day-count rules
+  (never re-derived — one definition of the six-year clock, shared with
+  the real engine); `buildMainResidenceTimeline` runs it for every plan
+  year plus `exemptProportion` for the exempt-days table, resolving
+  `mainResidence.movedOutAt/movedBackInAt`'s own DateRefs to calendar
+  dates the SAME way `deterministic.js`'s `resolveMainResidenceDates`
+  does. "investment" is reported for a genuinely non-ppr property
+  (included in the same timeline for comparison — this model has no
+  mechanism for a ppr to become one).
+- `buildCgtIfSoldSeries` — "CGT payable if sold that year" is a REAL
+  `projectPlan()` re-run per candidate year (never a shortcut formula:
+  CGT tax payable depends on the person's marginal rate and whatever
+  else that FY, which this engine already assesses correctly), isolated
+  as the INCREMENTAL household tax of a synthetic sale that year against
+  the same plan with no sale at all. Paid in July of the FOLLOWING FY
+  (this engine's own CGT accrual convention) — comparing the sale year's
+  own tax figure would silently read zero every time; a sale in the
+  final plan year reads `accruedCgtAtEnd` instead, since there's no
+  following-year row to read from.
+  A real, found-while-building-this confound: routing the synthetic
+  sale to one of the plan's own real assets measures CGT PLUS whatever
+  that asset's own earnings are on the extra cash for the rest of that
+  FY, not CGT alone — a browser test in this session caught it directly
+  (CGT reading nonzero years before the exempt-days table said the
+  exemption had even lapsed). Fixed with a dedicated zero-income,
+  zero-growth "measurement" asset injected into the throwaway clone
+  only, parking the proceeds somewhere that earns nothing so the only
+  tax difference a sale can create is the sale's own CGT — locked in
+  with a dedicated regression test using a real, earning destination
+  asset as the confound.
+
+Focus view: a colour-coded timeline bar (CSS, one segment per plan
+year) with a legend, the CGT-if-sold series, and the exempt-days table
+(exempt days / total days / exempt % by year) — reachable only for a
+`ppr` property with a "moved out" date set (an empty state otherwise,
+naming exactly what's missing). Disclosed simplification: "CGT payable
+if sold" is a TABLE, not a Plotly line — a chart would need new
+chart-wiring this commit doesn't add, and the cliff (flat, then
+climbing once the six-year window lapses) is legible in the numbers
+themselves without one.
+
+New route id `focus-ppr-exemption` added to `router.js`'s `OUTPUT_VIEWS`
+(the same gotcha Commit 3's own build-log entry already names — Focus
+view ids ARE output views for routing purposes).
+
+No engine/model change (spec 19 Commit 5 shipped that already) —
+regression gate: full suite green (1155 tests, +11 new). Verified in a
+real browser end to end: configured a property's moved-out/producing-
+income fields, viewed the Focus page, confirmed the timeline bar's
+colour transitions, the CGT table reading exactly $0 through the
+covered years and climbing precisely from the FY the exempt-days table
+marks "exceeded," zero console errors.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real

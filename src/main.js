@@ -58,6 +58,9 @@ import {
   surplusDestinationBreakdown, buildSurplusAllocationFocus,
   projectSingleDestinationAlternative, nonDeductibleFirstBenefit,
 } from "./focusSurplusAllocation.js";
+import {
+  eligibleMainResidenceProperties, buildMainResidenceTimeline, buildCgtIfSoldSeries,
+} from "./focusMainResidenceExemption.js";
 import { buildSnapshotColumns, buildSnapshotTable, snapshotToHTML, snapshotToCSV } from "./snapshot.js";
 import {
   eligibleDepositProperties, buildDepositFocus, solveDepositContribution, solveWhenCouldIBuy,
@@ -251,6 +254,7 @@ const els = {
   viewFocusSalarySacrifice: $("viewFocusSalarySacrifice"),
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
   viewFocusSurplusAllocation: $("viewFocusSurplusAllocation"),
+  viewFocusPprExemption: $("viewFocusPprExemption"),
   viewFocusLookups: $("viewFocusLookups"),
   viewFocusEquity: $("viewFocusEquity"),
   viewFocusTransferSchedule: $("viewFocusTransferSchedule"),
@@ -493,6 +497,7 @@ const OUTPUT_NAV = {
     { id: "focus-salary-sacrifice", label: "Salary sacrifice" },
     { id: "focus-debt-payoff", label: "Debt payoff" },
     { id: "focus-surplus-allocation", label: "Surplus allocation" },
+    { id: "focus-ppr-exemption", label: "Main residence exemption" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
@@ -6040,6 +6045,7 @@ const VIEW_MOUNTS = {
   "focus-salary-sacrifice": () => els.viewFocusSalarySacrifice,
   "focus-debt-payoff": () => els.viewFocusDebtPayoff,
   "focus-surplus-allocation": () => els.viewFocusSurplusAllocation,
+  "focus-ppr-exemption": () => els.viewFocusPprExemption,
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
@@ -6105,6 +6111,7 @@ function renderActiveView() {
   else if (activeView === "focus-salary-sacrifice") renderFocusSalarySacrificeView();
   else if (activeView === "focus-debt-payoff") renderFocusDebtPayoffView();
   else if (activeView === "focus-surplus-allocation") renderFocusSurplusAllocationView();
+  else if (activeView === "focus-ppr-exemption") renderFocusPprExemptionView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
@@ -9980,6 +9987,113 @@ function exportFocusSurplusAllocationCSV() {
   exportTransposedCSV("focus-surplus-allocation", focusSurplusAllocationTableHTML());
 }
 
+// --- Main residence exemption and the six-year absence rule, Focus view ----
+// (docs/specs/19-engine-completion.md, Commit 5's own Focus view — never
+// built until this commit.)
+//
+// The timeline/exempt-days table read straight off buildMainResidenceTimeline
+// (pure day-count arithmetic on the SAME exemptProportion the real engine
+// uses); "CGT payable if sold" is a table, not a chart — a genuine,
+// disclosed scope reduction: a Plotly line would need new chart-wiring
+// this commit doesn't add, and the cliff (flat, then climbing once the
+// six-year window lapses) is still legible in the numbers themselves.
+
+const MRE_STATUS_LABELS = {
+  "main-residence": "Main residence", "absent-covered": "Absent — covered",
+  "absent-exceeded": "Absent — exceeded", investment: "Investment",
+};
+
+let focusPprPropertyId = null;
+
+function focusPprTimelineHTML(rows) {
+  const segments = rows.map((r) =>
+    `<div class="mre-segment ${r.status}" title="${escapeHTML(r.fyLabel)}: ${MRE_STATUS_LABELS[r.status]}"></div>`
+  ).join("");
+  const legend = Object.entries(MRE_STATUS_LABELS).map(([key, label]) =>
+    `<span><span class="mre-legend-swatch mre-segment ${key}" style="display:inline-block;width:11px;height:11px;"></span>${escapeHTML(label)}</span>`
+  ).join("");
+  return `<div class="mre-timeline">${segments}</div><div class="mre-legend">${legend}</div>`;
+}
+
+function renderFocusPprExemptionView() {
+  const props = eligibleMainResidenceProperties(state);
+  if (props.length === 0) {
+    els.viewFocusPprExemption.innerHTML = focusEmptyStateHTML(
+      "The main residence exemption and its six-year absence rule only apply to a property flagged as Main residence (PPR) — add one, or set an existing property's type to PPR, to see it here.",
+      "property"
+    );
+    return;
+  }
+  if (!props.some((p) => p.id === focusPprPropertyId)) focusPprPropertyId = props[0].id;
+  const property = props.find((p) => p.id === focusPprPropertyId);
+  const schedule = projection.schedule;
+  const rows = buildMainResidenceTimeline({ property, plan: state.plan, schedule });
+
+  const propertyOptions = props.map((p) =>
+    `<option value="${p.id}"${p.id === property.id ? " selected" : ""}>${escapeHTML(p.name)}</option>`
+  ).join("");
+
+  if (!property.mainResidence.movedOutAt) {
+    els.viewFocusPprExemption.innerHTML = `
+      <h2 class="section-heading">Main residence exemption</h2>
+      ${props.length > 1 ? `<div class="focus-section"><label>Property</label><select id="focusPprPropertySelect">${propertyOptions}</select></div>` : ""}
+      <p class="helper-text">"${escapeHTML(property.name)}" has never moved out during this projection — it stays fully CGT-exempt throughout, so there is no six-year clock to show. Set a "Moved out" date on the property's own Main residence exemption section to see the timeline and the exempt-days table.</p>
+    `;
+    return;
+  }
+
+  const cgtSeries = buildCgtIfSoldSeries({ state, property, out: projection });
+  const cgtRows = cgtSeries.map((c, i) => `
+    <tr><td>${escapeHTML(c.fyLabel)}</td><td class="tl-num">${fmtMoney(Math.round(c.cgtPayable))}</td></tr>
+  `).join("");
+  const exemptRows = rows.map((r) => `
+    <tr>
+      <td>${escapeHTML(r.fyLabel)}</td>
+      <td>${MRE_STATUS_LABELS[r.status]}</td>
+      <td class="tl-num">${r.exemptDays.toLocaleString()}</td>
+      <td class="tl-num">${r.totalDays.toLocaleString()}</td>
+      <td class="tl-num">${(r.exemptProportion * 100).toFixed(1)}%</td>
+    </tr>
+  `).join("");
+
+  els.viewFocusPprExemption.innerHTML = `
+    <h2 class="section-heading">Main residence exemption</h2>
+    <p class="helper-text">The PPR stays CGT-exempt while occupied, and for up to six years while absent and producing income (indefinitely if not) — but only one absence/reoccupation cycle is modelled, only one property can be the main residence at a time, and there is no apportionment for a home office. The clock resets on reoccupation.</p>
+    ${props.length > 1 ? `<div class="focus-section"><label>Property</label><select id="focusPprPropertySelect">${propertyOptions}</select></div>` : ""}
+    ${focusPprTimelineHTML(rows)}
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>CGT payable if sold that year</h3>
+        <p class="helper-text">Flat while the exemption is intact; climbs once the six-year window lapses — the incremental household tax of a sale that year, against the same plan with no sale at all.</p>
+        <div class="tl-wrap"><table class="tl"><thead><tr><th>FY</th><th>CGT payable</th></tr></thead><tbody>${cgtRows}</tbody></table></div>
+      </div>
+      <div class="focus-section">
+        <h3>Exempt days by year</h3>
+        <div class="tl-wrap"><table class="tl"><thead><tr><th>FY</th><th>Status</th><th>Exempt days</th><th>Total days owned</th><th>Exempt %</th></tr></thead><tbody>${exemptRows}</tbody></table></div>
+      </div>
+    </div>
+  `;
+}
+
+els.viewFocusPprExemption.addEventListener("change", (e) => {
+  if (e.target.id !== "focusPprPropertySelect") return;
+  focusPprPropertyId = e.target.value;
+  renderFocusPprExemptionView();
+});
+
+function exportFocusPprExemptionCSV() {
+  const props = eligibleMainResidenceProperties(state);
+  const property = props.find((p) => p.id === focusPprPropertyId) ?? props[0];
+  if (!property || !property.mainResidence.movedOutAt) return;
+  const rows = buildMainResidenceTimeline({ property, plan: state.plan, schedule: projection.schedule });
+  const cgtSeries = buildCgtIfSoldSeries({ state, property, out: projection });
+  const lines = [`Main residence exemption,${csvEsc(property.name)}`, "", ["FY", "Status", "Exempt days", "Total days owned", "Exempt %", "CGT payable if sold"].map(csvEsc).join(",")];
+  rows.forEach((r, i) => {
+    lines.push([csvEsc(r.fyLabel), csvEsc(MRE_STATUS_LABELS[r.status]), r.exemptDays, r.totalDays, (r.exemptProportion * 100).toFixed(1), cgtSeries[i]?.cgtPayable.toFixed(2) ?? ""].join(","));
+  });
+  downloadCSV("focus-ppr-exemption", lines);
+}
+
 // --- Commit 6: Standalone lookups -------------------------------------------
 //
 // The one deliberate exception to the governing principle: a lookup,
@@ -11530,6 +11644,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-salary-sacrifice") exportFocusSalarySacrificeCSV();
   else if (activeView === "focus-debt-payoff") exportFocusDebtPayoffCSV();
   else if (activeView === "focus-surplus-allocation") exportFocusSurplusAllocationCSV();
+  else if (activeView === "focus-ppr-exemption") exportFocusPprExemptionCSV();
   else if (activeView === "focus-lookups") exportFocusLookupsCSV();
   else if (activeView === "focus-equity") exportFocusEquityCSV();
   else if (activeView === "focus-transfer-schedule") exportFocusTransferScheduleCSV();

@@ -3000,3 +3000,16 @@ dialog.modal::backdrop {
   /* Slider alignment loosens on narrow screens — full row, no plot-area inset. */
   .horizon-slider { padding-left: 12px; padding-right: 12px; }
 }
+
+/* Focus: Main residence exemption (spec 19 Commit 5's own Focus view)
+   — a colour-coded timeline bar, one segment per plan year. Colours are
+   semantic, matching the rest of the app's convention (green = safe,
+   amber = caution, red = exposed, grey = neutral/not applicable). */
+.mre-timeline { display: flex; width: 100%; height: 28px; border-radius: 4px; overflow: hidden; margin: 8px 0; }
+.mre-segment { flex: 1 1 0; min-width: 2px; }
+.mre-segment.main-residence { background: #4a9c6d; }
+.mre-segment.absent-covered { background: #d4a017; }
+.mre-segment.absent-exceeded { background: #c0392b; }
+.mre-segment.investment { background: #9aa5b1; }
+.mre-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 12px; }
+.mre-legend-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
