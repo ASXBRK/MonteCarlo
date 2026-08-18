@@ -862,7 +862,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // Per-goal detail (Document Set Commit 6), real dollars — this
     // FY's contribution only (summed across years for the lifetime
     // accrued figure; see goalStats in the final return object).
-    goals: Object.fromEntries(goals.map((g) => [g.id, { contribution: 0 }])),
+    // surplusContribution (Surplus and Deficit Allocation spec, Commit
+    // 3): the slice of `contribution` above that arrived via a surplus
+    // allocation this FY, rather than the goal's own ordinary
+    // fundedFrom draw — a reporting-only breakdown (both paths already
+    // debit the SAME pocket, so no conservation double-count risk;
+    // unlike surplusSalarySacrifice, this needs no invariant add-back)
+    // that lets the Cashflow table's Funding group and the Focus →
+    // Surplus allocation view show "how much of this goal's funding
+    // this year came from surplus" without re-deriving it.
+    goals: Object.fromEntries(goals.map((g) => [g.id, { contribution: 0, surplusContribution: 0 }])),
     // Per-property detail (D4), real dollars. deposit/duty/costs/fhog
     // (Focus Commit 2 follow-on): the purchase-year breakdown behind
     // `settlement`'s single net figure — by construction (same local
@@ -982,6 +991,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // subtract it back out of that add-back without touching the
       // genuine payroll figure.
       surplusSalarySacrifice: 0,
+      // The same reporting-only breakdown as surplusSalarySacrifice,
+      // but for a personalDeductible-type target — no invariant
+      // add-back needed here (an ORDINARY personalDeductible
+      // contribution already passes through wcaBal exactly like this
+      // surplus-sourced one does, unlike salary sacrifice's payroll
+      // bypass), so this exists purely so the Cashflow table's Funding
+      // group and the Focus → Surplus allocation view can show it.
+      surplusPersonalDeductible: 0,
       closing: 0, taxFreeClosing: 0,
     }])),
     superClosing: 0,
@@ -2227,6 +2244,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
                 row.superDetail[target.accountId].contributionsTax += tax;
                 if (target.type === "personalDeductible") {
                   row.superDetail[target.accountId].personalDeductible += consumed;
+                  row.superDetail[target.accountId].surplusPersonalDeductible += consumed;
                 } else {
                   row.superDetail[target.accountId].salarySacrifice += consumed;
                   // See the field's own comment: this slice passed
@@ -2249,6 +2267,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               consumed = share;
               wcaBal -= consumed;
               row.goals[a.targetId].contribution += consumed;
+              row.goals[a.targetId].surplusContribution += consumed;
               goalAccruedTotal[a.targetId] += consumed;
             }
             remaining -= consumed;

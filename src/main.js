@@ -39,6 +39,8 @@ import {
   SCHEMA_VERSION,
   ADJUSTMENT_TARGETS, ADJUSTMENT_TARGET_LABELS, createAdjustment,
   TERMINATION_TYPES, INDEX_BASES,
+  createSurplusPeriod, normaliseSurplusPeriods, ALLOCATION_TARGET_TYPES,
+  DEBT_ORDER_MODES, REMAINDER_TARGETS, DEFICIT_SELL_RULES,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -3307,9 +3309,236 @@ function renderCashflows() {
 
 // --- settings section ------------------------------------------------------
 
+// --- Surplus and deficit allocation (spec 16, Commits 2-4) -----------------
+//
+// Shared by the settings editor (this section), the Cashflow table's
+// Funding group (Commit 3), and the Focus → Surplus allocation view
+// (Commit 3/4) — ONE reader of "where did this FY's surplus actually
+// go", built from the engine's own already-resolved per-target
+// reporting fields (row.perAssetDetail[*].surplusInvested,
+// row.liabilities[*].surplusRepayment, row.superDetail[*].
+// surplus{SalarySacrifice,PersonalDeductible}, row.goals[*].
+// surplusContribution, row.surplusSpent, row.surplusAccumulated) rather
+// than re-deriving the allocation logic — a liability funded via the
+// automatic non-deductible-first step and one funded via an explicit
+// allocation both land in the SAME reported field (a real, deliberate
+// simplification: both are "surplus-driven", the spec's own phrase, and
+// distinguishing the mechanism after the fact would need new engine
+// state for no real benefit to what's displayed).
+function surplusDestinationBreakdown(row) {
+  if (!row) return [];
+  const out = [];
+  for (const a of state.assets) {
+    const amt = row.perAssetDetail?.[a.id]?.surplusInvested ?? 0;
+    if (amt > 0.005) out.push({ label: a.name, amount: amt });
+  }
+  for (const l of state.liabilities ?? []) {
+    const amt = row.liabilities?.[l.id]?.surplusRepayment ?? 0;
+    if (amt > 0.005) out.push({ label: l.name, amount: amt });
+  }
+  for (const sa of state.plan.superAccounts ?? []) {
+    const d = row.superDetail?.[sa.id];
+    const amt = (d?.surplusSalarySacrifice ?? 0) + (d?.surplusPersonalDeductible ?? 0);
+    if (amt > 0.005) out.push({ label: sa.name, amount: amt });
+  }
+  for (const g of state.goals ?? []) {
+    const amt = row.goals?.[g.id]?.surplusContribution ?? 0;
+    if (amt > 0.005) out.push({ label: g.label, amount: amt });
+  }
+  if (row.surplusSpent > 0.005) out.push({ label: "Expenditure", amount: row.surplusSpent });
+  if (row.surplusAccumulated > 0.005) out.push({ label: "Cash", amount: row.surplusAccumulated });
+  return out;
+}
+
+// Every legal allocation destination, grouped by type, encoded as a
+// single select value "type:id" — one control per allocation row
+// rather than a dependent type+target pair, so there is no
+// intermediate state where the type is chosen but the target isn't
+// (which clampAllocationEntry would silently drop on the next clamp).
+function surplusEligibleTargets() {
+  const assets = state.assets.filter((a) => a.include && a.class !== "lifestyle");
+  const liabilities = state.liabilities ?? [];
+  const superRows = (state.cashflows.superContributions ?? []).filter(
+    (sc) => sc.type === "salarySacrifice" || sc.type === "personalDeductible"
+  );
+  const goals = state.goals ?? [];
+  return { assets, liabilities, superRows, goals };
+}
+
+function surplusAllocationTargetOptionsHTML(selectedType, selectedId) {
+  const { assets, liabilities, superRows, goals } = surplusEligibleTargets();
+  const opt = (type, id, label) =>
+    `<option value="${type}:${id}"${selectedType === type && selectedId === id ? " selected" : ""}>${escapeHTML(label)}</option>`;
+  const groups = [];
+  if (assets.length) groups.push(`<optgroup label="Assets">${assets.map((a) => opt("asset", a.id, a.name)).join("")}</optgroup>`);
+  if (liabilities.length) groups.push(`<optgroup label="Liabilities">${liabilities.map((l) => opt("liability", l.id, l.name)).join("")}</optgroup>`);
+  if (superRows.length) {
+    groups.push(`<optgroup label="Super contributions">${superRows.map((sc) => {
+      const acct = findSuperAccount(sc.accountId);
+      return opt("superContribution", sc.id, `${sc.label}${acct ? ` (${acct.name})` : ""}`);
+    }).join("")}</optgroup>`);
+  }
+  if (goals.length) groups.push(`<optgroup label="Goals">${goals.map((g) => opt("goal", g.id, g.label)).join("")}</optgroup>`);
+  return groups.join("");
+}
+
+// The default destination for a freshly added allocation row — asset
+// preferred (the most common case), falling through to whatever DOES
+// exist. Always non-null: this app always keeps at least one financial
+// asset (removeAsset's own "keep the last financial asset" rule), so
+// there is always a legal default and a fresh row is never born
+// pointing at nothing (which clampAllocationEntry would drop outright).
+function surplusDefaultTarget() {
+  const { assets, liabilities, superRows, goals } = surplusEligibleTargets();
+  if (assets.length) return { targetType: "asset", targetId: assets[0].id };
+  if (liabilities.length) return { targetType: "liability", targetId: liabilities[0].id };
+  if (superRows.length) return { targetType: "superContribution", targetId: superRows[0].id };
+  if (goals.length) return { targetType: "goal", targetId: goals[0].id };
+  return { targetType: "asset", targetId: null };
+}
+
+function surplusCtx() {
+  return { liabilities: state.liabilities, goals: state.goals, superContributions: state.cashflows.superContributions };
+}
+
+function commitSurplusPeriods(periods) {
+  state.settings.surplus.periods = normaliseSurplusPeriods(periods, state.plan, state.assets, surplusCtx());
+  saveState();
+  refreshOutputs();
+  renderSettings();
+}
+
+// "Resolved effect" line (spec's own worked example: "$2,340/month:
+// $1,400 to Home loan, $600 to Super, $340 to Cash") — read from the
+// period's own FIRST covered plan year, using whatever the engine
+// actually did that year (never re-derived), so it's never wrong
+// relative to the real projection. The sweep itself is a single FY-end
+// lump sum, not a monthly transfer — the "/month" framing is the
+// spec's own (a familiar budgeting scale for an adviser), so the
+// caption says plainly that it's shown per month for scale only.
+function surplusResolvedEffectHTML(p) {
+  const schedule = projection.schedule;
+  const y = resolveRef(p.from, state.plan, schedule, "client").planYear;
+  const row = projection.yearly?.[y];
+  if (!row) return "";
+  const items = surplusDestinationBreakdown(row);
+  if (!items.length) {
+    return `<p class="helper-text">Resolved effect, ${schedule.fyLabels[y]}: no surplus was swept this year under this period's rules.</p>`;
+  }
+  const total = items.reduce((s, x) => s + x.amount, 0);
+  const parts = items.map((x) => `${fmtMoney(Math.round(x.amount / 12))} to ${escapeHTML(x.label)}`).join(", ");
+  return `<p class="helper-text">Resolved effect, ${schedule.fyLabels[y]} (swept once at FY-end; shown per month for scale): ${fmtMoney(Math.round(total / 12))}/month: ${parts}.</p>`;
+}
+
+function surplusPeriodCardHTML(p, i, periods) {
+  const plan = state.plan, schedule = projection.schedule;
+  const isFirst = i === 0, isLast = i === periods.length - 1;
+  const fromAge = resolveRef(p.from, plan, schedule, "client").age;
+  const toAge = resolveRef(p.to, plan, schedule, "client").age;
+  const canSplit = toAge > fromAge;
+  const usedPct = p.allocations.reduce((s, a) => s + a.pct, 0);
+  const remainderPct = Math.max(0, 100 - usedPct);
+
+  // Only an INTERNAL boundary (a non-first period's own "from") is
+  // ever directly edited — the outer edges (period 0's from, the last
+  // period's to) always track Start/End so the periods keep covering
+  // the whole projection even if the plan's own bounds later move.
+  // Bounded to (previous boundary, next boundary) so the control
+  // itself can never produce an overlap — the spec's own "incapable of
+  // entering a gap/overlap" requirement, enforced at the input, not
+  // after the fact.
+  const fromHTML = isFirst
+    ? `<span class="date-ref-resolved">Start (age ${fromAge})</span>`
+    : dateRefControlHTML(p.from, "client", `data-pid="${p.id}" data-pfield="boundary"`, plan.client.currentAge, plan.endAge);
+  const toHTML = isLast
+    ? `<span class="date-ref-resolved">End (age ${toAge})</span>`
+    : `<span class="date-ref-resolved">age ${toAge} — set by the next period's start</span>`;
+
+  const allocRows = p.allocations.map((a) => `
+    <div class="alloc-row" data-said="${a.id}">
+      <select data-pid="${p.id}" data-said="${a.id}" data-pfield="target">${surplusAllocationTargetOptionsHTML(a.targetType, a.targetId)}</select>
+      <input type="number" min="0" max="100" step="1" value="${a.pct}" data-pid="${p.id}" data-said="${a.id}" data-pfield="pct" aria-label="Percent" />%
+      <button type="button" class="btn-text" data-pid="${p.id}" data-said="${a.id}" data-paction="remove-allocation">Remove</button>
+    </div>
+  `).join("");
+
+  return `
+    <div class="cf-section surplus-period" data-pid="${p.id}">
+      <div class="cf-section-title">
+        Period ${i + 1}
+        ${periods.length > 1 ? `<button type="button" class="btn-text" data-pid="${p.id}" data-paction="remove-period">Remove period</button>` : ""}
+      </div>
+      <div class="person-grid">
+        <div class="cf-cell"><label>From</label>${fromHTML}</div>
+        <div class="cf-cell"><label>To</label>${toHTML}</div>
+      </div>
+      <label class="ptg-check">
+        <input type="checkbox"${p.payNonDeductibleDebtFirst ? " checked" : ""} data-pid="${p.id}" data-pfield="payNonDeductibleDebtFirst" />
+        <span>Pay non-deductible debt first, before any other destination</span>
+      </label>
+      <div class="cf-cell">
+        <label>Order debt is paid down in</label>
+        <select data-pid="${p.id}" data-pfield="debtOrder"${p.payNonDeductibleDebtFirst ? "" : " disabled"}>
+          <option value="interestRate"${p.debtOrder === "interestRate" ? " selected" : ""}>Highest interest rate first</option>
+          <option value="manual"${p.debtOrder === "manual" ? " selected" : ""}>Manual (Liabilities section order)</option>
+        </select>
+      </div>
+      <div class="alloc-list">${allocRows}</div>
+      ${remainderPct > 0 ? `<button type="button" class="btn-text" data-pid="${p.id}" data-paction="add-allocation">+ Add allocation</button>` : ""}
+      <p class="surplus-remainder">Remainder: <strong>${remainderPct}%</strong> →
+        <select data-pid="${p.id}" data-pfield="remainderTo">
+          <option value="cash"${p.remainderTo === "cash" ? " selected" : ""}>Cash</option>
+          <option value="expenditure"${p.remainderTo === "expenditure" ? " selected" : ""}>Expenditure</option>
+        </select>
+      </p>
+      ${canSplit ? `<button type="button" class="btn-text" data-pid="${p.id}" data-paction="split-period">+ Split into two periods</button>` : ""}
+      ${surplusResolvedEffectHTML(p)}
+    </div>
+  `;
+}
+
+function surplusPeriodsSectionHTML() {
+  const periods = state.settings.surplus.periods;
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Surplus treatment</div>
+      <p class="helper-text">Once a year, at the end of each financial year, whatever is sitting in the Working Cash Account above its minimum is allocated per the period covering that year.</p>
+    </div>
+    ${periods.map((p, i) => surplusPeriodCardHTML(p, i, periods)).join("")}
+  `;
+}
+
+function deficitSectionHTML(orderItems) {
+  const d = state.settings.deficit;
+  const includedAssets = state.assets.filter((a) => a.include && a.class !== "lifestyle");
+  const minBalRows = includedAssets.map((a) => `
+    <div class="cf-cell">
+      <label>${escapeHTML(a.name)} minimum ($)</label>
+      <input type="number" min="0" step="1000" value="${d.minimumBalances[a.id] ?? 0}"
+             data-aid="${a.id}" data-settings-field="deficitMinimum" />
+    </div>
+  `).join("");
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Deficit funding order</div>
+      <div class="order-list">${orderItems}</div>
+      <p class="helper-text">When the Working Cash Account needs topping up, money is drawn from these assets in this order.</p>
+      <div class="cf-cell">
+        <label>Sell rule</label>
+        <select data-settings-field="deficitSellRule">
+          <option value="order"${d.sellRule === "order" ? " selected" : ""}>Follow the order above</option>
+          <option value="minimumCapitalGain"${d.sellRule === "minimumCapitalGain" ? " selected" : ""}>Smallest unrealised gain first</option>
+        </select>
+      </div>
+      <p class="helper-text">"Smallest unrealised gain first" sells from whichever asset would realise the least capital gain as a proportion of its value, recomputed every time — tax-aware drawdown, not a fixed order. Cash and lifestyle assets (which realise nothing) always sort first either way.</p>
+      <div class="person-grid">${minBalRows}</div>
+      <p class="helper-text">Deficit funding draws each asset down to its own minimum before moving to the next; only once every asset is at its minimum does funding draw below them, in the same order, before cashflow goes unfunded.</p>
+    </div>
+  `;
+}
+
 function renderSettings() {
   const s = state.settings;
-  const includedAssets = state.assets.filter((a) => a.include && a.class !== "lifestyle");
   const orderItems = s.fundingOrder.map((id, i) => {
     const a = findAsset(id);
     if (!a) return "";
@@ -3328,14 +3557,6 @@ function renderSettings() {
   }).join("");
 
   const wca = state.plan.workingCash;
-  // Surplus/deficit allocation spec, Commit 1: settings.surplus is now
-  // a list of periods (model + engine only in this commit) — the old
-  // single-destination mode/assetId select is gone. A real period
-  // editor is Commit 2's own scope ("Allocation UI"); this is a safe,
-  // honest placeholder for the gap between the two, not the finished
-  // feature — it never writes the old {mode, assetId} shape, which
-  // normaliseSettings no longer reads at all.
-  const periodCount = s.surplus.periods.length;
   els.settingsPanel.innerHTML = `
     <div class="cf-panel">
       <div class="cf-section">
@@ -3357,20 +3578,15 @@ function renderSettings() {
         </div>
         <p class="helper-text">If the account would fall below its minimum, the shortfall is drawn from the deficit funding order below. Leave the rate blank to use the firm's Cash profile return.</p>
       </div>
-      <div class="cf-section">
-        <div class="cf-section-title">Surplus treatment</div>
-        <p class="helper-text">${periodCount} period${periodCount === 1 ? "" : "s"} configured. Once a year, at the end of each financial year, whatever is sitting in the Working Cash Account above its minimum is allocated per the period covering that year. A full period editor is coming; this scenario's allocation is unchanged from before.</p>
-      </div>
-      <div class="cf-section">
-        <div class="cf-section-title">Deficit funding order</div>
-        <div class="order-list">${orderItems}</div>
-        <p class="helper-text">When the Working Cash Account needs topping up, money is drawn from these assets in this order.</p>
-      </div>
+      ${surplusPeriodsSectionHTML()}
+      ${deficitSectionHTML(orderItems)}
     </div>
   `;
 }
 
 els.settingsPanel.addEventListener("change", (e) => {
+  const pid = e.target.dataset.pid;
+  if (pid) { onSurplusPeriodChange(e.target, pid); return; }
   const field = e.target.dataset.settingsField;
   if (!field) return;
   if (field === "wcaBalance") {
@@ -3380,21 +3596,103 @@ els.settingsPanel.addEventListener("change", (e) => {
   } else if (field === "wcaRate") {
     const v = e.target.value;
     state.plan.workingCash = clampWorkingCash({ ...state.plan.workingCash, ratePct: v === "" ? null : clampNumber(v, -10, 30) });
+  } else if (field === "deficitMinimum") {
+    const aid = e.target.dataset.aid;
+    state.settings.deficit = { ...state.settings.deficit, minimumBalances: { ...state.settings.deficit.minimumBalances, [aid]: clampNumber(e.target.value, 0) } };
+  } else if (field === "deficitSellRule") {
+    state.settings.deficit = { ...state.settings.deficit, sellRule: DEFICIT_SELL_RULES.includes(e.target.value) ? e.target.value : "order" };
   } else {
     return;
   }
+  state.settings = normaliseSettings(state.settings, state.assets, state.plan, surplusCtx());
   saveState();
   refreshOutputs();
   renderSettings();
 });
 
+// A period's own from/to are mutated as a PAIR: editing period i's
+// "from" (the only boundary ever directly exposed — see
+// surplusPeriodCardHTML's own comment) always writes period i-1's "to"
+// in the SAME commit, one age below the new value, so the two periods
+// can never drift out of contiguity between renders.
+function onSurplusPeriodChange(el, pid) {
+  const periods = state.settings.surplus.periods;
+  const i = periods.findIndex((p) => p.id === pid);
+  if (i < 0) return;
+  const plan = state.plan, schedule = projection.schedule;
+  const field = el.dataset.pfield;
+  const next = periods.map((p) => ({ ...p, allocations: p.allocations.map((a) => ({ ...a })) }));
+
+  if (field === "boundary") {
+    if (i === 0) return; // the first period's "from" is never editable
+    let ref;
+    if (el.dataset.drRole === "anchor") {
+      ref = el.value === "__age__"
+        ? { kind: "age", age: resolveRef(next[i].from, plan, schedule, "client").age }
+        : { kind: "anchor", anchorId: el.value };
+    } else {
+      ref = { kind: "age", age: clampInt(el.value, plan.client.currentAge, plan.endAge) };
+    }
+    // Bound strictly between the neighbouring boundaries so the SAME
+    // input that lets the user choose an anchor can never itself
+    // create a gap or an overlap — an anchor whose own resolved age
+    // falls outside the band is converted to a plain clamped age
+    // rather than accepted and silently misordering the list (the
+    // project's standing "unenterable state, not a warning" rule).
+    const minAge = resolveRef(next[i - 1].from, plan, schedule, "client").age + 1;
+    const maxAge = i + 1 < next.length ? resolveRef(next[i + 1].from, plan, schedule, "client").age - 1 : plan.endAge;
+    const resolvedAge = resolveRef(ref, plan, schedule, "client").age;
+    const clampedAge = Math.min(Math.max(resolvedAge, minAge), maxAge);
+    if (clampedAge !== resolvedAge) ref = { kind: "age", age: clampedAge };
+    next[i] = { ...next[i], from: ref };
+    next[i - 1] = { ...next[i - 1], to: { kind: "age", age: clampedAge - 1 } };
+    commitSurplusPeriods(next);
+    return;
+  }
+  if (field === "payNonDeductibleDebtFirst") {
+    next[i] = { ...next[i], payNonDeductibleDebtFirst: el.checked };
+    commitSurplusPeriods(next);
+    return;
+  }
+  if (field === "debtOrder") {
+    next[i] = { ...next[i], debtOrder: DEBT_ORDER_MODES.includes(el.value) ? el.value : "interestRate" };
+    commitSurplusPeriods(next);
+    return;
+  }
+  if (field === "remainderTo") {
+    next[i] = { ...next[i], remainderTo: REMAINDER_TARGETS.includes(el.value) ? el.value : "cash" };
+    commitSurplusPeriods(next);
+    return;
+  }
+  if (field === "target" || field === "pct") {
+    const said = el.dataset.said;
+    const allocs = next[i].allocations;
+    const j = allocs.findIndex((a) => a.id === said);
+    if (j < 0) return;
+    if (field === "target") {
+      const [targetType, targetId] = el.value.split(":");
+      if (!ALLOCATION_TARGET_TYPES.includes(targetType)) return;
+      allocs[j] = { ...allocs[j], targetType, targetId };
+    } else {
+      // Clamped to this row's own remaining headroom (100% minus every
+      // OTHER row's percentage) — the spec's own "incapable of
+      // exceeding 100%, prevented at input" requirement.
+      const othersSum = allocs.reduce((s, a, k) => (k === j ? s : s + a.pct), 0);
+      allocs[j] = { ...allocs[j], pct: clampNumber(el.value, 0, Math.max(0, 100 - othersSum)) };
+    }
+    commitSurplusPeriods(next);
+    return;
+  }
+}
+
 els.settingsPanel.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-action]");
+  const btn = e.target.closest("[data-action], [data-paction]");
   if (!btn) return;
-  const { action, aid } = btn.dataset;
+  const { action, paction, pid, said } = btn.dataset;
+  if (paction) { onSurplusPeriodAction(paction, pid, said); return; }
   if (action !== "order-up" && action !== "order-down") return;
   const order = [...state.settings.fundingOrder];
-  const i = order.indexOf(aid);
+  const i = order.indexOf(btn.dataset.aid);
   const j = action === "order-up" ? i - 1 : i + 1;
   if (i < 0 || j < 0 || j >= order.length) return;
   [order[i], order[j]] = [order[j], order[i]];
@@ -3402,6 +3700,48 @@ els.settingsPanel.addEventListener("click", (e) => {
   saveState();
   renderSettings();
 });
+
+function onSurplusPeriodAction(paction, pid, said) {
+  const periods = state.settings.surplus.periods;
+  const i = periods.findIndex((p) => p.id === pid);
+  if (i < 0) return;
+  const plan = state.plan, schedule = projection.schedule;
+  const next = periods.map((p) => ({ ...p, allocations: p.allocations.map((a) => ({ ...a })) }));
+
+  if (paction === "add-allocation") {
+    const usedPct = next[i].allocations.reduce((s, a) => s + a.pct, 0);
+    const remainderPct = Math.max(0, 100 - usedPct);
+    if (remainderPct <= 0) return;
+    next[i].allocations.push({ id: uid("sa"), ...surplusDefaultTarget(), pct: remainderPct });
+    commitSurplusPeriods(next);
+  } else if (paction === "remove-allocation") {
+    next[i].allocations = next[i].allocations.filter((a) => a.id !== said);
+    commitSurplusPeriods(next);
+  } else if (paction === "remove-period" && periods.length > 1) {
+    // Merge into a neighbour rather than leaving a gap: the first
+    // period is absorbed forward (period 1 extends back to Start), any
+    // other period is absorbed by the one before it (which extends to
+    // this period's own "to") — contiguity is preserved by construction,
+    // never re-validated after the fact.
+    if (i === 0) {
+      next[1] = { ...next[1], from: { kind: "anchor", anchorId: "start" } };
+    } else {
+      next[i - 1] = { ...next[i - 1], to: next[i].to };
+    }
+    next.splice(i, 1);
+    commitSurplusPeriods(next);
+  } else if (paction === "split-period") {
+    const p = next[i];
+    const fromAge = resolveRef(p.from, plan, schedule, "client").age;
+    const toAge = resolveRef(p.to, plan, schedule, "client").age;
+    if (toAge <= fromAge) return;
+    const splitAge = Math.min(Math.max(fromAge + Math.ceil((toAge - fromAge) / 2), fromAge + 1), toAge);
+    const added = { ...createSurplusPeriod(), from: { kind: "age", age: splitAge }, to: p.to };
+    next[i] = { ...p, to: { kind: "age", age: splitAge - 1 } };
+    next.splice(i + 1, 0, added);
+    commitSurplusPeriods(next);
+  }
+}
 
 // --- field mutation (delegated over assets + cashflows) ---------------------
 

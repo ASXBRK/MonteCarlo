@@ -280,6 +280,65 @@ occurrence. UI (Commit 2), outputs and a Focus view (Commit 3), and the
 non-deductible-first advice signal (Commit 4) are tracked in
 "Where we're going" below until they land.
 
+### Surplus and deficit allocation (spec 16, Commit 2 of 4 — settings UI)
+Replaces the Commit-1 placeholder text with a real period editor.
+Structural design choice: only ONE boundary per period is ever directly
+edited — a non-first period's own `from` — bounded at input to strictly
+between its two neighbours' resolved ages, so the control itself can
+never produce a gap or overlap (the spec's own "incapable of displaying
+an allocation that does not total 100%" principle extended to periods
+generally). Editing that boundary writes the PRECEDING period's `to` in
+the same commit (one age below), keeping the pair contiguous by
+construction rather than validated after the fact; the outermost edges
+(period 0's `from`, the last period's `to`) are never exposed as editable
+at all — always Start/End — so the period list keeps covering the whole
+projection even if the plan's own bounds move later. "Split into two
+periods" inserts a new period at the current range's midpoint age (as an
+explicit age, not an anchor — the user can then repoint it at an anchor
+via the same boundary control); "Remove period" merges into a neighbour
+(the first period is absorbed forward, any other backward) rather than
+leaving a gap. An allocation row is a single grouped select ("type:id"
+value) rather than a dependent type-then-target pair, so there's no
+intermediate state where a type is chosen but the target isn't (which
+`clampAllocationEntry` would silently drop on the next clamp); a percent
+input is clamped LIVE to its own row's remaining headroom (100% minus
+every other row's share), and "+ Add allocation" is hidden outright once
+the remainder reaches 0% — both make "cannot exceed 100%" true at the
+input, not merely enforced afterwards. The remainder line is always
+rendered, computed fresh from the stored allocations every render, never
+tracked as separate state that could drift.
+
+New shared reader, `surplusDestinationBreakdown(row)`: turns the
+engine's own already-resolved per-target reporting fields (per-asset
+`surplusInvested`, per-liability `surplusRepayment`, per-super-account
+`surplusSalarySacrifice`/`surplusPersonalDeductible`, per-goal
+`surplusContribution`, `surplusSpent`, `surplusAccumulated`) into one
+row per destination that actually received money that FY — built once,
+reused by this settings UI's own "resolved effect" line (spec's own
+worked example: "$2,340/month: $1,400 to Home loan..."), by Commit 3's
+Cashflow table breakdown, and by the Commit 3 Focus view, so there is
+exactly one definition of "where did the surplus go" across the whole
+app rather than three independent re-derivations that could disagree.
+Two new REPORTING-ONLY engine fields (no new money, no conservation
+term needed) support it: `superDetail[id].surplusPersonalDeductible`
+and `goals[id].surplusContribution` — mirroring the existing
+`surplusSalarySacrifice` field's purpose but for the two other surplus
+destination types that previously had no way to isolate "how much of
+this FY's total came from surplus specifically" from the ordinary flow
+to the same target.
+
+Deficit block: a minimum-balance number input per asset in the existing
+ordered list, plus the sell-rule select with its own explanatory line.
+
+No engine change beyond the two new reporting fields (both additive,
+read-only duplicates of money already accounted for elsewhere) — full
+suite green unchanged, and this is a pure UI commit for `randomScenario()`/
+the conservation invariant's own purposes. Verified in a real browser
+(Vite dev server + Playwright against the built app, not only the test
+suite): split a period, added/edited/removed an allocation row, toggled
+pay-non-deductible-debt-first, set a deficit minimum balance, changed the
+sell rule — no console errors, correct resolved-$ figures at every step.
+
 ### Navigation and charts (spec 17, Commit 1 — Output subject views)
 The Graphs and Tables sidebar groups (17 entries) collapsed into one
 Output group of 10 subject views (Projection, Cashflow, Assets,
@@ -876,11 +935,11 @@ are genuinely affordable as constructed.
 
 ## WHERE WE'RE GOING
 
-1. **Surplus allocation UI, outputs, and advice signal** (spec 16, Commits
-   2–4) — the settings editor for periods/allocations/remainder, the
-   Cashflow/Liabilities table breakdown and a Focus → Surplus allocation
-   view, and the non-deductible-first interest-saved figure. The model and
-   engine (Commit 1) are done — see DONE above.
+1. **Surplus allocation outputs and advice signal** (spec 16, Commits
+   3–4) — the Cashflow/Liabilities table breakdown and a Focus → Surplus
+   allocation view, and the non-deductible-first interest-saved figure.
+   The model/engine (Commit 1) and settings UI (Commit 2) are done — see
+   DONE above.
 2. **Bonus and allowance income as distinct types** — lumpy, variable
    income, matching the firm's own "Site/Locality Allowance" and "After
    tax bonus" rows (previously deferred in specs 11 and 13; promoted here).
