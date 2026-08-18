@@ -4507,6 +4507,39 @@ function propertyCardHTML(p) {
             ${num("Land tax override ($/yr, blank = calculated)", "landTaxOverride", p.landTaxOverride ?? "", 'min="0" step="100"')}
           ` : ""}
         </div>
+
+        <div class="cf-section">
+          <div class="cf-section-title">Sale ${tooltipHTML("Models this property being sold during the projection: proceeds net of agent fees and settlement costs, the linked loan discharged first (if any), CGT via the existing pooled cost base, and the property leaving the projection from that point.")}</div>
+          <label class="ptg-check"><input type="checkbox"${p.sale.enabled ? " checked" : ""} data-pid="${p.id}" data-pfield="sale.enabled" /><span>Sell this property during the projection</span></label>
+          ${p.sale.enabled ? `
+            <div class="person-grid">
+              ${cell("Sale date", dateRefControlHTML(p.sale.at, "client", `data-pid="${p.id}" data-pfield="sale.at"`, state.plan.client.currentAge, state.plan.endAge))}
+              ${num(`Agent fees (%) ${tooltipHTML(describeDefault("property.agentFeesPct"))}`, "sale.agentFeesPct", p.sale.agentFeesPct, 'min="0" max="10" step="0.1"')}
+              ${num("Settlement costs ($)", "sale.settlementCosts", p.sale.settlementCosts, 'min="0" step="100"')}
+              ${cell("Proceeds destination", `
+                <select data-pid="${p.id}" data-pfield="sale.proceedsDestination">
+                  <option value="repayLoanThenAsset"${p.sale.proceedsDestination === "repayLoanThenAsset" ? " selected" : ""}>Discharge linked loan first, remainder to asset</option>
+                  <option value="asset"${p.sale.proceedsDestination === "asset" ? " selected" : ""}>All proceeds to asset (no loan discharge)</option>
+                </select>`)}
+              ${cell("Destination asset", `<select data-pid="${p.id}" data-pfield="sale.assetId"><option value="">Select an asset…</option>${assetOptions(p.sale.assetId)}</select>`)}
+            </div>
+          ` : ""}
+        </div>
+
+        ${p.propertyType === "ppr" ? `
+        <div class="cf-section">
+          <div class="cf-section-title">Main residence exemption ${tooltipHTML("A main residence stays CGT-exempt while occupied, and for up to six years while absent if it isn't producing income beyond that window's own rule — see the Focus view for the running clock and what CGT would be payable if sold in a given year.")}</div>
+          <label class="ptg-check"><input type="checkbox"${p.mainResidence.movedOutAt ? " checked" : ""} data-pid="${p.id}" data-pfield="mainResidence.movedOutEnabled" /><span>Moved out during the projection</span></label>
+          ${p.mainResidence.movedOutAt ? `
+            <div class="person-grid">
+              ${cell("Moved out", dateRefControlHTML(p.mainResidence.movedOutAt, "client", `data-pid="${p.id}" data-pfield="mainResidence.movedOutAt"`, state.plan.client.currentAge, state.plan.endAge))}
+              ${cell("Producing income while absent", `<label class="ptg-check"><input type="checkbox"${p.mainResidence.producingIncome ? " checked" : ""} data-pid="${p.id}" data-pfield="mainResidence.producingIncome" /><span>Yes (rented out)</span></label>`)}
+            </div>
+            <label class="ptg-check"><input type="checkbox"${p.mainResidence.movedBackInAt ? " checked" : ""} data-pid="${p.id}" data-pfield="mainResidence.movedBackInEnabled" /><span>Moved back in (resets the six-year clock)</span></label>
+            ${p.mainResidence.movedBackInAt ? cell("Moved back in", dateRefControlHTML(p.mainResidence.movedBackInAt, "client", `data-pid="${p.id}" data-pfield="mainResidence.movedBackInAt"`, resolveRef(p.mainResidence.movedOutAt, state.plan, projection.schedule, "client").age, state.plan.endAge)) : ""}
+          ` : ""}
+        </div>
+        ` : ""}
         ${helper.text ? `<p class="${helper.warn ? "helper-warning" : "helper-text"}">${escapeHTML(helper.text)}${
           helper.action === "convertToPlanned"
             ? ` <button class="btn-text" type="button" data-prop-action="convertToPlanned" data-pid="${p.id}">Switch to planned purchase</button>`
@@ -4637,6 +4670,71 @@ wireDeferredDateCommit(els.propertySection, (e) => {
       if (sub === "amount") { p[group].amount = clampNumber(v, 0); p[group].isDefault = false; }
       else if (sub === "indexBasis") p[group].indexBasis = v;
       else if (sub === "indexExtraPct") p[group].indexExtraPct = clampNumber(v, -10, 10);
+    } else if (group === "sale") {
+      // Property sale (spec 19 Commit 4) — engine/model-complete since
+      // that commit; this is the input UI it never got.
+      if (sub === "enabled") {
+        // normaliseProperties forces enabled back to false whenever
+        // assetId doesn't resolve to a real financial asset (a sale
+        // enabled with nowhere for the proceeds to land is exactly the
+        // "looks entered but silently does nothing" state CLAUDE.md's
+        // input-integrity section rules out) — so checking the box
+        // must ALSO pick a destination in the SAME commit, or the
+        // checkbox would silently revert the instant it's ticked.
+        const defaultAssetId = p.sale.assetId ?? state.assets.find((a) => a.class !== "lifestyle")?.id ?? null;
+        p.sale = { ...p.sale, enabled: e.target.checked, assetId: defaultAssetId };
+      }
+      else if (sub === "at") {
+        if (e.target.dataset.drRole === "anchor") {
+          p.sale = { ...p.sale, at: v === "__age__"
+            ? { kind: "age", age: resolveRef(p.sale.at, state.plan, projection.schedule, "client").age }
+            : { kind: "anchor", anchorId: v } };
+        } else {
+          const age = clampInt(v, state.plan.client.currentAge, state.plan.endAge);
+          p.sale = { ...p.sale, at: { kind: "age", age } };
+          flagIfClamped(e.target, age);
+        }
+      }
+      else if (sub === "agentFeesPct") p.sale = { ...p.sale, agentFeesPct: clampNumber(v, 0, 10) };
+      else if (sub === "settlementCosts") p.sale = { ...p.sale, settlementCosts: clampNumber(v, 0) };
+      else if (sub === "proceedsDestination") p.sale = { ...p.sale, proceedsDestination: v };
+      else if (sub === "assetId") p.sale = { ...p.sale, assetId: v || null };
+    } else if (group === "mainResidence") {
+      // Main residence exemption and the six-year absence rule (spec
+      // 19 Commit 5) — engine/model-complete since that commit; this
+      // is the input UI it never got. movedOutEnabled/movedBackInEnabled
+      // are UI-only toggles (there's no stored "enabled" flag — presence
+      // of the DateRef itself is the model's own on/off switch).
+      if (sub === "movedOutEnabled") {
+        p.mainResidence = e.target.checked
+          ? { ...p.mainResidence, movedOutAt: { kind: "age", age: state.plan.client.currentAge } }
+          : { movedOutAt: null, producingIncome: false, movedBackInAt: null };
+      } else if (sub === "movedOutAt") {
+        if (e.target.dataset.drRole === "anchor") {
+          p.mainResidence = { ...p.mainResidence, movedOutAt: v === "__age__"
+            ? { kind: "age", age: resolveRef(p.mainResidence.movedOutAt, state.plan, projection.schedule, "client").age }
+            : { kind: "anchor", anchorId: v } };
+        } else {
+          const age = clampInt(v, state.plan.client.currentAge, state.plan.endAge);
+          p.mainResidence = { ...p.mainResidence, movedOutAt: { kind: "age", age } };
+          flagIfClamped(e.target, age);
+        }
+      }
+      else if (sub === "producingIncome") p.mainResidence = { ...p.mainResidence, producingIncome: e.target.checked };
+      else if (sub === "movedBackInEnabled") {
+        const movedOutAge = resolveRef(p.mainResidence.movedOutAt, state.plan, projection.schedule, "client").age;
+        p.mainResidence = { ...p.mainResidence, movedBackInAt: e.target.checked ? { kind: "age", age: movedOutAge } : null };
+      } else if (sub === "movedBackInAt") {
+        if (e.target.dataset.drRole === "anchor") {
+          p.mainResidence = { ...p.mainResidence, movedBackInAt: v === "__age__"
+            ? { kind: "age", age: resolveRef(p.mainResidence.movedBackInAt, state.plan, projection.schedule, "client").age }
+            : { kind: "anchor", anchorId: v } };
+        } else {
+          const age = clampInt(v, state.plan.client.currentAge, state.plan.endAge);
+          p.mainResidence = { ...p.mainResidence, movedBackInAt: { kind: "age", age } };
+          flagIfClamped(e.target, age);
+        }
+      }
     }
   }
   state.properties = normaliseProperties(state.properties, state.plan, state.assets);

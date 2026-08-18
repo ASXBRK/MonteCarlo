@@ -986,6 +986,42 @@ UI is complete this commit: a new "Insurance premium" section in
 CPI+3%-default tooltip) alongside three new `applySuperAccountEdit`
 cases, mirroring the account's existing ICR/Costs section.
 
+### Property sale and main residence exemption: input UI
+Closes a real gap: spec 19 Commits 4 (property sale) and 5 (main
+residence exemption) shipped fully engine/model-complete with no way
+to configure either from the app. This is pure UI wiring — no engine
+or model change, no new tests (the underlying mechanics were already
+covered by Commits 4/5's own test suites).
+
+Property card gains a "Sale" section (enable checkbox; when on: sale
+date via the existing DateRef control, agent fees % with the smart-
+defaults tooltip already registered for it since Commit 1
+(`property.agentFeesPct` — the registry anticipated this UI before it
+existed), settlement costs, proceeds destination, and a destination
+asset select) and, for a `ppr` property only, a "Main residence
+exemption" section (a "moved out" toggle exposing the DateRef plus a
+"producing income while absent" checkbox, and a "moved back in" toggle
+exposing its own DateRef — the six-year clock's own reset event).
+
+One real bug found and fixed while wiring this in: `normaliseProperties`
+already forces `sale.enabled` back to `false` whenever `assetId`
+doesn't resolve to a real financial asset (correct, pre-existing input-
+integrity behaviour from Commit 4 — a sale with nowhere for the
+proceeds to land is exactly the state CLAUDE.md's input-integrity
+section rules out) — but the new UI rendered the destination-asset
+select ONLY once `sale.enabled` was true, and left `assetId` null when
+the checkbox was first ticked, creating a genuine catch-22: checking
+the box couldn't reveal the field that would have kept it checked.
+Fixed by defaulting `assetId` to the first eligible financial asset in
+the SAME commit that sets `enabled: true`, so the two can never
+disagree even for the single render in between.
+
+Verified in a real browser (Vite dev server + Playwright, not only
+`node --check`): added a property, enabled sale (destination asset
+correctly auto-selected and visible), set agent fees/destination,
+enabled "moved out" and "moved back in" — all fields render and persist
+correctly, zero console errors at every step.
+
 ### Demo clients
 Three committed fixtures under `src/demo/` (First home buyer; Family with
 a mortgage; High earner pre-retirement), each built through the real
