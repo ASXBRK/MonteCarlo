@@ -65,6 +65,35 @@ export const SMART_DEFAULTS = {
     kind: DEFAULT_KIND.HOUSE,
     describe: (ctx) => `Default: ${fmtPct(ctx.value)} — house view (firm mortgage-rate assumption)`,
   },
+  // Input behaviour fix — label tracks the category (income/expense/
+  // deduction rows all have this same "label populated once, then
+  // stranded when the category changes" problem) until the user types
+  // their own, then stops permanently — see planState.js's
+  // clampDerivedLabel.
+  "income.label": {
+    kind: DEFAULT_KIND.DERIVED,
+    describe: (ctx) => `Default: "${ctx.value}" — derived (from the selected category); recomputes as the category changes until you type your own label`,
+  },
+  "expense.label": {
+    kind: DEFAULT_KIND.DERIVED,
+    describe: (ctx) => `Default: "${ctx.value}" — derived (from the selected category); recomputes as the category changes until you type your own label`,
+  },
+  "deduction.label": {
+    kind: DEFAULT_KIND.DERIVED,
+    describe: (ctx) => `Default: "${ctx.value}" — derived (from the selected category); recomputes as the category changes until you type your own label`,
+  },
+  // Input behaviour fix — a loan linked to a property derives its
+  // commencement date and deductibility from that property until
+  // overridden, each independently — see planState.js's
+  // clampLiability/deriveLiabilityFromLinkedProperty.
+  "liability.commencementDate": {
+    kind: DEFAULT_KIND.DERIVED,
+    describe: () => `Default: derived (the linked property's acquisition/purchase date); recomputes as that date changes until you enter your own`,
+  },
+  "liability.deductiblePct": {
+    kind: DEFAULT_KIND.DERIVED,
+    describe: (ctx) => `Default: ${fmtPct(ctx.value)} — derived (${ctx.reason}); recomputes if the linked property's type changes until you enter your own figure`,
+  },
 };
 
 function fmtPct(n) {

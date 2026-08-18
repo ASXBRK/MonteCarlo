@@ -1109,6 +1109,43 @@ skipping the check — this is what surfaced the super-closing-balance bug
 above. The other eight scenarios were checked for the same vacuity; all
 are genuinely affordable as constructed.
 
+### Input behaviour: derived values track their source until overridden
+Three fixes sharing one principle. (1) The touched dot now clears on any
+edit that changes a field's value, not only the explicit tick — closes a
+real coverage gap where table-row (`<td>`-based) fields across every
+Cashflow-style section (income, expenses, deductions, super contributions/
+withdrawals, liability extra/one-off repayments) got no touched decoration
+at all, because `decorateTouchedFields()`'s container resolution only knew
+`.cf-cell`/`.plan-field`. Fixing this surfaced a second, unrelated
+pre-existing bug: native `<select>`s fire "input" before "change", and
+several `applyRowEdit` cases unconditionally replaced `rowEl.outerHTML` on
+every invocation — including the "input" call — destroying the original
+element and silently suppressing the subsequent "change" event the
+touch-marking listener depends on. Fixed across all 9 occurrences (owner,
+type, basis, indexBasis, category, both DateRef anchor branches), gated on
+`commit`. (2) Income/expense/deduction row labels now derive from the
+selected category (`labelIsDefault`, mirroring the property rent/expenses
+convention) until the user types their own label, then freeze — with a
+provenance tooltip while tracking. (3) A liability's "Relates to / secured
+by" now offers properties as well as assets; once linked to a property,
+`commencedOn` (from the property's acquisition/purchase date) and
+`deductiblePct` (100 for investment, 0 for PPR/holiday) derive from it,
+each independently stopping once the user edits it directly
+(`commencementIsDefault`/`deductiblePctIsDefault`). The derivation itself
+lives in main.js, not `clampLiability` — resolving a planned property's
+purchaseAt needs a built schedule, which the pure clamp pipeline never
+has. `deterministic.js`'s sale-proceeds loan discharge (already defaulting
+to "repay linked loan first") was extended to recognise a manually-linked
+liability, not only the auto-generated `prop-<id>` purchase loan, so an
+already-owned property with no purchase-derived loan still discharges its
+linked mortgage on sale. Two missing `state.properties` arguments in
+main.js's `normaliseLiabilities` calls were fixed in the same pass — they
+were silently dropping any property link on the next liability edit.
+Browser-verified end to end: dot clears on edit, label tracks then
+freezes, property appears grouped in the link select, commencedOn/
+deductiblePct populate with tooltips and freeze independently on
+override, and the sale-proceeds default resolves to the linked loan.
+
 ---
 
 ## WHERE WE'RE GOING

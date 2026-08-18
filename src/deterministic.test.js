@@ -5736,9 +5736,62 @@ describe("Property sale (spec 19 Commit 4)", () => {
     expect(out.yearly[saleY].perAssetClosing.a1).toBeGreaterThan(remainder - 5000); // roughly the leftover, allowing for asset growth/other flows
   });
 
+  it("Input behaviour fix: a manually-entered liability linked via linkedAssetId is ALSO discharged by the sale, for an already-owned property with no auto-generated prop-<id> loan", () => {
+    const lb1 = {
+      id: "lb1", name: "Investment loan", type: "mortgage", owner: "client", balance: 100000,
+      interestRatePct: 0, termYears: 25, repayment: "io", ioYears: 25, deductiblePct: 100,
+      linkedAssetId: "p1", offsetAssetId: null, extraRepayments: [], oneOffRepayments: [],
+      rateType: "variable", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: null, commencedOn: null,
+    };
+    const out = projectPlan({
+      ...mkState({
+        endAge: 43,
+        assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 0 })],
+        plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+      }),
+      properties: [soldProp({ sale: { enabled: true, at: { kind: "age", age: 41 }, agentFeesPct: 0, settlementCosts: 0, proceedsDestination: "repayLoanThenAsset", assetId: "a1" } })],
+      liabilities: [lb1],
+    });
+    // Discharged in the sale year — no prop-<id> loan exists for this
+    // (already-owned) property at all, so this can ONLY have happened
+    // via the linkedAssetId lookup. (Closing balance is the nominal
+    // 100,000 deflated one year, same real-terms decay as every other
+    // liability/property fixture in this file — not a round 100,000.)
+    const loanBalanceJustBeforeSale = out.yearly[0].liabilities.lb1.closing;
+    expect(loanBalanceJustBeforeSale).toBeGreaterThan(90000);
+    expect(out.yearly[1].liabilities.lb1.closing).toBeCloseTo(0, 0);
+    // Remainder (sale value − payoff) reaches the asset — allowing for a
+    // year's further real-terms decay of the loan balance between "just
+    // before sale" and the actual payoff moment, same as the analogous
+    // purchase-loan test above.
+    const saleValue = out.yearly[1].properties.p1.saleValue;
+    const remainder = saleValue - loanBalanceJustBeforeSale;
+    expect(out.yearly[1].perAssetClosing.a1).toBeGreaterThan(remainder - 5000);
+    expect(out.yearly[1].perAssetClosing.a1).toBeLessThan(remainder + 5000);
+  });
+
   it("conservation holds for a scenario with a property sale active", () => {
     const out = projectPlan(withSale());
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `property sale fixture, year ${y}`);
+  });
+
+  it("conservation holds when the discharged loan is a manually-linked liability, not the auto-generated purchase loan", () => {
+    const lb1 = {
+      id: "lb1", name: "Investment loan", type: "mortgage", owner: "client", balance: 100000,
+      interestRatePct: 5, termYears: 25, repayment: "io", ioYears: 25, deductiblePct: 100,
+      linkedAssetId: "p1", offsetAssetId: null, extraRepayments: [], oneOffRepayments: [],
+      rateType: "variable", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: null, commencedOn: null,
+    };
+    const out = projectPlan({
+      ...mkState({
+        endAge: 43,
+        assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 0 })],
+        plan: { workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+      }),
+      properties: [soldProp({ sale: { enabled: true, at: { kind: "age", age: 41 }, agentFeesPct: 2.5, settlementCosts: 2000, proceedsDestination: "repayLoanThenAsset", assetId: "a1" } })],
+      liabilities: [lb1],
+    });
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `linked-liability sale-discharge fixture, year ${y}`);
   });
 
   it("regression gate: a property with sale.enabled:false behaves exactly as one with no sale field at all", () => {

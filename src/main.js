@@ -1543,12 +1543,29 @@ function markAllReviewedIn(container) {
 // canvas — every [data-section] is always mounted (showSection only
 // toggles `hidden`), so this reaches every section regardless of which
 // one is currently visible.
+// Input behaviour fix — every [data-section] field container this
+// decoration pass recognises. Cashflow-style tables (income, expenses,
+// deductions, super contributions/withdrawals, liability extra/one-off
+// repayments — every "Cashflow sections: table layout" surface) render
+// one field per <td>, never inside a .cf-cell/.plan-field wrapper —
+// before this fix, `target`/`container` below fell through to the bare
+// <input>/<select> itself, which the CSS never targets, so NEITHER the
+// dot NOR the muted styling ever appeared there at all (a real,
+// confirmed gap: verified in a browser that every table-row section had
+// zero decoration regardless of touched state, not merely a stale
+// dot). A <td> already behaves exactly like a .cf-cell for this
+// purpose — the date-ref pair (an anchor select + a hidden age number
+// input) shares one dotted path and one <td> the same way Setup's
+// month+year pair shares one .plan-field, so treating it as a
+// container needs no special-casing.
+const TOUCHED_FIELD_CONTAINER_SELECTOR = ".cf-cell, .plan-field, td";
+
 function decorateTouchedFields() {
   for (const el of els.workspaceCanvas.querySelectorAll(TOUCHED_FIELD_SELECTOR)) {
     const path = computeFieldPath(el);
     if (!path) continue;
     const untouched = !isTouched(path);
-    const container = el.closest(".cf-cell") || el.closest(".plan-field");
+    const container = el.closest(".cf-cell") || el.closest(".plan-field") || el.closest("td");
     const target = container || el;
     target.classList.toggle("field-untouched", untouched);
     const bubble = container?.querySelector(".tt-bubble");
@@ -1567,7 +1584,7 @@ function decorateTouchedFields() {
   // the other permanently unconfirmable. Recompute per container from
   // its own live children instead — one dot, click marks every path
   // still untouched inside it (see the click handler below).
-  for (const container of els.workspaceCanvas.querySelectorAll(".cf-cell, .plan-field")) {
+  for (const container of els.workspaceCanvas.querySelectorAll(TOUCHED_FIELD_CONTAINER_SELECTOR)) {
     const ownFields = container.querySelectorAll(TOUCHED_FIELD_SELECTOR);
     const anyUntouched = [...ownFields].some((el) => {
       const p = computeFieldPath(el);
@@ -2911,6 +2928,24 @@ function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax) {
   `;
 }
 
+// Input behaviour fix — the label cell shared by income/expense/
+// deduction rows: a derived default (planState.js's clampDerivedLabel)
+// that tracks the row's category until the user types their own, with
+// the smart-defaults provenance tooltip while it's still tracking (the
+// same "distinct while it's a default, ordinary once entered"
+// treatment property.rent/expenses already get).
+const LABEL_DEFAULT_KEY = { income: "income.label", expenses: "expense.label", deductions: "deduction.label" };
+function labelTdHTML(kind, r) {
+  const isDefault = r.labelIsDefault === true;
+  return `
+    <td class="cf-td-label">
+      <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
+             data-kind="${kind}" data-cfid="${r.id}" data-field="label" />
+      ${isDefault ? tooltipHTML(describeDefault(LABEL_DEFAULT_KEY[kind], { value: r.label })) : ""}
+    </td>
+  `;
+}
+
 function incomeRowHTML(r) {
   return `
     <tr class="cf-tr" data-cfid="${r.id}">
@@ -2927,10 +2962,7 @@ function incomeRowHTML(r) {
           <button type="button" class="btn-text" data-action="edit-termination" data-cfid="${r.id}">${r.termination?.enabled ? "Termination ✓" : "Termination…"}</button>
         ` : ""}
       </td>
-      <td class="cf-td-label">
-        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
-               data-kind="income" data-cfid="${r.id}" data-field="label" />
-      </td>
+      ${labelTdHTML("income", r)}
       ${isCouple() ? `
         <td class="cf-td-owner">
           <select data-kind="income" data-cfid="${r.id}" data-field="owner">
@@ -2965,10 +2997,7 @@ function expenseRowHTML(r) {
           ${EXPENSE_CATEGORIES.map((c) => `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(EXPENSE_CATEGORY_LABELS[c])}</option>`).join("")}
         </select>
       </td>
-      <td class="cf-td-label">
-        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
-               data-kind="expenses" data-cfid="${r.id}" data-field="label" />
-      </td>
+      ${labelTdHTML("expenses", r)}
       ${amountTdHTML("expenses", r.id, r.amount)}
       <td class="cf-td-freq">
         <select data-kind="expenses" data-cfid="${r.id}" data-field="frequency">
@@ -3002,10 +3031,7 @@ function deductionRowHTML(r) {
           ).join("")}
         </select>
       </td>
-      <td class="cf-td-label">
-        <input type="text" value="${escapeHTML(r.label)}" maxlength="60"
-               data-kind="deductions" data-cfid="${r.id}" data-field="label" />
-      </td>
+      ${labelTdHTML("deductions", r)}
       ${isCouple() ? `
         <td class="cf-td-owner">
           <select data-kind="deductions" data-cfid="${r.id}" data-field="owner">
@@ -3853,10 +3879,24 @@ function applyRowEdit(kind, row, field, el, commit) {
   const win = ownerWindow(plan, owner);
 
   switch (field) {
-    case "label":
+    case "label": {
+      // Input behaviour fix — typing a label directly is the override
+      // that stops it tracking the category (income/expenses/deductions
+      // only; other kinds' "label" has no category to derive from).
+      // Never re-arms, same one-way stop as property rent/expenses.
+      // A full outerHTML refresh (as the "category" case does) would
+      // drop focus/cursor position mid-keystroke, so the now-stale
+      // provenance tooltip is removed surgically instead, only at the
+      // instant tracking actually stops.
+      const wasDefault = row.labelIsDefault === true;
       row.label = commit ? (el.value.trim() || row.label) : el.value;
       if (commit) el.value = row.label;
+      if (kind === "income" || kind === "expenses" || kind === "deductions") {
+        row.labelIsDefault = false;
+        if (wasDefault) el.closest("td")?.querySelector(".tt-wrap")?.remove();
+      }
       break;
+    }
     case "owner": {
       if (el.value !== "client" && el.value !== "partner") break;
       row.owner = el.value;
@@ -3868,8 +3908,13 @@ function applyRowEdit(kind, row, field, el, commit) {
         // survives" convention as clampSuperContribution.
         const acct = (state.plan.superAccounts ?? []).find((s) => s.id === row.accountId);
         if (acct && acct.owner !== el.value) row.accountId = null;
-        const rowEl = el.closest(".cf-tr");
-        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+        // Gated on `commit` (see "category"'s own header comment,
+        // just below, for why an unconditional refresh here breaks the
+        // native "change" event a <select> fires second, after
+        // "input" — a real, found-in-browser bug this fix closes for
+        // every select-driven row refresh in this function, not just
+        // the one instance that was reported).
+        if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); }
         break;
       }
       // income/deduction rows only, from here.
@@ -3883,8 +3928,7 @@ function applyRowEdit(kind, row, field, el, commit) {
       // The owner change can also change which anchor a "Retirement —
       // <name>" option resolves to, so the whole row (selects,
       // resolved readouts) needs a full refresh, not just two labels.
-      const rowEl = el.closest(".cf-tr");
-      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); }
       break;
     }
     case "assetId":
@@ -3895,14 +3939,12 @@ function applyRowEdit(kind, row, field, el, commit) {
       break;
     case "type": {
       if (SUPER_CONTRIBUTION_TYPES.includes(el.value)) row.type = el.value;
-      const rowEl = el.closest(".cf-tr");
-      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // cap-headroom note depends on type
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // cap-headroom note depends on type
       break;
     }
     case "basis": {
       if (SUPER_CONTRIBUTION_BASES.includes(el.value)) row.basis = el.value;
-      const rowEl = el.closest(".cf-tr");
-      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // amount vs percent vs fill-note fields differ
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // amount vs percent vs fill-note fields differ
       break;
     }
     case "percent":
@@ -3932,8 +3974,7 @@ function applyRowEdit(kind, row, field, el, commit) {
       // subtext directly instead of re-rendering.
       const detailRow = el.closest(".cf-tr-detail");
       if (detailRow) { updateIndexTotalText(detailRow, row); break; }
-      const rowEl = el.closest(".cf-tr");
-      if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // refresh the computed total
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // refresh the computed total
       break;
     }
     case "indexExtraPct": {
@@ -3961,15 +4002,36 @@ function applyRowEdit(kind, row, field, el, commit) {
         row.category = INCOME_CATEGORIES.includes(el.value) ? el.value : "salary";
         row.incomeType = incomeCategoryTaxTreatment(row.category);
         // SG only ever applies to salary (planState's clampIncomeRow
-        // convention) — force it off here too, and refresh the row so
-        // the SG toggle appears/disappears.
+        // convention) — force it off here too.
         if (row.incomeType !== "employment") row.sgApplies = false;
-        const rowEl = el.closest(".cf-tr");
-        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+        // Input behaviour fix — label as a derived default: follows the
+        // category until the user types their own (see labelTdHTML's
+        // own header comment), mirroring planState.js's clampDerivedLabel
+        // for the cases (owner changes, hydrate) that go through the
+        // full clamp instead of this direct field-edit path.
+        if (row.labelIsDefault === true) row.label = INCOME_CATEGORY_LABELS[row.category];
       } else if (kind === "expenses") {
         row.category = EXPENSE_CATEGORIES.includes(el.value) ? el.value : "other";
+        if (row.labelIsDefault === true) row.label = EXPENSE_CATEGORY_LABELS[row.category];
       } else if (kind === "deductions") {
         row.category = DEDUCTION_CATEGORIES.includes(el.value) ? el.value : "other";
+        if (row.labelIsDefault === true) row.label = DEDUCTION_CATEGORY_LABELS[row.category];
+      }
+      // Refresh the row: income already needed this for the SG toggle;
+      // expenses/deductions now need it too, so a still-tracking
+      // label's new value shows immediately instead of waiting for
+      // some unrelated edit to trigger the next re-render. Gated on
+      // `commit` — a <select> fires "input" (commit false) immediately
+      // BEFORE its own native "change", and an unconditional outerHTML
+      // replacement here would destroy the original element while that
+      // "input" is still being handled, silently suppressing the
+      // "change" event the touched-field capture-phase listener (and
+      // browsers generally) expect to fire next on that same node — a
+      // real, found-in-browser regression (the touched dot never
+      // cleared for ANY category edit, income included, until this).
+      if (commit) {
+        const rowEl = el.closest(".cf-tr");
+        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
       }
       break;
     }
@@ -3983,8 +4045,7 @@ function applyRowEdit(kind, row, field, el, commit) {
         } else {
           row[field] = { kind: "anchor", anchorId: el.value };
         }
-        const rowEl = el.closest(".cf-tr");
-        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); // select/number visibility changes
+        if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // select/number visibility changes
         break;
       }
       // The paired number input, live only while "Specific age…" is chosen.
@@ -4009,8 +4070,7 @@ function applyRowEdit(kind, row, field, el, commit) {
         } else {
           row.at = { kind: "anchor", anchorId: el.value };
         }
-        const rowEl = el.closest(".cf-tr");
-        if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row);
+        if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); }
         break;
       }
       if (!commit) return;
@@ -4744,6 +4804,7 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   }
   state.properties = normaliseProperties(state.properties, state.plan, state.assets);
   state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
+  applyLiabilityLinkDerivations(state.liabilities, state.properties, state.plan, projection.schedule); // linked commencedOn/deductiblePct may change
   saveState();
   refreshOutputs();
   renderProperties();
@@ -4779,6 +4840,7 @@ els.propertySection.addEventListener("click", (e) => {
     state.properties = normaliseProperties(state.properties, state.plan, state.assets);
     state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
   }
+  applyLiabilityLinkDerivations(state.liabilities, state.properties, state.plan, projection.schedule);
   saveState();
   refreshOutputs();
   renderProperties();
@@ -5466,10 +5528,57 @@ function liabilityRolloverSummaryHTML(l) {
   return `<p class="helper-text">Rolls over in ${escapeHTML(r.fyLabel)}: ${r.fromRatePct.toFixed(2)}% → ${r.toRatePct.toFixed(2)}% p.a., repayment ${fmtMoney(r.repaymentBefore)}/mo → ${fmtMoney(r.repaymentAfter)}/mo.</p>`;
 }
 
+// Input behaviour fix: once a liability is linked to a PROPERTY (not a
+// plain asset — a property carries its own acquisition/purchase date
+// and a propertyType, neither of which an asset has), commencedOn and
+// deductiblePct derive from it, each stopping the moment the user
+// edits it directly (commencementIsDefault/deductiblePctIsDefault).
+// Lives in main.js, not clampLiability: resolving a planned property's
+// purchaseAt (a DateRef) to a calendar date needs a built schedule
+// (planYears/fyLabels), which the pure clamp pipeline never has access
+// to (see keyDates.js's resolveRef).
+function derivedLoanCommencementDate(prop, plan, schedule) {
+  if (prop.status === "owned") return prop.acquisitionDate ?? null;
+  const r = resolveRef(prop.purchaseAt, plan, schedule, "client");
+  // Purchases settle in July of the purchase FY (locked convention).
+  return `${firstFyStartYear(plan.start) + r.planYear}-07-01`;
+}
+function derivedLoanDeductiblePct(prop) {
+  return prop.propertyType === "investment" ? 100 : 0;
+}
+function liabilityLinkReason(prop) {
+  if (prop.propertyType === "investment") return "100% for an investment property";
+  if (prop.propertyType === "holiday") return "0% for a holiday home";
+  return "0% for a principal residence";
+}
+
+// Re-derives commencedOn/deductiblePct for every liability still
+// tracking its linked property (a no-op for liabilities linked to a
+// plain asset, or not linked, or already overridden) — called after
+// any edit that could change a linked property's relevant fields
+// (its own edits, or the liability's own linkedAssetId changing).
+function applyLiabilityLinkDerivations(liabilities, properties, plan, schedule) {
+  for (const l of liabilities ?? []) {
+    const prop = (properties ?? []).find((p) => p.id === l.linkedAssetId);
+    if (!prop) continue;
+    if (l.commencementIsDefault) l.commencedOn = derivedLoanCommencementDate(prop, plan, schedule);
+    if (l.deductiblePctIsDefault) l.deductiblePct = derivedLoanDeductiblePct(prop);
+  }
+  return liabilities;
+}
+
 function liabilityCardHTML(l) {
   const financialAssets = state.assets.filter((a) => a.class !== "lifestyle");
   const opt = (list, sel) => `<option value=""${!sel ? " selected" : ""}>None</option>` +
     list.map((a) => `<option value="${a.id}"${a.id === sel ? " selected" : ""}>${escapeHTML(a.name)}</option>`).join("");
+  const linkedProp = (state.properties ?? []).find((p) => p.id === l.linkedAssetId);
+  const linkOptions = `<option value=""${!l.linkedAssetId ? " selected" : ""}>None</option>` +
+    ((state.properties ?? []).length ? `<optgroup label="Properties">${
+      state.properties.map((p) => `<option value="${p.id}"${p.id === l.linkedAssetId ? " selected" : ""}>${escapeHTML(p.name)}</option>`).join("")
+    }</optgroup>` : "") +
+    (state.assets.length ? `<optgroup label="Assets">${
+      state.assets.map((a) => `<option value="${a.id}"${a.id === l.linkedAssetId ? " selected" : ""}>${escapeHTML(a.name)}</option>`).join("")
+    }</optgroup>` : "");
   return `
     <div class="pcard" data-lid="${l.id}">
       <div class="pcard-head">
@@ -5551,20 +5660,20 @@ function liabilityCardHTML(l) {
             </div>
           ` : ""}
           <div class="cf-cell">
-            <label>Interest deductible (%)</label>
+            <label>Interest deductible (%)${l.deductiblePctIsDefault && linkedProp ? ` ${tooltipHTML(describeDefault("liability.deductiblePct", { value: l.deductiblePct, reason: liabilityLinkReason(linkedProp) }))}` : ""}</label>
             <input type="number" min="0" max="100" step="1" value="${l.deductiblePct}" data-lid="${l.id}" data-lfield="deductiblePct" />
             <p class="helper-text">Deducts against ${l.owner === "joint" ? "both owners'" : "the owner's"} income — 100% for a fully investment loan, 0% for a home loan, or a part-way figure for a mixed-purpose loan.</p>
           </div>
           <div class="cf-cell">
             <label>Relates to / secured by</label>
-            <select data-lid="${l.id}" data-lfield="linkedAssetId">${opt(state.assets, l.linkedAssetId)}</select>
+            <select data-lid="${l.id}" data-lfield="linkedAssetId">${linkOptions}</select>
           </div>
           <div class="cf-cell">
             <label>Offset account</label>
             <select data-lid="${l.id}" data-lfield="offsetAssetId">${opt(financialAssets, l.offsetAssetId)}</select>
           </div>
           <div class="cf-cell">
-            <label>Loan commenced (optional)</label>
+            <label>Loan commenced (optional)${l.commencementIsDefault && linkedProp ? ` ${tooltipHTML(describeDefault("liability.commencementDate"))}` : ""}</label>
             <input type="date" value="${l.commencedOn ?? ""}" data-lid="${l.id}" data-lfield="commencedOn" />
           </div>
         </div>
@@ -5699,7 +5808,7 @@ els.liabilitiesSection.addEventListener("change", (e) => {
     else if (field === "interestRatePct") l.interestRatePct = clampNumber(e.target.value, 0, 30);
     else if (field === "termYears") l.termYears = clampInt(e.target.value, 1, 50);
     else if (field === "ioYears") l.ioYears = clampInt(e.target.value, 1, l.termYears); // never longer than the loan's own term
-    else if (field === "deductiblePct") l.deductiblePct = clampNumber(e.target.value, 0, 100);
+    else if (field === "deductiblePct") { l.deductiblePct = clampNumber(e.target.value, 0, 100); l.deductiblePctIsDefault = false; }
     else if (field === "linkedAssetId") l.linkedAssetId = e.target.value || null;
     else if (field === "offsetAssetId") l.offsetAssetId = e.target.value || null;
     // Fixed-rate rollover (Commit 1).
@@ -5708,7 +5817,7 @@ els.liabilitiesSection.addEventListener("change", (e) => {
     // Blank clears back to "use the mortgage-rate assumption" — the
     // same override-or-default shape as dutyOverride/lmiOverride.
     else if (field === "revertRatePct") l.revertRatePct = e.target.value === "" ? null : clampNumber(e.target.value, 0, 30);
-    else if (field === "commencedOn") l.commencedOn = e.target.value || null; // informational only
+    else if (field === "commencedOn") { l.commencedOn = e.target.value || null; l.commencementIsDefault = false; }
   } else if (erField) {
     // Document Set Commit 5 — extra repayment sub-row.
     const er = (l.extraRepayments ?? []).find((x) => x.id === e.target.dataset.erid);
@@ -5728,7 +5837,8 @@ els.liabilitiesSection.addEventListener("change", (e) => {
   } else {
     return;
   }
-  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets);
+  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
+  applyLiabilityLinkDerivations(state.liabilities, state.properties, state.plan, projection.schedule);
   saveState();
   refreshOutputs();
   renderLiabilities();
@@ -5767,7 +5877,8 @@ els.liabilitiesSection.addEventListener("click", (e) => {
   } else if (btn.dataset.liabAction === "remove-oneoff") {
     l.oneOffRepayments = (l.oneOffRepayments ?? []).filter((x) => x.id !== btn.dataset.orid);
   }
-  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets);
+  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
+  applyLiabilityLinkDerivations(state.liabilities, state.properties, state.plan, projection.schedule);
   saveState();
   refreshOutputs();
   renderLiabilities();

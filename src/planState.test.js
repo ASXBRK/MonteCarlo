@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   SCHEMA_VERSION, defaultState, createAsset, createCashflow,
-  createLumpSum, createIncomeRow, createExpenseRow,
+  createLumpSum, createIncomeRow, createExpenseRow, clampExpenseRow,
   clampPlan, clampAllToPlan, clampAllocation, clampIncomeRow,
+  INCOME_CATEGORY_LABELS, EXPENSE_CATEGORY_LABELS,
   nearestVolBasis, allocationTotalNominal, allocationSummary,
   normaliseFundingOrder, normaliseSettings,
   partnerOwnedItems, reassignPartnerToClient, deletePartnerOwned,
@@ -1284,6 +1285,43 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(INCOME_TYPES).toEqual(["employment", "rental", "otherTaxable", "nonTaxable"]);
   });
 
+  it("Input behaviour fix: label tracks the category for income/expense/deduction rows, and stops once the user types their own", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+
+    // Fresh rows start tracking (labelIsDefault: true) and follow a
+    // category change.
+    const inc = createIncomeRow(plan, []);
+    expect(inc.labelIsDefault).toBe(true);
+    expect(inc.label).toBe(INCOME_CATEGORY_LABELS.salary);
+    const incChanged = clampIncomeRow({ ...inc, category: "afterTaxBonus" }, plan);
+    expect(incChanged.label).toBe(INCOME_CATEGORY_LABELS.afterTaxBonus);
+    expect(incChanged.labelIsDefault).toBe(true);
+    // Once overridden, a further category change leaves the label alone.
+    const incOverridden = clampIncomeRow({ ...incChanged, label: "My bonus", labelIsDefault: false, category: "dividendIncome" }, plan);
+    expect(incOverridden.label).toBe("My bonus");
+    expect(incOverridden.labelIsDefault).toBe(false);
+
+    const exp = createExpenseRow(plan, []);
+    expect(exp.labelIsDefault).toBe(true);
+    const expChanged = clampExpenseRow({ ...exp, category: "holidays" }, plan);
+    expect(expChanged.label).toBe(EXPENSE_CATEGORY_LABELS.holidays);
+    const expOverridden = clampExpenseRow({ ...expChanged, label: "Bali trip", labelIsDefault: false, category: "other" }, plan);
+    expect(expOverridden.label).toBe("Bali trip");
+
+    const ded = createDeductionRow(plan, []);
+    expect(ded.labelIsDefault).toBe(true);
+    const dedChanged = clampDeductionRow({ ...ded, category: "vehicle" }, plan);
+    expect(dedChanged.label).toBe(DEDUCTION_CATEGORY_LABELS.vehicle);
+    const dedOverridden = clampDeductionRow({ ...dedChanged, label: "Ute", labelIsDefault: false, category: "other" }, plan);
+    expect(dedOverridden.label).toBe("Ute");
+
+    // Regression: a pre-this-fix row has an explicit label and no
+    // labelIsDefault field at all — must never be silently overwritten.
+    const legacy = clampExpenseRow({ id: "ex1", label: "Council rates", category: "nonDiscretionary", amount: 3000, frequency: "annual" }, plan);
+    expect(legacy.label).toBe("Council rates");
+    expect(legacy.labelIsDefault).toBe(false);
+  });
+
   it("a pre-Commit-2 row (incomeType only, no category — including the legacy 'rental' value) migrates on read", () => {
     const plan = clampPlan(couplePlan(), PROFILES);
     const legacyEmployment = clampIncomeRow({ id: "i1", label: "Salary", owner: "client", amount: 100000, frequency: "annual", incomeType: "employment", sgApplies: true }, plan);
@@ -1620,6 +1658,49 @@ describe("Input integrity — unenterable states (audit Part C)", () => {
     );
     expect(clamped.termYears).toBe(5);
     expect(clamped.ioYears).toBe(5); // was 30, capped to the term
+  });
+
+  it("Input behaviour fix: a new liability defaults to tracking a linked property's commencement/deductibility; a legacy row (flags absent) reads as already-overridden", () => {
+    const s = defaultState(PROFILES, NOW);
+    const fresh = createLiability(s.plan, []);
+    expect(fresh.commencementIsDefault).toBe(true);
+    expect(fresh.deductiblePctIsDefault).toBe(true);
+
+    // Legacy/hand-edited state predating this fix has neither flag —
+    // must read as false (already user-entered), never silently start
+    // overwriting a value someone already relied on.
+    const legacy = clampLiability(
+      { id: "lb1", name: "Loan", type: "mortgage", owner: "client", balance: 100000,
+        interestRatePct: 6, termYears: 25, repayment: "io", ioYears: 5, deductiblePct: 40,
+        linkedAssetId: null, offsetAssetId: null },
+      s.plan, s.assets
+    );
+    expect(legacy.commencementIsDefault).toBe(false);
+    expect(legacy.deductiblePctIsDefault).toBe(false);
+  });
+
+  it("Input behaviour fix: 'Relates to / secured by' accepts a PROPERTY id, not just an asset id", () => {
+    const s = defaultState(PROFILES, NOW);
+    const property = createProperty(s.plan, [], 5);
+    const linkedToProperty = clampLiability(
+      { id: "lb1", name: "Investment loan", type: "mortgage", owner: "client", balance: 100000,
+        interestRatePct: 6, termYears: 25, repayment: "io", ioYears: 5, deductiblePct: 100,
+        linkedAssetId: property.id, offsetAssetId: null },
+      s.plan, s.assets, [property]
+    );
+    expect(linkedToProperty.linkedAssetId).toBe(property.id); // preserved, not dropped
+
+    // Without the property in scope (e.g. properties argument omitted,
+    // the exact bug this fix closed at two call sites), the same link
+    // is silently wiped rather than crashing — confirms the guard is
+    // real, not a coincidence of some other field matching.
+    const droppedWithoutProperties = clampLiability(
+      { id: "lb1", name: "Investment loan", type: "mortgage", owner: "client", balance: 100000,
+        interestRatePct: 6, termYears: 25, repayment: "io", ioYears: 5, deductiblePct: 100,
+        linkedAssetId: property.id, offsetAssetId: null },
+      s.plan, s.assets
+    );
+    expect(droppedWithoutProperties.linkedAssetId).toBeNull();
   });
 
   it("clampLiability never allows a zero term even from legacy state (a zero-length loan with a real balance is meaningless)", () => {

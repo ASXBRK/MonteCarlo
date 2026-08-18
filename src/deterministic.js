@@ -489,6 +489,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     ...(state.liabilities ?? []).filter((l) => l.balance > 0),
     ...derivedLoans,
   ];
+  // Input behaviour fix — a liability the user linked to a property via
+  // "Relates to / secured by" is dischargeable by that property's sale
+  // too, not only the auto-generated purchase loan (`prop-<id>`, the
+  // ONLY loan this engine could previously identify as "this
+  // property's own" — see the sale-discharge block's own header). An
+  // already-owned property's manually-entered mortgage had no way to
+  // be recognised at all before this.
+  const linkedLoanIdByProperty = {};
+  for (const l of liabs) {
+    if (l.linkedAssetId && propMeta[l.linkedAssetId]) linkedLoanIdByProperty[l.linkedAssetId] = l.id;
+  }
   const liabMeta = {};
   const loanBal = {}; // nominal
   // Real-dollar balance over time (Liabilities table/chart, Commit 5) —
@@ -1550,13 +1561,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             if (s) acc[per].netCapitalGain += taxableGain * s;
           }
         }
-        // Discharge the linked purchase-derived loan (id `prop-<id>`,
-        // the SAME naming convention isPropertyLoan uses everywhere
-        // else) — the only loan this engine can identify as "this
-        // property's own", per this field's own header comment above.
+        // Discharge the loan linked to this property: the auto-
+        // generated purchase-derived loan (id `prop-<id>`, the SAME
+        // naming convention isPropertyLoan uses everywhere else) for a
+        // property this tool financed itself, or — Input behaviour fix
+        // — a liability the user separately linked via "Relates to /
+        // secured by" for an already-owned property whose loan was
+        // entered by hand. In practice a property only ever has one or
+        // the other; the auto-generated id is checked first purely as
+        // a defensive tie-break, not a real choice.
         let toDestination = netProceeds;
-        const loanId = `prop-${pid}`;
-        if (pm.sale.proceedsDestination === "repayLoanThenAsset" && loanBal[loanId] > 0) {
+        const autoLoanId = `prop-${pid}`;
+        const loanId = loanBal[autoLoanId] > 0 ? autoLoanId : linkedLoanIdByProperty[pid];
+        if (pm.sale.proceedsDestination === "repayLoanThenAsset" && loanId && loanBal[loanId] > 0) {
           const payoff = Math.min(toDestination, loanBal[loanId]);
           loanBal[loanId] -= payoff;
           toDestination -= payoff;

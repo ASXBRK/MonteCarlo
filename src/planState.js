@@ -562,6 +562,14 @@ export function createIncomeRow(plan, existing = []) {
   return {
     id: uid("in"),
     label: INCOME_CATEGORY_LABELS.salary,
+    // Label as a derived default (Input behaviour fix, spec 19 Commit
+    // 1's own registry) — tracks the category until the user types
+    // their own label, then stops permanently. Same "true only on a
+    // brand-new row" convention as property rent/expenses' isDefault:
+    // clampIncomeRow defaults this to false when absent, so a
+    // pre-this-fix row (an explicit label, no flag at all) is never
+    // silently overwritten the next time its category changes.
+    labelIsDefault: true,
     owner: "client",
     amount: 0,
     frequency: "annual",
@@ -607,6 +615,7 @@ export function createExpenseRow(plan, existing = []) {
   return {
     id: uid("ex"),
     label: EXPENSE_CATEGORY_LABELS.nonDiscretionary,
+    labelIsDefault: true, // see createIncomeRow's own comment
     category: "nonDiscretionary",
     amount: 0,
     frequency: "annual",
@@ -640,6 +649,7 @@ export function createDeductionRow(plan, existing = []) {
   return {
     id: uid("ded"),
     label: DEDUCTION_CATEGORY_LABELS.workingExpense,
+    labelIsDefault: true, // see createIncomeRow's own comment
     owner: "client",
     category: "workingExpense",
     amount: 0,
@@ -992,6 +1002,17 @@ export function createLiability(plan, existing = []) {
     fixedUntil: ageRef(plan.client.currentAge + 3), // DateRef — the rollover point
     revertRatePct: null,               // null = falls back to assumptions.mortgageRate at use-time (same override-or-default shape as dutyOverride/lmiOverride)
     commencedOn: null,                 // ISO date (past); informational only, drives nothing
+    // Input behaviour fix: once linked to a property, commencedOn and
+    // deductiblePct derive from it (see main.js's link-derivation
+    // helper — it needs a built schedule to resolve a planned
+    // property's purchaseAt, which clampLiability doesn't have access
+    // to) — each stops tracking the moment the user edits it directly,
+    // same isDefault convention as property rent/expenses and row
+    // labels. True only on brand-new rows; absent/missing on
+    // pre-existing rows reads as false (never overwrite untouched
+    // legacy data).
+    commencementIsDefault: true,
+    deductiblePctIsDefault: true,
   };
 }
 
@@ -1091,6 +1112,8 @@ export function clampLiability(l, plan, assets, properties = []) {
     revertRatePct: l.revertRatePct != null ? clampNumber(l.revertRatePct, 0, 30) : null,
     commencedOn: typeof l.commencedOn === "string" && !Number.isNaN(new Date(l.commencedOn).getTime())
       ? l.commencedOn : null,
+    commencementIsDefault: l.commencementIsDefault === true,
+    deductiblePctIsDefault: l.deductiblePctIsDefault === true,
   };
 }
 
@@ -1900,6 +1923,20 @@ export function clampLumpSum(ls, plan) {
   return { ...rest, at };
 }
 
+// Label as a derived default (Input behaviour fix, spec 19 Commit 1's
+// own registry) — shared by income/expense/deduction rows, the three
+// Cashflow row types with a category select and this same "label
+// populated once then stranded" problem. `labelIsDefault` defaults to
+// false when absent (a pre-this-fix row keeps its explicit label
+// forever) — true only ever comes from createXRow's own literal, or
+// from the user's own explicit re-arm (there isn't one: once false, it
+// stays false, matching property rent/expenses' own one-way stop).
+function clampDerivedLabel(row, categoryLabels, category) {
+  const labelIsDefault = row.labelIsDefault === true;
+  const label = labelIsDefault ? categoryLabels[category] : row.label;
+  return { label, labelIsDefault };
+}
+
 // Income rows anchor to their owner's window. category (Cashflow
 // table: firm row vocabulary) is now the authoritative, user-facing
 // field — incomeType is derived FROM it every time (a pre-Commit-2 row
@@ -1930,14 +1967,16 @@ export function clampIncomeRow(row, plan) {
   // there for free, so termination is just another way `to` gets set.
   const termination = clampTermination(row.termination, win, plan);
   const to = termination.enabled ? termination.at : clampedTo;
-  return { ...rest, owner, from, to, category, incomeType, sgApplies, termination, ...clampIndexation(row) };
+  const { label, labelIsDefault } = clampDerivedLabel(row, INCOME_CATEGORY_LABELS, category);
+  return { ...rest, owner, from, to, category, incomeType, sgApplies, termination, label, labelIsDefault, ...clampIndexation(row) };
 }
 
 export function clampExpenseRow(row, plan) {
   const { from, to } = clampFromTo(row, plan.client.currentAge, plan.endAge, plan);
   const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
   const category = EXPENSE_CATEGORIES.includes(row.category) ? row.category : "other";
-  return { ...rest, from, to, category, ...clampIndexation(row) };
+  const { label, labelIsDefault } = clampDerivedLabel(row, EXPENSE_CATEGORY_LABELS, category);
+  return { ...rest, from, to, category, label, labelIsDefault, ...clampIndexation(row) };
 }
 
 // Deduction rows anchor to their owner's window, same as income rows —
@@ -1948,7 +1987,8 @@ export function clampDeductionRow(row, plan) {
   const { from, to } = clampFromTo(row, win.from, win.to, plan);
   const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
   const category = DEDUCTION_CATEGORIES.includes(row.category) ? row.category : "other";
-  return { ...rest, owner, from, to, category, ...clampIndexation(row) };
+  const { label, labelIsDefault } = clampDerivedLabel(row, DEDUCTION_CATEGORY_LABELS, category);
+  return { ...rest, owner, from, to, category, label, labelIsDefault, ...clampIndexation(row) };
 }
 
 // fundingOrder invariant: exactly the INCLUDED FINANCIAL assets, in

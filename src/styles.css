@@ -1942,11 +1942,17 @@ tr[data-adj-marker] { cursor: pointer; }
 }
 
 /* --- Input Usability spec, Commit 2: distinguish entered values from
-   defaults. Muted, not alarming — this is a status, not an error. */
-.cf-cell.field-untouched, .plan-field.field-untouched { position: relative; }
-.cf-cell.field-untouched label, .plan-field.field-untouched label,
-.cf-cell.field-untouched input, .plan-field.field-untouched input,
-.cf-cell.field-untouched select, .plan-field.field-untouched select {
+   defaults. Muted, not alarming — this is a status, not an error.
+   Input behaviour fix: `td` joins .cf-cell/.plan-field as a field
+   container — every Cashflow-style table row (income/expenses/
+   deductions/super contributions/withdrawals/liability extra
+   repayments) renders one field per <td> with no other wrapper, and
+   had NO decoration at all before this (see decorateTouchedFields's
+   own header comment in main.js). */
+.cf-cell.field-untouched, .plan-field.field-untouched, td.field-untouched { position: relative; }
+.cf-cell.field-untouched label, .plan-field.field-untouched label, td.field-untouched label,
+.cf-cell.field-untouched input, .plan-field.field-untouched input, td.field-untouched input,
+.cf-cell.field-untouched select, .plan-field.field-untouched select, td.field-untouched select {
   color: var(--ink-soft);
   opacity: 0.7;
 }
