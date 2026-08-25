@@ -7203,3 +7203,95 @@ describe("Age pension (spec 21a, Commit 3): engine integration", () => {
     expect(outPension.yearly[1].agePensionDetail.assessableAssets).toBeGreaterThan(400000);
   });
 });
+
+// Work Bonus (spec 21b, Commit 1) — isolated fixtures (no assets, flat
+// employment income) so the exempted amount and bank balance can be
+// hand-checked directly against otherIncome, with nothing else moving.
+describe("Age pension — Work Bonus (spec 21b, Commit 1)", () => {
+  it("exempts $7,800/yr of employment income and draws the new-recipient $4,000 bank against the excess", () => {
+    const s = mkState({
+      endAge: 70, assets: [],
+      plan: { client: { currentAge: 67 } },
+      cashflows: { income: [employmentRow({ amount: 20000, frequency: "annual", from: { kind: "age", age: 67 }, to: { kind: "age", age: 70 }, indexBasis: "cpi" })] },
+    });
+    const out = projectPlan(s);
+    // Year 0 (age 67, new recipient): $20,000 income, $7,800 exempt
+    // outright, $12,200 excess, only $4,000 in the bank to draw →
+    // $11,800 total exempt, bank exhausted to 0.
+    expect(out.yearly[0].agePensionDetail.client.workBonusExempt).toBeCloseTo(11800, 2);
+    expect(out.yearly[0].agePensionDetail.client.workBonusBank).toBeCloseTo(0, 2);
+    expect(out.yearly[0].agePensionDetail.otherIncome).toBeCloseTo(20000 - 11800, 2);
+    // Year 1: bank is now empty — only the flat $7,800 exempts.
+    expect(out.yearly[1].agePensionDetail.client.workBonusExempt).toBeCloseTo(7800, 2);
+    expect(out.yearly[1].agePensionDetail.otherIncome).toBeCloseTo(20000 - 7800, 2);
+  });
+
+  it("the bank accrues the unused allowance in a low-income year, capped at $11,800", () => {
+    const s = mkState({
+      endAge: 70, assets: [],
+      plan: { client: { currentAge: 67 } },
+      cashflows: { income: [employmentRow({ amount: 3000, frequency: "annual", from: { kind: "age", age: 67 }, to: { kind: "age", age: 70 }, indexBasis: "cpi" })] },
+    });
+    const out = projectPlan(s);
+    // $3,000 income, fully exempt; $4,800 unused accrues onto the
+    // $4,000 starting balance → $8,800.
+    expect(out.yearly[0].agePensionDetail.client.workBonusExempt).toBeCloseTo(3000, 2);
+    expect(out.yearly[0].agePensionDetail.client.workBonusBank).toBeCloseTo(8800, 2);
+    expect(out.yearly[0].agePensionDetail.otherIncome).toBeCloseTo(0, 2);
+    // Year 1: another $4,800 unused would take it to $13,600 — capped at $11,800.
+    expect(out.yearly[1].agePensionDetail.client.workBonusBank).toBeCloseTo(11800, 2);
+  });
+
+  it("investment/rental income is untouched — only employment income is exempted", () => {
+    const s = mkState({
+      endAge: 70,
+      assets: [mkAsset({ balance: 200000, allocation: { mode: "custom", incomePct: 4, growthPct: 0, frankingPct: 0, volBasis: "Balanced" } })],
+      plan: { client: { currentAge: 67 } },
+    });
+    const out = projectPlan(s);
+    // No employment income at all in this fixture — Work Bonus has
+    // nothing to exempt, but deemed income on the $200k asset still
+    // feeds the income test in full (untouched by Work Bonus).
+    expect(out.yearly[0].agePensionDetail.client.workBonusExempt).toBe(0);
+    expect(out.yearly[0].agePensionDetail.deemedIncome).toBeGreaterThan(0);
+  });
+
+  it("applies per person — a couple where only the partner works", () => {
+    const s = mkState({
+      endAge: 70, assets: [],
+      plan: {
+        household: "couple",
+        client: { currentAge: 67 },
+        partner: { currentAge: 67 },
+      },
+      cashflows: {
+        income: [employmentRow({
+          id: "i1", owner: "partner", amount: 20000, frequency: "annual",
+          from: { kind: "age", age: 67 }, to: { kind: "age", age: 70 }, indexBasis: "none",
+        })],
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].agePensionDetail;
+    // Partner's own bank is drawn exactly as the single-person case
+    // above; the client — no employment income at all — has nothing
+    // exempted, and their OWN bank still accrues independently (Work
+    // Bonus eligibility isn't conditional on actually working).
+    expect(d.partner.workBonusExempt).toBeCloseTo(11800, 2);
+    expect(d.partner.workBonusBank).toBeCloseTo(0, 2);
+    expect(d.client.workBonusExempt).toBe(0);
+    expect(d.client.workBonusBank).toBeCloseTo(11800, 2); // 4,000 + 7,800 unused, under the cap
+  });
+
+  it("does not apply before age pension age — the full employment income counts", () => {
+    const s = mkState({
+      endAge: 70, assets: [],
+      plan: { client: { currentAge: 60 } }, // won't reach 67 until year 7
+      cashflows: { income: [employmentRow({ amount: 20000, frequency: "annual", from: { kind: "age", age: 60 }, to: { kind: "age", age: 70 }, indexBasis: "cpi" })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].agePensionDetail.client.ageEligible).toBe(false);
+    expect(out.yearly[0].agePensionDetail.client.workBonusExempt).toBe(0);
+    expect(out.yearly[0].agePensionDetail.otherIncome).toBeCloseTo(20000, 2);
+  });
+});

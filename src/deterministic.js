@@ -45,10 +45,11 @@ import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
 import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance, debitTransferBalance } from "./pensionTba.js";
-import { agePensionRatesFor } from "./data/agePension.js";
+import { agePensionRatesFor, WORK_BONUS } from "./data/agePension.js";
 import {
   assessableAssets as agePensionAssessableAssets, deemedIncome as agePensionDeemedIncome,
   assessableIncome as agePensionAssessableIncome, singleAgePensionAssessment, coupleAgePensionAssessment,
+  workBonusApply,
 } from "./agePensionMeansTest.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
@@ -451,6 +452,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     partner: [...(state.plan.partner?.super?.carryForward ?? [0, 0, 0, 0, 0])],
   };
   let superBringForward = { client: null, partner: null };
+  // Work Bonus income bank (spec 21b, Commit 1) — year-sequential state,
+  // same convention as superCarryForward: resolved once per FY, before
+  // either pass, in the age pension setup block below. null until the
+  // person's first year as an age-pension-age "new recipient" (starts
+  // at WORK_BONUS.startingBalance then, not before — see that block).
+  let workBonusBank = { client: null, partner: null };
   let pendingDiv293 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT)
   let pendingDiv296 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT/Div293)
   // PAYG withholding / tax refund timing: assessed FY t (paygWithheld −
@@ -3144,15 +3151,34 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       });
 
       // "Other income" (income test): employment income (schedule's own
-      // per-owner precomputed array, unaffected by the real pass) plus
-      // net rental income on already-settled non-PPR properties this
-      // FY. Disclosed simplification: "otherIncome"-category rows
-      // (business/other taxable income) and after-tax bonuses are not
-      // included — see the Parameters modal.
+      // per-owner precomputed array, unaffected by the real pass) —
+      // net of the Work Bonus (spec 21b, Commit 1) — plus net rental
+      // income on already-settled non-PPR properties this FY. Disclosed
+      // simplification: "otherIncome"-category rows (business/other
+      // taxable income) and after-tax bonuses are not included — see
+      // the Parameters modal.
+      //
+      // Work Bonus: per person, employment income ONLY (never rental/
+      // investment — those never enter this per-person figure), gated
+      // on the person having reached age pension age this FY (it's an
+      // age-pension-specific concession) — resolved before the rental
+      // loop below so workBonusBank[p] only ever advances once per real
+      // FY, the same year-sequential convention superCarryForward uses.
+      const workBonusExemptByOwner = { client: 0, partner: 0 };
       let otherIncomeTotal = 0;
-      for (let m = yearStart(y); m < yearEnd(y); m++) {
-        otherIncomeTotal += schedule.employmentIncomeByOwner.client?.[m] ?? 0;
-        otherIncomeTotal += schedule.employmentIncomeByOwner.partner?.[m] ?? 0;
+      for (const p of persons) {
+        let employmentIncomeP = 0;
+        for (let m = yearStart(y); m < yearEnd(y); m++) employmentIncomeP += schedule.employmentIncomeByOwner[p]?.[m] ?? 0;
+        const ageReached = ownerAgeAt(p, y) >= agePensionRatesY.ageOfEligibility;
+        if (ageReached) {
+          if (workBonusBank[p] == null) workBonusBank[p] = WORK_BONUS.startingBalance; // new recipient
+          const wb = workBonusApply({ employmentIncome: employmentIncomeP, bank: workBonusBank[p], exemptAnnual: WORK_BONUS.exemptAnnual, bankCap: WORK_BONUS.bankCap });
+          workBonusExemptByOwner[p] = wb.exempt;
+          workBonusBank[p] = wb.bank;
+          otherIncomeTotal += employmentIncomeP - wb.exempt;
+        } else {
+          otherIncomeTotal += employmentIncomeP; // not yet age-pension age — Work Bonus doesn't apply
+        }
       }
       for (const p of props) {
         const pm = propMeta[p.id];
@@ -3193,8 +3219,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         incomeTestResult: assessment.incomeResult,
         bindingTest: assessment.bindingTest,
         entitlement: paid.client + paid.partner,
-        client: { ageEligible: ageEligible.client, eligible: state.plan.client?.taxProfile?.centrelinkEligible !== false, paid: paid.client },
-        partner: couple ? { ageEligible: ageEligible.partner, eligible: state.plan.partner?.taxProfile?.centrelinkEligible !== false, paid: paid.partner } : null,
+        client: {
+          ageEligible: ageEligible.client, eligible: state.plan.client?.taxProfile?.centrelinkEligible !== false, paid: paid.client,
+          workBonusExempt: workBonusExemptByOwner.client, workBonusBank: workBonusBank.client ?? 0,
+        },
+        partner: couple ? {
+          ageEligible: ageEligible.partner, eligible: state.plan.partner?.taxProfile?.centrelinkEligible !== false, paid: paid.partner,
+          workBonusExempt: workBonusExemptByOwner.partner, workBonusBank: workBonusBank.partner ?? 0,
+        } : null,
       };
     }
 

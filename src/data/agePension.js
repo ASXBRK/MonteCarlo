@@ -168,6 +168,22 @@ export function agePensionRatesFor(fyStartYear, bracketMode = "indexed", cpi = 0
   };
 }
 
+// Work Bonus (spec 21b, Commit 1) — exempts employment/self-employment
+// income from the age pension income test, with an accruing "income
+// bank". The real scheme is fortnightly ($300 exempt, $11,800 bank
+// cap, $4,000 starting balance for a new recipient); this engine is
+// annual, so it's modelled as $7,800/yr ($300 × 26 fortnights) exempt
+// — the same annual-equivalent convention FORTNIGHTS_PER_YEAR already
+// uses for rates/free areas above — with the bank as an annual carry-
+// forward balance. Neither figure is indexed: a policy setting, not
+// part of the CPI/AWOTE regime, same treatment as the deeming rates
+// above.
+export const WORK_BONUS = Object.freeze({
+  exemptAnnual: 300 * FORTNIGHTS_PER_YEAR, // $7,800/yr
+  bankCap: 11800,
+  startingBalance: 4000,
+});
+
 // Assets-test cut-out point: the assessable-assets level at which
 // entitlement reaches zero under the assets test alone — derived from
 // the full-pension threshold, the (real, already-deflated) annual

@@ -53,6 +53,25 @@ export function deemedIncome({ financialAssets = 0, lowerRate, upperRate, thresh
   return threshold * lowerRate + (financialAssets - threshold) * upperRate;
 }
 
+// Work Bonus (spec 21b, Commit 1) — applies ONLY to employment/self-
+// employment income, per person, never to investment or rental income
+// (the caller must only ever pass employment income here). $300/f
+// ($7,800/yr) is disregarded from THIS year's employment income;
+// whatever of that annual allowance goes unused accrues to a bank
+// (capped), which is then drawn on in a year employment income
+// exceeds the annual allowance. Returns the total amount exempted this
+// year (to subtract from otherIncome before it reaches the income
+// test) and the resulting bank balance to carry into next year.
+export function workBonusApply({ employmentIncome = 0, bank = 0, exemptAnnual, bankCap }) {
+  if (employmentIncome <= exemptAnnual) {
+    const unused = exemptAnnual - employmentIncome;
+    return { exempt: employmentIncome, bank: Math.min(bankCap, bank + unused) };
+  }
+  const excess = employmentIncome - exemptAnnual;
+  const drawn = Math.min(bank, excess);
+  return { exempt: exemptAnnual + drawn, bank: bank - drawn };
+}
+
 // Total assessable income for the income test: deemed income on
 // financial assets, plus actual income from non-financial sources
 // (rent net of expenses, employment income, business income) — the

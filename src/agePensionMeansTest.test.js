@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { agePensionRatesFor } from "./data/agePension.js";
+import { agePensionRatesFor, WORK_BONUS } from "./data/agePension.js";
 import {
   assessableAssets, assetsTestResult, deemedIncome, assessableIncome, incomeTestResult,
-  agePensionEntitlement, singleAgePensionAssessment, coupleAgePensionAssessment,
+  agePensionEntitlement, singleAgePensionAssessment, coupleAgePensionAssessment, workBonusApply,
 } from "./agePensionMeansTest.js";
 
 const RATES = agePensionRatesFor(2026, "indexed", 0.025, 0.035); // FY2026/27 base — exact firm figures
@@ -177,5 +177,50 @@ describe("coupleAgePensionAssessment — combined assessment, split entitlement 
     const r = coupleAgePensionAssessment({ assessableAssets: 50000, assessableIncome: highDeemedIncome, rates: RATES, homeowner: true });
     expect(r.bindingTest).toBe("income");
     expect(r.entitlement).toBeLessThan(RATES.couple.rateCombined);
+  });
+});
+
+describe("workBonusApply — Work Bonus and the income bank (spec 21b, Commit 1)", () => {
+  const { exemptAnnual, bankCap } = WORK_BONUS;
+
+  it("exempts up to $7,800/yr ($300/fortnight equivalent) of employment income outright", () => {
+    const r = workBonusApply({ employmentIncome: 5000, bank: 0, exemptAnnual, bankCap });
+    expect(r.exempt).toBe(5000); // fully under the annual allowance
+  });
+
+  it("the bank accrues the UNUSED allowance, capped, and no further", () => {
+    // $0 employment income → the whole $7,800 allowance goes unused.
+    const r1 = workBonusApply({ employmentIncome: 0, bank: 10000, exemptAnnual, bankCap });
+    expect(r1.bank).toBe(bankCap); // 10,000 + 7,800 would exceed the cap — pinned at 11,800
+    const r2 = workBonusApply({ employmentIncome: 0, bank: 0, exemptAnnual, bankCap });
+    expect(r2.bank).toBe(exemptAnnual); // 0 + 7,800, well under the cap
+  });
+
+  it("the bank is drawn down in a high-employment-income year", () => {
+    // $10,000 employment income: $7,800 exempt outright, $2,200 excess
+    // drawn from an existing bank of $5,000.
+    const r = workBonusApply({ employmentIncome: 10000, bank: 5000, exemptAnnual, bankCap });
+    expect(r.exempt).toBe(exemptAnnual + 2200);
+    expect(r.bank).toBe(5000 - 2200);
+  });
+
+  it("draws only as much as the bank actually holds, leaving the rest assessable", () => {
+    // $20,000 employment income, $10,200 excess, but only $1,000 in the bank.
+    const r = workBonusApply({ employmentIncome: 20000, bank: 1000, exemptAnnual, bankCap });
+    expect(r.exempt).toBe(exemptAnnual + 1000);
+    expect(r.bank).toBe(0);
+  });
+
+  it("new-recipient starting balance is a caller concern (WORK_BONUS.startingBalance), not this function's default", () => {
+    expect(WORK_BONUS.startingBalance).toBe(4000);
+  });
+
+  it("investment/rental income is structurally unaffected — this function only ever sees employmentIncome", () => {
+    // The caller passes ONLY employment income; deemed/rental income
+    // never reaches this function at all, so there is nothing here to
+    // assert beyond the parameter's own name — a real "does the caller
+    // wire it correctly" check belongs in the engine-integration tests.
+    const r = workBonusApply({ employmentIncome: 0, bank: 0, exemptAnnual, bankCap });
+    expect(r.exempt).toBe(0);
   });
 });
