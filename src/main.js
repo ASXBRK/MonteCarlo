@@ -70,6 +70,7 @@ import {
 import { eligibleFhsssPersons, buildFhsssFocus, buildFhsssComparison } from "./focusFhsss.js";
 import { FHSSS_ANNUAL_CAP, FHSSS_LIFETIME_CAP } from "./fhsss.js";
 import { eligibleSalarySacrificeRows, buildSalarySacrificeFocus } from "./focusSalarySacrifice.js";
+import { buildAgePensionStrategyFocus } from "./focusAgePensionStrategy.js";
 import { eligibleDebtPayoffLoans, buildDebtPayoffFocus, solveExtraRepaymentForPayoffDate } from "./focusDebtPayoff.js";
 import {
   computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
@@ -8099,7 +8100,7 @@ function renderAgePensionChart() {
 // eligibility flag.
 function buildAgePensionGroups(entity) {
   const yl = projection.yearly;
-  const zero = { assessableAssets: 0, assetsTestResult: 0, deemedIncome: 0, otherIncome: 0, incomeTestResult: 0, bindingTest: null, entitlement: 0 };
+  const zero = { assessableAssets: 0, deprivedAssets: 0, assetsTestResult: 0, deemedIncome: 0, otherIncome: 0, incomeTestResult: 0, bindingTest: null, entitlement: 0 };
   const get = (y) => yl[y].agePensionDetail ?? zero;
   const entitlementFor = (y) => {
     const d = get(y);
@@ -8107,12 +8108,25 @@ function buildAgePensionGroups(entity) {
     if (entity === "partner") return d.partner?.paid ?? 0;
     return d.entitlement ?? 0;
   };
+  // Work Bonus (spec 21b, Commit 1) is genuinely per-person — the
+  // household ("all") view sums both, the same way "Deprived assets"
+  // is already inherently a household-level figure (gifting has no
+  // per-person split either).
+  const workBonusFor = (field) => (y) => {
+    const d = get(y);
+    if (entity === "client") return d.client?.[field] ?? 0;
+    if (entity === "partner") return d.partner?.[field] ?? 0;
+    return (d.client?.[field] ?? 0) + (d.partner?.[field] ?? 0);
+  };
   const bindingLabel = { assets: "Assets", income: "Income" };
   const rows = [
     { label: "Assessable assets", cell: (y) => get(y).assessableAssets, always: true },
+    { label: "Deprived assets", cell: (y) => get(y).deprivedAssets },
     { label: "Assets test result", cell: (y) => get(y).assetsTestResult },
     { label: "Deemed income", cell: (y) => get(y).deemedIncome },
     { label: "Other assessable income", cell: (y) => get(y).otherIncome },
+    { label: "Work Bonus applied", cell: workBonusFor("workBonusExempt") },
+    { label: "Work Bonus bank", cell: workBonusFor("workBonusBank") },
     { label: "Income test result", cell: (y) => get(y).incomeTestResult },
     { label: "Binding test", text: true, cell: (y) => bindingLabel[get(y).bindingTest] ?? "" },
     { label: "Entitlement", cell: entitlementFor, always: true, cls: "tl-total" },
@@ -8160,8 +8174,31 @@ function renderFocusAgePensionView() {
         <div id="focusAgePensionIncomeChart"></div>
       </div>
     </div>
+    <div class="focus-section">
+      <h3>Strategy comparison</h3>
+      <p class="helper-text">Entitlement and net worth side by side under the current plan, an illustrative gift, and illustrative work income — gifting increases entitlement by reducing real wealth, and Work Bonus income reduces (or holds) entitlement while still adding to it; neither is shown as the "better" choice.</p>
+      <div id="focusAgePensionStrategyTable"></div>
+    </div>
   `;
   renderFocusAgePensionCharts();
+  renderFocusAgePensionStrategyTable();
+}
+
+// Age pension strategy comparison (spec 21b, Commit 5) — current plan
+// vs an illustrative gift vs illustrative work income, side by side.
+// Every arm is a REAL projectPlan() run (focusAgePensionStrategy.js),
+// never a hand-derived estimate. Non-prescriptive: both figures
+// (entitlement, net assets) for every arm, no arm singled out as
+// preferred — see that module's own header.
+function renderFocusAgePensionStrategyTable() {
+  const el = $("focusAgePensionStrategyTable");
+  if (!el) return;
+  const result = buildAgePensionStrategyFocus({ state, giftAmount: 10000, workIncomeLevels: [10000, 20000] });
+  if (!result) { el.innerHTML = ""; return; }
+  const rows = [];
+  for (const arm of result.arms) rows.push({ label: `${arm.label} — entitlement`, cell: (y) => result.byYear[y][arm.id].entitlement });
+  for (const arm of result.arms) rows.push({ label: `${arm.label} — net assets`, cell: (y) => result.byYear[y][arm.id].netAssets, cls: "tl-total" });
+  renderTransposed(el, [{ title: null, rows }]);
 }
 
 function renderFocusAgePensionCharts() {
@@ -8707,6 +8744,26 @@ function buildKeyFiguresGroups(ctx = { state, projection }, entity = "all") {
         ? (yl[y].taxDetail.client?.helpBalanceClosing ?? 0) + (yl[y].taxDetail.partner?.helpBalanceClosing ?? 0)
         : (yl[y].taxDetail[forOwner]?.helpBalanceClosing ?? 0),
     },
+    // CSHC (spec 21b, Commit 4) — a household-level ("is anyone in this
+    // household eligible") summary when no person is selected; the
+    // selected person's own flag otherwise. Always shown (not hidden
+    // when never eligible) — an adviser needs to see "No" as
+    // confidently as "Yes".
+    {
+      label: "CSHC eligible",
+      text: true,
+      always: true,
+      cell: (y) => {
+        const d = yl[y].cshcDetail;
+        if (!d) return "";
+        const eligible = forOwner ? d[forOwner]?.eligible : (d.client?.eligible || d.partner?.eligible);
+        return eligible ? "Yes" : "No";
+      },
+    },
+    // HEAS (spec 21b, Commit 5) — a single household loan, no per-person
+    // split (same reasoning as Working cash balance above); hidden when
+    // never enabled/drawn (all-zero rows convention — no `always`).
+    { label: "HEAS loan balance", cell: (y) => -(yl[y].heasDetail?.closing ?? 0) },
   ];
   return [{ title: null, rows }];
 }

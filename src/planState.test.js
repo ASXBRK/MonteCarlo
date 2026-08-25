@@ -33,6 +33,7 @@ import {
   childEducationPlanYearBounds, normaliseChildren, flatEducationBlocks,
   createSurplusPeriod, legacySurplusPeriod, clampSurplusPeriod, normaliseSurplusPeriods,
   ADJUSTMENT_TARGETS, ADJUSTMENT_TARGET_LABELS, createAdjustment, clampAdjustment, normaliseAdjustments,
+  createHeas, clampHeas, refineHeasProperty,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2212,5 +2213,41 @@ describe("clampPlan — centrelinkEligible smart default (spec 21a, Commit 3)", 
     expect(p.endAge).toBe(70);
     expect(p.client.taxProfile.centrelinkEligible).toBe(true); // 65 → 70 within the projection
     expect(p.partner.taxProfile.centrelinkEligible).toBe(false); // 30 → 35 within the same 5-year window
+  });
+});
+
+describe("Home Equity Access Scheme (spec 21b, Commit 5): plan model", () => {
+  it("createHeas defaults to disabled with no security", () => {
+    const h = createHeas();
+    expect(h.enabled).toBe(false);
+    expect(h.propertyId).toBeNull();
+  });
+
+  it("clampHeas is a basic type/shape clamp only — no property cross-validation at this stage", () => {
+    expect(clampHeas({ enabled: true, propertyId: "p1" })).toEqual({ enabled: true, propertyId: "p1" });
+    expect(clampHeas({ enabled: "yes", propertyId: 123 })).toEqual({ enabled: false, propertyId: null });
+    expect(clampHeas(undefined)).toEqual({ enabled: false, propertyId: null });
+  });
+
+  it("refineHeasProperty drops a propertyId that isn't among the household's own properties — and resets enabled with it", () => {
+    const properties = [{ id: "p1" }, { id: "p2" }];
+    const valid = refineHeasProperty({ enabled: true, propertyId: "p1" }, properties);
+    expect(valid).toEqual({ enabled: true, propertyId: "p1" });
+    const stale = refineHeasProperty({ enabled: true, propertyId: "deleted-property" }, properties);
+    expect(stale.propertyId).toBeNull();
+    expect(stale.enabled).toBe(false); // an enabled HEAS with no valid security is the unenterable case
+  });
+
+  it("refineHeasProperty leaves a disabled HEAS with no propertyId untouched", () => {
+    const properties = [{ id: "p1" }];
+    expect(refineHeasProperty({ enabled: false, propertyId: null }, properties)).toEqual({ enabled: false, propertyId: null });
+  });
+
+  it("defaultState round-trips a valid HEAS election through clampAllToPlan without dropping it", () => {
+    const plan = couplePlan();
+    const property = { ...createProperty(plan, []), propertyType: "ppr", currentValue: 800000 };
+    const s = { ...defaultState(PROFILES, NOW), plan: { ...defaultState(PROFILES, NOW).plan, heas: { enabled: true, propertyId: property.id } }, properties: [property] };
+    const clamped = clampAllToPlan(s, PROFILES);
+    expect(clamped.plan.heas).toEqual({ enabled: true, propertyId: property.id });
   });
 });

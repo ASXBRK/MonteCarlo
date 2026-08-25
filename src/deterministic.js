@@ -46,6 +46,7 @@ import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
 import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance, debitTransferBalance } from "./pensionTba.js";
 import { agePensionRatesFor, WORK_BONUS, cshcThresholdsFor } from "./data/agePension.js";
+import { HEAS_BASE, heasEffectiveAnnualRate, heasMaxLoanAmount } from "./data/heas.js";
 import {
   assessableAssets as agePensionAssessableAssets, deemedIncome as agePensionDeemedIncome,
   assessableIncome as agePensionAssessableIncome, singleAgePensionAssessment, coupleAgePensionAssessment,
@@ -467,6 +468,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // person's first year as an age-pension-age "new recipient" (starts
   // at WORK_BONUS.startingBalance then, not before — see that block).
   let workBonusBank = { client: null, partner: null };
+  // Home Equity Access Scheme (spec 21b, Commit 5) — a single running
+  // loan balance (real $, like every other balance in this engine),
+  // resolved once per FY in the age-pension-adjacent per-year setup
+  // below (same year-sequential convention as workBonusBank above):
+  // drawdowns and capitalised interest both accrue onto it; never
+  // reduced by anything else (no repayment path is modelled — real
+  // rule too, the loan is recovered from the estate).
+  let heasBal = 0;
+  const heasConfig = state.plan.heas ?? { enabled: false, propertyId: null };
   let pendingDiv293 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT)
   let pendingDiv296 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT/Div293)
   // PAYG withholding / tax refund timing: assessed FY t (paygWithheld −
@@ -493,6 +503,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const awoteAssum = state.assumptions.awote ?? 0.035;
   const props = (state.properties ?? []).filter((p) =>
     p.status === "owned" ? p.currentValue > 0 : p.priceToday > 0);
+  // HEAS (spec 21b, Commit 5) — the secured property, resolved once. A
+  // stale/deleted/excluded propertyId (planState.js's own second-stage
+  // refinement should already prevent this, but this raw-state-
+  // tolerant engine defends anyway, same convention as every other
+  // dangling-reference fallback here) simply means HEAS never fires.
+  const heasProperty = heasConfig.enabled ? props.find((p) => p.id === heasConfig.propertyId) ?? null : null;
   const yearStartIdx = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
   const julyOf = (y) => (y === 0 ? (state.plan.start.month === 7 ? 0 : null) : yearStartIdx(y));
 
@@ -1326,6 +1342,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // measurement pass (it needs the FY's adjusted taxable income);
     // this default only ever shows if that block somehow didn't run.
     cshcDetail: null,
+    // HEAS (spec 21b, Commit 5) — set once per FY alongside
+    // agePensionDetail; opening/closing are the running loan balance
+    // (real $, a liability — see row.netAssets's own subtraction of
+    // heasDetail.closing).
+    heasDetail: { opening: 0, interest: 0, drawn: 0, mla: 0, securityValue: 0, closing: 0 },
     // Gifting (spec 21b, Commit 2) — the FY's total gift outflow (the
     // full amount, regardless of how much is deprived vs allowable —
     // see gifting.js's own header): a leak, set alongside agePensionDetail.
@@ -1352,6 +1373,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     taxOut, cgtDue, row, trackUnfunded, superOutcome, divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
     ongoingFromSuperRequested = 0, ongoingFromSuperShortfall = 0, upfrontFromSuperShortfall = 0,
     agePensionMonthly = 0,
+    heasMonthly = 0,
   }) {
     const fyStart = fy0 + y;
     // Condition of release (Tier 1.2, Commit 3): static for the whole
@@ -2540,7 +2562,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // assessable — Commit 3's own tax-treatment decision) — see the
       // per-year setup above for the FY-level assessment this monthly
       // figure divides out of.
-      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut + agePensionMonthly;
+      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut + agePensionMonthly + heasMonthly;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
         if (own && own[m] > 0) {
@@ -3156,6 +3178,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const agePensionRatesY = agePensionRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     let agePensionMonthly = 0;
     let agePensionDetailY = null;
+    // HEAS (spec 21b, Commit 5) — resolved inside the SAME block as the
+    // age pension's own entitlement (paid.client+paid.partner), just
+    // below, since the drawdown cap needs it; hoisted here (like
+    // agePensionMonthly/agePensionDetailY above) so both survive to
+    // feed row.heasDetail and the runYear calls further down.
+    let heasMonthly = 0;
+    let heasDetailY = null;
     // Deeming grandfathering (spec 21b, Commit 3) — per-pension detail
     // (deductible-amount income, deeming-base exemption), keyed by
     // pension id; declared here (outside the block below) so it
@@ -3360,6 +3389,57 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           ageEligible: ageEligible.partner, eligible: state.plan.partner?.taxProfile?.centrelinkEligible !== false, paid: paid.partner,
           workBonusExempt: workBonusExemptByOwner.partner, workBonusBank: workBonusBank.partner ?? 0,
         } : null,
+      };
+
+      // Home Equity Access Scheme (spec 21b, Commit 5) — resolved here,
+      // right after the age pension's own entitlement (paid.client +
+      // paid.partner) is known, since the drawdown cap is 150% of the
+      // maximum pension rate LESS the actual pension received. Real-
+      // rule eligibility: the client OR partner (couple) must have
+      // reached age pension age; the secured property must have
+      // actually settled (a still-planned property has no value yet to
+      // secure against). Interest capitalises on the OPENING balance
+      // regardless — an existing loan is never paused or forgiven.
+      const heasEligibleAge = heasProperty
+        ? (couple
+            ? ownerAgeAt("client", y) >= HEAS_BASE.ageOfEligibility || ownerAgeAt("partner", y) >= HEAS_BASE.ageOfEligibility
+            : ownerAgeAt("client", y) >= HEAS_BASE.ageOfEligibility)
+        : false;
+      const heasPm = heasProperty ? propMeta[heasProperty.id] : null;
+      // Disclosed simplification, same shape as pensionCommenced's own
+      // one-year lag: this whole assessment runs before either pass,
+      // against OPENING (1 July) values — propVal for a property
+      // purchasing exactly THIS FY isn't credited until the real pass's
+      // own purchase event fires, later in the month loop. So a
+      // property settling this exact FY still reads as unsettled for
+      // this one snapshot, then correctly available from the
+      // FOLLOWING FY onward.
+      const heasSettled = heasPm ? (heasPm.owned || (heasPm.purchaseMonth != null && heasPm.purchaseMonth <= yearStart(y))) : false;
+      const heasBalOpening = heasBal;
+      let heasSecurityValue = 0, heasMla = 0, heasDrawnThisYear = 0;
+      if (heasProperty && heasEligibleAge && heasSettled) {
+        heasSecurityValue = propVal[heasProperty.id];
+        // Real rule: for a couple, the YOUNGER partner's age sets the
+        // age component (a lower cap while either partner is younger).
+        const heasAge = couple ? Math.min(ownerAgeAt("client", y), ownerAgeAt("partner", y)) : ownerAgeAt("client", y);
+        heasMla = heasMaxLoanAmount(heasSecurityValue, heasAge);
+        const maxPensionRate = couple ? agePensionRatesY.couple.rateCombined : agePensionRatesY.single.rate;
+        const requestedAnnual = Math.max(0, HEAS_BASE.drawdownCapPctOfMaxPension * maxPensionRate - (paid.client + paid.partner));
+        const headroom = Math.max(0, heasMla - heasBalOpening);
+        heasDrawnThisYear = Math.min(requestedAnnual, headroom);
+      }
+      // The loan's legislated rate is NOMINAL (fortnightly-compounding,
+      // not part of the CPI/AWOTE indexation regime — see heas.js's own
+      // header); deflated to real terms the same Fisher way every other
+      // nominal rate in this engine is, since heasBal itself is tracked
+      // in real dollars like every other balance here.
+      const heasRealAnnualRate = (1 + heasEffectiveAnnualRate()) / (1 + cpi) - 1;
+      const heasInterestThisYear = heasBalOpening * heasRealAnnualRate;
+      heasBal = heasBalOpening + heasInterestThisYear + heasDrawnThisYear;
+      heasMonthly = heasDrawnThisYear / (yearEnd(y) - yearStart(y));
+      heasDetailY = {
+        opening: heasBalOpening, interest: heasInterestThisYear, drawn: heasDrawnThisYear,
+        mla: heasMla, securityValue: heasSecurityValue, closing: heasBal,
       };
     }
 
@@ -3629,7 +3709,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
-      agePensionMonthly,
+      agePensionMonthly, heasMonthly,
     });
     Object.assign(bal, balSnap);
     pools = poolSnap;
@@ -4059,6 +4139,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     row.agePensionDetail = agePensionDetailY;
     row.cshcDetail = cshcDetailY;
+    row.heasDetail = heasDetailY;
     row.giftsPaid = giftsPaidThisYear;
     for (const id of pensionIds) {
       if (grandfatheredDetailByPension[id]) Object.assign(row.pensionDetail[id], grandfatheredDetailByPension[id]);
@@ -4067,7 +4148,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
-      agePensionMonthly,
+      agePensionMonthly, heasMonthly,
     });
     row.closingBalance = combined[yearEnd(y)];
     row.wcaDetail.closing = wcaSeries[yearEnd(y)];
@@ -4168,7 +4249,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.properties[pid].value = propVal[pid];
       row.propertyClosing += propVal[pid];
     }
-    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.pensionClosing + row.wcaClosing - row.liabilitiesClosing;
+    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.pensionClosing + row.wcaClosing - row.liabilitiesClosing - row.heasDetail.closing;
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.

@@ -6,6 +6,7 @@ import { checkYearConservation } from "./conservationCheck.js";
 import { lmiPremium } from "./data/lmiRates.js";
 import { levelPayment } from "./liabilities.js";
 import { agePensionRatesFor, cshcThresholdsFor } from "./data/agePension.js";
+import { heasEffectiveAnnualRate, heasMaxLoanAmount } from "./data/heas.js";
 
 // Minimal v3-shaped state factory. Custom allocations pin exact
 // returns without depending on profile values.
@@ -3072,13 +3073,31 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       },
     };
 
+    // Home Equity Access Scheme (spec 21b, Commit 5) — a genuine new
+    // money flow (a drawdown crediting household cash, offset by an
+    // accruing loan balance that reduces net worth — see
+    // conservationCheck.js's own heasDrawn/heasInterest terms). Only
+    // ever enabled against the PPR property generated above (when one
+    // exists) — HEAS needs SOME real estate to secure against. 50% of
+    // the time when that property exists, independent of whether the
+    // household ever actually reaches age-pension age or the property
+    // ever actually settles within this short window — both gates
+    // (age-eligibility, settlement) get exercised across enough runs:
+    // sometimes never fires, sometimes fires for only the tail of the
+    // projection.
+    const pprProperty = properties.find((p) => p.propertyType === "ppr");
+    const heas = {
+      enabled: !!pprProperty && Math.random() < 0.5,
+      propertyId: pprProperty ? pprProperty.id : null,
+    };
+
     return {
       ...mkState({
         endAge, cpi: rand(0.02, 0.04), assets,
         plan: {
           household: couple ? "couple" : "single",
           client, partner, children,
-          superAccounts, pensions, gifts, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
+          superAccounts, pensions, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments,
         },
         cashflows: { income, expenses, superContributions },
@@ -7586,5 +7605,164 @@ describe("Commonwealth Seniors Health Card (spec 21b, Commit 4): engine integrat
     // remains eligible regardless of the age pension outcome.
     expect(out.yearly[0].cshcDetail.assessableIncome).toBe(0);
     expect(out.yearly[0].cshcDetail.client.eligible).toBe(true);
+  });
+});
+
+describe("Home Equity Access Scheme (spec 21b, Commit 5): engine integration", () => {
+  // An already-OWNED PPR (unlike randomScenario()'s own properties,
+  // always "planned" — see conservationCheck.js's own y=0 caveat on why
+  // that convention doesn't extend to these hand-written fixtures)
+  // growing at exactly cpi so its REAL value stays flat and fully
+  // hand-checkable — the same "zero real growth" convention every
+  // other known-value fixture in this file already uses.
+  const heasProp = (over = {}) => ({
+    id: "ppr1", name: "Home", owner: "client", state: "NSW",
+    propertyType: "ppr", status: "owned",
+    currentValue: 800000, acquisitionDate: "2010-01-01", costBase: 400000,
+    priceToday: 0, purchaseAt: null,
+    lvrPct: 0, firstHomeBuyer: false, newBuild: false,
+    purchaseCostsPct: 0, dutyOverride: 0, growthPct: 2.5, // = cpi
+    rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
+    expensesDeductible: true, depreciation: 0,
+    releaseFhsssAtPurchase: false,
+    ...over,
+  });
+
+  it("draws 150% of the maximum pension rate less the actual pension received, and the balance accrues interest — known values", () => {
+    const rates = agePensionRatesFor(2026, "indexed", 0.025, 0.035);
+    const s = {
+      ...mkState({
+        endAge: 69, assets: [],
+        plan: { client: { currentAge: 67 }, heas: { enabled: true, propertyId: "ppr1" } },
+      }),
+      properties: [heasProp()],
+    };
+    const out = projectPlan(s);
+    const y0 = out.yearly[0].heasDetail;
+    // No assets/income in this fixture — the PPR is exempt either way
+    // — so the age pension pays the full single rate; HEAS's own
+    // request is 150% of that maximum rate LESS the actual entitlement.
+    const actualPensionY0 = out.yearly[0].agePensionDetail.entitlement;
+    const expectedDrawnY0 = 1.5 * rates.single.rate - actualPensionY0;
+    expect(y0.securityValue).toBeCloseTo(800000, 2);
+    expect(y0.drawn).toBeCloseTo(expectedDrawnY0, 2);
+    expect(y0.interest).toBeCloseTo(0, 6); // opening balance is 0 in year 0
+    expect(y0.closing).toBeCloseTo(y0.drawn, 2);
+
+    const y1 = out.yearly[1].heasDetail;
+    expect(y1.opening).toBeCloseTo(y0.closing, 2);
+    const heasRealAnnualRate = (1 + heasEffectiveAnnualRate()) / 1.025 - 1; // this fixture's own cpi (mkState default 0.025)
+    expect(y1.interest).toBeCloseTo(y1.opening * heasRealAnnualRate, 2);
+    expect(y1.closing).toBeCloseTo(y1.opening + y1.interest + y1.drawn, 6);
+  });
+
+  it("the total loan cap (age-component × security value) binds — the drawdown is capped at the MLA, well below the uncapped request", () => {
+    const rates = agePensionRatesFor(2026, "indexed", 0.025, 0.035);
+    const s = {
+      ...mkState({
+        endAge: 68, assets: [],
+        plan: { client: { currentAge: 67 }, heas: { enabled: true, propertyId: "ppr1" } },
+      }),
+      properties: [heasProp({ currentValue: 50000 })],
+    };
+    const out = projectPlan(s);
+    const mla = heasMaxLoanAmount(50000, 67);
+    const uncappedRequest = 1.5 * rates.single.rate - out.yearly[0].agePensionDetail.entitlement;
+    expect(uncappedRequest).toBeGreaterThan(mla); // this small property's cap is what actually binds...
+    expect(out.yearly[0].heasDetail.mla).toBeCloseTo(mla, 2);
+    expect(out.yearly[0].heasDetail.drawn).toBeCloseTo(mla, 2); // ...capped exactly at the MLA, not the uncapped request
+    expect(out.yearly[0].heasDetail.closing).toBeCloseTo(mla, 2);
+  });
+
+  it("the age component (and so the MLA) grows year over year, freeing up incremental headroom even once the prior year's cap was fully drawn", () => {
+    const s = {
+      ...mkState({
+        endAge: 68, assets: [],
+        plan: { client: { currentAge: 67 }, heas: { enabled: true, propertyId: "ppr1" } },
+      }),
+      properties: [heasProp({ currentValue: 50000 })],
+    };
+    const out = projectPlan(s);
+    const mlaAt67 = heasMaxLoanAmount(50000, 67);
+    const mlaAt68 = heasMaxLoanAmount(50000, 68);
+    expect(mlaAt68).toBeGreaterThan(mlaAt67); // the age component itself increases with age
+    expect(out.yearly[1].heasDetail.mla).toBeCloseTo(mlaAt68, 2);
+    // Year 1's headroom is measured against the OPENING balance (last
+    // year's MLA, before this year's interest capitalises) — the
+    // incremental cap increase, exactly.
+    const y1 = out.yearly[1].heasDetail;
+    expect(y1.drawn).toBeCloseTo(mlaAt68 - mlaAt67, 2);
+    // The interest that capitalised on top isn't gated by the cap at
+    // all — the real rule: the cap limits DRAWDOWNS, never the
+    // compounding balance itself, so closing ends up slightly ABOVE
+    // the current year's own MLA.
+    expect(y1.interest).toBeGreaterThan(0);
+    expect(y1.closing).toBeCloseTo(mlaAt68 + y1.interest, 6);
+  });
+
+  it("never draws before age-pension age is reached (either partner, for a couple)", () => {
+    const s = {
+      ...mkState({
+        endAge: 65, assets: [],
+        plan: { client: { currentAge: 60 }, heas: { enabled: true, propertyId: "ppr1" } },
+      }),
+      properties: [heasProp()],
+    };
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.heasDetail.drawn).toBe(0);
+      expect(row.heasDetail.closing).toBe(0);
+    }
+  });
+
+  it("does not fire until the secured property actually settles", () => {
+    const plannedProp = heasProp({
+      status: "planned", currentValue: 0, priceToday: 800000, purchaseAt: { kind: "age", age: 69 },
+    });
+    const s = {
+      ...mkState({
+        endAge: 71, assets: [],
+        plan: { client: { currentAge: 67 }, heas: { enabled: true, propertyId: "ppr1" } },
+      }),
+      properties: [plannedProp],
+    };
+    const out = projectPlan(s);
+    // HEAS is assessed in the per-year setup, against OPENING (1 July)
+    // balances — the same "resolved before either pass, so it reads
+    // the PRIOR year's real-pass outcome" convention the age pension's
+    // own property loop and pensionCommenced both already document: a
+    // property purchasing exactly THIS FY is still read as unsettled
+    // for this one year's snapshot, then correctly available from the
+    // FOLLOWING FY onward. A one-year lag on the FY it actually
+    // settles, not an ongoing exclusion.
+    expect(out.yearly[0].heasDetail.drawn).toBe(0); // age 67, well before purchase
+    expect(out.yearly[1].heasDetail.drawn).toBe(0); // age 68, well before purchase
+    expect(out.yearly[2].heasDetail.drawn).toBe(0); // age 69 — purchases THIS FY, still lagged
+    expect(out.yearly[3].heasDetail.drawn).toBeGreaterThan(0); // age 70 — first FY it's actually available
+  });
+
+  it("a disabled HEAS election never draws, even with an eligible owned property", () => {
+    const s = {
+      ...mkState({
+        endAge: 69, assets: [],
+        plan: { client: { currentAge: 67 }, heas: { enabled: false, propertyId: "ppr1" } },
+      }),
+      properties: [heasProp()],
+    };
+    const out = projectPlan(s);
+    for (const row of out.yearly) expect(row.heasDetail.drawn).toBe(0);
+  });
+
+  it("conservation holds with HEAS drawing and accruing", () => {
+    const s = {
+      ...mkState({
+        endAge: 72, assets: [mkAsset()],
+        plan: { client: { currentAge: 67 }, heas: { enabled: true, propertyId: "ppr1" } },
+      }),
+      properties: [heasProp()],
+    };
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `HEAS fixture, year ${y}`);
   });
 });

@@ -119,6 +119,21 @@
 //           affects the age pension assessment, never actual net
 //           worth, so the whole gift is a leak here, the same shape as
 //           goalSpend just above)
+//         − heasDrawn − heasInterest (spec 21b, Commit 5: HEAS lives
+//           OUTSIDE row.liabilities — see deterministic.js's own header
+//           on why — so its balance growth needs its own term. A
+//           drawdown credits household cash (already inside `income`
+//           above, folded into `inc` the same way the age pension's
+//           own entitlement is) while the loan balance grows by the
+//           SAME amount plus this FY's capitalised interest; row.netAssets
+//           subtracts the closing balance directly. Net effect: the
+//           `+drawn` cash gain is exactly cancelled by subtracting the
+//           full balance growth here, leaving only `−interest` as a
+//           real, cash-free loss to net worth — the mirror image of
+//           liabilityRevaluation's own `+ drawdown` add-back for an
+//           ordinary purchase loan, just folded into one combined term
+//           here since HEAS has no separate "interest" row of its own
+//           the way row.liabilities does)
 //         + helpRepayment (HELP-as-liability follow-up fix: HELP/HECS
 //           now lives in row.liabilities like any other debt, so its
 //           balance is inside openingN/closingN and its indexation nets
@@ -242,7 +257,7 @@ export function computeYearFlows(out, y) {
     ? prev.netAssets
     : row.openingBalance + row.wcaDetail.opening
       + sumVals(row.superDetail, "opening") + sumVals(row.pensionDetail ?? {}, "opening")
-      - sumVals(row.liabilities, "opening");
+      - sumVals(row.liabilities, "opening") - (row.heasDetail?.opening ?? 0);
   const closingN = row.netAssets;
 
   const superEarningsNet = sumVals(row.superDetail, "earnings") - sumVals(row.superDetail, "earningsTax");
@@ -365,6 +380,25 @@ export function computeYearFlows(out, y) {
   // per-month), so no further derivation is needed here.
   const giftsPaid = row.giftsPaid ?? 0;
 
+  // --- HEAS (spec 21b, Commit 5) — a genuine new money flow: a
+  // drawdown credits household cash (folded into `row.income` the
+  // SAME way the age pension's own entitlement is — deterministic.js's
+  // `inc`), while SIMULTANEOUSLY the loan balance grows by that exact
+  // amount PLUS this FY's capitalised interest — heasDetail lives
+  // OUTSIDE row.liabilities (see deterministic.js's own header on why),
+  // so row.netAssets subtracts heasDetail.closing directly and this
+  // growth needs its own term here, the same shape liabilityRevaluation's
+  // own `+ drawdown` already establishes for an ordinary purchase loan:
+  // the drawdown itself is a wash (+cash via income, −liability via
+  // closingN — nets to zero) and only the CAPITALISED INTEREST is a
+  // genuine, cash-free loss to net worth. One term covers both: the
+  // household's `+drawn` cash gain already inside `income` above is
+  // exactly cancelled by subtracting the FULL balance growth
+  // (drawn + interest) here, leaving only `−interest` as the residual —
+  // matching what closingN actually reflects.
+  const heasDrawn = row.heasDetail?.drawn ?? 0;
+  const heasInterest = row.heasDetail?.interest ?? 0;
+
   // --- HELP/HECS (HELP-as-liability follow-up fix) — folded into the
   // SAME row.liabilities map as ordinary loans (deterministic.js), so
   // its opening/closing are already inside openingN/closingN and its
@@ -428,6 +462,7 @@ export function computeYearFlows(out, y) {
     lmiPremium,
     goalSpend,
     giftsPaid,
+    heasDrawn, heasInterest,
     helpRepayment,
     adviserFeeFromSuper, adviserFeeCash,
   };
@@ -458,7 +493,7 @@ export function checkYearConservation(out, y, ctx) {
     - f.surplusSpent + f.unfundedCashflow - f.divReleaseFromSuper
     + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
     - f.propertySaleCosts - f.superInsurancePremium
-    - f.goalSpend - f.giftsPaid + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash;
+    - f.goalSpend - f.giftsPaid - f.heasDrawn - f.heasInterest + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash;
 
   const gap = f.delta - expected;
   const tol = Math.max(0.05, Math.abs(f.closingN) * 1e-6);
@@ -508,11 +543,21 @@ export function decomposeNetWorthChange(out, y) {
     openingN: f.openingN,
     closingN: f.closingN,
     delta: f.delta,
-    income: f.income + f.sgInflow + f.govSuperInflow,
+    // HEAS's drawdown (spec 21b, Commit 5) is loan proceeds, not earned
+    // income — pulled OUT of the income bucket entirely (not relocated
+    // elsewhere: it's already fully cancelled by row.netAssets's own
+    // subtraction of the closing balance, the same "a same-total move
+    // between two already-counted pockets nets to zero by construction"
+    // reasoning this file already applies to a pension's own
+    // commencement transfer — see pensionEarningsNet's header). Its
+    // capitalised interest, unlike the drawdown, has no offsetting
+    // pocket anywhere — a real, cash-free cost — folded into the
+    // interest bucket alongside liability interest.
+    income: f.income + f.sgInflow + f.govSuperInflow - f.heasDrawn,
     growth: f.growth + f.propertyGrowth + f.helpRepayment,
     tax: f.tax + f.contributionsTax + f.divReleaseFromSuper,
     expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,
-    interest: f.liabilityInterest,
+    interest: f.liabilityInterest + f.heasInterest,
     fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash + f.superInsurancePremium,
     oneOffs: f.propertyOneOffCost - f.propertySaleCosts - f.goalSpend - f.giftsPaid + f.fhsssRelease - f.fhsssSuperDebit,
   };

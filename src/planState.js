@@ -355,6 +355,7 @@ export function defaultPlan(now = new Date()) {
     superAccounts: [],
     pensions: [],
     gifts: [],
+    heas: createHeas(),
     workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
     adviserFees: defaultAdviserFees(),
     implementation: defaultImplementation(),
@@ -1627,6 +1628,46 @@ export function normaliseGifts(gifts, plan) {
   return gifts.map((g) => clampGift(g, plan));
 }
 
+// --- Home Equity Access Scheme (spec 21b, Commit 5) -------------------------
+//
+// A single, plan-level election (not a repeatable row-list like gifts/
+// pensions — a household can only ever have one HEAS loan) — an
+// optional accruing government loan secured against ONE property.
+// `propertyId` can only be cross-validated once `properties` itself is
+// known, which clampPlan (this function's own caller) doesn't have
+// access to — properties are normalised at the OUTER hydrate() level
+// (same two-stage reason plan.implementation's allocations are refined
+// there too, see hydrate()'s own comment on refineImplementationAllocations).
+// So clampHeas here is deliberately "basic" (type/shape only); a stale
+// or deleted propertyId is cross-validated and dropped in hydrate()'s
+// second stage, the same dangling-reference-falls-back-gracefully
+// convention as surplusTargetId/divTaxReleaseAccountId elsewhere in
+// this schema.
+export function createHeas() {
+  return { enabled: false, propertyId: null };
+}
+
+export function clampHeas(h) {
+  return {
+    enabled: h?.enabled === true,
+    propertyId: typeof h?.propertyId === "string" && h.propertyId ? h.propertyId : null,
+  };
+}
+
+// Second-stage refinement (hydrate() only, once `properties` is known):
+// a propertyId not among the household's OWN properties can never be a
+// real HEAS security — reset to unconfigured (which also resets
+// `enabled`, since an enabled HEAS with no valid security is the exact
+// "impossible state must be unenterable" case CLAUDE.md's Input
+// integrity section names).
+export function refineHeasProperty(heas, properties) {
+  const validPropertyId = properties.some((p) => p.id === heas.propertyId) ? heas.propertyId : null;
+  return {
+    enabled: heas.enabled && validPropertyId != null,
+    propertyId: validPropertyId,
+  };
+}
+
 function nextAssetNumber(existing) {
   let max = 0;
   for (const a of existing) {
@@ -2010,6 +2051,10 @@ export function clampPlan(plan, profiles = {}) {
   // every other one-off event, so only needs client/partner/endAge,
   // already resolved above.
   const gifts = normaliseGifts(plan.gifts, { client, partner, endAge, keyDates });
+  // Home Equity Access Scheme (spec 21b, Commit 5) — BASIC clamp only;
+  // propertyId is cross-validated in hydrate()'s second stage, once
+  // `properties` is known (see refineHeasProperty's own header).
+  const heas = clampHeas(plan.heas);
   // Adviser fees (Implementation/Rates spec, Commit 2) — validated
   // against superAccounts, which is already known here; implementation
   // is only BASIC-clamped at this stage (see clampImplementationBasic's
@@ -2033,7 +2078,7 @@ export function clampPlan(plan, profiles = {}) {
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
   const planSoFar = {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, pensions, gifts, workingCash, children,
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, pensions, gifts, heas, workingCash, children,
     adviserFees, implementation,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,
@@ -2314,10 +2359,13 @@ export function clampAllToPlan(state, profiles = {}) {
   });
   // Flow of initial funds (Commit 2), second stage: targetAssetId needs
   // assets/goals, neither of which clampPlan can see (siblings of
-  // plan, not children of it) — refined here, now that both exist.
+  // plan, not children of it) — refined here, now that both exist. HEAS
+  // (spec 21b, Commit 5) needs the same second stage against
+  // `properties`, for the same reason — see refineHeasProperty's own header.
   const planWithRefinedImplementation = {
     ...plan,
     implementation: refineImplementationAllocations(plan.implementation, assets, goals),
+    heas: refineHeasProperty(plan.heas, properties),
   };
   return { ...state, plan: planWithRefinedImplementation, assets, cashflows, settings, liabilities, properties, goals };
 }
@@ -2890,12 +2938,19 @@ export function hydrate(json, profiles = {}) {
     const goalsForImplementation = normaliseGoals(raw.goals, plan, assets);
     const hydratedSuperContributions = hydrateSuperContributions(cf.superContributions, plan, superAccountOwnerById, incomeRowIds);
     const hydratedLiabilities = normaliseLiabilities(raw.liabilities, plan, assets, raw.properties);
+    const properties = normaliseProperties(raw.properties, plan, assets);
     const state = {
       schemaVersion: SCHEMA_VERSION,
       // Flow of initial funds (Commit 2), second stage — see
       // clampAllToPlan's own comment for why this can't happen inside
-      // clampPlan itself.
-      plan: { ...plan, implementation: refineImplementationAllocations(plan.implementation, assets, goalsForImplementation) },
+      // clampPlan itself. HEAS (spec 21b, Commit 5) needs the same
+      // second stage, for the same reason — see refineHeasProperty's
+      // own header.
+      plan: {
+        ...plan,
+        implementation: refineImplementationAllocations(plan.implementation, assets, goalsForImplementation),
+        heas: refineHeasProperty(plan.heas, properties),
+      },
       assets,
       cashflows: {
         income,
@@ -2908,7 +2963,7 @@ export function hydrate(json, profiles = {}) {
         superWithdrawals: hydrateSuperWithdrawals(cf.superWithdrawals, plan, superAccountOwnerById),
       },
       liabilities: hydratedLiabilities,
-      properties: normaliseProperties(raw.properties, plan, assets),
+      properties,
       goals: goalsForImplementation,
       settings: normaliseSettings(raw.settings, assets, plan, {
         liabilities: hydratedLiabilities, goals: goalsForImplementation, superContributions: hydratedSuperContributions,
