@@ -29,6 +29,7 @@ export const SCHEMA_VERSION = 17;
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION, OUTPUT_SUBJECT_FORMS } from "./router.js";
 import { isValidAnchorId } from "./keyDates.js";
+import { SUPER_RATES_BASE, superReleaseAge } from "./data/superRates.js";
 
 // --- id generation ---------------------------------------------------
 
@@ -321,6 +322,7 @@ export function defaultPlan(now = new Date()) {
     start,
     keyDates: [],
     superAccounts: [],
+    pensions: [],
     workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
     adviserFees: defaultAdviserFees(),
     implementation: defaultImplementation(),
@@ -1368,6 +1370,104 @@ export function normaliseSuperWithdrawals(rows, plan, superAccountOwnerById) {
   return rows.map((sw) => clampSuperWithdrawal(sw, plan, superAccountOwnerById));
 }
 
+// --- pension phase (spec 20, Commit 1) --------------------------------------
+//
+// Live on plan.pensions, alongside plan.superAccounts — same reasoning
+// as super itself (Tier 1.2's own header): always person-owned, never
+// joint, so it belongs with identity rather than a top-level list like
+// goals/liabilities/properties.
+//
+// A pension is always COMMENCED from within the projection — there is
+// no "already in pension phase at plan start" input; sourceAccountId
+// must name an existing plan.superAccounts entry owned by the SAME
+// person. taxFreeProportion is intentionally always null here: the
+// real proportion is fixed once, at the commencement MONTH, from the
+// source account's THEN-current components — a value only the engine
+// (deterministic.js), walking the month-by-month projection, can ever
+// know. This field exists on the schema purely to document that
+// contract; clampPension never derives or stores a real number into it.
+export const PENSION_TYPES = ["abp", "ttr"];
+
+// The earliest age the OWNER may legally COMMENCE a pension of this
+// type — deterministic.js's own condition-of-release gate, read here
+// only for createPension's smart default (see below). NOT used to
+// bound commenceAt's own age at input time: like every other client-
+// anchored DateRef (contributions/withdrawals/liability dates/goal
+// dates — see clampFromTo's own callers), an age-kind commenceAt is a
+// literal CLIENT age, regardless of the pension's own owner, so it
+// cannot be compared against an OWNER-scoped gate at this layer without
+// the same owner/client mismatch schedule.js's superWithdrawal gating
+// already solves correctly: bound the row's window at input time (any
+// age is enterable, exactly as a withdrawal row is), then defer/gate
+// the actual event engine-side against the owner's real age each plan
+// year. deterministic.js is the sole place this gate is enforced.
+//   - ABP: age 65, OR retirement at/after preservation age (60) —
+//     exactly superReleaseAge's own two-condition gate (data/superRates.js).
+//   - TTR: preservation age only (60) — no retirement condition.
+export function pensionMinCommenceAge(type, ownerRetirementAge, rates = SUPER_RATES_BASE) {
+  return type === "ttr" ? rates.preservationAge : superReleaseAge(ownerRetirementAge, rates);
+}
+
+export function createPension(plan, existing = [], superAccounts = [], owner = "client") {
+  const account = superAccounts.find((s) => s.owner === owner) ?? null;
+  const person = owner === "partner" ? plan.partner : plan.client;
+  const label = personDisplayName(person, owner === "partner" ? "Partner" : "Client");
+  return {
+    id: uid("pn"),
+    name: `Pension — ${label}`,
+    owner,
+    sourceAccountId: account ? account.id : null,
+    // Smart default (spec 20 Commit 5's own instruction): the owner's
+    // retirement key date, not a bare age — tracks it live until the
+    // user overrides.
+    commenceAt: anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"),
+    type: (person?.currentAge ?? 0) >= SUPER_RATES_BASE.unrestrictedAccessAge ? "abp" : "ttr",
+    commenceAmount: null, // null = whole balance
+    reversionary: false,
+    taxFreeProportion: null, // see module header — engine-derived only, never stored here
+    allocation: { mode: "profile", profile: account?.allocation?.mode === "profile" ? account.allocation.profile : null },
+    icrPct: 0,
+  };
+}
+
+export function clampPension(pn, plan, superAccounts = [], profiles = {}) {
+  const owner = pn.owner === "partner" && plan.partner ? "partner" : "client";
+  const superAccountOwnerById = new Map(superAccounts.map((s) => [s.id, s.owner]));
+  // A pension's source must be a super account belonging to the SAME
+  // person — the same input-integrity rule clampSuperContribution/
+  // clampSuperWithdrawal already enforce for their own accountId (a
+  // pension crediting one person's future income stream from the OTHER
+  // person's super would be a real misattribution, not cosmetic).
+  const sourceAccountId = superAccountOwnerById.get(pn.sourceAccountId) === owner ? pn.sourceAccountId : null;
+  const type = PENSION_TYPES.includes(pn.type) ? pn.type : "abp";
+  // Client-anchored, like every sibling row's from/to/at (contributions,
+  // withdrawals, liability dates, goal dates) — see pensionMinCommenceAge's
+  // own header for why the condition-of-release gate is NOT applied here:
+  // this age represents the CLIENT's age regardless of the pension's own
+  // owner, so bounding it against an OWNER-scoped gate would be wrong
+  // whenever owner is "partner" and the two ages diverge. deterministic.js
+  // is the sole place the gate is enforced, against the owner's real age.
+  const commenceAt = clampDateRef(pn.commenceAt ?? anchorRef("retirement-client"), plan.client.currentAge, plan.endAge, plan);
+  return {
+    id: typeof pn.id === "string" && pn.id ? pn.id : uid("pn"),
+    name: typeof pn.name === "string" && pn.name.trim() ? pn.name : "Pension",
+    owner,
+    sourceAccountId,
+    commenceAt,
+    type,
+    commenceAmount: pn.commenceAmount == null ? null : clampNumber(pn.commenceAmount, 0),
+    reversionary: pn.reversionary === true,
+    taxFreeProportion: null,
+    allocation: clampAllocation(pn.allocation, profiles),
+    icrPct: clampNumber(pn.icrPct, 0, 100),
+  };
+}
+
+export function normalisePensions(pensions, plan, superAccounts = [], profiles = {}) {
+  if (!Array.isArray(pensions)) return [];
+  return pensions.map((pn) => clampPension(pn, plan, superAccounts, profiles));
+}
+
 function nextAssetNumber(existing) {
   let max = 0;
   for (const a of existing) {
@@ -1738,6 +1838,11 @@ export function clampPlan(plan, profiles = {}) {
   // belong with identity rather than with the joint-ownable financial
   // asset list.
   const superAccounts = normaliseSuperAccounts(plan.superAccounts, { client, partner }, profiles);
+  // Pension phase (spec 20, Commit 1) — validated against superAccounts
+  // and the now-final client/partner retirementAge (the condition-of-
+  // release gate depends on it), same ordering reason as adviserFees
+  // below.
+  const pensions = normalisePensions(plan.pensions, { client, partner, endAge, keyDates }, superAccounts, profiles);
   // Adviser fees (Implementation/Rates spec, Commit 2) — validated
   // against superAccounts, which is already known here; implementation
   // is only BASIC-clamped at this stage (see clampImplementationBasic's
@@ -1761,7 +1866,7 @@ export function clampPlan(plan, profiles = {}) {
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
   const planSoFar = {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, workingCash, children,
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, pensions, workingCash, children,
     adviserFees, implementation,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,

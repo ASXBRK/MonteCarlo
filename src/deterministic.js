@@ -60,7 +60,7 @@ import { spouseSuperRatesFor, spouseContributionOffset, coContribution, listo } 
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
 import { decomposeNetWorthChange } from "./conservationCheck.js";
-import { dependentChildrenCountInFY } from "./planState.js";
+import { dependentChildrenCountInFY, pensionMinCommenceAge } from "./planState.js";
 import {
   createPool, poolAdd, poolConsume, poolNewFy,
   poolDeemedReacquisition, preReformTaxableGain,
@@ -246,9 +246,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // Pay `want` real dollars from a super account, proportioning
   // tax-free/taxable at the CURRENT interest — recalculated at every
   // payment (this is what distinguishes accumulation interests from
-  // pensions, which fix the proportion once at commencement; pensions
-  // are out of scope for this tier). Never cascades to another
-  // account — same convention as explicit financial-asset withdrawals.
+  // pensions, which fix the proportion once at commencement — see the
+  // pension phase section below). Never cascades to another account —
+  // same convention as explicit financial-asset withdrawals.
   function withdrawFromSuper(id, want) {
     const balance = superBal[id];
     const paid = Math.min(want, balance);
@@ -257,6 +257,59 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     superTaxFree[id] -= paid * taxFreeFraction;
     superBal[id] -= paid;
     return paid;
+  }
+
+  // --- pension phase (spec 20, Commit 1) -------------------------------------
+  //
+  // A pension is always COMMENCED from an existing super account WITHIN
+  // the projection — there is no "already in pension phase at plan
+  // start" input (planState.js's own header note). Its own balance
+  // series/detail therefore always opens at 0, the same shape as a
+  // planned (not-yet-purchased) property's opening value — see
+  // conservationCheck.js's own caveat on why randomScenario() must
+  // never generate a pension with a nonzero opening balance either.
+  //
+  // Growth (Commit 1): same 15%/10% earnings-tax haircut as accumulation
+  // super, a deliberate placeholder — Commit 3 ("the reason pension
+  // phase exists") replaces this with a zero-tax rate for an ABP in
+  // retirement phase and leaves a TTR taxed exactly as it is here.
+  const pensionRows = state.plan.pensions ?? [];
+  const pensionIds = pensionRows.map((pn) => pn.id);
+  const pensionMeta = {};
+  for (const pn of pensionRows) {
+    const { incomeNominal, growthNominal } = assetReturnComponents(pn, profiles);
+    const icr = pn.icrPct / 100;
+    const rates = superRatesFor(fy0, bracketMode, cpi);
+    const growthTaxRate = rates.earningsTaxRate * (2 / 3);
+    pensionMeta[pn.id] = {
+      rate: toMonthlyReal(incomeNominal * (1 - rates.earningsTaxRate) + growthNominal * (1 - growthTaxRate) - icr, cpi),
+      grossRate: toMonthlyReal(incomeNominal + growthNominal - icr, cpi),
+      owner: pn.owner,
+      sourceAccountId: pn.sourceAccountId,
+      type: pn.type,
+    };
+  }
+  const pensionBal = {};
+  const pensionSeries = {};
+  // Taxable component = balance − pensionTaxFree, same shape as super's
+  // own superTaxFree — but UNLIKE super, never recalculated from the
+  // live ratio after commencement (the proportioning rule, see below).
+  const pensionTaxFree = {};
+  // Fixed at the commencement MONTH from the source account's
+  // then-current components, and never recomputed again — "the single
+  // most important mechanical difference from accumulation" (spec 20's
+  // own words). Every subsequent debit (growth touches neither side;
+  // a future payment/commutation, Commits 2/5, will) reduces
+  // pensionTaxFree by exactly `debit × this fixed proportion`, NOT by
+  // the live balance ratio the way withdrawFromSuper's own taxFreeFraction is.
+  const pensionFixedProportion = {};
+  const pensionCommenced = {}; // guards the one-off transfer firing at most once per pension
+  for (const pn of pensionRows) {
+    pensionBal[pn.id] = 0;
+    pensionSeries[pn.id] = new Float64Array(months + 1);
+    pensionTaxFree[pn.id] = 0;
+    pensionFixedProportion[pn.id] = 0;
+    pensionCommenced[pn.id] = false;
   }
 
   // Concessional carry-forward (5-year FIFO) SEEDS from the plan's
@@ -300,6 +353,34 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     p.status === "owned" ? p.currentValue > 0 : p.priceToday > 0);
   const yearStartIdx = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
   const julyOf = (y) => (y === 0 ? (state.plan.start.month === 7 ? 0 : null) : yearStartIdx(y));
+
+  // Pension commencement month (spec 20, Commit 1) — resolved once
+  // here, not per month, same as a property's own purchaseMonth just
+  // above. commenceAt's own age (if age-kind) is CLIENT-anchored, per
+  // convention (see planState.js's pensionMinCommenceAge header) — but
+  // the condition-of-release GATE is scoped to the pension's OWNER, so
+  // it cannot be enforced by bounding commenceAt itself (see that same
+  // header). Instead: resolve commenceAt to its requested plan year,
+  // then walk FORWARD (never back) to the first plan year the owner's
+  // OWN age actually meets the type's gate — exactly how
+  // schedule.js's superWithdrawal payments are gated against the
+  // owner's real age each month, independent of the row's own window.
+  const ownerAgeAt = (owner, y) => (owner === "partner" ? schedule.partnerAges?.[y] : schedule.clientAges[y]);
+  const pensionCommenceMonth = {};
+  for (const pn of pensionRows) {
+    const meta = pensionMeta[pn.id];
+    // No valid (or currently-included) source account — can never fire.
+    if (!meta.sourceAccountId || superBal[meta.sourceAccountId] === undefined) {
+      pensionCommenceMonth[pn.id] = null;
+      continue;
+    }
+    const ownerPerson = meta.owner === "partner" ? state.plan.partner : state.plan.client;
+    const gateAge = pensionMinCommenceAge(meta.type, ownerPerson?.retirementAge);
+    let y = resolveRef(pn.commenceAt, state.plan, schedule, "client").planYear;
+    while (y < schedule.planYears && ownerAgeAt(meta.owner, y) < gateAge) y++;
+    pensionCommenceMonth[pn.id] = y < schedule.planYears ? julyOf(y) : null; // null = never fires within the projection (convention 5's partial-first-year skip, or the gate never met)
+  }
+
   // Main residence exemption (spec 19 Commit 5) — resolves a
   // mainResidence object's DateRef-anchored events to literal ISO
   // calendar dates (1 July of each event's resolved plan year, the
@@ -1014,6 +1095,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }])),
     superClosing: 0,
     superCapUsage: { client: null, partner: null },
+    // Per-pension detail (spec 20, Commit 1): opening/closing balance,
+    // the commencement transfer (nonzero only in the pension's own
+    // commencement FY), and fund earnings/earnings-tax — the SAME
+    // 15%/10% haircut shape as superDetail above (a Commit 1 placeholder
+    // — Commit 3 zero-rates an ABP in retirement phase). Payments/
+    // commutations/taxFreeClosing arrive in Commits 2/5, the same
+    // incremental growth superDetail's own fields went through across
+    // Tier 1.2's four commits. taxFreeProportion is null until the
+    // pension's own commencement fires this run, then fixed for every
+    // later year — the proportioning rule (see pensionFixedProportion
+    // in the engine setup above).
+    pensionDetail: Object.fromEntries(pensionIds.map((id) => [id, {
+      opening: 0, commencementAmount: 0, earnings: 0, earningsTax: 0, closing: 0, taxFreeProportion: null,
+    }])),
+    pensionClosing: 0,
     // Focus Commit 3 (docs/specs/12-focus-views.md) follow-on: the
     // FHSSS running-balance snapshot (src/fhsss.js's fhsssBal) was
     // tracked internally but never exposed — a Focus view showing
@@ -1415,6 +1511,55 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           row.superDetail[id].earnings += grossGrowth;
           row.superDetail[id].earningsTax += grossGrowth - netGrowth;
         }
+
+        // Pension phase (spec 20, Commit 1) — grows exactly like super
+        // above, using the SAME 15%/10% haircut (Commit 1's own
+        // placeholder — see pensionMeta's header). Zero balance before
+        // commencement, so this is a no-op until the transfer below
+        // fires, the same shape as a not-yet-purchased property's own
+        // growth-of-zero.
+        for (const id of pensionIds) {
+          const pm = pensionMeta[id];
+          const shock = shockFor(id, m);
+          const grossGrowth = pensionBal[id] * (pm.grossRate + shock);
+          const netGrowth = pensionBal[id] * (pm.rate + shock);
+          pensionBal[id] += netGrowth;
+          row.pensionDetail[id].earnings += grossGrowth;
+          row.pensionDetail[id].earningsTax += grossGrowth - netGrowth;
+        }
+        // Commencement — a one-off transfer FROM an existing super
+        // account INTO the (freshly-grown, still-zero) pension account
+        // above, fired at most once per pension, at its resolved month
+        // (pensionCommenceMonth, computed once above — see its own
+        // header for the condition-of-release gating). A TRANSFER, not
+        // new money: both pockets are already inside netAssets (via
+        // superClosing/pensionClosing), so this needs no conservation
+        // term of its own — see conservationCheck.js's own reasoning
+        // for why a same-total move between two already-counted pockets
+        // is invisible to the invariant by construction. Components
+        // transfer PROPORTIONALLY from the source (spec's own words);
+        // the resulting ratio is fixed here, once, for the pension's
+        // entire remaining life — the proportioning rule, and the
+        // single most important mechanical difference from accumulation
+        // (which recalculates the ratio on every payment instead).
+        for (const pn of pensionRows) {
+          if (pensionCommenced[pn.id] || pensionCommenceMonth[pn.id] !== m) continue;
+          pensionCommenced[pn.id] = true;
+          const pm = pensionMeta[pn.id];
+          const sourceBal = superBal[pm.sourceAccountId];
+          const amount = Math.min(pn.commenceAmount == null ? sourceBal : pn.commenceAmount, Math.max(0, sourceBal));
+          if (amount <= 0) continue; // nothing to commence with — leaves the pension permanently at 0, same as a purchase event with no funds
+          const taxFreeFraction = sourceBal > 0 ? superTaxFree[pm.sourceAccountId] / sourceBal : 0;
+          const taxFreeAmount = amount * taxFreeFraction;
+          superBal[pm.sourceAccountId] -= amount;
+          superTaxFree[pm.sourceAccountId] -= taxFreeAmount;
+          pensionBal[pn.id] += amount;
+          pensionTaxFree[pn.id] += taxFreeAmount;
+          pensionFixedProportion[pn.id] = taxFreeFraction; // fixed for life — see the block header above
+          row.pensionDetail[pn.id].commencementAmount += amount;
+          row.pensionDetail[pn.id].taxFreeProportion = taxFreeFraction;
+        }
+
         for (const id of superIds) {
           const flows = schedule.superFlows[id];
           if (!flows) continue;
@@ -2322,6 +2467,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // silently missing from the reported closing balance (see the
         // comment where this used to live, earlier in this function).
         for (const id of superIds) superSeries[id][m + 1] = superBal[id];
+        for (const id of pensionIds) pensionSeries[id][m + 1] = pensionBal[id];
         // Surplus/deficit allocation spec, Commit 1: liabSeries is
         // ALSO snapshotted too early for the same reason — the
         // per-liability loop (above, earlier this month) sets it right
@@ -3121,6 +3267,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
+    for (const id of pensionIds) row.pensionDetail[id].opening = pensionSeries[id][yearStart(y)];
     // Contribution splitting (spec 19 Commit 6 completion) — the actual
     // balance move already happened at the top of this year's loop
     // (before `opening`, above, was even read); this just reports it.
@@ -3145,6 +3292,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.superDetail[id].closing = superSeries[id][yearEnd(y)];
       row.superDetail[id].taxFreeClosing = superTaxFree[id];
       row.superClosing += superSeries[id][yearEnd(y)];
+    }
+    for (const id of pensionIds) {
+      row.pensionDetail[id].closing = pensionSeries[id][yearEnd(y)];
+      // Reported once the pension has actually commenced (fixed at that
+      // point, for life — see pensionFixedProportion's own header);
+      // still null every year before commencement, and 0 if it never
+      // commenced at all within this projection (no source funds, or
+      // the condition-of-release gate never met).
+      if (pensionCommenced[id]) row.pensionDetail[id].taxFreeProportion = pensionFixedProportion[id];
+      row.pensionClosing += pensionSeries[id][yearEnd(y)];
     }
 
     // Government co-contribution + LISTO (spec 19 Commit 6) — credited
@@ -3211,7 +3368,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.properties[pid].value = propVal[pid];
       row.propertyClosing += propVal[pid];
     }
-    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.wcaClosing - row.liabilitiesClosing;
+    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.pensionClosing + row.wcaClosing - row.liabilitiesClosing;
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.

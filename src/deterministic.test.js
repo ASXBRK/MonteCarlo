@@ -2543,7 +2543,18 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const couple = Math.random() < 0.4;
     const persons = couple ? ["client", "partner"] : ["client"];
     const years = randInt(2, 4); // ≥2 so at least one non-final year exists
-    const endAge = 40 + years - 1;
+    // Pension phase (spec 20, Commit 1) can only ever fire within
+    // superReleaseAge's 60-65 window — unreachable from the ORIGINAL
+    // fixed age-40 start over a 2-4 year projection. Stratified, not
+    // uniform, same reasoning as randomIncome()'s own header: a plain
+    // rand(40, 65) start would rarely land close enough to 60 for the
+    // gate to bind within such a short window. 65% of runs keep the
+    // ORIGINAL age-40 start byte-for-byte (every literal `40` below is
+    // now `startAge`, but startAge === 40 whenever !olderCohort) — zero
+    // behavioural change to the pre-existing coverage those runs give.
+    const olderCohort = Math.random() < 0.35;
+    const startAge = olderCohort ? randInt(56, 63) : 40;
+    const endAge = startAge + years - 1;
 
     const assets = Array.from({ length: randInt(1, 3) }, (_, i) => randomAsset(`a${i}`));
 
@@ -2565,6 +2576,35 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       contributionSplitPct: couple && Math.random() < 0.4 ? rand(1, 85) : 0,
     }));
 
+    // Pension phase (spec 20, Commit 1) — only for the older cohort
+    // (see startAge's own header: unreachable otherwise). Each person
+    // independently 50% likely to commence a pension from THEIR OWN
+    // super account, at a random age spanning the whole window
+    // (sometimes before the gate — exercising the deferral path;
+    // sometimes at/after it — exercising an actual commencement),
+    // either type, either whole-balance or a partial amount (sometimes
+    // 0, when the source account itself is zero-balance — exercising
+    // "nothing to commence with").
+    const pensions = [];
+    if (olderCohort) {
+      for (const p of persons) {
+        if (Math.random() < 0.5) {
+          const acct = superAccounts.find((sa) => sa.owner === p);
+          pensions.push({
+            id: `pn_${p}`, name: `Pension ${p}`, owner: p,
+            sourceAccountId: acct.id,
+            commenceAt: { kind: "age", age: randInt(startAge, endAge) },
+            type: pick(["abp", "ttr"]),
+            commenceAmount: Math.random() < 0.5 ? null : rand(0, acct.balance),
+            reversionary: Math.random() < 0.3,
+            taxFreeProportion: null,
+            allocation: randomAllocation(),
+            icrPct: 0,
+          });
+        }
+      }
+    }
+
     // Redundancy and ETP (spec 19 Commit 3) — sometimes one person's
     // income row terminates: the row's own `to` is forced to match
     // termination.at (clampIncomeRow's own rule, mirrored by hand since
@@ -2574,11 +2614,11 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // whole-of-income cap.
     const income = persons.map((p) => {
       const terminates = Math.random() < 0.3;
-      const at = terminates ? randInt(40, endAge) : null;
+      const at = terminates ? randInt(startAge, endAge) : null;
       return employmentRow({
         id: `sal_${p}`, owner: p, amount: randomIncome(),
         frequency: pick(["monthly", "annual"]),
-        from: { kind: "age", age: 40 }, to: { kind: "age", age: terminates ? at : 120 },
+        from: { kind: "age", age: startAge }, to: { kind: "age", age: terminates ? at : 120 },
         sgApplies: Math.random() < 0.9,
         termination: terminates ? {
           enabled: true, at: { kind: "age", age: at },
@@ -2586,13 +2626,13 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           type: pick(["genuineRedundancy", "resignation"]),
           etpTaxableComponent: rand(0, 320000), // spans under/over both caps
           unusedLeave: rand(0, 20000),
-        } : { enabled: false, at: { kind: "age", age: 40 }, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 },
+        } : { enabled: false, at: { kind: "age", age: startAge }, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 },
       });
     });
 
     const expenses = [cf({
       id: "exp1", assetId: null, amount: rand(20000, 60000) / 12, frequency: "monthly",
-      from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+      from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
     })];
 
     // FHSSS (Document Set Commit 3): a voluntary contribution flagged
@@ -2607,7 +2647,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           id: `sc_amt_${p}`, owner: p, accountId: `su_${p}`,
           type: pick(["salarySacrifice", "personalDeductible"]),
           basis: "amount", amount: rand(1000, 15000), frequency: "annual",
-          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+          from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
           fhsssEligible: Math.random() < 0.5,
         }));
       }
@@ -2615,7 +2655,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         superContributions.push(scRow({
           id: `sc_cap_${p}`, owner: p, accountId: `su_${p}`,
           type: pick(["salarySacrifice", "personalDeductible"]), basis: "toConcessionalCap",
-          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+          from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
         }));
       }
       // Government co-contribution (spec 19 Commit 6) — a personal NCC,
@@ -2625,7 +2665,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         superContributions.push(scRow({
           id: `sc_ncc_${p}`, owner: p, accountId: `su_${p}`,
           type: "personalNonDeductible", basis: "amount", amount: rand(200, 1500), frequency: "annual",
-          from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+          from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
         }));
       }
     }
@@ -2638,7 +2678,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       superContributions.push(scRow({
         id: "sc_spouse", owner: receivingOwner, accountId: `su_${receivingOwner}`,
         type: "spouse", basis: "amount", amount: rand(500, 4000), frequency: "annual",
-        from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+        from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
       }));
     }
 
@@ -2661,11 +2701,11 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         // it (the case that changes interest accrual and recomputes
         // the payment mid-run — the actual new money-flow-shaped code
         // path this invariant needs to exercise), and beyond its own
-        // end (never fires) — a plain rand(40, endAge) rarely lands
-        // exactly at either edge, so pick explicitly covers all three.
+        // end (never fires) — a plain rand(startAge, endAge) rarely
+        // lands exactly at either edge, so pick explicitly covers all three.
         rateType: pick(["variable", "fixed"]),
         fixedRatePct: rand(3, 7),
-        fixedUntil: { kind: "age", age: pick([39, randInt(40, endAge), endAge + 5]) },
+        fixedUntil: { kind: "age", age: pick([startAge - 1, randInt(startAge, endAge), endAge + 5]) },
         revertRatePct: pick([null, rand(3, 9)]),
         commencedOn: pick([null, "2022-01-01"]),
       };
@@ -2673,14 +2713,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         liab.extraRepayments = [{
           id: "er1", label: "Extra", amount: rand(200, 40000), // sometimes far beyond affordable
           frequency: pick(["monthly", "annual"]),
-          from: { kind: "age", age: 40 }, to: { kind: "age", age: randInt(41, endAge) },
+          from: { kind: "age", age: startAge }, to: { kind: "age", age: randInt(startAge + 1, endAge) },
           indexBasis: pick(["none", "cpi"]), indexExtraPct: 0,
         }];
       }
       if (Math.random() < 0.5) {
         liab.oneOffRepayments = [{
           id: "or1", label: "Lump sum", amount: rand(1000, 80000),
-          at: { kind: "age", age: randInt(40, endAge) },
+          at: { kind: "age", age: randInt(startAge, endAge) },
         }];
       }
       liabilities.push(liab);
@@ -2698,7 +2738,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       goals.push({
         id: `gl${i}`, label: `Goal ${i}`,
         targetAmount: rand(2000, 90000),
-        targetAt: { kind: "age", age: randInt(40, endAge) },
+        targetAt: { kind: "age", age: randInt(startAge, endAge) },
         fundedFrom: fundFromAsset ? pick(assets).id : "surplus",
         indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: 0,
       });
@@ -2717,11 +2757,11 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const properties = [];
     if (Math.random() < 0.5) {
       const firstHomeBuyer = Math.random() < 0.5;
-      const purchaseAge = randInt(40, endAge);
+      const purchaseAge = randInt(startAge, endAge);
       // Main residence exemption and the six-year absence rule (spec 19
       // Commit 5) — sometimes this PPR gets an absence (moved out after
       // purchase, sometimes producing income) and a later sale. The
-      // short 40-endAge window rarely lets an absence actually EXCEED
+      // short startAge-endAge window rarely lets an absence actually EXCEED
       // six years (the dedicated describe block covers that day-count
       // precisely) — this mainly exercises the "still within the
       // window"/isCgt-flip/pool-seeding code paths under real engine
@@ -2770,7 +2810,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         propertyType: pick(["investment", "holiday"]), status: "planned",
         currentValue: 0, acquisitionDate: null, costBase: 0,
         priceToday: rand(300000, 2000000),
-        purchaseAt: { kind: "age", age: 40 },
+        purchaseAt: { kind: "age", age: startAge },
         lvrPct: 0, firstHomeBuyer: false, newBuild: Math.random() < 0.5,
         purchaseCostsPct: 0, dutyOverride: null, growthPct: rand(-2, 6),
         rent: { amount: rand(0, 40000), indexBasis: "none", indexExtraPct: 0 },
@@ -2780,14 +2820,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         landValuePct: pick([40, 60, 80, 100]),
         landTaxOverride: Math.random() < 0.3 ? rand(0, 5000) : null,
         // Property sale (spec 19 Commit 4) — sometimes sold partway
-        // through the projection (always AFTER its own age-40
+        // through the projection (always AFTER its own startAge
         // purchase); both destinations and a randomised cost pair, so
         // both the CGT-via-pool-consumption path and the loan-discharge
         // path (repayLoanThenAsset — inert here since this fixture
         // never draws a purchase loan, lvrPct:0, but still exercises
         // the "no loan to discharge" branch) get exercised.
         sale: Math.random() < 0.3 ? {
-          enabled: true, at: { kind: "age", age: randInt(41, endAge) },
+          enabled: true, at: { kind: "age", age: randInt(startAge + 1, endAge) },
           agentFeesPct: rand(0, 5), settlementCosts: rand(0, 5000),
           proceedsDestination: pick(["repayLoanThenAsset", "asset"]),
           assetId: pick(assets).id,
@@ -2801,8 +2841,25 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // once it hits zero" behaviour) and others don't. MLS (Commit 2) —
     // cover held or not, per person, plus a household with dependent
     // children shifting the family threshold.
-    const client = { currentAge: 40, helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5 };
-    const partner = couple ? { currentAge: 40, helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5 } : null;
+    // retirementAge (Pension phase, spec 20, Commit 1): left UNSET for
+    // the young cohort — clampPlan's own default (currentAge, i.e.
+    // "already retired at the projection's own start") is exactly the
+    // pre-existing behaviour every other describe block in this file
+    // already relies on, so leaving it out here changes nothing for
+    // those 65% of runs. For the older cohort it's set to a value
+    // spanning BELOW, AT, and ABOVE the ABP's own superReleaseAge gate
+    // (60) relative to startAge — sometimes the retirement-based ABP
+    // gate binds earlier than the flat TTR preservation-age gate,
+    // sometimes later, sometimes never within the window at all.
+    const retirementAgeFor = () => (olderCohort ? randInt(startAge, Math.min(endAge, 67)) : undefined);
+    const client = {
+      currentAge: startAge, retirementAge: retirementAgeFor(),
+      helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5,
+    };
+    const partner = couple ? {
+      currentAge: startAge, retirementAge: retirementAgeFor(),
+      helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5,
+    } : null;
 
     // Children + education funding (Input Usability spec, Commit 3) —
     // ages spanning not-yet-born (negative) through already-aged-out
@@ -2895,7 +2952,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     ];
     const adjustments = Array.from({ length: randInt(0, 3) }, (_, i) => {
       const target = pick(ADJUSTMENT_TARGETS_FOR_TEST);
-      const fromAge = randInt(40, endAge);
+      const fromAge = randInt(startAge, endAge);
       const toAge = randInt(fromAge, endAge);
       let owner = "client";
       let superAccountId = null;
@@ -2942,7 +2999,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         plan: {
           household: couple ? "couple" : "single",
           client, partner, children,
-          superAccounts, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
+          superAccounts, pensions, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments,
         },
         cashflows: { income, expenses, superContributions },
@@ -6123,5 +6180,212 @@ describe("Insurance premiums inside super (spec 19 Commit 7)", () => {
     const { insurancePremium, ...noField } = superAcct({ balance: 50000, taxFreeComponent: 10000 });
     const b = projectPlan(mkState({ endAge: 42, plan: { superAccounts: [noField] } }));
     expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+  });
+});
+
+function pensionRow(over = {}) {
+  return {
+    id: "pn1", name: "Pension", owner: "client", sourceAccountId: "su1",
+    commenceAt: { kind: "age", age: 60 }, type: "abp", commenceAmount: null,
+    reversionary: false, taxFreeProportion: null,
+    allocation: zeroRealSuperAlloc(), icrPct: 0,
+    ...over,
+  };
+}
+
+describe("Pension phase (spec 20, Commit 1): accounts, commencement, and the proportioning rule", () => {
+  it("the tax-free proportion is fixed at commencement and stays unchanged across later years, even though fund growth would otherwise dilute the live ratio", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 40000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow()],
+      },
+    }));
+    // Commences immediately (client is already 60, the ABP gate at
+    // retirementAge 60) — 40% of the whole balance is tax-free.
+    expect(out.yearly[0].pensionDetail.pn1.commencementAmount).toBeCloseTo(100000, 0);
+    expect(out.yearly[0].pensionDetail.pn1.taxFreeProportion).toBeCloseTo(0.4, 4);
+    // A LATER year: even with zero real growth here (deliberately, to
+    // isolate the proportioning question from growth arithmetic), the
+    // reported proportion must still read the FIXED figure, not
+    // whatever pensionTaxFree/closing would recompute to if it were
+    // live — asserted by construction: it's the SAME stored value
+    // every year post-commencement, not re-derived.
+    expect(out.yearly[2].pensionDetail.pn1.taxFreeProportion).toBeCloseTo(0.4, 4);
+  });
+
+  it("a real (nonzero) return dilutes the LIVE ratio while the reported proportion stays fixed — the actual mechanical distinction from accumulation", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 50000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({
+          // A real positive return: incomePct grossed up the same way
+          // zeroRealSuperAlloc does, plus a bit more.
+          allocation: { mode: "custom", incomePct: (0.025 / 0.85) * 100 + 5, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+        })],
+      },
+    }));
+    const closing = out.yearly[2].pensionDetail.pn1.closing;
+    const liveRatio = out.yearly[2].pensionDetail.pn1.taxFreeProportion; // reported figure — must be the FIXED 0.5, not this
+    expect(closing).toBeGreaterThan(100000); // genuine growth happened
+    expect(liveRatio).toBeCloseTo(0.5, 4); // still exactly the commencement-time proportion
+    // If the engine had (wrongly) recalculated live like accumulation
+    // does, taxFree/closing would now be BELOW 0.5 (growth dilutes the
+    // ratio, since growth only ever adds to the taxable side) — confirm
+    // that the fixed reported figure does NOT equal what a live
+    // recompute would give, proving this is genuinely fixed, not
+    // coincidentally equal.
+    const wouldBeLiveRatio = 50000 / closing; // taxFree never grows; only closing does
+    expect(wouldBeLiveRatio).toBeLessThan(0.5);
+  });
+
+  it("a PARTIAL commencement transfers components proportionally, leaving the source account with the same ratio it started with", () => {
+    const out = projectPlan(mkState({
+      endAge: 62,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 40000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ commenceAmount: 60000 })],
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.commencementAmount).toBeCloseTo(60000, 0);
+    expect(out.yearly[0].pensionDetail.pn1.closing).toBeCloseTo(60000, 0);
+    expect(out.yearly[0].pensionDetail.pn1.taxFreeProportion).toBeCloseTo(0.4, 4); // same 40% ratio as the whole account
+    // The remainder stays behind in the source account, at the SAME
+    // proportion (a proportional split preserves the ratio on both sides).
+    expect(out.yearly[0].superDetail.su1.closing).toBeCloseTo(40000, 0);
+    const remainingTaxFree = out.yearly[0].superDetail.su1.taxFreeClosing;
+    expect(remainingTaxFree).toBeCloseTo(16000, 0); // 40,000 × 40%
+  });
+
+  it("condition-of-release gating: an ABP requested before the owner actually meets the gate is DEFERRED to the year the gate is met, not commenced early nor silently dropped", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 55, retirementAge: 55 }, // "retired" at 55 — below preservation age
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        // Requested immediately (age 55) — the ABP gate is
+        // superReleaseAge(55) = 60 (floored at preservation age), so
+        // this must defer 5 years, not commence at 55.
+        pensions: [pensionRow({ commenceAt: { kind: "age", age: 55 } })],
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.closing).toBe(0); // not yet — age 55
+    expect(out.yearly[0].pensionDetail.pn1.commencementAmount).toBe(0);
+    // Client turns 60 in plan year 5 (currentAge 55 + 5).
+    expect(out.yearly[5].pensionDetail.pn1.commencementAmount).toBeCloseTo(100000, 0);
+    expect(out.yearly[5].pensionDetail.pn1.closing).toBeCloseTo(100000, 0);
+  });
+
+  it("condition-of-release gating: a TTR only needs preservation age (60) — commences there regardless of retirementAge, unlike an ABP requested at the same age with the same retirementAge", () => {
+    const commonPlan = {
+      client: { currentAge: 55, retirementAge: 55 }, // never satisfies the ABP's retirement-based gate within this short window
+      superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+    };
+    const ttrOut = projectPlan(mkState({
+      endAge: 61,
+      plan: { ...commonPlan, pensions: [pensionRow({ type: "ttr", commenceAt: { kind: "age", age: 55 } })] },
+    }));
+    const abpOut = projectPlan(mkState({
+      endAge: 61,
+      plan: { ...commonPlan, pensions: [pensionRow({ type: "abp", commenceAt: { kind: "age", age: 55 } })] },
+    }));
+    // TTR: gate is a flat preservation age (60) — commences at age 60
+    // (plan year 5) regardless of retirementAge.
+    expect(ttrOut.yearly[5].pensionDetail.pn1.commencementAmount).toBeCloseTo(100000, 0);
+    // ABP: gate is superReleaseAge(55) = 60 too in this fixture (floored
+    // at preservation age since retirementAge 55 < 60) — SAME year here,
+    // confirming both types share the preservation-age floor...
+    expect(abpOut.yearly[5].pensionDetail.pn1.commencementAmount).toBeCloseTo(100000, 0);
+  });
+
+  it("condition-of-release gating: an ABP's retirement-based gate can differ from a TTR's flat preservation-age gate when retirementAge sits between the two", () => {
+    // retirementAge 62 (>60, <65): a TTR still gates at flat 60; an ABP
+    // gates at superReleaseAge(62) = 62 — two years LATER than the TTR.
+    const commonPlan = {
+      client: { currentAge: 58, retirementAge: 62 },
+      superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+    };
+    const ttrOut = projectPlan(mkState({
+      endAge: 64,
+      plan: { ...commonPlan, pensions: [pensionRow({ type: "ttr", commenceAt: { kind: "age", age: 58 } })] },
+    }));
+    const abpOut = projectPlan(mkState({
+      endAge: 64,
+      plan: { ...commonPlan, pensions: [pensionRow({ type: "abp", commenceAt: { kind: "age", age: 58 } })] },
+    }));
+    expect(ttrOut.yearly[2].pensionDetail.pn1.commencementAmount).toBeCloseTo(100000, 0); // age 60, plan year 2
+    expect(abpOut.yearly[2].pensionDetail.pn1.commencementAmount).toBe(0); // not yet — gate is 62
+    expect(abpOut.yearly[4].pensionDetail.pn1.commencementAmount).toBeCloseTo(100000, 0); // age 62, plan year 4
+  });
+
+  it("contributions continue landing in the source account after a whole-balance commencement leaves it at zero", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow()],
+      },
+      cashflows: {
+        superContributions: [{
+          id: "sc1", label: "SG", owner: "client", accountId: "su1",
+          type: "sg", basis: "amount", amount: 12000, frequency: "annual",
+          from: { kind: "age", age: 60 }, to: { kind: "age", age: 63 },
+          indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+    }));
+    // Whole-balance commencement zeroes the source at year 0 (before
+    // that year's own contribution lands — commencement fires ahead of
+    // the contribution-credit step in the monthly loop).
+    expect(out.yearly[0].superDetail.su1.closing).toBeCloseTo(12000 * 0.85, 0); // net of 15% contributions tax
+    // The pension itself never receives contributions (out of scope —
+    // only a commencement transfer ever credits it in this build).
+    expect(out.yearly[1].superDetail.su1.closing).toBeGreaterThan(0);
+    expect(out.yearly[1].superDetail.su1.contributions).toBeGreaterThan(0);
+  });
+
+  it("regression gate: a scenario with plan.pensions omitted entirely behaves exactly as one with plan.pensions: []", () => {
+    const base = {
+      endAge: 45,
+      plan: {
+        superAccounts: [superAcct({ balance: 50000, allocation: zeroRealSuperAlloc() })],
+        workingCash: { balance: 5000, minimumBalance: 1000, ratePct: 2 },
+      },
+      cashflows: { income: [employmentRow({ amount: 90000, to: { kind: "age", age: 45 } })] },
+    };
+    const withEmpty = projectPlan(mkState({ ...base, plan: { ...base.plan, pensions: [] } }));
+    const withOmitted = projectPlan(mkState(base));
+    expect(Array.from(withOmitted.monthly.combined)).toEqual(Array.from(withEmpty.monthly.combined));
+  });
+
+  it("conservation holds across commencement, a partial commencement, and post-commencement growth", () => {
+    const scenarios = [
+      mkState({
+        endAge: 64,
+        plan: {
+          client: { currentAge: 60, retirementAge: 60 },
+          superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 30000, allocation: { mode: "custom", incomePct: 5, growthPct: 2, frankingPct: 0, volBasis: "Balanced" } })],
+          pensions: [pensionRow({ allocation: { mode: "custom", incomePct: 4, growthPct: 1, frankingPct: 0, volBasis: "Balanced" } })],
+        },
+      }),
+      mkState({
+        endAge: 64,
+        plan: {
+          client: { currentAge: 60, retirementAge: 60 },
+          superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 30000, allocation: zeroRealSuperAlloc() })],
+          pensions: [pensionRow({ commenceAmount: 35000 })],
+        },
+      }),
+    ];
+    for (const [i, s] of scenarios.entries()) {
+      const out = projectPlan(s);
+      for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `pension scenario ${i}, year ${y}`);
+    }
   });
 });

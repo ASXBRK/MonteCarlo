@@ -20,6 +20,7 @@ import {
   createSuperAccount, clampSuperAccount, normaliseSuperAccounts,
   createSuperContribution, clampSuperContribution, normaliseSuperContributions,
   createSuperWithdrawal, clampSuperWithdrawal, normaliseSuperWithdrawals,
+  createPension, clampPension, normalisePensions, pensionMinCommenceAge, PENSION_TYPES,
   INCOME_TYPES, SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, CARRY_FORWARD_YEARS,
   clampWorkingCash,
   createDeductionRow, clampDeductionRow, DEDUCTION_CATEGORIES, DEDUCTION_CATEGORY_LABELS,
@@ -1243,6 +1244,88 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
 
   it("normaliseSuperAccounts defends non-array input", () => {
     expect(normaliseSuperAccounts(null, clampPlan(couplePlan(), PROFILES), PROFILES)).toEqual([]);
+  });
+
+  it("pensionMinCommenceAge (spec 20, Commit 1): ABP is superReleaseAge's two-condition gate; TTR is the flat preservation age only", () => {
+    expect(pensionMinCommenceAge("ttr", 45)).toBe(60); // retirementAge irrelevant to TTR
+    expect(pensionMinCommenceAge("ttr", 70)).toBe(60);
+    expect(pensionMinCommenceAge("abp", 50)).toBe(60); // floored at preservation age
+    expect(pensionMinCommenceAge("abp", 62)).toBe(62); // retirement at/after 60
+    expect(pensionMinCommenceAge("abp", 70)).toBe(65); // capped at unrestricted access
+  });
+
+  it("createPension defaults to the owner's own super account, tracks the owner's retirement key date, and picks ABP/TTR from the owner's current age", () => {
+    const plan = clampPlan(couplePlan(), PROFILES); // client 40, partner 36
+    const su = createSuperAccount(plan, [], PROFILES, "client");
+    const pn = createPension(plan, [], [su], "client");
+    expect(pn.owner).toBe("client");
+    expect(pn.sourceAccountId).toBe(su.id);
+    expect(pn.commenceAt).toEqual({ kind: "anchor", anchorId: "retirement-client" });
+    expect(pn.type).toBe("ttr"); // 40 < unrestrictedAccessAge (65)
+    expect(pn.commenceAmount).toBeNull(); // whole balance
+    expect(pn.reversionary).toBe(false);
+    expect(pn.taxFreeProportion).toBeNull();
+
+    const old = clampPlan({ ...couplePlan(), client: { currentAge: 66 } }, PROFILES);
+    expect(createPension(old, [], [su], "client").type).toBe("abp");
+  });
+
+  it("clampPension drops a sourceAccountId belonging to the OTHER person — never attributes one person's future income stream to the other's super", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const suClient = createSuperAccount(plan, [], PROFILES, "client");
+    const suPartner = createSuperAccount(plan, [], PROFILES, "partner");
+    const pn = clampPension(
+      { owner: "client", sourceAccountId: suPartner.id, type: "abp", commenceAt: { kind: "age", age: 65 } },
+      plan, [suClient, suPartner], PROFILES
+    );
+    expect(pn.sourceAccountId).toBeNull();
+    // The correct pairing round-trips untouched.
+    const ok = clampPension(
+      { owner: "client", sourceAccountId: suClient.id, type: "abp", commenceAt: { kind: "age", age: 65 } },
+      plan, [suClient, suPartner], PROFILES
+    );
+    expect(ok.sourceAccountId).toBe(suClient.id);
+  });
+
+  it("clampPension bounds commenceAt to a plain CLIENT-anchored age window, NOT the owner's own condition-of-release gate — a partner's pension age is never compared against the wrong person's ages", () => {
+    const plan = clampPlan(couplePlan(), PROFILES); // client 40-90, partner 36
+    const su = createSuperAccount(plan, [], PROFILES, "partner");
+    // An age-45 request (well below any release gate for EITHER type) is
+    // still perfectly enterable — see pensionMinCommenceAge's own header
+    // for why the gate is enforced engine-side, not here.
+    const pn = clampPension(
+      { owner: "partner", sourceAccountId: su.id, type: "abp", commenceAt: { kind: "age", age: 45 } },
+      plan, [su], PROFILES
+    );
+    expect(pn.commenceAt).toEqual({ kind: "age", age: 45 });
+    // Still bounded to the plan's own client-anchored window — an age
+    // below currentAge or beyond endAge is genuinely unenterable.
+    const clampedLow = clampPension(
+      { owner: "partner", sourceAccountId: su.id, type: "abp", commenceAt: { kind: "age", age: 10 } },
+      plan, [su], PROFILES
+    );
+    expect(clampedLow.commenceAt.age).toBe(40); // plan.client.currentAge
+    const clampedHigh = clampPension(
+      { owner: "partner", sourceAccountId: su.id, type: "abp", commenceAt: { kind: "age", age: 999 } },
+      plan, [su], PROFILES
+    );
+    expect(clampedHigh.commenceAt.age).toBe(90); // plan.endAge
+  });
+
+  it("clampPension: type defends against a junk value, and taxFreeProportion is always null (engine-derived only, never stored here)", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const su = createSuperAccount(plan, [], PROFILES, "client");
+    const pn = clampPension(
+      { owner: "client", sourceAccountId: su.id, type: "not-a-real-type", commenceAt: { kind: "age", age: 65 }, taxFreeProportion: 0.4 },
+      plan, [su], PROFILES
+    );
+    expect(PENSION_TYPES).toContain(pn.type);
+    expect(pn.type).toBe("abp"); // the defensive default
+    expect(pn.taxFreeProportion).toBeNull(); // never trusts a stored value
+  });
+
+  it("normalisePensions defends non-array input", () => {
+    expect(normalisePensions(null, clampPlan(couplePlan(), PROFILES), [], PROFILES)).toEqual([]);
   });
 
   it("super accounts are structurally invisible to fundingOrder and settings — there is no path to include one", () => {

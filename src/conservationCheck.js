@@ -46,7 +46,14 @@
 //           earned value, just redirected into super net of the
 //           contributions tax below — omitting it here would double-
 //           subtract it)
-//         + growth (asset growth + super earnings, NET of fund tax)
+//         + growth (asset growth + super earnings + PENSION earnings —
+//           spec 20, Commit 1 — all NET of fund tax; a pension's own
+//           COMMENCEMENT transfer needs no term of its own, since both
+//           pockets it moves between, superClosing and pensionClosing,
+//           are already inside netAssets — a same-total move between
+//           two already-counted pockets nets to zero by construction,
+//           the same reasoning already applied to contribution
+//           splitting/land tax/the PPR exemption elsewhere in this file)
 //         + externalInflows (employer SG — money the household never
 //           had to forgo, entering only through super)
 //         − expenses
@@ -209,10 +216,20 @@ export function computeYearFlows(out, y) {
   const openingN = prev
     ? prev.netAssets
     : row.openingBalance + row.wcaDetail.opening
-      + sumVals(row.superDetail, "opening") - sumVals(row.liabilities, "opening");
+      + sumVals(row.superDetail, "opening") + sumVals(row.pensionDetail ?? {}, "opening")
+      - sumVals(row.liabilities, "opening");
   const closingN = row.netAssets;
 
   const superEarningsNet = sumVals(row.superDetail, "earnings") - sumVals(row.superDetail, "earningsTax");
+  // Pension phase (spec 20, Commit 1) — a genuine leak, same shape as
+  // superEarningsNet just above (the 15%/10% fund-tax haircut, a
+  // Commit 1 placeholder — Commit 3 zero-rates an ABP in retirement
+  // phase). The COMMENCEMENT transfer itself needs no term of its own:
+  // both pockets (superClosing, pensionClosing) are already inside
+  // netAssets, so a same-total move between them is invisible to this
+  // invariant by construction — see the engine's own commencement
+  // comment (deterministic.js).
+  const pensionEarningsNet = sumVals(row.pensionDetail ?? {}, "earnings") - sumVals(row.pensionDetail ?? {}, "earningsTax");
   const contributionsTax = sumVals(row.superDetail, "contributionsTax");
   const sgInflow = sumVals(row.superDetail, "sg");
   // Government co-contribution + LISTO (spec 19 Commit 6) — a genuine
@@ -273,7 +290,7 @@ export function computeYearFlows(out, y) {
   // would double-subtract it (once by excluding it from income, again
   // implicitly by not crediting where it actually landed).
   const income = row.income + row.wcaDetail.interest + salarySacrificed;
-  const growth = row.growth + superEarningsNet + liabilityRevaluation;
+  const growth = row.growth + superEarningsNet + pensionEarningsNet + liabilityRevaluation;
 
   // --- Properties (Document Set Commits 3/4) — see the header derivation.
   // Property sale (spec 19 Commit 4) adds a THIRD property-shaped event
