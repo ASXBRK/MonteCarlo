@@ -44,6 +44,7 @@ import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./sc
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
+import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance } from "./pensionTba.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
 import { fhsssAcceptContribution, fhsssReleaseAmounts } from "./fhsss.js";
@@ -407,6 +408,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // minimum is not a plan; it is a compliance breach" (spec's own words).
     pensionAnnualAmount[pn.id] = Math.max(minAmount, requested);
   }
+  // --- transfer balance cap and account (spec 20, Commit 4) ------------------
+  //
+  // One account PER PERSON (not per pension — several pensions can
+  // credit the SAME person's account). Seeded at the general cap as at
+  // plan start; indexed once per FY thereafter by however much the
+  // general cap itself moved (see pensionTba.js's own header for the
+  // proportional-indexation rule). pensionTbaCredited[id] guards a
+  // TTR's own (single, at-conversion) credit from firing more than
+  // once — an ABP credits immediately at commencement instead (see the
+  // commencement block below), so it never needs this guard.
+  const transferBalanceCap0 = superRatesFor(fy0, bracketMode, cpi).generalTransferBalanceCap;
+  const tba = { client: createTransferBalanceAccount(transferBalanceCap0), partner: null };
+  if (state.plan.partner) tba.partner = createTransferBalanceAccount(transferBalanceCap0);
+  let lastTransferBalanceCap = transferBalanceCap0;
+  const pensionTbaCredited = {};
+  for (const pn of pensionRows) pensionTbaCredited[pn.id] = false;
+
   for (const pn of pensionRows) {
     pensionBal[pn.id] = 0;
     pensionSeries[pn.id] = new Float64Array(months + 1);
@@ -1216,6 +1234,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       closing: 0, taxFreeProportion: null,
     }])),
     pensionClosing: 0,
+    // Transfer balance account (spec 20, Commit 4) — a snapshot of each
+    // person's account at THIS FY's end: the running credited-minus-
+    // debited balance, their own (proportionally-indexed) personal
+    // cap, and remaining headroom (floored at 0 — a breach shows as 0
+    // headroom, not negative; the excess itself is on superWarnings,
+    // type "tbaExcess", the same disclosure-only shape every other
+    // pension/super warning already uses).
+    transferBalance: Object.fromEntries(persons.map((p) => [p, { balance: 0, personalCap: 0, remainingCap: 0 }])),
     // Focus Commit 3 (docs/specs/12-focus-views.md) follow-on: the
     // FHSSS running-balance snapshot (src/fhsss.js's fhsssBal) was
     // tracked internally but never exposed — a Focus view showing
@@ -1642,6 +1668,26 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         for (const id of pensionIds) {
           const pm = pensionMeta[id];
           const inRetirementPhase = pm.type === "abp" || ownerAgeAt(pm.owner, y) >= pm.retirementPhaseFromAge;
+          // Transfer balance account (spec 20, Commit 4) — a TTR
+          // credits ONLY here, the FIRST month it's actually in
+          // retirement phase (never at its own commencement — see the
+          // commencement block's own comment), at its THEN-CURRENT
+          // value — the balance going INTO this exact month, before
+          // this same month's own growth compounds. pensionCommenced
+          // guards against a not-yet-commenced pension (balance still
+          // 0) firing this early, purely from the owner's age already
+          // meeting the gate before the pension itself exists yet.
+          if (pm.type === "ttr" && inRetirementPhase && pensionCommenced[id] && !pensionTbaCredited[id]) {
+            const { tba: newTba, excess, excessTaxRate } = creditTransferBalance(tba[pm.owner], pensionBal[id]);
+            tba[pm.owner] = newTba;
+            pensionTbaCredited[id] = true;
+            if (excess != null) {
+              superWarnings.push({
+                fyLabel: schedule.fyLabels[y], owner: pm.owner, type: "tbaExcess",
+                reason: `Transfer balance cap exceeded by $${Math.round(excess)} — the ${Math.round(excessTaxRate * 100)}% notional earnings tax would apply (disclosure only; the commutation-authority process is not modelled)`,
+              });
+            }
+          }
           const netRate = inRetirementPhase ? pm.grossRate : pm.taxedRate;
           const shock = shockFor(id, m);
           const grossGrowth = pensionBal[id] * (pm.grossRate + shock);
@@ -1697,6 +1743,25 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           // per-year setup above since it ran before this transfer
           // existed. Every LATER year resolves there instead.
           resolvePensionThisYear(pn, pensionBal[pn.id], ownerAgeAt(pm.owner, y), y);
+          // Transfer balance account (spec 20, Commit 4) — an ABP is in
+          // retirement phase from the moment it commences (Commit 3),
+          // so it credits the OWNER's account right here, at its
+          // commencement value. A TTR does NOT credit here — it credits
+          // separately, at CONVERSION, at its then-current value (see
+          // the growth step below) — this is "the entire point of the
+          // TTR-versus-ABP question" the spec's own Commit 3 header
+          // names, extended to the cap too.
+          if (pn.type === "abp") {
+            const { tba: newTba, excess, excessTaxRate } = creditTransferBalance(tba[pm.owner], amount);
+            tba[pm.owner] = newTba;
+            pensionTbaCredited[pn.id] = true;
+            if (excess != null) {
+              superWarnings.push({
+                fyLabel: schedule.fyLabels[y], owner: pm.owner, type: "tbaExcess",
+                reason: `Transfer balance cap exceeded by $${Math.round(excess)} — the ${Math.round(excessTaxRate * 100)}% notional earnings tax would apply (disclosure only; the commutation-authority process is not modelled)`,
+              });
+            }
+          }
         }
 
         for (const id of superIds) {
@@ -2924,6 +2989,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // "toConcessionalCap" fills, excess CC, and the Div293 inputs) is
     // handed to runYear for crediting in the real pass only.
     const superRatesY = superRatesFor(fyStart, bracketMode, cpi, awoteAssum);
+
+    // Transfer balance cap indexation (spec 20, Commit 4) — applied
+    // ONCE per FY, before either pass (a pure recompute against
+    // whatever each person's account already holds; no cash/balance
+    // mutation, so it's safe to apply UNGATED, identically in both
+    // passes — the same reasoning superRatesY's own resolution uses).
+    const generalCapDelta = superRatesY.generalTransferBalanceCap - lastTransferBalanceCap;
+    for (const p of persons) tba[p] = indexTransferBalanceCap(tba[p], generalCapDelta);
+    lastTransferBalanceCap = superRatesY.generalTransferBalanceCap;
     const helpRatesY = helpRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     const mlsRatesY = mlsRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     const superOutcome = { client: null, partner: null };
@@ -3585,6 +3659,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // the condition-of-release gate never met).
       if (pensionCommenced[id]) row.pensionDetail[id].taxFreeProportion = pensionFixedProportion[id];
       row.pensionClosing += pensionSeries[id][yearEnd(y)];
+    }
+    // Transfer balance account (spec 20, Commit 4) — snapshotted after
+    // this FY's indexation AND every credit event that could have
+    // fired this FY (both happen earlier in this same real pass).
+    for (const p of persons) {
+      row.transferBalance[p] = {
+        balance: tba[p].balance,
+        personalCap: tba[p].personalCap,
+        remainingCap: Math.max(0, tba[p].personalCap - tba[p].balance),
+      };
     }
 
     // Government co-contribution + LISTO (spec 19 Commit 6) — credited

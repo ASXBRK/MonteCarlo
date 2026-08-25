@@ -6744,3 +6744,132 @@ describe("Pension phase (spec 20, Commit 3): retirement-phase earnings exemption
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `TTR conversion fixture, year ${y}`);
   });
 });
+
+describe("Pension phase (spec 20, Commit 4): transfer balance cap and account", () => {
+  it("commencing an ABP credits the owner's transfer balance account at the commencement value", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 500000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ type: "abp" })],
+      },
+    }));
+    expect(out.yearly[0].transferBalance.client.balance).toBeCloseTo(500000, 0);
+  });
+
+  it("payments are NOT a debit — the account balance never falls as the pension pays out over the years", () => {
+    const out = projectPlan(mkState({
+      endAge: 64,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 500000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ type: "abp" })], // default drawdown: minimum — pays out every year
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeGreaterThan(0); // genuinely paying out
+    expect(out.yearly[0].transferBalance.client.balance).toBeCloseTo(500000, 0);
+    expect(out.yearly[3].transferBalance.client.balance).toBeCloseTo(500000, 0); // unchanged despite 4 years of payments
+  });
+
+  it("a TTR credits the transfer balance account ONLY at conversion, at its THEN-current value — not at its own (earlier) commencement", () => {
+    const out = projectPlan(mkState({
+      endAge: 65,
+      plan: {
+        client: { currentAge: 58, retirementAge: 61 }, // TTR commences at 60, converts at 61
+        superAccounts: [superAcct({ balance: 100000, allocation: { mode: "custom", incomePct: 4, growthPct: 3, frankingPct: 0, volBasis: "Balanced" } })],
+        pensions: [pensionRow({
+          type: "ttr", commenceAt: { kind: "age", age: 58 },
+          allocation: { mode: "custom", incomePct: 4, growthPct: 3, frankingPct: 0, volBasis: "Balanced" },
+        })],
+      },
+    }));
+    // Age 60 (plan year 2): commenced, but NOT yet credited.
+    expect(out.yearly[2].pensionDetail.pn1.commencementAmount).toBeGreaterThan(0);
+    expect(out.yearly[2].transferBalance.client.balance).toBe(0);
+    // Age 61 (plan year 3): converts — credited at the CURRENT balance,
+    // which has grown (and shrunk a little from the minimum payment)
+    // since commencement, so it does NOT equal the commencement amount.
+    expect(out.yearly[3].transferBalance.client.balance).toBeGreaterThan(0);
+    expect(out.yearly[3].transferBalance.client.balance)
+      .not.toBeCloseTo(out.yearly[2].pensionDetail.pn1.commencementAmount, 0);
+  });
+
+  it("proportional indexation, end to end: a member at 40% used gets a smaller personal-cap increase than one who has never credited anything", () => {
+    // A single client at 40% (840,000 of a 2,100,000 general cap).
+    const usedOut = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 840000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ type: "abp" })],
+      },
+    }));
+    // A single client who never commences anything — 100% unused.
+    const unusedOut = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 840000, allocation: zeroRealSuperAlloc() })],
+      },
+    }));
+    const usedCap0 = usedOut.yearly[0].transferBalance.client.personalCap;
+    const unusedCap0 = unusedOut.yearly[0].transferBalance.client.personalCap;
+    expect(usedCap0).toBeCloseTo(unusedCap0, 0); // both start at the same general cap
+    // If/when the general cap ever indexes within this short window,
+    // the "used" scenario's personal cap grows by LESS (60% of the
+    // step) than the "unused" one (100% of the step) — assert the
+    // relationship holds structurally rather than depending on the
+    // step actually firing within 3 years (CPI-driven, may not).
+    for (let y = 1; y < usedOut.yearly.length; y++) {
+      const usedGrowth = usedOut.yearly[y].transferBalance.client.personalCap - usedCap0;
+      const unusedGrowth = unusedOut.yearly[y].transferBalance.client.personalCap - unusedCap0;
+      expect(usedGrowth).toBeLessThanOrEqual(unusedGrowth + 1e-6);
+    }
+  });
+
+  it("a member at 100% used gets no further personal-cap indexation, ever, even across many years", () => {
+    const out = projectPlan(mkState({
+      endAge: 90,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 3000000, allocation: zeroRealSuperAlloc() })], // well over the general cap
+        pensions: [pensionRow({ type: "abp", commenceAmount: 2100000 })], // exactly 100% of the FY2026/27 general cap
+      },
+    }));
+    const cap0 = out.yearly[0].transferBalance.client.personalCap;
+    const capLast = out.yearly[out.yearly.length - 1].transferBalance.client.personalCap;
+    expect(capLast).toBeCloseTo(cap0, 0); // frozen for the ENTIRE 30-year run
+  });
+
+  it("excess is flagged at the right amount when a commencement exceeds the personal cap", () => {
+    const out = projectPlan(mkState({
+      endAge: 62,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 2500000, allocation: zeroRealSuperAlloc() })], // 400,000 over the 2,100,000 cap
+        pensions: [pensionRow({ type: "abp" })],
+      },
+    }));
+    const warning = out.superWarnings.find((w) => w.type === "tbaExcess");
+    expect(warning).toBeDefined();
+    expect(warning.reason).toMatch(/\$400,?000|\$400000/); // the excess amount, to the nearest dollar
+    expect(warning.reason).toMatch(/15%/); // first breach
+  });
+
+  it("conservation holds — the transfer balance account is a pure disclosure mechanism with no money flow of its own", () => {
+    const out = projectPlan(mkState({
+      endAge: 65,
+      assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 30000 })],
+      fundingOrder: ["a1"],
+      plan: {
+        client: { currentAge: 60, retirementAge: 62 },
+        superAccounts: [superAcct({ balance: 2400000, taxFreeComponent: 400000, allocation: { mode: "custom", incomePct: 5, growthPct: 2, frankingPct: 0, volBasis: "Balanced" } })],
+        pensions: [pensionRow({ type: "ttr", allocation: { mode: "custom", incomePct: 5, growthPct: 2, frankingPct: 0, volBasis: "Balanced" } })],
+        workingCash: { balance: 2000, minimumBalance: 2000, ratePct: 1 },
+      },
+      cashflows: { expenses: [cf({ id: "exp1", assetId: null, amount: 1500, frequency: "monthly", from: { kind: "age", age: 60 }, to: { kind: "age", age: 120 } })] },
+    }));
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `TBA excess/conversion fixture, year ${y}`);
+  });
+});
