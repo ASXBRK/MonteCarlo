@@ -2660,6 +2660,20 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
     }
 
+    // Gifting and deprivation (spec 21b, Commit 2) — a genuine new
+    // money flow (a leak — see conservationCheck.js). 0-3 gifts,
+    // spanning amounts comfortably under, at, and over BOTH the
+    // $10,000 annual and $30,000 five-year limits, at random ages
+    // across the window — exercising allowable-in-full, partially-
+    // deprived, and (with several gifts close together) five-year-
+    // limit-breached cases all in the same sweep.
+    const gifts = Array.from({ length: randInt(0, 3) }, (_, i) => ({
+      id: `gift${i}`, owner: couple ? pick(["client", "partner", "joint"]) : "client",
+      amount: pick([rand(1000, 9000), rand(10000, 15000), rand(20000, 40000)]),
+      at: { kind: "age", age: randInt(startAge, endAge) },
+      label: `Gift ${i}`,
+    }));
+
     // Redundancy and ETP (spec 19 Commit 3) — sometimes one person's
     // income row terminates: the row's own `to` is forced to match
     // termination.at (clampIncomeRow's own rule, mirrored by hand since
@@ -3064,7 +3078,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         plan: {
           household: couple ? "couple" : "single",
           client, partner, children,
-          superAccounts, pensions, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
+          superAccounts, pensions, gifts, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments,
         },
         cashflows: { income, expenses, superContributions },
@@ -7293,5 +7307,68 @@ describe("Age pension — Work Bonus (spec 21b, Commit 1)", () => {
     expect(out.yearly[0].agePensionDetail.client.ageEligible).toBe(false);
     expect(out.yearly[0].agePensionDetail.client.workBonusExempt).toBe(0);
     expect(out.yearly[0].agePensionDetail.otherIncome).toBeCloseTo(20000, 2);
+  });
+});
+
+describe("Gifting and deprivation (spec 21b, Commit 2): engine integration", () => {
+  it("a gift reduces actual assets by its FULL amount, regardless of deprivation", () => {
+    // A funded household (starting cash, no income/expenses otherwise)
+    // so the gift is actually PAYABLE — an unfunded gift would show up
+    // as row.unfundedCashflow instead of moving wcaClosing at all,
+    // which is the correct (if less legible) behaviour, just not what
+    // this test is isolating. cpi: 0 alongside ratePct: 0 keeps the WCA
+    // truly flat in REAL terms too (this engine works in real dollars
+    // throughout — a 0% NOMINAL rate is a small NEGATIVE real rate
+    // whenever cpi > 0, which would otherwise make the two runs diverge
+    // by a little more than the bare gift amount, for a reason that has
+    // nothing to do with gifting).
+    const gift = { id: "g1", owner: "client", amount: 15000, at: { kind: "age", age: 62 }, label: "Gift" };
+    const plan = { client: { currentAge: 60 }, workingCash: { balance: 50000, minimumBalance: 0, ratePct: 0 } };
+    const withoutGift = mkState({ endAge: 70, assets: [], plan, surplus: { mode: "accumulate" }, cpi: 0 });
+    const withGift = mkState({ endAge: 70, assets: [], plan: { ...plan, gifts: [gift] }, surplus: { mode: "accumulate" }, cpi: 0 });
+    const outWithout = projectPlan(withoutGift);
+    const outWith = projectPlan(withGift);
+    // No income/expenses in this fixture, so wcaClosing differs by
+    // EXACTLY the gift amount from the year it fires (age 62, y=2) onward.
+    expect(outWithout.yearly[2].wcaClosing - outWith.yearly[2].wcaClosing).toBeCloseTo(15000, 2);
+    expect(outWith.yearly[2].giftsPaid).toBeCloseTo(15000, 2);
+    expect(outWithout.yearly[2].giftsPaid).toBe(0);
+    expect(outWith.yearly[2].unfundedCashflow).toBe(0); // fully funded — no shortfall
+  });
+
+  it("a deprived amount (above the $10,000 allowable) is assessed under BOTH the assets test and (deemed) the income test", () => {
+    const s = mkState({
+      endAge: 75, assets: [],
+      plan: {
+        client: { currentAge: 65 },
+        gifts: [{ id: "g1", owner: "client", amount: 15000, at: { kind: "age", age: 66 }, label: "Gift" }],
+      },
+    });
+    const out = projectPlan(s);
+    // Age 67 (y=2): the $5,000 deprived amount (fired at 66, drops out
+    // at 71) is still active.
+    const d = out.yearly[2].agePensionDetail;
+    expect(d.deprivedAssets).toBeCloseTo(5000, 2);
+    expect(d.assessableAssets).toBeCloseTo(5000, 2); // no other assets in this fixture
+    expect(d.deemedIncome).toBeGreaterThan(0); // deemed, generating income-test exposure
+  });
+
+  it("deprived amounts drop out exactly five years after the gift's own date", () => {
+    const s = mkState({
+      endAge: 75, assets: [],
+      plan: { client: { currentAge: 65 }, gifts: [{ id: "g1", owner: "client", amount: 15000, at: { kind: "age", age: 66 }, label: "Gift" }] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[70 - 65].agePensionDetail.deprivedAssets).toBeCloseTo(5000, 2); // age 70 — still active
+    expect(out.yearly[71 - 65].agePensionDetail.deprivedAssets).toBe(0); // age 71 — dropped out
+  });
+
+  it("conservation holds with gifting present", () => {
+    const s = mkState({
+      endAge: 75, assets: [mkAsset()],
+      plan: { client: { currentAge: 65 }, gifts: [{ id: "g1", owner: "client", amount: 15000, at: { kind: "age", age: 66 }, label: "Gift" }] },
+    });
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `gifting fixture, year ${y}`);
   });
 });

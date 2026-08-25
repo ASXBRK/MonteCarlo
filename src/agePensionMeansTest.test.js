@@ -62,6 +62,13 @@ describe("assessableAssets — the accumulation-vs-pension-phase super rule (Com
     const total = assessableAssets({ financialAssets: 20000 });
     expect(total).toBe(20000);
   });
+
+  // Gifting and deprivation (spec 21b, Commit 2) — a deprived asset is
+  // assessed at face value here, on top of every other bucket.
+  it("adds deprived assets on top of every other bucket", () => {
+    const total = assessableAssets({ financialAssets: 20000, deprivedAssets: 5000 });
+    expect(total).toBe(25000);
+  });
 });
 
 describe("assetsTestResult — known values (Commit 2)", () => {

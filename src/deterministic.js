@@ -51,6 +51,7 @@ import {
   assessableIncome as agePensionAssessableIncome, singleAgePensionAssessment, coupleAgePensionAssessment,
   workBonusApply,
 } from "./agePensionMeansTest.js";
+import { resolveGiftDeprivation, deprivedAssetsAt } from "./gifting.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
 import { fhsssAcceptContribution, fhsssReleaseAmounts } from "./fhsss.js";
@@ -525,6 +526,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       return { id: c.id, month: julyOf(y), amount: c.amount, destination: c.destination };
     }).filter((e) => e.month != null);
   }
+
+  // Gifting and deprivation (spec 21b, Commit 2) — each gift resolves
+  // to its own firing month, same "fires in July of its resolved plan
+  // year, or never" convention. Deprivation itself (the $10,000/yr,
+  // $30,000/five-year rolling limits) is resolved ONCE, up front, since
+  // it depends only on the gifts' own fixed dates/amounts — not on
+  // anything path-dependent — chronologically across ALL gifts
+  // regardless of input order (src/gifting.js's own header).
+  const giftEvents = (state.plan.gifts ?? []).map((g) => {
+    const y = resolveRef(g.at, state.plan, schedule, "client").planYear;
+    const month = julyOf(y);
+    return month == null ? null : { id: g.id, month, amount: g.amount, planYear: y };
+  }).filter(Boolean);
+  const resolvedGifts = resolveGiftDeprivation(giftEvents);
+  const giftsByMonth = {};
+  for (const g of resolvedGifts) (giftsByMonth[g.month] ??= []).push(g);
 
   // Main residence exemption (spec 19 Commit 5) — resolves a
   // mainResidence object's DateRef-anchored events to literal ISO
@@ -1279,6 +1296,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // right in two passes); this default only ever shows if that block
     // somehow didn't run.
     agePensionDetail: null,
+    // Gifting (spec 21b, Commit 2) — the FY's total gift outflow (the
+    // full amount, regardless of how much is deprived vs allowable —
+    // see gifting.js's own header): a leak, set alongside agePensionDetail.
+    giftsPaid: 0,
     // Working Cash Account detail: opening + interest + netFlow +
     // sweptToCash − sweptInvested − sweptSpent = closing (the top-up-
     // from-assets draws are reported under deficitFundedFromAssets
@@ -2513,7 +2534,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       const upfrontCashOut = m === 0 ? upfrontOutsideOnly + upfrontFromSuperShortfall : 0;
       const ongoingCashOut = ongoingOutsideMonthlyAt(m) + (m === first ? ongoingFromSuperShortfall : 0);
       const adviserFeeCashOut = upfrontCashOut + ongoingCashOut;
-      let net = inc - (exp + propExpenseOut + landTaxOut) - tax - loanPayReal - settlementOut - superContribCashOut - adviserFeeCashOut;
+      // Gifting (spec 21b, Commit 2) — the FULL gift amount leaves
+      // household cash at its own resolved month, regardless of how
+      // much of it Centrelink counts as deprived vs allowable (that
+      // distinction only affects the age pension assessment, resolved
+      // separately above — see the module header on gifting.js: "the
+      // gifted amount leaves the client's assets regardless").
+      const giftOut = (giftsByMonth[m] ?? []).reduce((s, g) => s + g.amount, 0);
+      let net = inc - (exp + propExpenseOut + landTaxOut) - tax - loanPayReal - settlementOut - superContribCashOut - adviserFeeCashOut - giftOut;
       // Goals, surplus-funded: capped at whatever's actually left over
       // this month (a goal can't manufacture cash that doesn't exist,
       // unlike an instructed transaction such as a loan repayment or a
@@ -3086,6 +3114,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const agePensionRatesY = agePensionRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     let agePensionMonthly = 0;
     let agePensionDetailY = null;
+    // Gifting (spec 21b, Commit 2) — the household total for THIS FY,
+    // summed straight from the already-resolved gift events (fixed
+    // month/amount, no path dependence) rather than accumulated inside
+    // runYear's own monthly loop.
+    let giftsPaidThisYear = 0;
+    for (let m = yearStart(y); m < yearEnd(y); m++) {
+      giftsPaidThisYear += (giftsByMonth[m] ?? []).reduce((s, g) => s + g.amount, 0);
+    }
     {
       // Financial + lifestyle assets both count toward the assets test
       // (spec's own words); only FINANCIAL assets (plus pension-phase
@@ -3145,9 +3181,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // this one year's snapshot, then correctly pension-phase from the
       // FOLLOWING FY onward. A one-year lag on the FY a pension actually
       // starts, not an ongoing misclassification.
+      //
+      // Deprived assets (spec 21b, Commit 2) — gifts above the gifting
+      // limits, still counted at face value for the assets test (and
+      // folded into the deeming base below for the income test) for
+      // exactly five years from their own date.
+      const deprivedAssetsTotal = deprivedAssetsAt(resolvedGifts, yearStart(y));
       const assessableAssetsTotal = agePensionAssessableAssets({
         financialAssets, lifestyleAssets, investmentProperty: propertyAssets,
-        pensionSuper: preAssessedSuper, securedLiabilities,
+        pensionSuper: preAssessedSuper, securedLiabilities, deprivedAssets: deprivedAssetsTotal,
       });
 
       // "Other income" (income test): employment income (schedule's own
@@ -3190,7 +3232,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         }
       }
       const deemedIncomeTotal = agePensionDeemedIncome({
-        financialAssets: financialAssets + preAssessedSuper, // ABPs are deemed like any other financial asset
+        // ABPs are deemed like any other financial asset; deprived
+        // gifted amounts are ALSO deemed (spec's own words: "assessed
+        // under both the assets and income tests (deemed)").
+        financialAssets: financialAssets + preAssessedSuper + deprivedAssetsTotal,
         lowerRate: agePensionRatesY.deemingLowerRate, upperRate: agePensionRatesY.deemingUpperRate,
         threshold: couple ? agePensionRatesY.couple.deemingThreshold : agePensionRatesY.single.deemingThreshold,
       });
@@ -3211,6 +3256,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       agePensionMonthly = (paid.client + paid.partner) / (yearEnd(y) - yearStart(y));
       agePensionDetailY = {
         homeowner,
+        deprivedAssets: deprivedAssetsTotal,
         assessableAssets: assessableAssetsTotal,
         assetsTestResult: assessment.assetsResult,
         deemedIncome: deemedIncomeTotal,
@@ -3883,6 +3929,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.superDetail[split.toId].contributionSplitIn += split.amount;
     }
     row.agePensionDetail = agePensionDetailY;
+    row.giftsPaid = giftsPaidThisYear;
     const real = runYear(y, {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,

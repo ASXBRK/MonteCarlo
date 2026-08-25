@@ -113,6 +113,12 @@
 //           the model, whether pulled from an asset via sell() or
 //           diverted from surplus before it reaches the WCA — a leak,
 //           the same shape as an ordinary expense)
+//         − giftsPaid (spec 21b, Commit 2: the FULL gift amount leaves
+//           household cash at its own resolved month regardless of how
+//           much Centrelink counts as deprived — deprivation only
+//           affects the age pension assessment, never actual net
+//           worth, so the whole gift is a leak here, the same shape as
+//           goalSpend just above)
 //         + helpRepayment (HELP-as-liability follow-up fix: HELP/HECS
 //           now lives in row.liabilities like any other debt, so its
 //           balance is inside openingN/closingN and its indexation nets
@@ -350,6 +356,15 @@ export function computeYearFlows(out, y) {
   // --- Goals (Document Set Commit 6) — a leak; see header.
   const goalSpend = Object.values(row.goals ?? {}).reduce((s, g) => s + (g.contribution ?? 0), 0);
 
+  // --- Gifting (spec 21b, Commit 2) — a genuine leak, the same shape
+  // as goalSpend just above: the FULL gift amount leaves household
+  // cash regardless of how much of it Centrelink counts as deprived
+  // (deprivation is an assessment-only concept, invisible to net
+  // worth). row.giftsPaid is a plain household total (deterministic.js
+  // sums it straight from the resolved gift events, not accumulated
+  // per-month), so no further derivation is needed here.
+  const giftsPaid = row.giftsPaid ?? 0;
+
   // --- HELP/HECS (HELP-as-liability follow-up fix) — folded into the
   // SAME row.liabilities map as ordinary loans (deterministic.js), so
   // its opening/closing are already inside openingN/closingN and its
@@ -412,6 +427,7 @@ export function computeYearFlows(out, y) {
     fhsssRelease, fhsssSuperDebit,
     lmiPremium,
     goalSpend,
+    giftsPaid,
     helpRepayment,
     adviserFeeFromSuper, adviserFeeCash,
   };
@@ -442,7 +458,7 @@ export function checkYearConservation(out, y, ctx) {
     - f.surplusSpent + f.unfundedCashflow - f.divReleaseFromSuper
     + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
     - f.propertySaleCosts - f.superInsurancePremium
-    - f.goalSpend + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash;
+    - f.goalSpend - f.giftsPaid + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash;
 
   const gap = f.delta - expected;
   const tol = Math.max(0.05, Math.abs(f.closingN) * 1e-6);
@@ -498,6 +514,6 @@ export function decomposeNetWorthChange(out, y) {
     expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,
     interest: f.liabilityInterest,
     fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash + f.superInsurancePremium,
-    oneOffs: f.propertyOneOffCost - f.propertySaleCosts - f.goalSpend + f.fhsssRelease - f.fhsssSuperDebit,
+    oneOffs: f.propertyOneOffCost - f.propertySaleCosts - f.goalSpend - f.giftsPaid + f.fhsssRelease - f.fhsssSuperDebit,
   };
 }

@@ -354,6 +354,7 @@ export function defaultPlan(now = new Date()) {
     keyDates: [],
     superAccounts: [],
     pensions: [],
+    gifts: [],
     workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
     adviserFees: defaultAdviserFees(),
     implementation: defaultImplementation(),
@@ -1557,6 +1558,39 @@ export function normalisePensions(pensions, plan, superAccounts = [], profiles =
   return pensions.map((pn) => clampPension(pn, plan, superAccounts, profiles));
 }
 
+// --- Gifting and deprivation (spec 21b, Commit 2) ---------------------------
+//
+// A one-off cash gift, DateRef-anchored like a lump sum or a
+// commutation ("fires in July of its resolved plan year, or never" —
+// the same convention every age-anchored one-off event in this engine
+// already uses). `owner` is informational only (whose asset the gift
+// notionally came from) — the $10,000/yr and $30,000/five-year
+// deprivation limits, and the deprived-asset assessment itself, are
+// HOUSEHOLD-level regardless of owner, matching how Centrelink treats
+// a couple's gifting as one combined pool (src/gifting.js).
+export function createGift(plan, existing = []) {
+  return {
+    id: uid("gift"), owner: "client", amount: 10000,
+    at: anchorRef("end"), label: `Gift ${existing.length + 1}`,
+  };
+}
+
+export function clampGift(g, plan) {
+  return {
+    id: typeof g.id === "string" && g.id ? g.id : uid("gift"),
+    owner: ["client", "partner", "joint"].includes(g.owner) && (g.owner === "client" || plan.partner)
+      ? g.owner : "client",
+    amount: clampNumber(g.amount, 0),
+    at: clampDateRef(g.at ?? anchorRef("end"), plan.client.currentAge, plan.endAge, plan),
+    label: typeof g.label === "string" && g.label.trim() ? g.label : "Gift",
+  };
+}
+
+export function normaliseGifts(gifts, plan) {
+  if (!Array.isArray(gifts)) return [];
+  return gifts.map((g) => clampGift(g, plan));
+}
+
 function nextAssetNumber(existing) {
   let max = 0;
   for (const a of existing) {
@@ -1936,6 +1970,10 @@ export function clampPlan(plan, profiles = {}) {
   // release gate depends on it), same ordering reason as adviserFees
   // below.
   const pensions = normalisePensions(plan.pensions, { client, partner, endAge, keyDates }, superAccounts, profiles);
+  // Gifting and deprivation (spec 21b, Commit 2) — client-anchored like
+  // every other one-off event, so only needs client/partner/endAge,
+  // already resolved above.
+  const gifts = normaliseGifts(plan.gifts, { client, partner, endAge, keyDates });
   // Adviser fees (Implementation/Rates spec, Commit 2) — validated
   // against superAccounts, which is already known here; implementation
   // is only BASIC-clamped at this stage (see clampImplementationBasic's
@@ -1959,7 +1997,7 @@ export function clampPlan(plan, profiles = {}) {
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
   const planSoFar = {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, pensions, workingCash, children,
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, pensions, gifts, workingCash, children,
     adviserFees, implementation,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,

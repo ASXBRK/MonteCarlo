@@ -20,6 +20,11 @@
 // before this function ever sees the figures) — netting reduces the
 // asset's contribution, per the spec's own wording ("less... any
 // liability secured against an assessed asset").
+// `deprivedAssets` (spec 21b, Commit 2) — gifted amounts above the
+// gifting limits, assessed at face value here (and DEEMED like any
+// other financial asset for the income test — the caller folds it
+// into the deeming base separately, since deeming needs its own base
+// figure, not this function's total).
 export function assessableAssets({
   financialAssets = 0,
   lifestyleAssets = 0,
@@ -29,9 +34,10 @@ export function assessableAssets({
   pensionSuper = 0,
   agePensionAgeReached = true,
   securedLiabilities = 0,
+  deprivedAssets = 0,
 } = {}) {
   const assessedSuper = pensionSuper + (agePensionAgeReached ? accumulationSuper : 0);
-  const gross = financialAssets + lifestyleAssets + investmentProperty + businessAssets + assessedSuper;
+  const gross = financialAssets + lifestyleAssets + investmentProperty + businessAssets + assessedSuper + deprivedAssets;
   return Math.max(0, gross - securedLiabilities);
 }
 
