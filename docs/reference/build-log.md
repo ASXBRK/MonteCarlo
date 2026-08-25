@@ -1218,6 +1218,55 @@ table showed the binding test correctly switching from Assets to
 Income as assets grew over a 15-year window; conservation holds across
 20×300-scenario sweeps.
 
+### Age pension — refinements (spec 21b, 5 commits)
+`6161282` Work Bonus and income bank; `a59f2c8` gifting and deprivation;
+`1289a32` pre-2015 deeming grandfathering; `a04af60` Commonwealth
+Seniors Health Card; `d78c145`+`9829943` (HEAS engine/outputs +
+Settings input control)+`78c30d7` (browser-verification fix) Home
+Equity Access Scheme and the age pension strategy Focus view. Work
+Bonus: $7,800/yr exempt (26-fortnight annual-equivalent of the real
+$300/fortnight scheme) plus an $11,800-cap income bank, employment/
+self-employment income only, per person. Gifting: the $10,000/yr,
+$30,000/five-year deprivation limits as a genuinely moving five-year
+window (not five FYs from the first gift) — new module `src/gifting.js`
+— a leak (`giftsPaid`), the full amount leaving real wealth regardless
+of how much Centrelink counts as deprived. Grandfathering: pre-2015 ABPs
+get the deductible-amount income test instead of deeming (assets test
+unaffected either way), modelled via the existing `commenceAt` mechanism
+(a grandfathered pension is necessarily one the client already holds at
+plan start) with a fixed LE-at-commencement factor never recomputed
+engine-side; lost permanently on commutation (modelled, with a warning)
+or ceasing income support (disclosed, not modelled — no such event
+exists in this engine). CSHC: income-tested only, adjusted taxable
+income (the same disclosed-simplified figure HELP/MLS already use) plus
+deemed ABP income only (narrower than the age pension's own deeming
+base — never accumulation super or other financial assets), same
+grandfathering exclusion, assessed on combined income for a couple,
+independent of the age pension's own entitlement. HEAS: `plan.heas`
+(`{enabled, propertyId}`) as its own top-level election rather than
+forced into the liability shape (no term/repayment schedule fits an
+interest-only, never-repaid, drawn-as-income government loan);
+3.95%pa/fortnightly-compounding interest and the 150%-of-max-pension
+drawdown cap are well-sourced, but the total-loan-cap age-component
+table is a disclosed sparse-anchor linear interpolation — direct access
+to Services Australia's own published table was blocked by network
+egress in this environment (see `src/data/heas.js`'s own header; every
+anchor point itself is sourced and cross-checked). New money flows in
+this spec (gifts, HEAS drawdown+interest) extended both
+`randomScenario()` and `conservationCheck.js` in the same commits that
+introduced them, per CLAUDE.md's own rule. Outputs: Age pension table
+gained Deprived assets/Work Bonus rows; Key Figures gained CSHC
+eligible/HEAS loan balance; a new Focus → Age pension "Strategy
+comparison" table (current plan vs an illustrative gift vs illustrative
+work-income levels, non-prescriptive — entitlement AND net assets for
+every arm, no arm labelled preferred). Browser-verification caught one
+real bug before it reached main: the illustrative gift arm could
+silently never fire (a partial first plan year's own July-only firing
+rule) when a client was already age-pension-eligible at plan start,
+producing a no-op arm indistinguishable from "Current plan" with no
+visible cue — fixed same session. Conservation holds across 5+ sweeps
+per commit.
+
 ---
 
 ## WHERE WE'RE GOING
@@ -1248,6 +1297,14 @@ Income as assets grew over a 15-year window; conservation holds across
 - **FHSSS associated earnings rate** (`assumptions.fhsssEarningsRate`,
   currently 7.94% nominal) — an indicative ATO shortfall interest rate;
   user-adjustable in the meantime (Parameters modal / Assumptions view).
+- **HEAS age-component table** (`src/data/heas.js`) — the interest rate
+  (3.95% pa, fortnightly compounding) and the 150%-of-maximum-pension
+  drawdown cap are well-sourced; the total-loan-cap age-component table
+  is a SPARSE set of publicly-quoted anchor points, piecewise-linearly
+  interpolated — direct access to Services Australia's/DVA's own
+  published tables was blocked by network egress in this environment.
+  Confirm the full table against the firm reference before relying on
+  the loan-cap figure for advice.
 - **HELP/HECS balance indexation basis** — indexed annually at the lower
   of CPI and AWOTE (AWOTE proxying WPI, the post-1 June 2023 "lesser of"
   legislative basis) — confirm against the firm reference before relying
