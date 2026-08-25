@@ -176,6 +176,25 @@
 // commit to check for, even when the answer turns out to be "the
 // existing terms already cover it."
 //
+// Age pension (spec 21a) — a genuinely NEW money flow (a government
+// payment with no offsetting household outflow, the spec's own
+// words), unlike every "no new term needed" case above (all of which
+// are TRANSFERS between two already-counted pockets). Checked, per
+// this file's own header instruction, and the answer is: still no new
+// formula term — Commit 3's own tax-treatment decision (non-assessable
+// income) credits the entitlement into the household's ordinary cash
+// stream (deterministic.js's `inc`, the same variable schedule.income/
+// cashDist/rentIncome already flow through), which lands in row.income
+// exactly like any other income dollar — and row.income is ALREADY the
+// `income` term above. No separate pocket, no separate leak/inflow
+// name required. randomScenario() (deterministic.test.js) was extended
+// with a THIRD age stratum (retireeCohort) specifically because neither
+// the original age-40 start nor the pension-phase olderCohort (max
+// age 66) could ever reach age pension age (67) within the 2-4 year
+// sweep window — without it, this invariant would have silently never
+// exercised the age pension path at all, the exact "guard that doesn't
+// grow with the engine" failure this file's header warns about.
+//
 // Monte Carlo's random return shocks (Session B) touch none of the
 // terms above except `row.growth`/superDetail's earnings figures
 // themselves — those are accumulated from whatever return was actually

@@ -109,7 +109,18 @@ export function assessableIncome(row, ctx, forOwner = null) {
     ? (row.taxDetail?.client?.taxablePensionComponent ?? 0) + (row.taxDetail?.partner?.taxablePensionComponent ?? 0)
     : (row.taxDetail?.[forOwner]?.taxablePensionComponent ?? 0);
   const otherIncome = byCat("otherIncome");
-  const governmentPayments = 0; // [zero] — Centrelink not modelled
+  // Age pension (spec 21a, Commit 3) — the firm's own template fixes
+  // this row's HOME in the Assessable Income section regardless of
+  // final tax treatment (a common convention: "Income" as a report
+  // heading, not a taxability promise). Commit 3's own tax-treatment
+  // decision is NON-ASSESSABLE (SAPTO isn't modelled — see
+  // deterministic.js's own comment), so the value is shown here for
+  // display but deliberately excluded from computedTotal/total below,
+  // the one line in this function that is NOT a component of taxable
+  // income despite living in this section.
+  const governmentPayments = forOwner == null
+    ? (row.agePensionDetail?.entitlement ?? 0)
+    : (row.agePensionDetail?.[forOwner]?.paid ?? 0);
   const interestIncome = row.wcaDetail.interest * shareOf("joint", forOwner) + byCat("interestIncome");
   const dividendIncome = row.cashDistributions * shareOf("joint", forOwner) + byCat("dividendIncome");
   const frankingCredits = forOwner == null
@@ -122,7 +133,8 @@ export function assessableIncome(row, ctx, forOwner = null) {
   const netTaxableCapitalGains = forOwner == null
     ? (row.taxDetail?.netCapitalGain ?? 0)
     : (row.taxDetail?.[forOwner]?.netCapitalGain ?? 0);
-  const computedTotal = salary + taxablePensionComponent + otherIncome + governmentPayments + interestIncome
+  // governmentPayments deliberately excluded — see its own comment above.
+  const computedTotal = salary + taxablePensionComponent + otherIncome + interestIncome
     + dividendIncome + frankingCredits + propertyIncomeGross + trustDistribution + foreignIncome + netTaxableCapitalGains;
   // Adjustment rows (spec 18) — an "income.assessable" adjustment is a
   // leak-free income term (the registry's own description), so it folds

@@ -1908,6 +1908,15 @@ function personTaxDetailsHTML(prefix, person, title) {
             <span>Yes</span>
           </label>
         </div>
+        <div class="cf-cell">
+          <label>Age pension eligible ${tooltipHTML("Assesses this person for the age pension once they reach age pension age. Turn off for someone who won't qualify — residency, or a client who simply doesn't want it modelled.")}
+            ${tp.centrelinkEligibleIsDefault ? tooltipHTML(describeDefault("person.centrelinkEligible", { value: tp.centrelinkEligible })) : ""}
+          </label>
+          <label class="ptg-check">
+            <input type="checkbox"${tp.centrelinkEligible !== false ? " checked" : ""} data-plan-field="${prefix}CentrelinkEligible" />
+            <span>Yes</span>
+          </label>
+        </div>
       </div>
     </div>
   `;
@@ -2306,6 +2315,10 @@ function handlePlanFieldChange(e) {
       residency: field === `${prefix}Residency` ? e.target.value : cur.taxProfile.residency,
       medicareExempt: field === `${prefix}Medicare` ? e.target.value === "exempt" : cur.taxProfile.medicareExempt,
       openingCapitalLosses: field === `${prefix}OpeningLosses` ? e.target.value : cur.taxProfile.openingCapitalLosses,
+      centrelinkEligible: field === `${prefix}CentrelinkEligible` ? e.target.checked : cur.taxProfile.centrelinkEligible,
+      // Explicitly setting the checkbox stops it tracking the smart
+      // default (same one-way convention as every other *IsDefault flag).
+      centrelinkEligibleIsDefault: field === `${prefix}CentrelinkEligible` ? false : cur.taxProfile.centrelinkEligibleIsDefault,
     },
     // Super carry-forward ledger etc. (Tier 1.2) — carried through
     // untouched by every OTHER field edit; the work-test toggle

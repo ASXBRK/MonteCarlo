@@ -77,6 +77,32 @@ describe("assessableIncome", () => {
     const aClient = assessableIncome(row, {}, "client");
     expect(aClient.taxablePensionComponent).toBe(4000);
   });
+
+  // Age pension (spec 21a, Commit 3) — the reserved "Government/
+  // Centrelink payments" row reads the engine's own figure, but
+  // (Commit 3's own non-assessable tax-treatment decision) is
+  // deliberately EXCLUDED from computedTotal/total despite living in
+  // this section — its firm-template home, not a taxability promise.
+  it("Government/Centrelink payments reads from agePensionDetail, per-owner, but never joins the assessable total", () => {
+    const row = mkRow({
+      agePensionDetail: {
+        entitlement: 20000,
+        client: { paid: 14000 }, partner: { paid: 6000 },
+      },
+    });
+    const a = assessableIncome(row, {});
+    expect(a.governmentPayments).toBe(20000);
+    expect(a.total).toBe(0); // every other constituent is 0 in this fixture — governmentPayments must not sneak in
+    const aClient = assessableIncome(row, {}, "client");
+    expect(aClient.governmentPayments).toBe(14000);
+    const aPartner = assessableIncome(row, {}, "partner");
+    expect(aPartner.governmentPayments).toBe(6000);
+  });
+
+  it("Government/Centrelink payments defaults to 0 with no agePensionDetail on the row (pre-spec-21a rows)", () => {
+    const a = assessableIncome(mkRow(), {});
+    expect(a.governmentPayments).toBe(0);
+  });
 });
 
 describe("deductionSums", () => {

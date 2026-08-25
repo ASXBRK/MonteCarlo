@@ -30,6 +30,7 @@ import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION, OUTPUT_SUBJECT_FORMS } from "./router.js";
 import { isValidAnchorId } from "./keyDates.js";
 import { SUPER_RATES_BASE, superReleaseAge } from "./data/superRates.js";
+import { AGE_PENSION_RATES_BASE } from "./data/agePension.js";
 
 // --- id generation ---------------------------------------------------
 
@@ -42,12 +43,22 @@ export function uid(prefix = "id") {
 // --- defaults ---------------------------------------------------------
 
 // Per-person tax profile (C3, extended D1 with opening carry-forward
-// capital losses). Input Usability spec, Commit 1: centrelinkEligible
-// removed entirely — it was captured but inert (drove nothing) and is
-// noise in an already-dense form; reintroduce it properly when
-// Centrelink modelling arrives.
+// capital losses). Input Usability spec, Commit 1 removed
+// centrelinkEligible entirely (it was captured but inert); spec 21a
+// Commit 3 reintroduces it now that Centrelink modelling actually
+// exists. Default true, tracking a SMART default (like a liability's
+// commencementIsDefault) — true for anyone reaching age pension age
+// within the projection, resolved once endAge is known (clampPlan,
+// not here: clampPerson runs before endAge is resolved) — false
+// suppresses assessment entirely (residency, or a client who simply
+// doesn't want it modelled). Explicitly setting the checkbox stops it
+// tracking, same one-way "stop following the default" convention every
+// other *IsDefault flag in this schema already uses.
 export function defaultTaxProfile() {
-  return { residency: "resident", medicareExempt: false, openingCapitalLosses: 0 };
+  return {
+    residency: "resident", medicareExempt: false, openingCapitalLosses: 0,
+    centrelinkEligible: true, centrelinkEligibleIsDefault: true,
+  };
 }
 
 export function clampTaxProfile(raw) {
@@ -55,6 +66,26 @@ export function clampTaxProfile(raw) {
     residency: raw?.residency === "nonResident" ? "nonResident" : "resident",
     medicareExempt: raw?.medicareExempt === true,
     openingCapitalLosses: clampNumber(raw?.openingCapitalLosses, 0),
+    centrelinkEligible: raw?.centrelinkEligible !== false,
+    centrelinkEligibleIsDefault: raw?.centrelinkEligibleIsDefault !== false,
+  };
+}
+
+// Resolves the centrelinkEligible SMART default now that endAge is
+// finally known (spec 21a: "Default true for anyone reaching age
+// pension age within the projection") — a no-op once the user has
+// overridden it directly. endAge is CLIENT-anchored (locked
+// convention), so a PARTNER's own age at the end of the projection is
+// NOT endAge itself — it's their current age plus however many years
+// the projection actually runs (endAge − client.currentAge). Passing
+// `clientCurrentAge` explicitly (rather than reading person.currentAge
+// for both) is what makes this correct for both calls.
+function applyCentrelinkEligibleDefault(person, endAge, clientCurrentAge) {
+  if (!person.taxProfile.centrelinkEligibleIsDefault) return person;
+  const ageAtEnd = person.currentAge + (endAge - clientCurrentAge);
+  return {
+    ...person,
+    taxProfile: { ...person.taxProfile, centrelinkEligible: ageAtEnd >= AGE_PENSION_RATES_BASE.ageOfEligibility },
   };
 }
 
@@ -1883,9 +1914,13 @@ export function clampPlan(plan, profiles = {}) {
   // (clampPerson runs before endAge is resolved, so it could only
   // enforce the static [18,120] bound). See CLAUDE.md's Input
   // integrity section.
-  const client = { ...clientRaw, retirementAge: clampInt(clientRaw.retirementAge, clientRaw.currentAge, endAge) };
+  const client = applyCentrelinkEligibleDefault(
+    { ...clientRaw, retirementAge: clampInt(clientRaw.retirementAge, clientRaw.currentAge, endAge) }, endAge, clientRaw.currentAge
+  );
   const partner = partnerRaw
-    ? { ...partnerRaw, retirementAge: clampInt(partnerRaw.retirementAge, partnerRaw.currentAge, endAge) }
+    ? applyCentrelinkEligibleDefault(
+        { ...partnerRaw, retirementAge: clampInt(partnerRaw.retirementAge, partnerRaw.currentAge, endAge) }, endAge, clientRaw.currentAge
+      )
     : null;
   // keyDates are validated against the PRE-clamp partner presence too
   // (normaliseKeyDates itself falls a partner-basis date back to

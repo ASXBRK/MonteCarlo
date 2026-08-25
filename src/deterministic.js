@@ -45,6 +45,11 @@ import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
 import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance, debitTransferBalance } from "./pensionTba.js";
+import { agePensionRatesFor } from "./data/agePension.js";
+import {
+  assessableAssets as agePensionAssessableAssets, deemedIncome as agePensionDeemedIncome,
+  assessableIncome as agePensionAssessableIncome, singleAgePensionAssessment, coupleAgePensionAssessment,
+} from "./agePensionMeansTest.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
 import { fhsssAcceptContribution, fhsssReleaseAmounts } from "./fhsss.js";
@@ -1262,6 +1267,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // null once a person has already released (nothing left to accrue —
     // mirrors fhsssBal.released's own early-exit).
     fhsssDetail: { client: null, partner: null },
+    // Age pension (spec 21a) — set once per FY in the per-year setup
+    // (before either pass, since it carries no tax consequence to get
+    // right in two passes); this default only ever shows if that block
+    // somehow didn't run.
+    agePensionDetail: null,
     // Working Cash Account detail: opening + interest + netFlow +
     // sweptToCash − sweptInvested − sweptSpent = closing (the top-up-
     // from-assets draws are reported under deficitFundedFromAssets
@@ -1283,6 +1293,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   function runYear(y, {
     taxOut, cgtDue, row, trackUnfunded, superOutcome, divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
     ongoingFromSuperRequested = 0, ongoingFromSuperShortfall = 0, upfrontFromSuperShortfall = 0,
+    agePensionMonthly = 0,
   }) {
     const fyStart = fy0 + y;
     // Condition of release (Tier 1.2, Commit 3): static for the whole
@@ -2452,7 +2463,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // cash income the same month it's resolved, exactly like an
       // explicit salary-sacrifice row already does upstream in
       // schedule.js (see a-super-fill above).
-      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut;
+      // Age pension (spec 21a) — a genuinely NEW money flow (a
+      // government payment with no offsetting household outflow),
+      // credited to household cash exactly like any other recurring
+      // income, but NEVER via row.income/acc[p].ordinary (it's non-
+      // assessable — Commit 3's own tax-treatment decision) — see the
+      // per-year setup above for the FY-level assessment this monthly
+      // figure divides out of.
+      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut + agePensionMonthly;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
         if (own && own[m] > 0) {
@@ -3040,6 +3058,146 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       resolvePensionThisYear(pn, pensionBal[pn.id], ownerAge, y);
     }
 
+    // Age pension (spec 21a) — assessed ONCE per FY, before either
+    // pass, against opening (1 July) balances: bal/propVal/loanBal/
+    // superBal/pensionBal/wcaBal all already reflect the PRIOR year's
+    // real pass at this exact point (same reasoning pensionBal's own
+    // drawdown resolution above relies on) — Centrelink itself
+    // reassesses through the year (20 March/September); this engine
+    // applies it once, the same simplification agePension.js's own
+    // header discloses for rate/threshold indexation. Tax treatment
+    // (Commit 3's own decision, spec's own words: "pick one and say
+    // which") — NON-ASSESSABLE income, disclosed: the pensioner tax
+    // offset (SAPTO) that would otherwise reduce a taxable pension to
+    // near-nil is not modelled anywhere in this engine (CLAUDE.md's own
+    // "not modelled" list), so treating the payment as taxable without
+    // it would overstate tax; non-assessable avoids that distortion and
+    // needs no measurement-pass split at all — there's no tax
+    // consequence to get right in two passes; the credit below applies
+    // identically to both, gated `if (row)` only for the actual cash
+    // movement (the shared "real-pass-only balance mutation" convention).
+    const agePensionRatesY = agePensionRatesFor(fyStart, bracketMode, cpi, awoteAssum);
+    let agePensionMonthly = 0;
+    let agePensionDetailY = null;
+    {
+      // Financial + lifestyle assets both count toward the assets test
+      // (spec's own words); only FINANCIAL assets (plus pension-phase
+      // super, deemed like any other financial asset) are deemed for
+      // the income test — accumulation super is never deemed (it
+      // produces no accessible income while preserved).
+      let financialAssets = wcaBal;
+      let lifestyleAssets = 0;
+      for (const id of ids) {
+        if (meta[id].lifestyle) lifestyleAssets += bal[id]; else financialAssets += bal[id];
+      }
+      // Property: every non-PPR property counts at market value, read
+      // broadly (a holiday home is assessable too under real Centrelink
+      // rules, not only a rented investment) — the PPR is the ONLY
+      // property exemption, and its presence marks homeowner status.
+      let propertyAssets = 0;
+      let homeowner = false;
+      for (const p of props) {
+        const pm = propMeta[p.id];
+        const settledByNow = pm.owned || (pm.purchaseMonth != null && pm.purchaseMonth <= yearStart(y));
+        if (!settledByNow) continue;
+        if (p.propertyType === "ppr") { homeowner = true; continue; }
+        propertyAssets += propVal[p.id];
+      }
+      // Liabilities secured against an ASSESSED asset (never the PPR)
+      // reduce the total — netted against the combined pool rather than
+      // per-asset, an equivalent simplification for the aggregate this
+      // feeds (agePensionMeansTest.js's own assessableAssets()).
+      let securedLiabilities = 0;
+      for (const l of liabs) {
+        const targetId = l.propertyId ?? l.linkedAssetId;
+        const targetProp = targetId ? props.find((p) => p.id === targetId) : null;
+        if (targetProp && targetProp.propertyType === "ppr") continue; // secured against the exempt PPR — no effect
+        securedLiabilities += loanBal[l.id] ?? 0;
+      }
+      // Super: accumulation exempt below age pension age, pension-phase
+      // assessed regardless (spec's own words — "the rule that drives
+      // strategy"), evaluated per OWNER — a couple's younger partner
+      // still exempts THEIR OWN accumulation balance even while the
+      // elder partner's is fully assessed. Pre-gated here (per owner),
+      // then handed to assessableAssets() as `pensionSuper` (its
+      // "always assessed" bucket) since the gating is already applied —
+      // that function's own single agePensionAgeReached flag can't
+      // represent a MIXED per-owner outcome for a couple in one call.
+      let preAssessedSuper = 0;
+      for (const p of persons) {
+        const ageReached = ownerAgeAt(p, y) >= agePensionRatesY.ageOfEligibility;
+        if (ageReached) preAssessedSuper += superAccountsByOwner[p].reduce((s, id) => s + superBal[id], 0);
+      }
+      for (const pn of pensionRows) {
+        if (pensionCommenced[pn.id]) preAssessedSuper += pensionBal[pn.id]; // pension-phase, always assessed
+      }
+      // Disclosed simplification: `pensionCommenced` only flips true
+      // inside the real pass's own month loop (the actual commencement
+      // transfer), which runs AFTER this assessment — so a pension
+      // commencing exactly THIS FY is still read as accumulation for
+      // this one year's snapshot, then correctly pension-phase from the
+      // FOLLOWING FY onward. A one-year lag on the FY a pension actually
+      // starts, not an ongoing misclassification.
+      const assessableAssetsTotal = agePensionAssessableAssets({
+        financialAssets, lifestyleAssets, investmentProperty: propertyAssets,
+        pensionSuper: preAssessedSuper, securedLiabilities,
+      });
+
+      // "Other income" (income test): employment income (schedule's own
+      // per-owner precomputed array, unaffected by the real pass) plus
+      // net rental income on already-settled non-PPR properties this
+      // FY. Disclosed simplification: "otherIncome"-category rows
+      // (business/other taxable income) and after-tax bonuses are not
+      // included — see the Parameters modal.
+      let otherIncomeTotal = 0;
+      for (let m = yearStart(y); m < yearEnd(y); m++) {
+        otherIncomeTotal += schedule.employmentIncomeByOwner.client?.[m] ?? 0;
+        otherIncomeTotal += schedule.employmentIncomeByOwner.partner?.[m] ?? 0;
+      }
+      for (const p of props) {
+        const pm = propMeta[p.id];
+        if (!pm.invest || p.propertyType === "ppr") continue;
+        const settledByNow = pm.owned || (pm.purchaseMonth != null && pm.purchaseMonth <= yearStart(y));
+        if (!settledByNow) continue;
+        for (let m = yearStart(y); m < yearEnd(y); m++) {
+          otherIncomeTotal += propFlowAt(pm.rent, m) - propFlowAt(pm.expensesFlow, m);
+        }
+      }
+      const deemedIncomeTotal = agePensionDeemedIncome({
+        financialAssets: financialAssets + preAssessedSuper, // ABPs are deemed like any other financial asset
+        lowerRate: agePensionRatesY.deemingLowerRate, upperRate: agePensionRatesY.deemingUpperRate,
+        threshold: couple ? agePensionRatesY.couple.deemingThreshold : agePensionRatesY.single.deemingThreshold,
+      });
+      const assessableIncomeTotal = agePensionAssessableIncome({ deemedIncome: deemedIncomeTotal, otherIncome: otherIncomeTotal });
+
+      const assessment = couple
+        ? coupleAgePensionAssessment({ assessableAssets: assessableAssetsTotal, assessableIncome: assessableIncomeTotal, rates: agePensionRatesY, homeowner })
+        : singleAgePensionAssessment({ assessableAssets: assessableAssetsTotal, assessableIncome: assessableIncomeTotal, rates: agePensionRatesY, homeowner });
+
+      const eachShare = couple ? assessment.each : assessment.entitlement;
+      const paid = { client: 0, partner: 0 };
+      const ageEligible = { client: false, partner: false };
+      for (const p of persons) {
+        const person = p === "partner" ? state.plan.partner : state.plan.client;
+        ageEligible[p] = ownerAgeAt(p, y) >= agePensionRatesY.ageOfEligibility;
+        if (ageEligible[p] && person?.taxProfile?.centrelinkEligible !== false) paid[p] = eachShare;
+      }
+      agePensionMonthly = (paid.client + paid.partner) / (yearEnd(y) - yearStart(y));
+      agePensionDetailY = {
+        homeowner,
+        assessableAssets: assessableAssetsTotal,
+        assetsTestResult: assessment.assetsResult,
+        deemedIncome: deemedIncomeTotal,
+        otherIncome: otherIncomeTotal,
+        assessableIncome: assessableIncomeTotal,
+        incomeTestResult: assessment.incomeResult,
+        bindingTest: assessment.bindingTest,
+        entitlement: paid.client + paid.partner,
+        client: { ageEligible: ageEligible.client, eligible: state.plan.client?.taxProfile?.centrelinkEligible !== false, paid: paid.client },
+        partner: couple ? { ageEligible: ageEligible.partner, eligible: state.plan.partner?.taxProfile?.centrelinkEligible !== false, paid: paid.partner } : null,
+      };
+    }
+
     // Super contribution caps (Tier 1.2, Commit 2): resolved ONCE per
     // FY, before either pass — concessional carry-forward and NCC
     // bring-forward are year-SEQUENTIAL state that must advance exactly
@@ -3306,6 +3464,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
+      agePensionMonthly,
     });
     Object.assign(bal, balSnap);
     pools = poolSnap;
@@ -3691,10 +3850,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.superDetail[split.fromId].contributionSplitOut += split.amount;
       row.superDetail[split.toId].contributionSplitIn += split.amount;
     }
+    row.agePensionDetail = agePensionDetailY;
     const real = runYear(y, {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
+      agePensionMonthly,
     });
     row.closingBalance = combined[yearEnd(y)];
     row.wcaDetail.closing = wcaSeries[yearEnd(y)];

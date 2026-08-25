@@ -631,7 +631,15 @@ describe("schema v4 migration (C3)", () => {
     const s = hydrate(JSON.stringify(v3), PROFILES);
     expect(s).not.toBeNull();
     expect(s.schemaVersion).toBe(SCHEMA_VERSION);
-    const def = { residency: "resident", medicareExempt: false, openingCapitalLosses: 0 };
+    // Age pension (spec 21a, Commit 3) reintroduced centrelinkEligible —
+    // a migrated v3 blob has no such field, so clampTaxProfile's own
+    // default (true, still tracking) applies, then clampPlan's smart
+    // default resolves it against this plan's (LE-derived) endAge,
+    // which is well past age pension age for a 40-year-old default.
+    const def = {
+      residency: "resident", medicareExempt: false, openingCapitalLosses: 0,
+      centrelinkEligible: true, centrelinkEligibleIsDefault: true,
+    };
     expect(s.plan.client.taxProfile).toEqual(def);
     expect(s.plan.partner.taxProfile).toEqual(def);
   });
@@ -641,19 +649,36 @@ describe("schema v4 migration (C3)", () => {
     s.plan.client.taxProfile = { residency: "nonResident", medicareExempt: true, openingCapitalLosses: 2500 };
     const back = hydrate(serialize(s), PROFILES);
     expect(back.plan.client.taxProfile)
-      .toEqual({ residency: "nonResident", medicareExempt: true, openingCapitalLosses: 2500 });
+      .toEqual({
+        residency: "nonResident", medicareExempt: true, openingCapitalLosses: 2500,
+        centrelinkEligible: true, centrelinkEligibleIsDefault: true,
+      });
   });
 
   it("clampTaxProfile defends junk", () => {
     expect(clampTaxProfile(null))
-      .toEqual({ residency: "resident", medicareExempt: false, openingCapitalLosses: 0 });
+      .toEqual({
+        residency: "resident", medicareExempt: false, openingCapitalLosses: 0,
+        centrelinkEligible: true, centrelinkEligibleIsDefault: true,
+      });
     expect(clampTaxProfile({ residency: "martian", medicareExempt: "yes", centrelinkEligible: 1, openingCapitalLosses: -5 }))
-      .toEqual({ residency: "resident", medicareExempt: false, openingCapitalLosses: 0 });
+      .toEqual({
+        residency: "resident", medicareExempt: false, openingCapitalLosses: 0,
+        centrelinkEligible: true, centrelinkEligibleIsDefault: true,
+      });
   });
 
-  it("Input Usability spec, Commit 1: centrelinkEligible is dropped entirely, even if present in raw input", () => {
-    expect(clampTaxProfile({ residency: "resident", medicareExempt: false, centrelinkEligible: true, openingCapitalLosses: 0 }))
-      .not.toHaveProperty("centrelinkEligible");
+  // Age pension (spec 21a, Commit 3) — reintroduced now that Centrelink
+  // modelling exists (Input Usability spec, Commit 1 had removed it as
+  // inert). clampTaxProfile reads the raw stored value; clampPlan's own
+  // applyCentrelinkEligibleDefault (not exercised here, since that needs
+  // a resolved endAge) is what actually recomputes the SMART default.
+  it("clampTaxProfile preserves an explicit centrelinkEligible: false override", () => {
+    expect(clampTaxProfile({ centrelinkEligible: false, centrelinkEligibleIsDefault: false }))
+      .toEqual({
+        residency: "resident", medicareExempt: false, openingCapitalLosses: 0,
+        centrelinkEligible: false, centrelinkEligibleIsDefault: false,
+      });
   });
 });
 
@@ -2064,5 +2089,69 @@ describe("Adjustment rows", () => {
       "tax.incomeTax", "tax.withheld", "tax.medicare", "tax.help", "tax.cgt",
       "expenses", "superContributions",
     ]);
+  });
+});
+
+// Age pension (spec 21a, Commit 3) — centrelinkEligible's smart default
+// (true for anyone reaching age pension age, 67, within the projection)
+// can only resolve once endAge is known, so it's clampPlan's own job,
+// not clampTaxProfile's (see applyCentrelinkEligibleDefault's header).
+describe("clampPlan — centrelinkEligible smart default (spec 21a, Commit 3)", () => {
+  const start = { year: 2026, month: 8 };
+
+  it("defaults eligible when the person reaches 67 within the projection", () => {
+    const p = clampPlan({
+      client: { dob: "1986-07-01", sex: "male" }, // age 40
+      endBasis: { mode: "fixedAge", fixedAge: 90 },
+      start,
+    });
+    expect(p.client.taxProfile.centrelinkEligible).toBe(true);
+    expect(p.client.taxProfile.centrelinkEligibleIsDefault).toBe(true);
+  });
+
+  it("defaults ineligible when the projection ends before age pension age", () => {
+    const p = clampPlan({
+      client: { dob: "1986-07-01", sex: "male" }, // age 40
+      endBasis: { mode: "fixedAge", fixedAge: 60 }, // never reaches 67
+      start,
+    });
+    expect(p.client.taxProfile.centrelinkEligible).toBe(false);
+  });
+
+  it("an explicit override survives and stops tracking, even when endAge would otherwise flip the default", () => {
+    const p = clampPlan({
+      client: {
+        dob: "1986-07-01", sex: "male",
+        taxProfile: { centrelinkEligible: false, centrelinkEligibleIsDefault: false },
+      },
+      endBasis: { mode: "fixedAge", fixedAge: 90 }, // would default to eligible
+      start,
+    });
+    expect(p.client.taxProfile.centrelinkEligible).toBe(false);
+    expect(p.client.taxProfile.centrelinkEligibleIsDefault).toBe(false);
+  });
+
+  it("recomputes while still tracking as endAge changes (derived-default convention)", () => {
+    const shortened = clampPlan({
+      client: { dob: "1986-07-01", sex: "male" },
+      endBasis: { mode: "fixedAge", fixedAge: 90 },
+      start,
+    });
+    expect(shortened.client.taxProfile.centrelinkEligible).toBe(true);
+    const cutShort = clampPlan({ ...shortened, endBasis: { mode: "fixedAge", fixedAge: 50 } });
+    expect(cutShort.client.taxProfile.centrelinkEligible).toBe(false);
+  });
+
+  it("resolves independently per person for a couple with an age gap — endAge is CLIENT-anchored, so a partner's own age-at-end is NOT the same figure", () => {
+    const p = clampPlan({
+      household: "married",
+      client: { dob: "1961-07-01", sex: "male" }, // age 65 at start
+      partner: { dob: "1996-07-01", sex: "female" }, // age 30 at start
+      endBasis: { mode: "fixedAge", fixedAge: 70 }, // client's own endAge — client reaches 70, partner only reaches 30+5=35
+      start,
+    });
+    expect(p.endAge).toBe(70);
+    expect(p.client.taxProfile.centrelinkEligible).toBe(true); // 65 → 70 within the projection
+    expect(p.partner.taxProfile.centrelinkEligible).toBe(false); // 30 → 35 within the same 5-year window
   });
 });

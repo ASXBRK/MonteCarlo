@@ -94,6 +94,13 @@ export const SMART_DEFAULTS = {
     kind: DEFAULT_KIND.DERIVED,
     describe: (ctx) => `Default: ${fmtPct(ctx.value)} — derived (${ctx.reason}); recomputes if the linked property's type changes until you enter your own figure`,
   },
+  // Age pension (spec 21a, Commit 3) — eligible by default for anyone
+  // reaching age pension age within the projection; recomputes as
+  // endAge/retirement inputs change until you set the checkbox yourself.
+  "person.centrelinkEligible": {
+    kind: DEFAULT_KIND.DERIVED,
+    describe: (ctx) => `Default: ${ctx.value ? "eligible" : "not eligible"} — derived (reaches age pension age within the projection); recomputes as the projection end changes until you set this yourself`,
+  },
 };
 
 function fmtPct(n) {

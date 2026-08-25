@@ -5,6 +5,7 @@ import { PROFILES } from "./profiles.js";
 import { checkYearConservation } from "./conservationCheck.js";
 import { lmiPremium } from "./data/lmiRates.js";
 import { levelPayment } from "./liabilities.js";
+import { agePensionRatesFor } from "./data/agePension.js";
 
 // Minimal v3-shaped state factory. Custom allocations pin exact
 // returns without depending on profile values.
@@ -550,6 +551,20 @@ describe("Key Dates — v5 → v6 migration gate", () => {
       ...mkState({
         endAge: 55,
         assets: v5.assets,
+        // Age pension (spec 21a) reintroduced taxProfile.centrelinkEligible
+        // — mkState's own default client has no taxProfile at all, so
+        // this must match what clampTaxProfile resolves for the migrated
+        // side's explicit `centrelinkEligible: false` (v5.plan.client.taxProfile
+        // above), or the two sides' row.agePensionDetail diverge on the
+        // "eligible" flag alone (the paid AMOUNT is identical either way,
+        // since this client never reaches age pension age within the
+        // plan — but the bit-identical gate compares the whole row).
+        plan: {
+          client: {
+            currentAge: 40,
+            taxProfile: { residency: "resident", medicareExempt: false, centrelinkEligible: false, centrelinkEligibleIsDefault: false, openingCapitalLosses: 0 },
+          },
+        },
         cashflows: {
           // incomeType/sgApplies explicit here — hydrate() defaults a
         // pre-Tier-1.2 row (no incomeType field, like v5 above) to
@@ -2553,7 +2568,18 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // now `startAge`, but startAge === 40 whenever !olderCohort) — zero
     // behavioural change to the pre-existing coverage those runs give.
     const olderCohort = Math.random() < 0.35;
-    const startAge = olderCohort ? randInt(56, 63) : 40;
+    // Age pension (spec 21a) can only ever fire once a person reaches
+    // age pension age (67) — unreachable from EITHER the original
+    // age-40 start or the pension-phase olderCohort (max 63+4-1=66)
+    // over this same 2-4 year window. A THIRD, independent stratum
+    // (not exclusive with olderCohort — both can roll true) pushes the
+    // start old enough that endAge comfortably clears 67 most of the
+    // time, exercising assessment, entitlement, AND (since it can
+    // combine with olderCohort) the pension-phase-super-always-assessed
+    // interaction the spec calls out as the case that "must be exactly
+    // right".
+    const retireeCohort = Math.random() < 0.2;
+    const startAge = retireeCohort ? randInt(65, 70) : olderCohort ? randInt(56, 63) : 40;
     const endAge = startAge + years - 1;
 
     const assets = Array.from({ length: randInt(1, 3) }, (_, i) => randomAsset(`a${i}`));
@@ -2881,13 +2907,23 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // gate binds earlier than the flat TTR preservation-age gate,
     // sometimes later, sometimes never within the window at all.
     const retirementAgeFor = () => (olderCohort ? randInt(startAge, Math.min(endAge, 67)) : undefined);
+    // Age pension (spec 21a) — the eligibility flag, exercised
+    // explicitly (not left to its own true-by-default) so the
+    // suppression path (residency, or a client who doesn't want it
+    // modelled) gets swept too, not just the "everyone eligible" case.
+    // centrelinkEligibleIsDefault: false throughout — this raw state
+    // bypasses clampPlan's own smart-default resolution entirely (same
+    // reason retirementAge is set explicitly rather than left to
+    // default), so the literal value here is authoritative either way.
     const client = {
       currentAge: startAge, retirementAge: retirementAgeFor(),
       helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5,
+      taxProfile: { centrelinkEligible: Math.random() < 0.85, centrelinkEligibleIsDefault: false },
     };
     const partner = couple ? {
       currentAge: startAge, retirementAge: retirementAgeFor(),
       helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5,
+      taxProfile: { centrelinkEligible: Math.random() < 0.85, centrelinkEligibleIsDefault: false },
     } : null;
 
     // Children + education funding (Input Usability spec, Commit 3) —
@@ -7043,5 +7079,127 @@ describe("Pension phase (spec 20, Commit 5): commutations", () => {
       const out = projectPlan(s);
       for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `commutation scenario ${i}, year ${y}`);
     }
+  });
+});
+
+// Age pension (spec 21a, Commit 3) — engine integration. An isolated
+// fixture (no assets, no income, no expenses) so the entitlement is
+// the ONLY thing moving household cash — the age pension's own known-
+// value figure (agePensionRatesFor's single rate) can then be checked
+// directly against row.income/wcaClosing with nothing else to net
+// against, rather than needing to disentangle it from other flows.
+describe("Age pension (spec 21a, Commit 3): engine integration", () => {
+  it("pays nothing before age pension age, then the full single rate once reached (known value)", () => {
+    const s = mkState({ endAge: 70, assets: [], plan: { client: { currentAge: 65 } } });
+    const out = projectPlan(s);
+    // Age 65 (y=0), 66 (y=1): not yet 67.
+    expect(out.yearly[0].agePensionDetail.entitlement).toBe(0);
+    expect(out.yearly[1].agePensionDetail.entitlement).toBe(0);
+    expect(out.yearly[0].agePensionDetail.client.ageEligible).toBe(false);
+    // Age 67 (y=2): reached. Zero assessable assets/income (no assets,
+    // no income rows) → full single rate, homeowner status irrelevant
+    // at $0 assessable assets either way.
+    const rates2028 = agePensionRatesFor(2028, "indexed", 0.025, 0.035);
+    expect(out.yearly[2].agePensionDetail.client.ageEligible).toBe(true);
+    expect(out.yearly[2].agePensionDetail.entitlement).toBeCloseTo(rates2028.single.rate, 2);
+    expect(out.yearly[2].agePensionDetail.client.paid).toBeCloseTo(rates2028.single.rate, 2);
+    expect(out.yearly[2].agePensionDetail.assetsTestResult).toBeCloseTo(rates2028.single.rate, 2);
+    expect(out.yearly[2].agePensionDetail.incomeTestResult).toBeCloseTo(rates2028.single.rate, 2);
+    expect(out.yearly[2].agePensionDetail.assessableAssets).toBe(0);
+  });
+
+  it("reaches household cashflow — row.income jumps by exactly the entitlement once eligible, with nothing else in this fixture to net against", () => {
+    // surplus: accumulate — mkState's own default ("spend") sweeps any
+    // WCA surplus away at FY-end, which would hide the credit from the
+    // closing-balance assertion below (same fix Commit 5's own
+    // commutation-to-cash test needed, for the same reason).
+    const s = mkState({ endAge: 70, assets: [], plan: { client: { currentAge: 65 } }, surplus: { mode: "accumulate" } });
+    const out = projectPlan(s);
+    const jump = out.yearly[2].income - out.yearly[1].income;
+    expect(jump).toBeCloseTo(out.yearly[2].agePensionDetail.entitlement, 2);
+    // ...and the WCA closing balance carries it forward — plus whatever
+    // interest it earned as it accrued monthly through the year (no
+    // expenses, no tax in this fixture, so income + interest is the
+    // whole story, not the bare entitlement alone).
+    expect(out.yearly[2].wcaClosing).toBeCloseTo(out.yearly[2].income + out.yearly[2].wcaDetail.interest, 2);
+  });
+
+  it("the eligibility flag suppresses assessment entirely, even once age-eligible", () => {
+    const s = mkState({
+      endAge: 70, assets: [],
+      plan: { client: { currentAge: 65, taxProfile: { centrelinkEligible: false, centrelinkEligibleIsDefault: false } } },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.agePensionDetail.entitlement).toBe(0);
+      expect(row.agePensionDetail.client.eligible).toBe(false);
+    }
+    // The test itself still ran (assessableAssets/results are reported
+    // regardless of the flag — useful for an adviser to see the
+    // trajectory even for a client who's opted out) — only the PAID
+    // amount is suppressed.
+    expect(out.yearly[5].agePensionDetail.client.ageEligible).toBe(true);
+    expect(out.yearly[5].agePensionDetail.assetsTestResult).toBeGreaterThan(0);
+  });
+
+  it("a couple with an age gap: only the age-eligible partner is paid, at the couple's split rate — the assets/income tests still run on the COMBINED household figures", () => {
+    const s = mkState({
+      endAge: 70, assets: [],
+      plan: {
+        household: "couple",
+        client: { currentAge: 67 }, // already eligible at year 0
+        partner: { currentAge: 40 }, // decades from eligibility
+      },
+    });
+    const out = projectPlan(s);
+    const rates2026 = agePensionRatesFor(2026, "indexed", 0.025, 0.035);
+    expect(out.yearly[0].agePensionDetail.client.ageEligible).toBe(true);
+    expect(out.yearly[0].agePensionDetail.partner.ageEligible).toBe(false);
+    expect(out.yearly[0].agePensionDetail.client.paid).toBeCloseTo(rates2026.couple.rateEach, 2);
+    expect(out.yearly[0].agePensionDetail.partner.paid).toBe(0);
+    expect(out.yearly[0].agePensionDetail.entitlement).toBeCloseTo(rates2026.couple.rateEach, 2);
+  });
+
+  it("conservation holds with the age pension present, across the whole fixture", () => {
+    const s = mkState({ endAge: 70, assets: [], plan: { client: { currentAge: 65 } } });
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `age pension fixture, year ${y}`);
+  });
+
+  it("accumulation super below age pension age is exempt from the assets test; the SAME balance in pension phase is assessed at any age — the strategy the spec calls out", () => {
+    const belowAge = mkState({
+      endAge: 62, assets: [],
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 500000, allocation: { mode: "custom", incomePct: 0, growthPct: 0, frankingPct: 0, volBasis: "Balanced" } })],
+      },
+    });
+    const outBelow = projectPlan(belowAge);
+    // Age 60-62: accumulation, well below age pension age (67) — the
+    // assets test should never see this balance (assessableAssets stays
+    // at 0 throughout, since there are no other assets in this fixture).
+    for (const row of outBelow.yearly) expect(row.agePensionDetail.assessableAssets).toBe(0);
+
+    const inPension = mkState({
+      endAge: 62, assets: [],
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 500000, allocation: { mode: "custom", incomePct: 0, growthPct: 0, frankingPct: 0, volBasis: "Balanced" } })],
+        pensions: [pensionRow({
+          type: "abp", allocation: { mode: "custom", incomePct: 0, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+        })],
+      },
+    });
+    const outPension = projectPlan(inPension);
+    // Commences at age 60 (this pension's default commenceAt) — the
+    // per-year assessment for the commencement FY itself still reads
+    // this as accumulation (a disclosed one-year lag: pensionCommenced
+    // only flips true inside the real pass's own commencement transfer,
+    // which runs AFTER this assessment — see deterministic.js's own
+    // comment). From the FOLLOWING FY (age 61) onward, the SAME $500k
+    // is correctly assessed as pension-phase, decades before age
+    // pension age — the strategy the spec calls out.
+    expect(outPension.yearly[0].agePensionDetail.assessableAssets).toBe(0);
+    expect(outPension.yearly[1].agePensionDetail.assessableAssets).toBeGreaterThan(400000);
   });
 });
