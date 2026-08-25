@@ -3,8 +3,8 @@
 Repo `ASXBRK/MonteCarlo`, branch `claude/monte-carlo-investment-app-R9XSB`.
 Rewritten stock-take, grouped by area rather than by spec — the specs
 themselves (`docs/specs/`) hold the full commit-by-commit reasoning; this
-file is the map of where things landed. 107 commits in, branch head at
-time of writing `9d6bf04`.
+file is the map of where things landed. 192 commits in, branch head at
+time of writing `8eaeb50`.
 
 This file is updated in the SAME commit as the work it describes, per
 CLAUDE.md's Workflow rules ("Keep `docs/reference/build-log.md` current:
@@ -1146,6 +1146,78 @@ freezes, property appears grouped in the link select, commencedOn/
 deductiblePct populate with tooltips and freeze independently on
 override, and the sale-proceeds default resolves to the linked loan.
 
+### Pension phase (spec 20 — accounts through commutations, 5 commits)
+`f3239b3` accounts/commencement; `0246b71` drawdown/minimums/payment
+tax; `bb4357a` retirement-phase earnings exemption and TTR; `6d83dd3`
+transfer balance cap and account; `5d53723` commutations, input UI,
+and outputs. Account-based and TTR pensions: the tax-free/taxable
+proportioning rule fixed at commencement (snapshotted from the source
+account's then-current components, never recalculated the way
+accumulation is); minimum drawdown by age band with fixed/expenditure/
+maximum(TTR-only 10%) options, the minimum always a floor under any
+other option; retirement-phase earnings exempt from fund tax, TTR
+converting automatically once the owner reaches release age; the
+transfer balance cap and account, general-cap indexation plus the
+unused-proportion personal-cap mechanism; partial/full commutations in
+the pension's fixed proportions, both destinations (cash or back to
+super). New money flow: pension earnings (net of fund tax) — named in
+conservationCheck.js; commencement/payments/commutations are pure
+transfers between already-counted pockets, needing no term.
+`reserveFromSuper` (a shared per-account "already spoken for" ledger,
+resolved once per FY before either pass, in a fixed order across
+adviser fees/Div293/296/FHSSS/pension commencement) closes a real bug
+the 300-scenario conservation sweep caught: pension commencement
+originally bypassed it, so an FHSSS release could over-credit
+settlement cash relative to what the shared super account actually
+still held after the pension had already drained it earlier the same
+month. Input UI: a Pensions section between Super and Liabilities;
+outputs: a Pensions table, pension balances joining the Super balances
+chart as a separate band, and the firm's reserved `Taxable Pension
+Component`/`Taxable Pension Offset (TTR)` cashflow rows now populate
+(previously hardcoded zero). Browser-verified end to end; conservation
+holds across 15–25×300-scenario sweeps per commit.
+
+### Age pension — core means testing (spec 21a, 4 commits)
+`190a178` rates/thresholds/indexation; `cca035c` assets test/income
+test/entitlement; `c2270b7` engine integration and cashflow; `8eaeb50`
+tables, chart, and Focus view. Depended on Pension phase landing first
+— the assets test's central rule (accumulation super exempt below age
+pension age, pension-phase assessed regardless of age) needs pension
+phase to exist. FY2026/27 rates per-figure indexed (rates at AWOTE,
+thresholds at CPI — modelling rates at CPI instead would understate
+the pension by roughly a third over 30 years, since the real legislated
+floor is 27.7% of MTAWE, which AWOTE proxies). Data gap closed: the
+firm's reference doesn't carry non-homeowner asset thresholds;
+cross-referenced against Services Australia's published 2026 rates via
+two independent public sources, then validated internally by
+confirming the sourced pension-rate figure reproduces the firm's own
+given homeowner cut-outs to within the $500 rounding step. Assets test
+(financial + lifestyle + non-PPR property at market value, less
+liabilities secured against an assessed asset) and two-tier-deeming
+income test, both run on a couple's COMBINED figures against the
+couple rate/thresholds, entitlement the lesser of the two, split 50/50
+and paid only to whichever partner(s) are both age-eligible (67) and
+flagged eligible. Tax treatment (the spec's own "pick one and say
+which"): non-assessable income — SAPTO isn't modelled anywhere in this
+engine, so taxing the payment without it would overstate tax.
+`centrelinkEligible` reintroduced on taxProfile (removed as inert in
+spec 15 Commit 1) as a smart default, true for anyone reaching age
+pension age within the projection. New money flow: entitlement, a
+government payment with no offsetting outflow — needs no dedicated
+conservation term since it's credited straight into `row.income`, the
+existing `income` term (documented in conservationCheck.js, not just
+assumed); `randomScenario()` gained a `retireeCohort` age stratum,
+since neither the original age-40 start nor the pension-phase
+`olderCohort` (max age 66) could otherwise ever reach age pension age
+within the 2–4 year sweep window. Outputs: an Age pension table/chart
+subject, a Focus view with full-pension/cut-out threshold lines, and
+the entitlement joining the composite and income-sources charts as its
+own band (pulled back out of `row.income` so it's never double-counted
+against the existing Income band). Browser-verified end to end: the
+table showed the binding test correctly switching from Assets to
+Income as assets grew over a 15-year window; conservation holds across
+20×300-scenario sweeps.
+
 ---
 
 ## WHERE WE'RE GOING
@@ -1187,9 +1259,10 @@ Accumulated across specs 11–15; see each spec's own "Deferred" section
 for the reasoning behind each item.
 - Salary packaging and novated leases (FBT mechanics are a separate
   build); debt recycling (needs loan drawdowns); trust distributions,
-  foreign income, taxable pension component, TTR offset, SAPTO, and
-  Centrelink payments (spec 11 — these currently emit as zero rows to
-  preserve the worked document's table shape).
+  foreign income, and SAPTO (spec 11 — these still emit as zero rows to
+  preserve the worked document's table shape; taxable pension
+  component, TTR offset, and Centrelink/age pension payments — also
+  spec 11 zero-rows originally — are done, see specs 20/21a above).
 - Investment product comparison (research, not projection); solver
   targets beyond the three Focus already has (spec 12).
 - The banking-structure diagram itself (produced separately); property
