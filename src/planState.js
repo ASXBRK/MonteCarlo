@@ -1477,6 +1477,14 @@ export function createPension(plan, existing = [], superAccounts = [], owner = "
     indexBasis: "cpi",
     indexExtraPct: 0,
     commutations: [],
+    // Deeming grandfathering (spec 21b, Commit 3) — off by default; a
+    // NEW pension commencing within this projection can never qualify
+    // (grandfathering requires commencement before 1 January 2015),
+    // only an existing pension the client already holds at plan start.
+    grandfathered: false,
+    grandfatheredCommencedOn: null,
+    grandfatheredPurchasePrice: 0,
+    grandfatheredLifeExpectancyYears: null, // engine-derived only, see clampPension
   };
 }
 
@@ -1534,6 +1542,30 @@ export function clampPension(pn, plan, superAccounts = [], profiles = {}) {
   // reset to the safe default rather than silently doing something an
   // ABP was never entitled to.
   const drawdownOption = requestedDrawdown === "maximum" && type !== "ttr" ? "minimum" : requestedDrawdown;
+  // Deeming grandfathering (spec 21b, Commit 3) — input integrity: a
+  // commencement date on or after 1 January 2015 is not a real
+  // grandfathering case this tool can model (the legal cutoff), so
+  // `grandfathered` resets to false rather than silently keeping a
+  // combination the law never allows — same "reject the invalid combo"
+  // convention as drawdownOption's own "maximum"-is-TTR-only rule above.
+  const requestedGrandfathered = pn.grandfathered === true
+    && typeof pn.grandfatheredCommencedOn === "string" && pn.grandfatheredCommencedOn < "2015-01-01";
+  const grandfatheredCommencedOn = requestedGrandfathered ? pn.grandfatheredCommencedOn : null;
+  // Life expectancy AT COMMENCEMENT — a fixed factor computed from the
+  // OWNER's own DOB and the historical commencement date (the ABS
+  // tables already embedded for LE anchoring elsewhere in this schema),
+  // recomputed whenever either input changes, never re-derived engine-
+  // side against a moving "current" age the way an ordinary LE-basis
+  // projection end is. Without a resolvable owner DOB there is no valid
+  // factor to compute, so grandfathering can't be safely claimed at all.
+  const ownerPerson = owner === "partner" ? plan.partner : plan.client;
+  let grandfatheredLifeExpectancyYears = null;
+  if (requestedGrandfathered && ownerPerson?.dob) {
+    const [gy, gm] = grandfatheredCommencedOn.split("-").map(Number);
+    const ageAtCommencement = ageAtDate(ownerPerson.dob, gy, gm);
+    if (ageAtCommencement != null) grandfatheredLifeExpectancyYears = remainingLE(ageAtCommencement, ownerPerson.sex);
+  }
+  const grandfathered = requestedGrandfathered && grandfatheredLifeExpectancyYears != null;
   return {
     id: typeof pn.id === "string" && pn.id ? pn.id : uid("pn"),
     name: typeof pn.name === "string" && pn.name.trim() ? pn.name : "Pension",
@@ -1550,6 +1582,10 @@ export function clampPension(pn, plan, superAccounts = [], profiles = {}) {
     fixedAmount: clampNumber(pn.fixedAmount, 0),
     ...clampIndexation(pn),
     commutations: Array.isArray(pn.commutations) ? pn.commutations.map((c) => clampCommutation(c, plan)) : [],
+    grandfathered,
+    grandfatheredCommencedOn,
+    grandfatheredPurchasePrice: grandfathered ? clampNumber(pn.grandfatheredPurchasePrice, 0) : 0,
+    grandfatheredLifeExpectancyYears,
   };
 }
 

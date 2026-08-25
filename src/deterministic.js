@@ -322,6 +322,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       fixedAmount: pn.fixedAmount,
       indexBasis: pn.indexBasis,
       indexExtraPct: pn.indexExtraPct,
+      // Deeming grandfathering (spec 21b, Commit 3) — a fixed factor
+      // from plan state, never recomputed engine-side (see
+      // clampPension's own header: the LE factor is anchored to the
+      // OWNER's age at the historical commencement date, not to any
+      // moving "current" age).
+      grandfathered: pn.grandfathered === true,
+      grandfatheredPurchasePrice: pn.grandfatheredPurchasePrice ?? 0,
+      grandfatheredLifeExpectancyYears: pn.grandfatheredLifeExpectancyYears ?? null,
     };
   }
   const pensionBal = {};
@@ -525,6 +533,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       const y = resolveRef(c.at, state.plan, schedule, "client").planYear;
       return { id: c.id, month: julyOf(y), amount: c.amount, destination: c.destination };
     }).filter((e) => e.month != null);
+  }
+
+  // Deeming grandfathering (spec 21b, Commit 3) — grandfathering is
+  // lost PERMANENTLY the moment a grandfathered pension is first
+  // commuted (partial or full), so its loss is the earliest commutation
+  // event's own month — resolved once, up front, alongside the events
+  // themselves, since it depends only on the commutation rows' fixed
+  // dates, never on anything path-dependent. Real rules also end
+  // grandfathering when the member ceases income support entirely;
+  // that trigger isn't modelled (disclosed — this engine has no such
+  // event to hang it on).
+  const pensionGrandfatheredLostAt = {};
+  for (const pn of pensionRows) {
+    const events = pensionCommutationEvents[pn.id];
+    pensionGrandfatheredLostAt[pn.id] = events.length ? Math.min(...events.map((e) => e.month)) : null;
   }
 
   // Gifting and deprivation (spec 21b, Commit 2) — each gift resolves
@@ -1273,6 +1296,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       opening: 0, commencementAmount: 0, earnings: 0, earningsTax: 0,
       payments: 0, paymentsTaxFree: 0, paymentsTaxable: 0, commutations: 0,
       closing: 0, taxFreeClosing: 0, taxFreeProportion: null,
+      // Deeming grandfathering (spec 21b, Commit 3) — both zero unless
+      // this pension is grandfathered AND still is this FY.
+      grandfatheredDeductibleIncome: 0, grandfatheredDeemingExempt: 0,
     }])),
     pensionClosing: 0,
     // Transfer balance account (spec 20, Commit 4) — a snapshot of each
@@ -2463,6 +2489,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             const taxFreeAmount = paid * pensionFixedProportion[pn.id];
             row.pensionDetail[pn.id].commutations += paid;
             tba[pm.owner] = debitTransferBalance(tba[pm.owner], paid);
+            // Deeming grandfathering (spec 21b, Commit 3) — commuting a
+            // grandfathered pension ends its grandfathering PERMANENTLY,
+            // from this exact month; the consequence (full deeming from
+            // here on) doesn't show up in the entitlement figure until
+            // next FY's assessment, so it needs a visible warning here,
+            // at the moment it actually happens.
+            if (pm.grandfathered && ev.month === pensionGrandfatheredLostAt[pn.id]) {
+              superWarnings.push({
+                fyLabel: schedule.fyLabels[y], owner: pm.owner, type: "grandfatheringLost",
+                reason: `Commuting ${pn.name ?? "this pension"} permanently ends its pre-2015 deeming grandfathering — its balance is deemed like any other financial asset from this point on`,
+              });
+            }
             // "super": returns to accumulation in the SAME account the
             // pension originally came from — a disclosed simplification
             // when that account is no longer valid/included (falls back
@@ -3114,6 +3152,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const agePensionRatesY = agePensionRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     let agePensionMonthly = 0;
     let agePensionDetailY = null;
+    // Deeming grandfathering (spec 21b, Commit 3) — per-pension detail
+    // (deductible-amount income, deeming-base exemption), keyed by
+    // pension id; declared here (outside the block below) so it
+    // survives to feed row.pensionDetail[id] further down.
+    let grandfatheredDetailByPension = {};
     // Gifting (spec 21b, Commit 2) — the household total for THIS FY,
     // summed straight from the already-resolved gift events (fixed
     // month/amount, no path dependence) rather than accumulated inside
@@ -3171,8 +3214,32 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const ageReached = ownerAgeAt(p, y) >= agePensionRatesY.ageOfEligibility;
         if (ageReached) preAssessedSuper += superAccountsByOwner[p].reduce((s, id) => s + superBal[id], 0);
       }
+      // Deeming grandfathering (spec 21b, Commit 3) — grandfathering
+      // ONLY changes the INCOME test treatment (a "deductible amount"
+      // in place of deeming); the ASSETS test is unaffected by it (the
+      // spec's own words), so a grandfathered pension's balance still
+      // joins preAssessedSuper here uniformly. Separately: still-
+      // grandfathered pensions have their balance pulled back OUT of
+      // the deeming base below, and their deductible-amount income
+      // added straight into otherIncomeTotal instead — bypassing
+      // deeming entirely, exactly like a real Centrelink assessment.
+      let grandfatheredDeemingExempt = 0;
+      let grandfatheredDeductibleIncome = 0;
       for (const pn of pensionRows) {
-        if (pensionCommenced[pn.id]) preAssessedSuper += pensionBal[pn.id]; // pension-phase, always assessed
+        if (!pensionCommenced[pn.id]) continue;
+        preAssessedSuper += pensionBal[pn.id]; // pension-phase, always assessed
+        const pm = pensionMeta[pn.id];
+        if (!pm.grandfathered) continue;
+        const lostAt = pensionGrandfatheredLostAt[pn.id];
+        const stillGrandfathered = lostAt == null || lostAt > yearStart(y);
+        if (!stillGrandfathered) continue;
+        grandfatheredDeemingExempt += pensionBal[pn.id];
+        const annualPayment = pensionAnnualAmount[pn.id] ?? pensionMinThisYear[pn.id];
+        const deductible = pm.grandfatheredLifeExpectancyYears > 0
+          ? pm.grandfatheredPurchasePrice / pm.grandfatheredLifeExpectancyYears : 0;
+        const deductibleIncome = Math.max(0, annualPayment - deductible);
+        grandfatheredDeductibleIncome += deductibleIncome;
+        grandfatheredDetailByPension[pn.id] = { grandfatheredDeductibleIncome: deductibleIncome, grandfatheredDeemingExempt: pensionBal[pn.id] };
       }
       // Disclosed simplification: `pensionCommenced` only flips true
       // inside the real pass's own month loop (the actual commencement
@@ -3234,11 +3301,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       const deemedIncomeTotal = agePensionDeemedIncome({
         // ABPs are deemed like any other financial asset; deprived
         // gifted amounts are ALSO deemed (spec's own words: "assessed
-        // under both the assets and income tests (deemed)").
-        financialAssets: financialAssets + preAssessedSuper + deprivedAssetsTotal,
+        // under both the assets and income tests (deemed)"); a still-
+        // grandfathered pension's balance is pulled back OUT here (its
+        // income instead flows through otherIncomeTotal as a deductible-
+        // amount figure, added below).
+        financialAssets: financialAssets + preAssessedSuper - grandfatheredDeemingExempt + deprivedAssetsTotal,
         lowerRate: agePensionRatesY.deemingLowerRate, upperRate: agePensionRatesY.deemingUpperRate,
         threshold: couple ? agePensionRatesY.couple.deemingThreshold : agePensionRatesY.single.deemingThreshold,
       });
+      otherIncomeTotal += grandfatheredDeductibleIncome;
       const assessableIncomeTotal = agePensionAssessableIncome({ deemedIncome: deemedIncomeTotal, otherIncome: otherIncomeTotal });
 
       const assessment = couple
@@ -3265,6 +3336,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         incomeTestResult: assessment.incomeResult,
         bindingTest: assessment.bindingTest,
         entitlement: paid.client + paid.partner,
+        grandfatheredDeductibleIncome: grandfatheredDeductibleIncome,
+        grandfatheredDeemingExempt: grandfatheredDeemingExempt,
         client: {
           ageEligible: ageEligible.client, eligible: state.plan.client?.taxProfile?.centrelinkEligible !== false, paid: paid.client,
           workBonusExempt: workBonusExemptByOwner.client, workBonusBank: workBonusBank.client ?? 0,
@@ -3930,6 +4003,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     row.agePensionDetail = agePensionDetailY;
     row.giftsPaid = giftsPaidThisYear;
+    for (const id of pensionIds) {
+      if (grandfatheredDetailByPension[id]) Object.assign(row.pensionDetail[id], grandfatheredDetailByPension[id]);
+    }
     const real = runYear(y, {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,

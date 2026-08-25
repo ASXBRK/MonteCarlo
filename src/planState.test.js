@@ -1388,6 +1388,65 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(pn.fixedAmount).toBe(0);
   });
 
+  it("clampPension (grandfathering, spec 21b Commit 3): a valid pre-2015 commencement with a resolvable owner DOB computes the life-expectancy factor at commencement", () => {
+    const plan = clampPlan(couplePlan(), PROFILES); // client dob synthesised to 1986-07-01, male (start FY2026/27, age 40)
+    const su = createSuperAccount(plan, [], PROFILES, "client");
+    const pn = clampPension(
+      {
+        owner: "client", sourceAccountId: su.id, type: "abp", commenceAt: { kind: "age", age: 65 },
+        grandfathered: true, grandfatheredCommencedOn: "2010-07-01", grandfatheredPurchasePrice: 300000,
+      },
+      plan, [su], PROFILES
+    );
+    expect(pn.grandfathered).toBe(true);
+    expect(pn.grandfatheredCommencedOn).toBe("2010-07-01");
+    expect(pn.grandfatheredPurchasePrice).toBe(300000);
+    // dob 1986-07-01 → exact age 24 at 2010-07-01 → ABS male ex(24) = 57.88 (see lifeTables.js header)
+    expect(pn.grandfatheredLifeExpectancyYears).toBeCloseTo(57.88, 6);
+  });
+
+  it("clampPension (grandfathering): a commencement on/after 1 January 2015 is not a real grandfathering case — resets to false rather than silently keeping it (input integrity)", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const su = createSuperAccount(plan, [], PROFILES, "client");
+    const pn = clampPension(
+      {
+        owner: "client", sourceAccountId: su.id, type: "abp", commenceAt: { kind: "age", age: 65 },
+        grandfathered: true, grandfatheredCommencedOn: "2015-01-01", grandfatheredPurchasePrice: 300000,
+      },
+      plan, [su], PROFILES
+    );
+    expect(pn.grandfathered).toBe(false);
+    expect(pn.grandfatheredCommencedOn).toBeNull();
+    expect(pn.grandfatheredPurchasePrice).toBe(0); // clamps to 0 once not grandfathered
+    expect(pn.grandfatheredLifeExpectancyYears).toBeNull();
+  });
+
+  it("clampPension (grandfathering): an owner with no resolvable DOB also prevents grandfathering from taking effect — no valid factor, no claim", () => {
+    const plan = { client: { currentAge: 40 }, partner: null, endAge: 90 }; // hand-built, no dob on the owner
+    const su = { id: "su1", owner: "client" };
+    const pn = clampPension(
+      {
+        owner: "client", sourceAccountId: su.id, type: "abp", commenceAt: { kind: "age", age: 65 },
+        grandfathered: true, grandfatheredCommencedOn: "2010-07-01", grandfatheredPurchasePrice: 300000,
+      },
+      plan, [su], PROFILES
+    );
+    expect(pn.grandfathered).toBe(false);
+    expect(pn.grandfatheredLifeExpectancyYears).toBeNull();
+    expect(pn.grandfatheredPurchasePrice).toBe(0);
+  });
+
+  it("clampPension (grandfathering): grandfatheredPurchasePrice always clamps to 0 when not grandfathered, regardless of the stored raw value", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const su = createSuperAccount(plan, [], PROFILES, "client");
+    const pn = clampPension(
+      { owner: "client", sourceAccountId: su.id, type: "abp", commenceAt: { kind: "age", age: 65 }, grandfathered: false, grandfatheredPurchasePrice: 500000 },
+      plan, [su], PROFILES
+    );
+    expect(pn.grandfathered).toBe(false);
+    expect(pn.grandfatheredPurchasePrice).toBe(0);
+  });
+
   it("super accounts are structurally invisible to fundingOrder and settings — there is no path to include one", () => {
     // normaliseFundingOrder/normaliseSettings only ever consult
     // state.assets; a super account id is never even a candidate.

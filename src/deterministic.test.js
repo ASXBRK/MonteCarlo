@@ -7372,3 +7372,104 @@ describe("Gifting and deprivation (spec 21b, Commit 2): engine integration", () 
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `gifting fixture, year ${y}`);
   });
 });
+
+describe("Deeming grandfathering (spec 21b, Commit 3): engine integration", () => {
+  // A pension commencing immediately (commenceAt === currentAge) is
+  // read as accumulation for its own commencement FY (a disclosed
+  // one-year lag — see "accumulation super below age pension age"
+  // above); pension-phase, and grandfathering, apply from y=1 onward.
+  it("computes the deductible amount correctly — otherIncome carries it directly, not the full payment", () => {
+    const s = mkState({
+      endAge: 65, assets: [],
+      plan: {
+        client: { currentAge: 62, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 300000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({
+          commenceAt: { kind: "age", age: 62 }, drawdownOption: "fixed", fixedAmount: 20000,
+          grandfathered: true, grandfatheredPurchasePrice: 200000, grandfatheredLifeExpectancyYears: 20,
+        })],
+      },
+    });
+    const out = projectPlan(s);
+    const y = 1;
+    const pd = out.yearly[y].pensionDetail.pn1;
+    const expectedDeductible = 200000 / 20; // 10,000/yr
+    expect(pd.grandfatheredDeductibleIncome).toBeCloseTo(Math.max(0, pd.payments - expectedDeductible), 2);
+    expect(pd.grandfatheredDeemingExempt).toBeCloseTo(pd.opening, 2); // the whole balance is pulled out of deeming
+    // No other assets/income in this fixture: otherIncome is EXACTLY
+    // the deductible-amount figure, not the bare payment.
+    expect(out.yearly[y].agePensionDetail.otherIncome).toBeCloseTo(pd.grandfatheredDeductibleIncome, 2);
+    expect(out.yearly[y].agePensionDetail.deemedIncome).toBe(0);
+  });
+
+  it("a grandfathered pension is not deemed; the identical pension WITHOUT grandfathering is deemed instead — the assets test is unaffected either way", () => {
+    const base = {
+      endAge: 65, assets: [],
+      plan: {
+        client: { currentAge: 62, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 300000, allocation: zeroRealSuperAlloc() })],
+      },
+    };
+    const outGF = projectPlan(mkState({
+      ...base,
+      plan: {
+        ...base.plan,
+        pensions: [pensionRow({
+          commenceAt: { kind: "age", age: 62 },
+          grandfathered: true, grandfatheredPurchasePrice: 200000, grandfatheredLifeExpectancyYears: 20,
+        })],
+      },
+    }));
+    const outNoGF = projectPlan(mkState({
+      ...base,
+      plan: { ...base.plan, pensions: [pensionRow({ commenceAt: { kind: "age", age: 62 } })] },
+    }));
+    const y = 1;
+    expect(outGF.yearly[y].agePensionDetail.deemedIncome).toBe(0);
+    expect(outNoGF.yearly[y].agePensionDetail.deemedIncome).toBeGreaterThan(0);
+    // Grandfathering ONLY changes the income test (spec's own words) —
+    // the assets test assesses the identical pension balance either way.
+    expect(outGF.yearly[y].agePensionDetail.assessableAssets).toBeCloseTo(outNoGF.yearly[y].agePensionDetail.assessableAssets, 2);
+  });
+
+  it("grandfathering is lost permanently on commutation — deeming applies from that FY on, and a warning fires", () => {
+    const s = mkState({
+      endAge: 68, assets: [],
+      plan: {
+        client: { currentAge: 62, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 300000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({
+          commenceAt: { kind: "age", age: 62 },
+          grandfathered: true, grandfatheredPurchasePrice: 200000, grandfatheredLifeExpectancyYears: 20,
+          commutations: [commutationRow({ amount: 50000, at: { kind: "age", age: 64 }, destination: "cash" })],
+        })],
+      },
+    });
+    const out = projectPlan(s);
+    // y=1 (age 63): still grandfathered — the commutation hasn't fired yet.
+    expect(out.yearly[1].agePensionDetail.deemedIncome).toBe(0);
+    expect(out.yearly[1].pensionDetail.pn1.grandfatheredDeemingExempt).toBeGreaterThan(0);
+    // Commutation fires in July of the FY age 64 is reached (y=2):
+    // grandfathering is lost from THIS FY onward.
+    expect(out.yearly[2].agePensionDetail.deemedIncome).toBeGreaterThan(0);
+    expect(out.yearly[2].pensionDetail.pn1.grandfatheredDeemingExempt).toBe(0);
+    expect(out.yearly[2].pensionDetail.pn1.grandfatheredDeductibleIncome).toBe(0);
+    expect(out.superWarnings.some((w) => w.type === "grandfatheringLost")).toBe(true);
+  });
+
+  it("conservation holds with a grandfathered pension present", () => {
+    const s = mkState({
+      endAge: 68, assets: [],
+      plan: {
+        client: { currentAge: 62, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 300000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({
+          commenceAt: { kind: "age", age: 62 },
+          grandfathered: true, grandfatheredPurchasePrice: 200000, grandfatheredLifeExpectancyYears: 20,
+        })],
+      },
+    });
+    const out = projectPlan(s);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `grandfathering fixture, year ${y}`);
+  });
+});
