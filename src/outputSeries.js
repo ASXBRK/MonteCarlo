@@ -21,8 +21,18 @@ export function compositeDrawdown(row) {
   return row.withdrawals + row.deficitFundedFromAssets;
 }
 
+// Age pension (spec 21a, Commit 4) — row.income already INCLUDES the
+// entitlement (deterministic.js credits it into the household's
+// ordinary cash stream, non-assessable) — pulled back out here so it
+// can join the composite chart as its OWN band rather than being
+// silently absorbed into "Income" (the spec's own words: "as its own
+// band"). Never double-counted: income + agePension still sums to the
+// same row.income the ledger reports.
 export function compositeIncome(row) {
-  return row.income;
+  return row.income - compositeAgePension(row);
+}
+export function compositeAgePension(row) {
+  return row.agePensionDetail?.entitlement ?? 0;
 }
 
 function lifestyleValue(row, assets) {
@@ -57,6 +67,7 @@ export function compositeSeries(yearly, assets, properties, treatment) {
   const expenditure = [];
   const income = [];
   const drawdown = [];
+  const agePension = [];
 
   for (const row of yearly) {
     const lifestyle = lifestyleValue(row, assets);
@@ -79,8 +90,9 @@ export function compositeSeries(yearly, assets, properties, treatment) {
     expenditure.push(compositeExpenditure(row));
     income.push(compositeIncome(row));
     drawdown.push(compositeDrawdown(row));
+    agePension.push(compositeAgePension(row));
   }
-  return { netAssetsArea, separateArea, expenditure, income, drawdown };
+  return { netAssetsArea, separateArea, expenditure, income, drawdown, agePension };
 }
 
 // --- shared-zero dual-axis maths (composite chart fixes) --------------------

@@ -169,11 +169,12 @@ describe("known section/view ids", () => {
 
   it("exposes the output view list", () => {
     expect(OUTPUT_VIEWS).toEqual([
-      "projection", "cashflow", "assets", "liabilities", "super", "pension", "tax", "net-worth", "allocation", "snapshot", "assumptions",
+      "projection", "cashflow", "assets", "liabilities", "super", "pension", "age-pension", "tax", "net-worth", "allocation", "snapshot", "assumptions",
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
       "focus-equity", "focus-transfer-schedule",
       "focus-surplus-allocation",
       "focus-ppr-exemption",
+      "focus-age-pension",
       "monte-carlo", "monte-carlo-table",
       "whatif-rate-shock", "whatif-crash", "whatif-income-gap", "whatif-expense-shock",
     ]);
@@ -188,6 +189,7 @@ describe("known section/view ids", () => {
       liabilities: ["chart", "table"],
       super: ["chart", "table"],
       pension: ["table"],
+      "age-pension": ["chart", "table"],
       tax: ["table"],
       "net-worth": ["chart", "table"],
       allocation: ["chart"],

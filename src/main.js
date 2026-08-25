@@ -91,6 +91,7 @@ import {
 import { realThreshold, LITO } from "./Tax/annual.js";
 import { superRatesFor } from "./data/superRates.js";
 import { SUPER_RATES_BASE } from "./data/superRates.js";
+import { agePensionRatesFor, assetsTestCutOut } from "./data/agePension.js";
 import { LEG } from "./Tax/engine.js";
 import { expenseFundingSeries, taxByTypeSeries, debtVsAssetsSeries, debtAssetsCrossoverYear, superVsNonSuperSeries } from "./chartSeries.js";
 import {
@@ -167,6 +168,8 @@ const els = {
   superTable: $("superTable"),
   pensionEntity: $("pensionEntity"),
   pensionTable: $("pensionTable"),
+  agePensionEntity: $("agePensionEntity"),
+  agePensionTable: $("agePensionTable"),
   liabilitiesEntity: $("liabilitiesEntity"),
   liabilitiesTable: $("liabilitiesTable"),
   viewSnapshot: $("viewSnapshot"),
@@ -182,6 +185,8 @@ const els = {
   viewTaxByType: $("viewTaxByType"),
   viewDebtVsAssets: $("viewDebtVsAssets"),
   viewSuperVsNonSuper: $("viewSuperVsNonSuper"),
+  viewAgePensionChart: $("viewAgePensionChart"),
+  viewAgePensionTable: $("viewAgePensionTable"),
   viewKeyFigures: $("viewKeyFigures"),
   keyFiguresPersonSelector: $("keyFiguresPersonSelector"),
   keyFiguresTable: $("keyFiguresTable"),
@@ -261,6 +266,7 @@ const els = {
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
   viewFocusSurplusAllocation: $("viewFocusSurplusAllocation"),
   viewFocusPprExemption: $("viewFocusPprExemption"),
+  viewFocusAgePension: $("viewFocusAgePension"),
   viewFocusLookups: $("viewFocusLookups"),
   viewFocusEquity: $("viewFocusEquity"),
   viewFocusTransferSchedule: $("viewFocusTransferSchedule"),
@@ -489,6 +495,7 @@ const OUTPUT_NAV = {
     { id: "liabilities", label: "Liabilities" },
     { id: "super", label: "Super" },
     { id: "pension", label: "Pension" },
+    { id: "age-pension", label: "Age pension" },
     { id: "tax", label: "Tax" },
     { id: "net-worth", label: "Net worth" },
     { id: "allocation", label: "Allocation" },
@@ -506,6 +513,7 @@ const OUTPUT_NAV = {
     { id: "focus-debt-payoff", label: "Debt payoff" },
     { id: "focus-surplus-allocation", label: "Surplus allocation" },
     { id: "focus-ppr-exemption", label: "Main residence exemption" },
+    { id: "focus-age-pension", label: "Age pension" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
@@ -554,6 +562,7 @@ const SUBJECT_FORM_VIEW = {
   assets: { chart: "asset-balances", table: "assets" },
   liabilities: { chart: "liabilities-balances", table: "liabilities" },
   super: { chart: "super-balances", table: "super" },
+  "age-pension": { chart: "age-pension-chart", table: "age-pension-table" },
   tax: { table: "tax" },
   "net-worth": { chart: "net-assets", table: "key-figures" },
   allocation: { chart: "asset-allocation" },
@@ -6504,6 +6513,7 @@ let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liab
 // none of them survive a reload either).
 let cashflowPersonEntity = "all";
 let taxPersonEntity = "all";
+let agePensionPersonEntity = "all";
 let allocationPersonEntity = "all";
 let netAssetsPersonEntity = "all";
 let keyFiguresPersonEntity = "all";
@@ -6602,12 +6612,14 @@ const VIEW_MOUNTS = {
   "tax-by-type": () => els.viewTaxByType,
   "debt-vs-assets": () => els.viewDebtVsAssets,
   "super-vs-non-super": () => els.viewSuperVsNonSuper,
+  "age-pension-chart": () => els.viewAgePensionChart,
   "key-figures": () => els.viewKeyFigures,
   cashflow: () => els.viewCashflow,
   assets: () => els.viewAssets,
   tax: () => els.viewTax,
   super: () => els.viewSuper,
   pension: () => els.viewPension,
+  "age-pension-table": () => els.viewAgePensionTable,
   liabilities: () => els.viewLiabilities,
   snapshot: () => els.viewSnapshot,
   "monte-carlo-table": () => els.viewMonteCarloTable,
@@ -6618,6 +6630,7 @@ const VIEW_MOUNTS = {
   "focus-debt-payoff": () => els.viewFocusDebtPayoff,
   "focus-surplus-allocation": () => els.viewFocusSurplusAllocation,
   "focus-ppr-exemption": () => els.viewFocusPprExemption,
+  "focus-age-pension": () => els.viewFocusAgePension,
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
@@ -6628,7 +6641,7 @@ const VIEW_MOUNTS = {
 };
 const GRAPH_VIEWS = new Set([
   "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars",
-  "income-sources", "expense-funding", "tax-by-type", "debt-vs-assets", "super-vs-non-super",
+  "income-sources", "expense-funding", "tax-by-type", "debt-vs-assets", "super-vs-non-super", "age-pension-chart",
 ]);
 
 // Selection now happens via the sidebar (data-nav-section), which
@@ -6669,12 +6682,14 @@ function renderActiveView() {
   else if (activeView === "tax-by-type") renderTaxByTypeChart();
   else if (activeView === "debt-vs-assets") renderDebtVsAssetsChart();
   else if (activeView === "super-vs-non-super") renderSuperVsNonSuperChart();
+  else if (activeView === "age-pension-chart") renderAgePensionChart();
   else if (activeView === "key-figures") renderKeyFiguresView();
   else if (activeView === "cashflow") renderCashflowView();
   else if (activeView === "assets") renderAssetsView();
   else if (activeView === "tax") renderTaxView();
   else if (activeView === "super") renderSuperTableView();
   else if (activeView === "pension") renderPensionTableView();
+  else if (activeView === "age-pension-table") renderAgePensionTableView();
   else if (activeView === "liabilities") renderLiabilitiesView();
   else if (activeView === "snapshot") renderSnapshotView();
   else if (activeView === "monte-carlo-table") renderMonteCarloTableView();
@@ -6685,6 +6700,7 @@ function renderActiveView() {
   else if (activeView === "focus-debt-payoff") renderFocusDebtPayoffView();
   else if (activeView === "focus-surplus-allocation") renderFocusSurplusAllocationView();
   else if (activeView === "focus-ppr-exemption") renderFocusPprExemptionView();
+  else if (activeView === "focus-age-pension") renderFocusAgePensionView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
@@ -6907,6 +6923,7 @@ function renderCompositeChart() {
   const incomeArea = scale(series.income);
   const drawdownArea = scale(series.drawdown);
   const expenditureArea = scale(series.expenditure);
+  const agePensionArea = scale(series.agePension);
 
   // Auto-hide series that are zero across every displayed period —
   // no legend entry, no bar slot. Net assets is the chart's anchor
@@ -6915,6 +6932,7 @@ function renderCompositeChart() {
   const hasIncome = !seriesIsAllZero(incomeArea);
   const hasDrawdown = !seriesIsAllZero(drawdownArea);
   const hasExpenditure = !seriesIsAllZero(expenditureArea);
+  const hasAgePension = !seriesIsAllZero(agePensionArea);
 
   const traces = [{
     x: ages, y: netArea, name: "Net assets",
@@ -6939,6 +6957,13 @@ function renderCompositeChart() {
       hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Income</extra>",
     });
   }
+  if (hasAgePension) {
+    traces.push({
+      x: ages, y: agePensionArea, name: "Age pension", type: "bar",
+      marker: { color: "rgb(28, 150, 150)", opacity: 0.55 }, yaxis: "y2",
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Age pension</extra>",
+    });
+  }
   if (hasDrawdown) {
     traces.push({
       x: ages, y: drawdownArea, name: "Capital drawdown", type: "bar",
@@ -6961,7 +6986,8 @@ function renderCompositeChart() {
   // the range maths.
   const topArea = hasSeparate ? netArea.map((v, i) => v + sepArea[i]) : netArea;
   const leftValues = hasSeparate ? [...netArea, ...topArea] : netArea;
-  const stackTop = ages.map((_, i) => (hasIncome ? incomeArea[i] : 0) + (hasDrawdown ? drawdownArea[i] : 0));
+  const stackTop = ages.map((_, i) =>
+    (hasIncome ? incomeArea[i] : 0) + (hasAgePension ? agePensionArea[i] : 0) + (hasDrawdown ? drawdownArea[i] : 0));
   const rightValues = hasExpenditure ? [...stackTop, ...expenditureArea] : stackTop;
   const { leftRange, rightRange, zeroFraction, leftDataRange, rightDataRange } =
     sharedZeroRanges(leftValues, rightValues);
@@ -7811,6 +7837,16 @@ function renderIncomeSourcesChart() {
       hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
     });
   }
+  // Age pension (spec 21a, Commit 4) — its own band, read straight off
+  // row.agePensionDetail (not a category row, so it never reaches
+  // incomeCategorySums' own aggregation — no double-count risk).
+  const agePensionSeries = yearIdxs.map((y) => (projection.yearly[y].agePensionDetail?.entitlement ?? 0) * factor(y));
+  if (!seriesIsAllZero(agePensionSeries)) {
+    traces.push({
+      x: ages, y: agePensionSeries, name: "Age pension", type: "bar", marker: { color: "#dc5a28" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Age pension</extra>",
+    });
+  }
   Plotly.react(el, traces, {
     margin: { l: 70, r: 20, t: 24, b: 60 },
     paper_bgcolor: "white", plot_bgcolor: "white",
@@ -8003,6 +8039,211 @@ function renderSuperVsNonSuperChart() {
       tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
     },
     shapes, annotations,
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// --- View: Age pension (spec 21a, Commit 4) ---------------------------------
+//
+// Entitlement over time with the two test results overlaid, so the
+// crossover — the year the binding test changes — is visible. All
+// three series read straight off row.agePensionDetail; never re-derived.
+function renderAgePensionChart() {
+  const el = $("chartAgePension");
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const detail = (y) => projection.yearly[y].agePensionDetail;
+  const traces = [
+    {
+      x: ages, y: yearIdxs.map((y) => (detail(y)?.entitlement ?? 0) * factor(y)),
+      name: "Entitlement (paid)", type: "scatter", mode: "lines", fill: "tozeroy",
+      line: { color: "#1c5ab4", width: 2 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Entitlement</extra>",
+    },
+    {
+      x: ages, y: yearIdxs.map((y) => (detail(y)?.assetsTestResult ?? 0) * factor(y)),
+      name: "Assets test result", type: "scatter", mode: "lines",
+      line: { color: "#dc5a28", width: 1.5, dash: "dot" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Assets test</extra>",
+    },
+    {
+      x: ages, y: yearIdxs.map((y) => (detail(y)?.incomeTestResult ?? 0) * factor(y)),
+      name: "Income test result", type: "scatter", mode: "lines",
+      line: { color: "#6b8e23", width: 1.5, dash: "dot" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Income test</extra>",
+    },
+  ];
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Annual amount (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Per person per year: assessable assets, assets test result, deemed
+// income, other assessable income, income test result, which test
+// binds, and entitlement (the spec's own field list). The household-
+// level test rows (everything except entitlement itself) are the SAME
+// figure regardless of which person is selected — a couple's tests run
+// on COMBINED figures (deterministic.js) — only entitlement differs
+// per person, since payment is gated per person on age + the
+// eligibility flag.
+function buildAgePensionGroups(entity) {
+  const yl = projection.yearly;
+  const zero = { assessableAssets: 0, assetsTestResult: 0, deemedIncome: 0, otherIncome: 0, incomeTestResult: 0, bindingTest: null, entitlement: 0 };
+  const get = (y) => yl[y].agePensionDetail ?? zero;
+  const entitlementFor = (y) => {
+    const d = get(y);
+    if (entity === "client") return d.client?.paid ?? 0;
+    if (entity === "partner") return d.partner?.paid ?? 0;
+    return d.entitlement ?? 0;
+  };
+  const bindingLabel = { assets: "Assets", income: "Income" };
+  const rows = [
+    { label: "Assessable assets", cell: (y) => get(y).assessableAssets, always: true },
+    { label: "Assets test result", cell: (y) => get(y).assetsTestResult },
+    { label: "Deemed income", cell: (y) => get(y).deemedIncome },
+    { label: "Other assessable income", cell: (y) => get(y).otherIncome },
+    { label: "Income test result", cell: (y) => get(y).incomeTestResult },
+    { label: "Binding test", text: true, cell: (y) => bindingLabel[get(y).bindingTest] ?? "" },
+    { label: "Entitlement", cell: entitlementFor, always: true, cls: "tl-total" },
+  ];
+  const title = entity === "client" ? clientName() : entity === "partner" ? partnerName() : "Household";
+  return [{ title, rows }];
+}
+
+function renderAgePensionTableView() {
+  if (agePensionPersonEntity !== "all" && !isCouple()) agePensionPersonEntity = "all";
+  renderPersonSelector(els.agePensionEntity, agePensionPersonEntity, (id) => { agePensionPersonEntity = id; renderAgePensionTableView(); });
+  renderTransposed(els.agePensionTable, buildAgePensionGroups(agePensionPersonEntity));
+}
+
+// --- Focus: Age pension (spec 21a, Commit 4) --------------------------------
+//
+// Assets and income against their own thresholds by year, with the
+// full-pension and cut-out lines drawn — the view an adviser uses to
+// reason about whether a strategy moves someone across a threshold.
+// Thresholds are recomputed per year from agePensionRatesFor (the SAME
+// function deterministic.js itself calls), never re-derived by hand.
+function agePensionFocusEligible() {
+  return (projection?.yearly ?? []).some((row) =>
+    row.agePensionDetail?.client?.ageEligible || row.agePensionDetail?.partner?.ageEligible
+  );
+}
+
+function renderFocusAgePensionView() {
+  if (!agePensionFocusEligible()) {
+    els.viewFocusAgePension.innerHTML = focusEmptyStateHTML(
+      "Assets and income against the age pension thresholds, once someone in the household reaches age pension age (67) within the projection.",
+      "tax-details"
+    );
+    return;
+  }
+  els.viewFocusAgePension.innerHTML = `
+    <h2 class="section-heading">Age pension</h2>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>Assessable assets vs thresholds</h3>
+        <div id="focusAgePensionAssetsChart"></div>
+      </div>
+      <div class="focus-section">
+        <h3>Assessable income vs thresholds</h3>
+        <div id="focusAgePensionIncomeChart"></div>
+      </div>
+    </div>
+  `;
+  renderFocusAgePensionCharts();
+}
+
+function renderFocusAgePensionCharts() {
+  const assetsEl = $("focusAgePensionAssetsChart");
+  const incomeEl = $("focusAgePensionIncomeChart");
+  if (!assetsEl || !incomeEl) return;
+  if (typeof Plotly === "undefined") {
+    assetsEl.innerHTML = chartUnavailableHTML();
+    incomeEl.innerHTML = chartUnavailableHTML();
+    return;
+  }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const fy0 = firstFyStartYear(state.plan.start);
+  const couple = isCouple();
+  const cpi = state.assumptions.cpi;
+  const awote = state.assumptions.awote ?? 0.035;
+  const bracketMode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
+  const detail = (y) => projection.yearly[y].agePensionDetail;
+  const ratesAt = (y) => agePensionRatesFor(fy0 + y, bracketMode, cpi, awote);
+
+  const fullPensionThreshold = (y) => {
+    const r = ratesAt(y);
+    const homeowner = detail(y)?.homeowner !== false;
+    return couple
+      ? (homeowner ? r.couple.assetsFullHomeowner : r.couple.assetsFullNonHomeowner)
+      : (homeowner ? r.single.assetsFullHomeowner : r.single.assetsFullNonHomeowner);
+  };
+  const assetsCutOut = (y) => {
+    const r = ratesAt(y);
+    return assetsTestCutOut(fullPensionThreshold(y), couple ? r.couple.rateCombined : r.single.rate, r.reductionRatePer1000);
+  };
+  const incomeFreeArea = (y) => {
+    const r = ratesAt(y);
+    return couple ? r.couple.incomeFreeAreaCombined : r.single.incomeFreeArea;
+  };
+  // Income cut-out — the income level at which the income test alone
+  // reaches zero — derived the same way assetsTestCutOut derives the
+  // assets-test cut-out (solving the taper for its zero), just never
+  // extracted as its own named export since only this Focus view needs it.
+  const incomeCutOut = (y) => {
+    const r = ratesAt(y);
+    const maxRate = couple ? r.couple.rateCombined : r.single.rate;
+    return incomeFreeArea(y) + maxRate / r.incomeReductionRate;
+  };
+
+  const lineTrace = (name, values, color, dash) => ({
+    x: ages, y: yearIdxs.map((y, i) => values[i] * factor(y)),
+    name, type: "scatter", mode: "lines", line: { color, width: name.includes("assessable") ? 2 : 1.25, dash },
+    hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(name)}</extra>`,
+  });
+
+  Plotly.react(assetsEl, [
+    lineTrace("Assessable assets", yearIdxs.map((y) => detail(y)?.assessableAssets ?? 0), "#1c5ab4"),
+    lineTrace("Full pension threshold", yearIdxs.map((y) => fullPensionThreshold(y)), "#6b8e23", "dash"),
+    lineTrace("Cut-out", yearIdxs.map((y) => assetsCutOut(y)), "#dc5a28", "dash"),
+  ], {
+    margin: { l: 70, r: 20, t: 24, b: 50 }, paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+
+  Plotly.react(incomeEl, [
+    lineTrace("Assessable income", yearIdxs.map((y) => detail(y)?.assessableIncome ?? 0), "#1c5ab4"),
+    lineTrace("Free area", yearIdxs.map((y) => incomeFreeArea(y)), "#6b8e23", "dash"),
+    lineTrace("Cut-out", yearIdxs.map((y) => incomeCutOut(y)), "#dc5a28", "dash"),
+  ], {
+    margin: { l: 70, r: 20, t: 24, b: 50 }, paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Income (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
     font: BASE_CHART_FONT,
   }, { displayModeBar: false, responsive: true });
 }
@@ -12287,6 +12528,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "tax-by-type") exportChartPNG("chartTaxByType", "tax-by-type");
   else if (activeView === "debt-vs-assets") exportChartPNG("chartDebtVsAssets", "debt-vs-assets");
   else if (activeView === "super-vs-non-super") exportChartPNG("chartSuperVsNonSuper", "super-vs-non-super");
+  else if (activeView === "age-pension-chart") exportChartPNG("chartAgePension", "age-pension");
   else if (activeView === "monte-carlo") exportChartPNG("chartMonteCarlo", "monte-carlo");
   else if (activeView === "money-decomposition") exportMoneyDecompositionCSV();
   else if (activeView === "key-figures") exportTransposedCSV("key-figures", buildKeyFiguresGroups({ state, projection }, keyFiguresPersonEntity));
@@ -12294,6 +12536,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "assets") exportTransposedCSV("assets", buildAssetsGroups(assetsEntity));
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups(taxPersonEntity));
   else if (activeView === "super") exportTransposedCSV("super", buildSuperGroups(superEntity));
+  else if (activeView === "age-pension-table") exportTransposedCSV("age-pension", buildAgePensionGroups(agePensionPersonEntity));
   else if (activeView === "liabilities") exportTransposedCSV("liabilities", buildLiabilitiesGroups(liabilitiesEntity));
   else if (activeView === "snapshot") exportSnapshotCSV();
   else if (activeView === "monte-carlo-table") exportMonteCarloCSV();

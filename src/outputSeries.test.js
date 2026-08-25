@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { projectPlan } from "./deterministic.js";
 import { defaultChartTreatment } from "./planState.js";
 import {
-  compositeSeries, compositeExpenditure, compositeIncome, compositeDrawdown,
+  compositeSeries, compositeExpenditure, compositeIncome, compositeDrawdown, compositeAgePension,
   sharedZeroRanges, seriesIsAllZero, axisTickVals,
 } from "./outputSeries.js";
 
@@ -76,6 +76,24 @@ describe("compositeExpenditure / compositeIncome / compositeDrawdown", () => {
       // this scenario — a real reconciliation, not a vacuous 0=0 check.
       expect(loanService).toBeGreaterThan(0);
     }
+  });
+
+  // Age pension (spec 21a, Commit 4) — joins the composite chart as its
+  // own band: compositeIncome() no longer includes the entitlement
+  // (row.income does, since deterministic.js credits it there), but
+  // income + compositeAgePension() must still sum back to row.income
+  // exactly — no double-count, no dropped dollar.
+  it("compositeAgePension pulls the entitlement out of compositeIncome without losing it", () => {
+    const row = { income: 50000, agePensionDetail: { entitlement: 12000 } };
+    expect(compositeAgePension(row)).toBe(12000);
+    expect(compositeIncome(row)).toBe(38000);
+    expect(compositeIncome(row) + compositeAgePension(row)).toBe(row.income);
+  });
+
+  it("compositeAgePension is 0 with no agePensionDetail on the row (pre-spec-21a rows)", () => {
+    const row = { income: 50000 };
+    expect(compositeAgePension(row)).toBe(0);
+    expect(compositeIncome(row)).toBe(50000);
   });
 });
 
