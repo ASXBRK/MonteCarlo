@@ -6202,7 +6202,15 @@ function pensionRow(over = {}) {
     id: "pn1", name: "Pension", owner: "client", sourceAccountId: "su1",
     commenceAt: { kind: "age", age: 60 }, type: "abp", commenceAmount: null,
     reversionary: false, taxFreeProportion: null,
-    allocation: zeroRealSuperAlloc(), icrPct: 0,
+    // The PLAIN zero-real allocation, not zeroRealSuperAlloc's grossed-
+    // up one — this row defaults to "abp", and an ABP in retirement
+    // phase pays NO tax on earnings (spec 20, Commit 3), so the
+    // account's own real return is already exactly zero with no
+    // haircut to gross up for. A test exercising a TTR before
+    // conversion (still taxed like accumulation) overrides this
+    // explicitly where the exact growth rate matters to its assertions.
+    allocation: zeroRealAlloc(), icrPct: 0,
+    drawdownOption: "minimum", fixedAmount: 0, indexBasis: "cpi", indexExtraPct: 0,
     ...over,
   };
 }
@@ -6578,5 +6586,161 @@ describe("Pension phase (spec 20, Commit 2): drawdown, minimums, and payment tax
       }));
       for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `drawdown option "${drawdownOption}" (${i}), year ${y}`);
     }
+  });
+});
+
+describe("Pension phase (spec 20, Commit 3): retirement-phase earnings exemption and TTR", () => {
+  const growthAlloc = { mode: "custom", incomePct: 4, growthPct: 3, frankingPct: 0, volBasis: "Balanced" };
+
+  it("an ABP's earnings are entirely untaxed — earningsTax stays zero even with genuine growth", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: growthAlloc })],
+        pensions: [pensionRow({ type: "abp", allocation: growthAlloc })],
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.earnings).toBeGreaterThan(0); // real growth happened
+    expect(out.yearly[0].pensionDetail.pn1.earningsTax).toBeCloseTo(0, 6);
+    expect(out.yearly[2].pensionDetail.pn1.earningsTax).toBeCloseTo(0, 6);
+  });
+
+  it("a TTR's earnings are taxed exactly like accumulation (15% income / 10% effective growth) before it ever converts", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        // retirementAge 99 clamps DOWN to endAge (63, below 65) — the
+        // retirement-based trigger can therefore never fire earlier
+        // than the projection's own end, and 65 is never reached
+        // either, so this TTR is "not yet converted" for its entire run.
+        client: { currentAge: 60, retirementAge: 99 },
+        superAccounts: [superAcct({ balance: 100000, allocation: growthAlloc })],
+        pensions: [pensionRow({ type: "ttr", allocation: growthAlloc })],
+      },
+    }));
+    // Same account, same allocation, taxed identically to accumulation —
+    // compare directly against a same-shaped super account never
+    // commencing a pension at all.
+    const accumOut = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 99 },
+        superAccounts: [superAcct({ balance: 100000, allocation: growthAlloc })],
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.earningsTax).toBeGreaterThan(0);
+    // The tax WEDGE (earnings − earningsTax as a fraction of earnings)
+    // should match accumulation's own, since a not-yet-converted TTR
+    // uses the identical 15%/10% formula.
+    const pensionWedge = out.yearly[0].pensionDetail.pn1.earningsTax / out.yearly[0].pensionDetail.pn1.earnings;
+    const accumWedge = accumOut.yearly[0].superDetail.su1.earningsTax / accumOut.yearly[0].superDetail.su1.earnings;
+    expect(pensionWedge).toBeCloseTo(accumWedge, 6);
+  });
+
+  it("a TTR converts automatically at age 65 — earnings switch from taxed to untaxed in that exact FY, with retirementAge never satisfying the OTHER trigger", () => {
+    const out = projectPlan(mkState({
+      endAge: 68,
+      plan: {
+        // retirementAge 70 clamps DOWN to endAge (68, still ≥ 65) — the
+        // retirement-based trigger therefore resolves to exactly 65
+        // too (superReleaseAge floors at 65), so both triggers agree:
+        // this isolates "conversion happens at 65", not a coincidence
+        // of which trigger technically fired.
+        client: { currentAge: 62, retirementAge: 70 },
+        superAccounts: [superAcct({ balance: 100000, allocation: growthAlloc })],
+        pensions: [pensionRow({ type: "ttr", commenceAt: { kind: "age", age: 62 }, allocation: growthAlloc })],
+      },
+    }));
+    // Age 62, 63, 64 — not yet 65 — still taxed.
+    expect(out.yearly[0].pensionDetail.pn1.earningsTax).toBeGreaterThan(0);
+    expect(out.yearly[2].pensionDetail.pn1.earningsTax).toBeGreaterThan(0);
+    // Age 65 (plan year 3) onward — converted, untaxed.
+    expect(out.yearly[3].pensionDetail.pn1.earningsTax).toBeCloseTo(0, 6);
+    expect(out.yearly[6].pensionDetail.pn1.earningsTax).toBeCloseTo(0, 6);
+  });
+
+  it("a TTR converts at notified retirement (retirementAge, when it's at/after preservation age) — BEFORE turning 65, not waiting for it", () => {
+    const out = projectPlan(mkState({
+      endAge: 66,
+      plan: {
+        // retirementAge 61: satisfies the retirement-based trigger
+        // (>= preservation age 60) well before 65.
+        client: { currentAge: 58, retirementAge: 61 },
+        // Flat source allocation — isolates the commencement AMOUNT
+        // from growth arithmetic (the pension's OWN allocation below is
+        // what exercises real earnings-tax timing, post-commencement).
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ type: "ttr", commenceAt: { kind: "age", age: 58 }, allocation: growthAlloc })],
+      },
+    }));
+    // TTR requires only preservation age to COMMENCE (spec 20 Commit 1)
+    // — the client is 58 at plan start, so this defers to age 60 (plan
+    // year 2) regardless of retirementAge.
+    expect(out.yearly[1].pensionDetail.pn1.commencementAmount).toBe(0); // age 59 — not yet commenced
+    expect(out.yearly[2].pensionDetail.pn1.commencementAmount).toBeCloseTo(100000, 0); // age 60
+    // Age 60 (commencement year): retirementAge (61) not yet reached — still taxed.
+    expect(out.yearly[2].pensionDetail.pn1.earningsTax).toBeGreaterThan(0);
+    // Age 61 (plan year 3): retirement-based trigger fires — converted,
+    // well before turning 65 (which wouldn't happen until plan year 7).
+    expect(out.yearly[3].pensionDetail.pn1.earningsTax).toBeCloseTo(0, 6);
+  });
+
+  it("an ABP and a TTR commenced identically (same age, same amount) diverge in closing balance — the ABP ends up ahead, purely from the earnings-tax exemption", () => {
+    // The ABP's OWN commencement gate is superReleaseAge(retirementAge)
+    // — the IDENTICAL formula the TTR's conversion gate uses — so an
+    // ABP commencing at exactly 60 forces retirementAge<=60, which
+    // would ALSO convert a same-owner TTR immediately (no divergence
+    // possible for one person). Two DIFFERENT owners sidesteps this:
+    // the client retires AT 60 (their ABP commences at 60, and — being
+    // already retired at commencement — is in retirement phase from
+    // day one, same as any ABP); the partner keeps working well past
+    // preservation age (retirementAge 70, capped at 65) — TTR
+    // commencement is a FLAT preservation-age gate regardless of
+    // retirementAge (spec 20 Commit 1), so their TTR ALSO commences at
+    // 60 — the SAME age, same source balance — but stays taxed like
+    // accumulation until they actually retire (capped at 65), a
+    // genuine multi-year divergence window.
+    const commonSuper = { balance: 100000, allocation: growthAlloc };
+    const abpOut = projectPlan(mkState({
+      endAge: 64,
+      plan: {
+        household: "married", client: { currentAge: 60, retirementAge: 60 }, partner: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ id: "su1", owner: "client", ...commonSuper })],
+        pensions: [pensionRow({ type: "abp", owner: "client", allocation: growthAlloc })],
+      },
+    }));
+    const ttrOut = projectPlan(mkState({
+      endAge: 64,
+      plan: {
+        household: "married", client: { currentAge: 60, retirementAge: 60 }, partner: { currentAge: 60, retirementAge: 70 },
+        superAccounts: [superAcct({ id: "su1", owner: "partner", ...commonSuper })],
+        pensions: [pensionRow({ id: "pn1", type: "ttr", owner: "partner", sourceAccountId: "su1", allocation: growthAlloc })],
+      },
+    }));
+    // Both commence at exactly age 60 (year 0), same source balance.
+    expect(abpOut.yearly[0].pensionDetail.pn1.commencementAmount)
+      .toBeCloseTo(ttrOut.yearly[0].pensionDetail.pn1.commencementAmount, 0);
+    expect(abpOut.yearly[0].pensionDetail.pn1.commencementAmount).toBeGreaterThan(0); // sanity: it actually commenced
+    // The TTR stays taxed (partner not yet 65, retirementAge 70 not yet
+    // reached) for the whole 4-year window — the ABP, untaxed from
+    // commencement, pulls ahead.
+    expect(abpOut.yearly[3].pensionDetail.pn1.closing).toBeGreaterThan(ttrOut.yearly[3].pensionDetail.pn1.closing);
+  });
+
+  it("conservation holds across a TTR converting mid-projection (the earnings-tax rate itself changing partway through)", () => {
+    const out = projectPlan(mkState({
+      endAge: 68,
+      assets: [mkAsset({ id: "a1", allocation: { mode: "custom", incomePct: 2, growthPct: 1, frankingPct: 0, volBasis: "Balanced" }, balance: 20000 })],
+      fundingOrder: ["a1"],
+      plan: {
+        client: { currentAge: 62, retirementAge: 62 },
+        superAccounts: [superAcct({ balance: 150000, taxFreeComponent: 50000, allocation: growthAlloc })],
+        pensions: [pensionRow({ type: "ttr", commenceAt: { kind: "age", age: 62 }, allocation: growthAlloc })],
+        workingCash: { balance: 3000, minimumBalance: 3000, ratePct: 1 },
+      },
+      cashflows: { expenses: [cf({ id: "exp1", assetId: null, amount: 2000, frequency: "monthly", from: { kind: "age", age: 62 }, to: { kind: "age", age: 120 } })] },
+    }));
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `TTR conversion fixture, year ${y}`);
   });
 });

@@ -270,10 +270,27 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // conservationCheck.js's own caveat on why randomScenario() must
   // never generate a pension with a nonzero opening balance either.
   //
-  // Growth (Commit 1): same 15%/10% earnings-tax haircut as accumulation
-  // super, a deliberate placeholder — Commit 3 ("the reason pension
-  // phase exists") replaces this with a zero-tax rate for an ABP in
-  // retirement phase and leaves a TTR taxed exactly as it is here.
+  // Growth: "the reason pension phase exists" (spec 20, Commit 3) — an
+  // ABP in RETIREMENT PHASE pays no tax on earnings (capital gains
+  // included — this engine already accrues gains smoothly into the
+  // return rate rather than tracking discrete realisation events, the
+  // same simplification accumulation super's own earnings tax uses, so
+  // "untaxed" here means the SAME smooth-accrual rate with the tax
+  // wedge simply zeroed). A TTR is NOT in retirement phase — its
+  // earnings stay taxed exactly like accumulation (15%/10%) — UNTIL it
+  // converts, at the first of two triggers: turning 65 (automatic), or
+  // notifying retirement at/after preservation age (retirementAge) —
+  // exactly pensionMinCommenceAge's own ABP formula (superReleaseAge):
+  // retiring before 60 doesn't count until 60 is ALSO reached, since a
+  // full condition of release always requires reaching preservation age
+  // regardless of when someone actually stopped working. taxedRate is
+  // the Commit 1 accumulation-style formula (still used for a TTR
+  // before conversion); grossRate is the account's TRUE pre-tax return,
+  // reused UNCHANGED as the net rate too once in retirement phase (0%
+  // tax = no wedge between gross and net) — resolved fresh every month
+  // in the growth step below, not fixed once like superMeta's own rate
+  // (which never needs to change mid-projection; a TTR's DOES, at its
+  // own conversion point).
   const pensionRows = state.plan.pensions ?? [];
   const pensionIds = pensionRows.map((pn) => pn.id);
   const pensionMeta = {};
@@ -282,9 +299,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const icr = pn.icrPct / 100;
     const rates = superRatesFor(fy0, bracketMode, cpi);
     const growthTaxRate = rates.earningsTaxRate * (2 / 3);
+    const ownerPerson = pn.owner === "partner" ? state.plan.partner : state.plan.client;
     pensionMeta[pn.id] = {
-      rate: toMonthlyReal(incomeNominal * (1 - rates.earningsTaxRate) + growthNominal * (1 - growthTaxRate) - icr, cpi),
+      taxedRate: toMonthlyReal(incomeNominal * (1 - rates.earningsTaxRate) + growthNominal * (1 - growthTaxRate) - icr, cpi),
       grossRate: toMonthlyReal(incomeNominal + growthNominal - icr, cpi),
+      // Irrelevant for an ABP (always in retirement phase, from
+      // commencement) — computed for every pension uniformly anyway,
+      // cheap and side-effect-free.
+      retirementPhaseFromAge: superReleaseAge(ownerPerson?.retirementAge),
       owner: pn.owner,
       sourceAccountId: pn.sourceAccountId,
       type: pn.type,
@@ -1608,17 +1630,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           row.superDetail[id].earningsTax += grossGrowth - netGrowth;
         }
 
-        // Pension phase (spec 20, Commit 1) — grows exactly like super
-        // above, using the SAME 15%/10% haircut (Commit 1's own
-        // placeholder — see pensionMeta's header). Zero balance before
-        // commencement, so this is a no-op until the transfer below
-        // fires, the same shape as a not-yet-purchased property's own
-        // growth-of-zero.
+        // Pension phase (spec 20, Commit 3) — "the reason pension phase
+        // exists": an ABP (always in retirement phase, from
+        // commencement) or a CONVERTED TTR grows completely untaxed
+        // (grossRate reused as the net rate — no wedge); a not-yet-
+        // converted TTR still grows taxed exactly like accumulation
+        // (taxedRate) — see pensionMeta's own header for the two
+        // conversion triggers. Zero balance before commencement, so
+        // this is a no-op until the transfer below fires, the same
+        // shape as a not-yet-purchased property's own growth-of-zero.
         for (const id of pensionIds) {
           const pm = pensionMeta[id];
+          const inRetirementPhase = pm.type === "abp" || ownerAgeAt(pm.owner, y) >= pm.retirementPhaseFromAge;
+          const netRate = inRetirementPhase ? pm.grossRate : pm.taxedRate;
           const shock = shockFor(id, m);
           const grossGrowth = pensionBal[id] * (pm.grossRate + shock);
-          const netGrowth = pensionBal[id] * (pm.rate + shock);
+          const netGrowth = pensionBal[id] * (netRate + shock);
           pensionBal[id] += netGrowth;
           row.pensionDetail[id].earnings += grossGrowth;
           row.pensionDetail[id].earningsTax += grossGrowth - netGrowth;
