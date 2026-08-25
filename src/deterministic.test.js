@@ -7886,3 +7886,123 @@ describe("Death benefits (spec 22, Commit 1): engine integration", () => {
     expect(final.deathBenefitDetail).toEqual({ client: null, partner: null });
   });
 });
+
+describe("Death benefits (spec 22, Commit 2): reversionary pensions", () => {
+  it("a reversionary pension continues to the spouse — excluded from the lump-sum split entirely, reported separately instead", () => {
+    const s = mkState({
+      endAge: 62,
+      plan: {
+        household: "couple",
+        client: {
+          currentAge: 60, retirementAge: 60,
+          deathBenefit: { beneficiaries: [{ id: "b1", label: "Adult child", relationship: "adultChild", sharePct: 100 }] },
+        },
+        partner: { currentAge: 60 },
+        superAccounts: [
+          superAcct({ id: "su1", owner: "client", balance: 300000, taxFreeComponent: 0, allocation: zeroRealSuperAlloc() }),
+        ],
+        pensions: [pensionRow({
+          id: "pn1", owner: "client", sourceAccountId: "su1", commenceAt: { kind: "age", age: 60 },
+          reversionary: true, allocation: zeroRealAlloc(),
+        })],
+      },
+    });
+    const out = projectPlan(s);
+    const final = out.yearly[out.yearly.length - 1];
+    const d = final.deathBenefitDetail.client;
+    // Excluded from the ordinary lump-sum accounts and beneficiary split.
+    expect(d.accounts.some((a) => a.id === "pn1")).toBe(false);
+    expect(d.totals.gross).toBe(0); // the ONLY account client has is the reversionary pension
+    expect(d.byBeneficiary[0].gross).toBe(0);
+    // Reported separately instead, as continuing.
+    expect(d.reversionaryPensions).toHaveLength(1);
+    expect(d.reversionaryPensions[0].pensionId).toBe("pn1");
+    expect(d.reversionaryPensions[0].valueAtDeath).toBeCloseTo(final.pensionDetail.pn1.closing, 2);
+    expect(d.reversionaryPensions[0].valueAtDeath).toBeGreaterThan(0);
+  });
+
+  it("is NANE to the spouse — no tax figure anywhere on the reversionary detail", () => {
+    const s = mkState({
+      endAge: 62,
+      plan: {
+        household: "couple",
+        client: { currentAge: 60, retirementAge: 60 },
+        partner: { currentAge: 60 },
+        superAccounts: [superAcct({ id: "su1", owner: "client", balance: 300000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ id: "pn1", owner: "client", sourceAccountId: "su1", commenceAt: { kind: "age", age: 60 }, reversionary: true, allocation: zeroRealAlloc() })],
+      },
+    });
+    const out = projectPlan(s);
+    const final = out.yearly[out.yearly.length - 1];
+    // No deathBenefit beneficiaries were nominated at all — the ONLY
+    // reason this person's detail exists is the reversionary pension —
+    // confirming the gate itself doesn't require ordinary beneficiaries.
+    const rp = final.deathBenefitDetail.client.reversionaryPensions[0];
+    expect(rp.tax).toBeUndefined();
+    expect(rp.valueAtDeath).toBeGreaterThan(0);
+  });
+
+  it("the transfer balance credit lands at the value AT DEATH (this FY's closing balance) — the twelve-month timing is disclosed, not simulated", () => {
+    const s = mkState({
+      endAge: 62,
+      plan: {
+        household: "couple",
+        client: { currentAge: 60, retirementAge: 60 },
+        partner: { currentAge: 60 },
+        superAccounts: [superAcct({ id: "su1", owner: "client", balance: 300000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ id: "pn1", owner: "client", sourceAccountId: "su1", commenceAt: { kind: "age", age: 60 }, reversionary: true, allocation: zeroRealAlloc() })],
+      },
+    });
+    const out = projectPlan(s);
+    const final = out.yearly[out.yearly.length - 1];
+    const rp = final.deathBenefitDetail.client.reversionaryPensions[0];
+    // The survivor (partner) had no OTHER pension — their TBA starts at
+    // 0, so the credit is exactly the pension's own value at death.
+    expect(rp.survivorTbaBefore.balance).toBe(0);
+    expect(rp.survivorTbaAfter.balance - rp.survivorTbaBefore.balance).toBeCloseTo(rp.valueAtDeath, 2);
+  });
+
+  it("a survivor pushed over their OWN cap by the reversionary credit is flagged with the excess", () => {
+    const s = mkState({
+      endAge: 62,
+      plan: {
+        household: "couple",
+        client: {
+          currentAge: 60, retirementAge: 60,
+        },
+        partner: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [
+          superAcct({ id: "su1", owner: "client", balance: 500000, allocation: zeroRealSuperAlloc() }),
+          superAcct({ id: "su2", owner: "partner", balance: 1900000, allocation: zeroRealSuperAlloc() }),
+        ],
+        pensions: [
+          pensionRow({ id: "pn1", owner: "client", sourceAccountId: "su1", commenceAt: { kind: "age", age: 60 }, reversionary: true, allocation: zeroRealAlloc() }),
+          // The partner's OWN pension already uses most of their personal
+          // cap — the reversionary credit on top should breach it.
+          pensionRow({ id: "pn2", owner: "partner", sourceAccountId: "su2", commenceAt: { kind: "age", age: 60 }, allocation: zeroRealAlloc() }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    const final = out.yearly[out.yearly.length - 1];
+    const rp = final.deathBenefitDetail.client.reversionaryPensions[0];
+    expect(rp.survivorTbaBefore.balance).toBeGreaterThan(0); // the partner's own pension already credited
+    expect(rp.excess).toBeGreaterThan(0);
+    expect(rp.excessTaxRate).toBe(0.15); // first breach
+  });
+
+  it("reversionary has no effect for a single household — no partner to revert to (input integrity, planState.js's own clamp)", () => {
+    const s = mkState({
+      endAge: 41, assets: [],
+      plan: {
+        superAccounts: [superAcct({ id: "su1", balance: 300000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ id: "pn1", sourceAccountId: "su1", commenceAt: { kind: "age", age: 40 }, reversionary: true, allocation: zeroRealAlloc() })],
+      },
+    });
+    const out = projectPlan(s);
+    const final = out.yearly[out.yearly.length - 1];
+    // No beneficiaries nominated either — with reversionary structurally
+    // inert (no couple), there's nothing at all to report.
+    expect(final.deathBenefitDetail).toEqual({ client: null, partner: null });
+  });
+});

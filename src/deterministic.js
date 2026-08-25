@@ -188,9 +188,47 @@ function ownerShares(asset, couple) {
 // out — a disclosed simplification of "taxed per ultimate beneficiary"
 // (not modelled: this tool has no concept of who the estate's own
 // beneficiaries are).
-function computeDeathBenefitForPerson(owner, person, superAccounts, pensionRows, finalRow) {
+// Reversionary pensions (spec 22, Commit 2) — the `reversionary` flag
+// (spec 20, Commit 1) previously had no consequence; here it means a
+// pension continues DIRECTLY to the spouse rather than being paid as a
+// lump sum, so it's excluded from the ordinary beneficiary split below
+// entirely (a couple-only concept — meaningless with no spouse to
+// revert to; couple is checked defensively here even though
+// clampPension already resets `reversionary` to false for a single
+// household, since this raw-state-tolerant engine defends every other
+// dangling/impossible combination the same way). NANE to the spouse as
+// a tax dependant (always — spec's own words), so it needs no tax
+// computation of its own, only the transfer balance consequence: the
+// credit lands on the SURVIVOR's own transfer balance account, at the
+// value AT THE DATE OF DEATH (this FY's closing balance — no 12
+// months of further growth is simulated; this is a terminal figure,
+// consistent with Commit 1), which can push the survivor over their
+// OWN cap — the actual planning issue, so it's reported explicitly
+// rather than silently absorbed. Twelve-months-after-death is a
+// disclosed TIMING fact only (the real law's own deliberate delay,
+// giving the survivor time to restructure) — not simulated, since
+// nothing projects past the final year here anyway.
+function computeReversionaryPensions(owner, pensionRows, finalRow, couple, tba) {
+  if (!couple) return [];
+  const survivor = owner === "client" ? "partner" : "client";
+  const survivorTbaBefore = tba[survivor];
+  return pensionRows.filter((pn) => pn.owner === owner && pn.reversionary === true).map((pn) => {
+    const d = finalRow.pensionDetail[pn.id];
+    const valueAtDeath = d?.closing ?? 0;
+    const { tba: survivorTbaAfter, excess, excessTaxRate } = creditTransferBalance(survivorTbaBefore, valueAtDeath);
+    return {
+      pensionId: pn.id, pensionName: pn.name, valueAtDeath,
+      survivorTbaBefore: { balance: survivorTbaBefore.balance, personalCap: survivorTbaBefore.personalCap },
+      survivorTbaAfter: { balance: survivorTbaAfter.balance, personalCap: survivorTbaAfter.personalCap },
+      excess: excess ?? 0, excessTaxRate,
+    };
+  });
+}
+
+function computeDeathBenefitForPerson(owner, person, superAccounts, pensionRows, finalRow, couple, tba) {
   const beneficiaries = person?.deathBenefit?.beneficiaries ?? [];
-  if (beneficiaries.length === 0) return null;
+  const reversionaryPensions = computeReversionaryPensions(owner, pensionRows, finalRow, couple, tba);
+  if (beneficiaries.length === 0 && reversionaryPensions.length === 0) return null;
 
   const accounts = [];
   for (const s of superAccounts) {
@@ -202,6 +240,7 @@ function computeDeathBenefitForPerson(owner, person, superAccounts, pensionRows,
   }
   for (const pn of pensionRows) {
     if (pn.owner !== owner) continue;
+    if (pn.reversionary === true && couple) continue; // continues to the spouse instead — see computeReversionaryPensions
     const d = finalRow.pensionDetail[pn.id];
     if (!d) continue;
     const taxFree = Math.min(Math.max(0, d.taxFreeClosing), d.closing);
@@ -239,7 +278,7 @@ function computeDeathBenefitForPerson(owner, person, superAccounts, pensionRows,
     gross: acc.gross + b.gross, tax: acc.tax + b.tax, net: acc.net + b.net,
   }), { gross: 0, tax: 0, net: 0 });
 
-  return { accounts, byBeneficiary, totals };
+  return { accounts, byBeneficiary, totals, reversionaryPensions };
 }
 
 export function projectPlan(state, profiles = PROFILES, mc = null) {
@@ -4701,8 +4740,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const finalRow = yearly[yearly.length - 1];
   if (finalRow) {
     finalRow.deathBenefitDetail = {
-      client: computeDeathBenefitForPerson("client", state.plan.client, superAccounts, pensionRows, finalRow),
-      partner: couple ? computeDeathBenefitForPerson("partner", state.plan.partner, superAccounts, pensionRows, finalRow) : null,
+      client: computeDeathBenefitForPerson("client", state.plan.client, superAccounts, pensionRows, finalRow, couple, tba),
+      partner: couple ? computeDeathBenefitForPerson("partner", state.plan.partner, superAccounts, pensionRows, finalRow, couple, tba) : null,
     };
   }
 

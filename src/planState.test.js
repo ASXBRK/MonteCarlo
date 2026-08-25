@@ -1315,6 +1315,24 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(ok.sourceAccountId).toBe(suClient.id);
   });
 
+  it("clampPension (spec 22, Commit 2): reversionary resets to false with no partner in the household — meaningless with nobody to revert to", () => {
+    const couple = clampPlan(couplePlan(), PROFILES);
+    const suCouple = createSuperAccount(couple, [], PROFILES, "client");
+    const withPartner = clampPension(
+      { owner: "client", sourceAccountId: suCouple.id, type: "abp", commenceAt: { kind: "age", age: 65 }, reversionary: true },
+      couple, [suCouple], PROFILES
+    );
+    expect(withPartner.reversionary).toBe(true);
+
+    const single = clampPlan({ ...couplePlan(), household: "single", partner: null }, PROFILES);
+    const suSingle = createSuperAccount(single, [], PROFILES, "client");
+    const withoutPartner = clampPension(
+      { owner: "client", sourceAccountId: suSingle.id, type: "abp", commenceAt: { kind: "age", age: 65 }, reversionary: true },
+      single, [suSingle], PROFILES
+    );
+    expect(withoutPartner.reversionary).toBe(false);
+  });
+
   it("clampPension bounds commenceAt to a plain CLIENT-anchored age window, NOT the owner's own condition-of-release gate — a partner's pension age is never compared against the wrong person's ages", () => {
     const plan = clampPlan(couplePlan(), PROFILES); // client 40-90, partner 36
     const su = createSuperAccount(plan, [], PROFILES, "partner");

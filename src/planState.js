@@ -1620,7 +1620,12 @@ export function clampPension(pn, plan, superAccounts = [], profiles = {}) {
     commenceAt,
     type,
     commenceAmount: pn.commenceAmount == null ? null : clampNumber(pn.commenceAmount, 0),
-    reversionary: pn.reversionary === true,
+    // Death benefits (spec 22, Commit 2) — reversionary means "continues
+    // to THE SPOUSE" specifically; with no partner in the household
+    // there's nobody to revert to, so an enabled flag with no spouse is
+    // an impossible combination this tool can model — reset rather than
+    // silently kept (CLAUDE.md's Input integrity section).
+    reversionary: pn.reversionary === true && !!plan.partner,
     taxFreeProportion: null,
     allocation: clampAllocation(pn.allocation, profiles),
     icrPct: clampNumber(pn.icrPct, 0, 100),
