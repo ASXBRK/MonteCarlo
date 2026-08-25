@@ -31,7 +31,7 @@ import {
   createSuperContribution, normaliseSuperContributions,
   createSuperWithdrawal, normaliseSuperWithdrawals,
   SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, FHSSS_ELIGIBLE_TYPES,
-  clampWorkingCash, uid,
+  clampWorkingCash, uid, clampHeas,
   createAllocation,
   INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
   incomeCategoryTaxTreatment,
@@ -3620,8 +3620,40 @@ function renderSettings() {
         </div>
         <p class="helper-text">If the account would fall below its minimum, the shortfall is drawn from the deficit funding order below. Leave the rate blank to use the firm's Cash profile return.</p>
       </div>
+      ${heasSectionHTML()}
       ${surplusPeriodsSectionHTML()}
       ${deficitSectionHTML(orderItems)}
+    </div>
+  `;
+}
+
+// Home Equity Access Scheme (spec 21b, Commit 5) — a single household
+// election, so it lives here (a plan-level setting) rather than as a
+// repeatable row-list the way pensions/gifts are. Mirrors the property
+// "Sale" toggle's own shape (a checkbox gating a dependent select,
+// propertyCardHTML) — disabled/hidden with an explanatory note when the
+// household has no property at all to secure it against.
+function heasSectionHTML() {
+  const heas = state.plan.heas ?? { enabled: false, propertyId: null };
+  const properties = state.properties ?? [];
+  const propertyOptions = properties
+    .map((p) => `<option value="${p.id}"${p.id === heas.propertyId ? " selected" : ""}>${escapeHTML(p.name)}</option>`)
+    .join("");
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Home Equity Access Scheme</div>
+      <p class="helper-text">A government loan secured against one property, drawn as a fortnightly income stream (up to 150% of the maximum pension rate, less any actual age pension received), with interest capitalising onto the loan balance and recovered from the estate — it increases cashflow at the cost of a smaller estate, not the other way around.</p>
+      ${properties.length ? `
+        <label class="ptg-check"><input type="checkbox"${heas.enabled ? " checked" : ""} data-settings-field="heasEnabled" /><span>Model a Home Equity Access Scheme loan</span></label>
+        ${heas.enabled ? `
+          <div class="person-grid">
+            <div class="cf-cell">
+              <label>Secured against</label>
+              <select data-settings-field="heasPropertyId"><option value="">Select a property…</option>${propertyOptions}</select>
+            </div>
+          </div>
+        ` : ""}
+      ` : `<p class="helper-text">Add a property (Property section) before this can be enabled — the loan must be secured against real estate.</p>`}
     </div>
   `;
 }
@@ -3638,6 +3670,13 @@ els.settingsPanel.addEventListener("change", (e) => {
   } else if (field === "wcaRate") {
     const v = e.target.value;
     state.plan.workingCash = clampWorkingCash({ ...state.plan.workingCash, ratePct: v === "" ? null : clampNumber(v, -10, 30) });
+  } else if (field === "heasEnabled") {
+    // Enabling defaults to the first available property — never an
+    // enabled election with nothing yet selected to secure it against.
+    const defaultPropertyId = state.plan.heas?.propertyId ?? (state.properties ?? [])[0]?.id ?? null;
+    state.plan.heas = clampHeas({ enabled: e.target.checked, propertyId: defaultPropertyId });
+  } else if (field === "heasPropertyId") {
+    state.plan.heas = clampHeas({ ...state.plan.heas, propertyId: e.target.value || null });
   } else if (field === "deficitMinimum") {
     const aid = e.target.dataset.aid;
     state.settings.deficit = { ...state.settings.deficit, minimumBalances: { ...state.settings.deficit.minimumBalances, [aid]: clampNumber(e.target.value, 0) } };
