@@ -42,11 +42,24 @@ export function buildAgePensionStrategyFocus({ state, giftAmount = 10000, workIn
 
   const arms = [{ id: "current", label: "Current plan", out: baseOut }];
 
-  const firstEligibleY = baseOut.yearly.findIndex((row) =>
+  let giftY = baseOut.yearly.findIndex((row) =>
     row.agePensionDetail?.client?.ageEligible || row.agePensionDetail?.partner?.ageEligible);
-  if (firstEligibleY >= 0) {
+  // Annual one-offs (gifts included) only ever fire in July, and July
+  // never fires in year 0 of a PARTIAL first plan year (deterministic.js's
+  // own julyOf convention: `y === 0 ? (start.month === 7 ? 0 : null) : ...`)
+  // — so the first ELIGIBLE year and the first year a gift can actually
+  // FIRE diverge whenever the client is already age-pension-eligible at
+  // plan start and the plan itself doesn't start in July. Left
+  // unchecked, the gift silently never fires and the "gift" arm becomes
+  // a no-op relabelled as "Current plan" with no visible cue — exactly
+  // the silently-wrong-output shape CLAUDE.md's Input Integrity section
+  // warns against. Bumped to year 1 instead (still guaranteed eligible —
+  // age-pension eligibility never lapses once reached), or the arm is
+  // dropped entirely if there IS no year 1 (a one-year projection).
+  if (giftY === 0 && state.plan.start.month !== 7) giftY = baseOut.yearly.length > 1 ? 1 : -1;
+  if (giftY >= 0) {
     const giftState = structuredClone(state);
-    const giftAge = state.plan.client.currentAge + firstEligibleY;
+    const giftAge = state.plan.client.currentAge + giftY;
     giftState.plan.gifts = [
       ...(giftState.plan.gifts ?? []),
       { id: "focus-strategy-gift", owner: "client", amount: giftAmount, at: { kind: "age", age: giftAge }, label: "Illustrative gift" },

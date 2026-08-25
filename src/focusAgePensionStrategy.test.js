@@ -99,6 +99,33 @@ describe("buildAgePensionStrategyFocus (spec 21b, Commit 5)", () => {
     }
   });
 
+  it("the gift still actually fires when the client is ALREADY eligible at plan start and the plan starts outside July — never a silent no-op", () => {
+    // A partial first plan year (start month != July) never fires an
+    // annual one-off in year 0 (deterministic.js's own julyOf
+    // convention) — a client already eligible at year 0 needs the gift
+    // bumped to year 1, or it silently never fires and the "gift" arm
+    // degrades into a byte-identical copy of "Current plan" with no
+    // visible cue (the bug this test guards against).
+    const state = mkState({
+      plan: { client: { currentAge: 67 }, start: { year: 2026, month: 8 } }, // August — partial first year
+      endAge: 70,
+      assets: [mkAsset({ balance: 500000 })],
+    });
+    const result = buildAgePensionStrategyFocus({ state, giftAmount: 10000, workIncomeLevels: [] });
+    const somewhereDiverges = result.byYear.some((point) => point.gift.netAssets !== point.current.netAssets);
+    expect(somewhereDiverges).toBe(true);
+  });
+
+  it("drops the gift arm entirely (rather than silently no-op) when the client is eligible at start of a partial first year AND there is no later year to bump to", () => {
+    const state = mkState({
+      plan: { client: { currentAge: 67 }, start: { year: 2026, month: 8 } },
+      endAge: 67, // a single-year projection — no year 1 to bump to
+      assets: [mkAsset({ balance: 500000 })],
+    });
+    const result = buildAgePensionStrategyFocus({ state, giftAmount: 10000, workIncomeLevels: [] });
+    expect(result.arms.some((a) => a.id === "gift")).toBe(false);
+  });
+
   it("the gift arm is present whenever ANY later year is eligible, even if year 0 itself isn't", () => {
     const state = mkState({ plan: { client: { currentAge: 65 } }, endAge: 68 });
     const result = buildAgePensionStrategyFocus({ state });
