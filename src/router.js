@@ -14,7 +14,7 @@
 
 export const INPUT_SECTIONS = [
   "setup", "tax-details", "children", "implementation", "income", "deductions", "expenses", "financial-assets", "lifestyle-assets",
-  "property", "super", "liabilities", "goals", "investment-cashflows", "settings",
+  "property", "super", "pension", "liabilities", "goals", "investment-cashflows", "settings",
 ];
 export const DEFAULT_INPUT_SECTION = "setup";
 
@@ -28,7 +28,7 @@ export const DEFAULT_INPUT_SECTION = "setup";
 // "money-decomposition" fold into Projection's and Net worth's own
 // chart selector (Commit 4) rather than staying separate subjects.
 export const OUTPUT_VIEWS = [
-  "projection", "cashflow", "assets", "liabilities", "super", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
+  "projection", "cashflow", "assets", "liabilities", "super", "pension", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
   "focus-equity", "focus-transfer-schedule",                                                                                                                  // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
   "focus-surplus-allocation",                                                                                                                                 // Focus (docs/specs/16-surplus-allocation.md, Commit 3)
@@ -56,6 +56,7 @@ export const OUTPUT_SUBJECT_FORMS = {
   assets: ["chart", "table"],
   liabilities: ["chart", "table"],
   super: ["chart", "table"],
+  pension: ["table"],
   tax: ["table"],
   "net-worth": ["chart", "table"],
   allocation: ["chart"],

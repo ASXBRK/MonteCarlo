@@ -2614,6 +2614,21 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
             fixedAmount: drawdownOption === "fixed" ? rand(0, 20000) : 0,
             indexBasis: pick(["none", "cpi", "awote"]),
             indexExtraPct: rand(0, 2),
+            // Commutations (spec 20, Commit 5) — 0-2 per pension,
+            // spanning the whole window (sometimes before commencement
+            // — never fires, exercising "no valid pension yet to debit"
+            // — and sometimes after), both a partial (a small explicit
+            // amount, well under what's likely left) and a full
+            // (amount:null) commutation, and both destinations —
+            // exercising the "closes the pension" path (a full
+            // commutation followed by a LATER one that finds nothing
+            // left) alongside the ordinary partial-then-continues path.
+            commutations: Array.from({ length: randInt(0, 2) }, (_, i) => ({
+              id: `cm_${p}_${i}`, label: `Commutation ${i}`,
+              amount: Math.random() < 0.5 ? null : rand(1000, 40000),
+              at: { kind: "age", age: randInt(startAge, endAge) },
+              destination: pick(["cash", "super"]),
+            })),
           });
         }
       }
@@ -6211,8 +6226,13 @@ function pensionRow(over = {}) {
     // explicitly where the exact growth rate matters to its assertions.
     allocation: zeroRealAlloc(), icrPct: 0,
     drawdownOption: "minimum", fixedAmount: 0, indexBasis: "cpi", indexExtraPct: 0,
+    commutations: [],
     ...over,
   };
+}
+
+function commutationRow(over = {}) {
+  return { id: "cm1", label: "Commutation", amount: null, at: { kind: "age", age: 62 }, destination: "cash", ...over };
 }
 
 describe("Pension phase (spec 20, Commit 1): accounts, commencement, and the proportioning rule", () => {
@@ -6871,5 +6891,157 @@ describe("Pension phase (spec 20, Commit 4): transfer balance cap and account", 
       cashflows: { expenses: [cf({ id: "exp1", assetId: null, amount: 1500, frequency: "monthly", from: { kind: "age", age: 60 }, to: { kind: "age", age: 120 } })] },
     }));
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `TBA excess/conversion fixture, year ${y}`);
+  });
+});
+
+describe("Pension phase (spec 20, Commit 5): commutations", () => {
+  it("a full commutation (amount: null) pays out the WHOLE remaining balance, in the fixed proportions, and closes the pension", () => {
+    const out = projectPlan(mkState({
+      endAge: 64,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 40000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({
+          drawdownOption: "minimum",
+          commutations: [commutationRow({ at: { kind: "age", age: 62 } })],
+        })],
+      },
+    }));
+    const balanceBefore = out.yearly[1].pensionDetail.pn1.closing; // year before commutation (age 61)
+    expect(balanceBefore).toBeGreaterThan(0);
+    // Commutation fires in year 2 (age 62) — pays out whatever remained
+    // AT THAT POINT (balanceBefore, less that year's own minimum
+    // drawdown, which fires before the commutation within the same FY).
+    expect(out.yearly[2].pensionDetail.pn1.commutations).toBeGreaterThan(0);
+    expect(out.yearly[2].pensionDetail.pn1.closing).toBeCloseTo(0, 0); // closed
+    // A LATER year: still 0 — no further growth or payments on a closed pension.
+    expect(out.yearly[3].pensionDetail.pn1.closing).toBe(0);
+    expect(out.yearly[3].pensionDetail.pn1.payments).toBe(0);
+  });
+
+  it("a partial commutation pays the requested amount, in the fixed proportions, and the pension keeps operating afterward", () => {
+    const out = projectPlan(mkState({
+      endAge: 64,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 40000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({
+          drawdownOption: "minimum",
+          commutations: [commutationRow({ amount: 20000, at: { kind: "age", age: 62 } })],
+        })],
+      },
+    }));
+    expect(out.yearly[2].pensionDetail.pn1.commutations).toBeCloseTo(20000, 0);
+    // Still operating afterward — closing balance is positive, and the
+    // NEXT year's minimum still pays out (against the now-smaller balance).
+    expect(out.yearly[2].pensionDetail.pn1.closing).toBeGreaterThan(0);
+    expect(out.yearly[3].pensionDetail.pn1.payments).toBeGreaterThan(0);
+  });
+
+  it("both destinations: 'cash' credits the WCA; 'super' returns the balance to the SAME source account", () => {
+    const commonPlan = {
+      client: { currentAge: 60, retirementAge: 60 },
+      superAccounts: [superAcct({ id: "su1", balance: 100000, allocation: zeroRealSuperAlloc() })],
+      workingCash: { balance: 1000, minimumBalance: 1000, ratePct: 0 },
+    };
+    // mkState's own default surplus mode is "spend" (remainderTo:
+    // "expenditure" — WCA surplus above the minimum leaves the system
+    // entirely at FY-end); "accumulate" keeps it IN the WCA instead, so
+    // the cash-destination assertion below can actually see it land.
+    const cashOut = projectPlan(mkState({
+      endAge: 63,
+      surplus: { mode: "accumulate" },
+      plan: { ...commonPlan, pensions: [pensionRow({ drawdownOption: "minimum", commutations: [commutationRow({ amount: 30000, at: { kind: "age", age: 61 }, destination: "cash" })] })] },
+    }));
+    const superOut = projectPlan(mkState({
+      endAge: 63,
+      surplus: { mode: "accumulate" },
+      plan: { ...commonPlan, pensions: [pensionRow({ drawdownOption: "minimum", commutations: [commutationRow({ amount: 30000, at: { kind: "age", age: 61 }, destination: "super" })] })] },
+    }));
+    // Cash destination: the WCA jumps by (roughly) the commuted amount
+    // beyond its own minimum, in the commutation year.
+    expect(cashOut.yearly[1].wcaClosing).toBeGreaterThan(20000);
+    // Super destination: the source account's own balance grows back
+    // up by the commuted amount instead — the WCA gets only the
+    // pension's own ordinary minimum-drawdown payments, nowhere near
+    // what the cash-destination scenario accumulated (which gets BOTH
+    // those same payments AND the 30,000 commutation itself).
+    expect(superOut.yearly[1].superDetail.su1.closing).toBeGreaterThan(20000);
+    expect(superOut.yearly[1].wcaClosing).toBeLessThan(cashOut.yearly[1].wcaClosing - 15000);
+  });
+
+  it("a commutation debits the transfer balance account at the commuted amount", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 500000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ drawdownOption: "minimum", commutations: [commutationRow({ amount: 100000, at: { kind: "age", age: 61 } })] })],
+      },
+    }));
+    const balanceBeforeCommutation = out.yearly[0].transferBalance.client.balance; // commencement year (credit only)
+    expect(balanceBeforeCommutation).toBeCloseTo(500000, 0);
+    // The commutation year: debited by roughly the commuted amount
+    // (payments never debit — only this does).
+    const balanceAfter = out.yearly[1].transferBalance.client.balance;
+    expect(balanceBeforeCommutation - balanceAfter).toBeCloseTo(100000, 0);
+  });
+
+  it("the reserved vocabulary rows exist and read zero for an ordinary post-60 pension, not undefined/NaN", () => {
+    // Structurally unreachable end-to-end in THIS build for a NONZERO
+    // reading (every payment is post-60 — see acc[p]'s own comment,
+    // deterministic.js) — the wiring that would populate them from a
+    // nonzero taxDetail figure is exercised directly instead
+    // (cashflowStatement.test.js's own "Taxable Pension Component"/
+    // "Taxable Pension Offset (TTR)" tests). This test confirms the
+    // ENGINE actually emits well-formed zeros (a real number, not
+    // undefined) for the ordinary, always-reachable case.
+    const out = projectPlan(mkState({
+      endAge: 62,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow()],
+      },
+      cashflows: { income: [employmentRow({ amount: 50000, to: { kind: "age", age: 62 } })] },
+    }));
+    // Post-60 pension payments never touch assessable income.
+    expect(out.yearly[0].taxDetail.client.taxablePensionComponent).toBe(0);
+    expect(out.yearly[0].taxDetail.client.ttrPensionOffset).toBe(0);
+  });
+
+  it("conservation holds across commencement, payment, and a full commutation", () => {
+    const scenarios = [
+      // Full commutation to cash.
+      mkState({
+        endAge: 65,
+        plan: {
+          client: { currentAge: 60, retirementAge: 60 },
+          superAccounts: [superAcct({ balance: 300000, taxFreeComponent: 80000, allocation: { mode: "custom", incomePct: 4, growthPct: 2, frankingPct: 0, volBasis: "Balanced" } })],
+          pensions: [pensionRow({
+            drawdownOption: "minimum",
+            allocation: { mode: "custom", incomePct: 4, growthPct: 2, frankingPct: 0, volBasis: "Balanced" },
+            commutations: [commutationRow({ amount: 50000, at: { kind: "age", age: 62 }, destination: "cash" })],
+          })],
+        },
+      }),
+      // Partial commutation back to super.
+      mkState({
+        endAge: 65,
+        plan: {
+          client: { currentAge: 60, retirementAge: 60 },
+          superAccounts: [superAcct({ balance: 300000, taxFreeComponent: 80000, allocation: { mode: "custom", incomePct: 4, growthPct: 2, frankingPct: 0, volBasis: "Balanced" } })],
+          pensions: [pensionRow({
+            drawdownOption: "fixed", fixedAmount: 12000, indexBasis: "none", indexExtraPct: 0,
+            allocation: { mode: "custom", incomePct: 4, growthPct: 2, frankingPct: 0, volBasis: "Balanced" },
+            commutations: [commutationRow({ amount: null, at: { kind: "age", age: 63 }, destination: "super" })],
+          })],
+        },
+      }),
+    ];
+    for (const [i, s] of scenarios.entries()) {
+      const out = projectPlan(s);
+      for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `commutation scenario ${i}, year ${y}`);
+    }
   });
 });

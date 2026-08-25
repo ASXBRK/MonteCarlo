@@ -99,7 +99,15 @@ export function assessableIncome(row, ctx, forOwner = null) {
   const byCat = (cat) => sumByCategory(incomeRows, rowTotalsIncome, cat, y, forOwner);
   const investmentProps = properties.filter((p) => p.propertyType === "investment");
   const salary = byCat("salary");
-  const taxablePensionComponent = 0; // [zero] — pension phase not modelled
+  // Pension phase (spec 20, Commit 2/5) — the taxable component of a
+  // pre-60 TTR payment, assessable at marginal rates. Always 0 in this
+  // build's own reachable states (every payment is post-60 — see
+  // deterministic.js's acc[p] header) but wired for genuine
+  // correctness, same "sum across both owners, or read one" shape
+  // every other per-person taxDetail figure here already uses.
+  const taxablePensionComponent = forOwner == null
+    ? (row.taxDetail?.client?.taxablePensionComponent ?? 0) + (row.taxDetail?.partner?.taxablePensionComponent ?? 0)
+    : (row.taxDetail?.[forOwner]?.taxablePensionComponent ?? 0);
   const otherIncome = byCat("otherIncome");
   const governmentPayments = 0; // [zero] — Centrelink not modelled
   const interestIncome = row.wcaDetail.interest * shareOf("joint", forOwner) + byCat("interestIncome");
@@ -232,7 +240,15 @@ export function taxSums(row, forOwner = null) {
   const frankingCreditOffset = forOwner == null
     ? -(row.taxDetail?.frankingCredits ?? 0)
     : -(person.frankingCredits ?? 0);
-  const taxablePensionOffset = 0; // [zero]
+  // Pension phase (spec 20, Commit 2/5) — the 15% non-refundable offset
+  // on a pre-60 TTR payment's taxable component. Same negative-sign
+  // convention as lito/frankingCreditOffset (an offset REDUCES tax).
+  // Always 0 in this build's own reachable states — see
+  // assessableIncome's own taxablePensionComponent comment above.
+  const taxablePensionOffsetRaw = forOwner == null
+    ? (client.ttrPensionOffset ?? 0) + (partner.ttrPensionOffset ?? 0)
+    : (person.ttrPensionOffset ?? 0);
+  const taxablePensionOffset = -taxablePensionOffsetRaw || 0; // avoid a -0 when it's genuinely zero
   const div293 = forOwner == null ? (row.taxDetail?.div293 ?? 0) : (person.div293 ?? 0);
   const div296 = forOwner == null ? (row.taxDetail?.div296 ?? 0) : (person.div296 ?? 0);
   const total = incomeTax + medicareLevy + medicareLevySurcharge + helpRepayment + sapto + lito

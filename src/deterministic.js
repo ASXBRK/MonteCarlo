@@ -44,7 +44,7 @@ import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./sc
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
-import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance } from "./pensionTba.js";
+import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance, debitTransferBalance } from "./pensionTba.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
 import { fhsssAcceptContribution, fhsssReleaseAmounts } from "./fhsss.js";
@@ -500,6 +500,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     let y = resolveRef(pn.commenceAt, state.plan, schedule, "client").planYear;
     while (y < schedule.planYears && ownerAgeAt(meta.owner, y) < gateAge) y++;
     pensionCommenceMonth[pn.id] = y < schedule.planYears ? julyOf(y) : null; // null = never fires within the projection (convention 5's partial-first-year skip, or the gate never met)
+  }
+
+  // Commutation events (spec 20, Commit 5) — resolved once per
+  // commutation row, same "fires in July of its resolved plan year, or
+  // never" convention as commencement just above. A pension can carry
+  // several; each resolves independently.
+  const pensionCommutationEvents = {};
+  for (const pn of pensionRows) {
+    pensionCommutationEvents[pn.id] = (pn.commutations ?? []).map((c) => {
+      const y = resolveRef(c.at, state.plan, schedule, "client").planYear;
+      return { id: c.id, month: julyOf(y), amount: c.amount, destination: c.destination };
+    }).filter((e) => e.month != null);
   }
 
   // Main residence exemption (spec 19 Commit 5) — resolves a
@@ -1230,8 +1242,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // every later year.
     pensionDetail: Object.fromEntries(pensionIds.map((id) => [id, {
       opening: 0, commencementAmount: 0, earnings: 0, earningsTax: 0,
-      payments: 0, paymentsTaxFree: 0, paymentsTaxable: 0,
-      closing: 0, taxFreeProportion: null,
+      payments: 0, paymentsTaxFree: 0, paymentsTaxable: 0, commutations: 0,
+      closing: 0, taxFreeClosing: 0, taxFreeProportion: null,
     }])),
     pensionClosing: 0,
     // Transfer balance account (spec 20, Commit 4) — a snapshot of each
@@ -2380,6 +2392,53 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           row.pensionDetail[pn.id].payments += paid;
           row.pensionDetail[pn.id].paymentsTaxFree += taxFreeAmount;
           row.pensionDetail[pn.id].paymentsTaxable += paid - taxFreeAmount;
+        }
+      }
+
+      // Commutations (spec 20, Commit 5) — a lump-sum withdrawal in the
+      // FIXED proportions (withdrawFromPension, never the live ratio),
+      // debiting the owner's transfer balance account at the commuted
+      // amount. Post-60 tax-free — every commutation this engine can
+      // ever reach IS post-60 (a pension can't even exist below it —
+      // see pensionMinCommenceAge's own header), so no offset mechanism
+      // is needed the way payments' pre-60 TTR case has one. A TRANSFER
+      // either way (cash: pensionClosing → wcaClosing; super:
+      // pensionClosing → superClosing), so — like payments — it's
+      // credited DIRECTLY, never through `inc`/row.income (would
+      // double-count it in the conservation invariant; see the payment
+      // block's own comment above for the exact reasoning). A FULL
+      // commutation (amount:null → the whole remaining balance) simply
+      // leaves pensionBal at 0 — "closing" the pension needs no separate
+      // flag; growth/payments on a zero balance are already inert.
+      // Real-pass only, same structural convention as every other
+      // pension/super balance mutation in this engine.
+      if (row) {
+        for (const pn of pensionRows) {
+          if (!pensionCommenced[pn.id]) continue;
+          const pm = pensionMeta[pn.id];
+          for (const ev of pensionCommutationEvents[pn.id]) {
+            if (ev.month !== m) continue;
+            const requested = ev.amount == null ? pensionBal[pn.id] : ev.amount;
+            const paid = withdrawFromPension(pn.id, requested);
+            if (paid <= 0) continue;
+            const taxFreeAmount = paid * pensionFixedProportion[pn.id];
+            row.pensionDetail[pn.id].commutations += paid;
+            tba[pm.owner] = debitTransferBalance(tba[pm.owner], paid);
+            // "super": returns to accumulation in the SAME account the
+            // pension originally came from — a disclosed simplification
+            // when that account is no longer valid/included (falls back
+            // to cash, the same "don't destroy money, don't silently
+            // misattribute it either" fallback shape every other
+            // dangling-target case in this engine already uses).
+            const target = ev.destination === "super" && superBal[pm.sourceAccountId] !== undefined
+              ? pm.sourceAccountId : null;
+            if (target) {
+              superBal[target] += paid;
+              superTaxFree[target] += taxFreeAmount;
+            } else {
+              wcaBal += paid;
+            }
+          }
         }
       }
 
@@ -3652,6 +3711,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     for (const id of pensionIds) {
       row.pensionDetail[id].closing = pensionSeries[id][yearEnd(y)];
+      row.pensionDetail[id].taxFreeClosing = pensionTaxFree[id];
       // Reported once the pension has actually commenced (fixed at that
       // point, for life — see pensionFixedProportion's own header);
       // still null every year before commencement, and 0 if it never
@@ -3845,6 +3905,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       fhsssTaxableComponent: fhsssRelease?.[p]?.taxableComponent ?? 0,
       fhsssTaxFreeComponent: fhsssRelease?.[p]?.taxFreeComponent ?? 0,
       fhsssOffset: assessed[p].fhsssOffset,
+      // Pension phase (spec 20, Commit 2/5) — the reserved "Taxable
+      // Pension Component"/"Taxable Pension Offset (TTR)" rows in the
+      // firm's cashflow vocabulary (src/cashflowStatement.js). Always 0
+      // in this build's own reachable states (every payment is post-60
+      // — see acc[p]'s own header) but wired for genuine correctness,
+      // the same shape as excessCcOffset/fhsssOffset above.
+      taxablePensionComponent: measured[p].ttrPensionTaxable ?? 0,
+      ttrPensionOffset: assessed[p].ttrPensionOffset,
     } : null;
     for (const p of persons) quarantineCarry[p] += newQuarantine[p]; // available from next FY
     row.taxDetail = {

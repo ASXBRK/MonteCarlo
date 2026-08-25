@@ -59,6 +59,24 @@ describe("assessableIncome", () => {
       + a.trustDistribution + a.foreignIncome + a.netTaxableCapitalGains;
     expect(a.total).toBeCloseTo(manualSum, 6);
   });
+
+  // Pension phase (spec 20, Commit 2/5) — the reserved "Taxable Pension
+  // Component" row reads the engine's own figure, not a hardcoded 0 —
+  // see taxSums' own sibling test above for why this is exercised
+  // directly rather than via a real projection.
+  it("Taxable Pension Component reads from taxDetail, summed across both persons", () => {
+    const row = mkRow({
+      taxDetail: {
+        client: { taxablePensionComponent: 4000 },
+        partner: { taxablePensionComponent: 1500 },
+        frankingCredits: 0, netCapitalGain: 0,
+      },
+    });
+    const a = assessableIncome(row, {});
+    expect(a.taxablePensionComponent).toBe(5500);
+    const aClient = assessableIncome(row, {}, "client");
+    expect(aClient.taxablePensionComponent).toBe(4000);
+  });
 });
 
 describe("deductionSums", () => {
@@ -148,6 +166,26 @@ describe("taxSums", () => {
     // Matches the household net-income-tax identity directly: gross −
     // medicare − lito − franking + div293 + div296.
     expect(t.total).toBeCloseTo(28000 + 1400 - 700 - 300 + 1200 + 0, 6);
+  });
+
+  // Pension phase (spec 20, Commit 2/5) — the reserved "Taxable Pension
+  // Offset (TTR)" row actually reads the engine's own figure now,
+  // rather than a hardcoded 0 — genuinely unreachable end-to-end via a
+  // real projection (see deterministic.js's acc[p] header), so wired
+  // and tested directly against the row shape here instead.
+  it("Taxable Pension Offset (TTR) reads from taxDetail, negative like every other offset, summed across both persons", () => {
+    const row = mkRow({
+      taxDetail: {
+        client: { grossTax: 20000, ttrPensionOffset: 900 },
+        partner: { grossTax: 8000, ttrPensionOffset: 150 },
+        frankingCredits: 0, div293: 0, div296: 0,
+      },
+    });
+    const t = taxSums(row);
+    expect(t.taxablePensionOffset).toBe(-1050);
+    // Per-person split reads the SAME field, not the household sum.
+    const tClient = taxSums(row, "client");
+    expect(tClient.taxablePensionOffset).toBe(-900);
   });
 });
 

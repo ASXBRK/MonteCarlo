@@ -41,6 +41,8 @@ import {
   TERMINATION_TYPES, INDEX_BASES,
   createSurplusPeriod, normaliseSurplusPeriods, ALLOCATION_TARGET_TYPES,
   DEBT_ORDER_MODES, REMAINDER_TARGETS, DEFICIT_SELL_RULES,
+  PENSION_TYPES, PENSION_DRAWDOWN_OPTIONS, COMMUTATION_DESTINATIONS,
+  createPension, createCommutation,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -131,6 +133,7 @@ const els = {
   goalsSection: $("goalsSection"),
   propertySection: $("propertySection"),
   superSection: $("superSection"),
+  pensionSection: $("pensionSection"),
   addAssetBtn: $("addAssetBtn"),
   incomeSection: $("incomeSection"),
   deductionsSection: $("deductionsSection"),
@@ -155,12 +158,15 @@ const els = {
   taxEntity: $("taxEntity"),
   taxTable: $("taxTable"),
   viewSuper: $("viewSuper"),
+  viewPension: $("viewPension"),
   viewLiabilities: $("viewLiabilities"),
   viewAssumptions: $("viewAssumptions"),
   assetsEntity: $("assetsEntity"),
   assetsTable: $("assetsTable"),
   superEntity: $("superEntity"),
   superTable: $("superTable"),
+  pensionEntity: $("pensionEntity"),
+  pensionTable: $("pensionTable"),
   liabilitiesEntity: $("liabilitiesEntity"),
   liabilitiesTable: $("liabilitiesTable"),
   viewSnapshot: $("viewSnapshot"),
@@ -449,6 +455,7 @@ const INPUT_NAV = [
   { id: "lifestyle-assets", label: "Lifestyle assets" },
   { id: "property", label: "Property" },
   { id: "super", label: "Super" },
+  { id: "pension", label: "Pension" },
   { id: "liabilities", label: "Liabilities" },
   { id: "goals", label: "Goals" },
   { id: "investment-cashflows", label: "Investment cashflows" },
@@ -463,7 +470,7 @@ const INPUT_GROUPS = [
   { id: "client", label: "Client", ids: ["setup", "tax-details", "children"] },
   { id: "money-in", label: "Money in", ids: ["income", "deductions"] },
   { id: "money-out", label: "Money out", ids: ["expenses", "goals"] },
-  { id: "assets", label: "Assets", ids: ["financial-assets", "lifestyle-assets", "property", "super"] },
+  { id: "assets", label: "Assets", ids: ["financial-assets", "lifestyle-assets", "property", "super", "pension"] },
   { id: "debt", label: "Debt", ids: ["liabilities"] },
   { id: "plan", label: "Plan", ids: ["implementation", "investment-cashflows", "settings"] },
 ];
@@ -481,6 +488,7 @@ const OUTPUT_NAV = {
     { id: "assets", label: "Assets" },
     { id: "liabilities", label: "Liabilities" },
     { id: "super", label: "Super" },
+    { id: "pension", label: "Pension" },
     { id: "tax", label: "Tax" },
     { id: "net-worth", label: "Net worth" },
     { id: "allocation", label: "Allocation" },
@@ -5406,11 +5414,17 @@ els.superSection.addEventListener("click", (e) => {
       state.plan.superAccounts = state.plan.superAccounts.filter((x) => x.id !== said);
       state.cashflows.superContributions = (state.cashflows.superContributions ?? []).filter((c) => c.accountId !== said);
       state.cashflows.superWithdrawals = (state.cashflows.superWithdrawals ?? []).filter((w) => w.accountId !== said);
+      // A pension sourced from this account survives (it's a projected
+      // income stream, not tied to the account's continued existence
+      // the way a contribution/withdrawal row is) but drops the now-
+      // dangling reference — same convention as clampPension itself.
+      for (const pn of state.plan.pensions ?? []) if (pn.sourceAccountId === said) pn.sourceAccountId = null;
       collapsed.delete(said);
       volBasisTouched.delete(said);
       saveState();
       refreshOutputs();
       renderSuper();
+      renderPensions();
       break;
     }
     case "alloc-mode": {
@@ -5421,6 +5435,438 @@ els.superSection.addEventListener("click", (e) => {
       break;
     }
   }
+});
+
+// --- pension section (spec 20, Commit 5) ------------------------------------
+//
+// Cards mirror the super-account/liability card shape (a .pcard per
+// row, direct-mutate-then-saveState, same as els.superSection above) —
+// not the .cf-tr table-row machinery (applyRowEdit/rowHTMLFor), which
+// is shaped around cashflow rows and their owner/date semantics.
+// commenceAt gets the full DateRef anchor control (spec's own words);
+// each commutation's `at` gets the simpler plain-age control every
+// other one-off sub-row (liability lump-sum repayments, goals) uses.
+
+function findPension(pid) {
+  return (state.plan.pensions ?? []).find((p) => p.id === pid) || null;
+}
+
+function pensionHeadMeta(pn) {
+  const ownerLabel = pn.owner === "partner" ? partnerName() : clientName();
+  const typeLabel = pn.type === "ttr" ? "Transition to retirement" : "Account-based pension";
+  const drawdownLabel = { minimum: "Minimum", fixed: "Fixed amount", expenditure: "Expenditure-linked", maximum: "Maximum (10%)" }[pn.drawdownOption] ?? pn.drawdownOption;
+  return `${ownerLabel} · ${typeLabel} · ${drawdownLabel} drawdown`;
+}
+
+function pensionAllocationSectionHTML(pn) {
+  const alloc = pn.allocation;
+  const isCustom = alloc.mode === "custom";
+  const seg = `
+    <div class="seg-toggle" role="radiogroup" aria-label="Allocation mode">
+      <button class="seg-option${!isCustom ? " active" : ""}" type="button"
+              data-pension-action="alloc-mode" data-pid="${pn.id}" data-mode="profile"
+              aria-pressed="${!isCustom}">Firm profile</button>
+      <button class="seg-option${isCustom ? " active" : ""}" type="button"
+              data-pension-action="alloc-mode" data-pid="${pn.id}" data-mode="custom"
+              aria-pressed="${isCustom}">Custom</button>
+    </div>
+  `;
+  if (!isCustom) {
+    return `
+      <div class="cf-section">
+        <div class="cf-section-title">Allocation</div>
+        ${seg}
+        <div class="alloc-grid alloc-grid-profile">
+          <div class="cf-cell">
+            <label>Risk profile</label>
+            <select data-pid="${pn.id}" data-pfield="alloc.profile">${profileOptions(alloc.profile)}</select>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  const total = (alloc.incomePct + alloc.growthPct).toFixed(2);
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Allocation</div>
+      ${seg}
+      <div class="alloc-grid">
+        <div class="cf-cell">
+          <label>Income (% p.a.)</label>
+          <input type="number" min="0" max="${ALLOC_PCT_MAX}" step="0.05" value="${alloc.incomePct}"
+                 data-pid="${pn.id}" data-pfield="alloc.incomePct" />
+        </div>
+        <div class="cf-cell">
+          <label>Growth (% p.a.)</label>
+          <input type="number" min="0" max="${ALLOC_PCT_MAX}" step="0.05" value="${alloc.growthPct}"
+                 data-pid="${pn.id}" data-pfield="alloc.growthPct" />
+        </div>
+        <div class="cf-cell">
+          <label>Franking (%)</label>
+          <input type="number" min="0" max="100" step="1" value="${alloc.frankingPct}"
+                 data-pid="${pn.id}" data-pfield="alloc.frankingPct" />
+        </div>
+        <div class="cf-cell alloc-total">
+          <label>&nbsp;</label>
+          <div class="alloc-total-value" data-role="pensionAllocTotal-${pn.id}">Total: ${total}% p.a. nominal</div>
+        </div>
+      </div>
+      <div class="alloc-grid alloc-grid-vol">
+        <div class="cf-cell">
+          <label>Volatility basis</label>
+          <select data-pid="${pn.id}" data-pfield="alloc.volBasis">${profileOptions(alloc.volBasis)}</select>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function commutationRowHTML(pid, c) {
+  const age = c.at.kind === "age" ? c.at.age : resolveRef(c.at, state.plan, projection.schedule, "client").age;
+  return `
+    <tr class="cf-tr">
+      <td class="cf-td-label">
+        <input type="text" value="${escapeHTML(c.label)}" maxlength="40" data-pid="${pid}" data-cmid="${c.id}" data-cmfield="label" />
+      </td>
+      <td class="cf-td-amount">
+        <input type="number" min="0" step="1000" value="${c.amount ?? ""}" placeholder="Whole balance"
+               data-pid="${pid}" data-cmid="${c.id}" data-cmfield="amount" />
+      </td>
+      <td class="cf-td-date">
+        <input type="number" min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1"
+               value="${age}" aria-label="At age" data-pid="${pid}" data-cmid="${c.id}" data-cmfield="atAge" />
+      </td>
+      <td class="cf-td-basis">
+        <select data-pid="${pid}" data-cmid="${c.id}" data-cmfield="destination">
+          ${COMMUTATION_DESTINATIONS.map((d) => `<option value="${d}"${c.destination === d ? " selected" : ""}>${d === "cash" ? "To cash" : "Back to super"}</option>`).join("")}
+        </select>
+      </td>
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-pension-action="remove-commutation" data-pid="${pid}" data-cmid="${c.id}">×</button>
+      </td>
+    </tr>
+  `;
+}
+
+function pensionCommutationsHTML(pn) {
+  return `
+    <div class="cf-subsection">
+      <div class="cf-section-title">Commutations ${tooltipHTML("A partial or full lump-sum withdrawal, paid in the pension's fixed tax-free/taxable proportions and debited from the transfer balance account. Leave the amount blank for the whole remaining balance — a full commutation closes the pension.")}</div>
+      ${(pn.commutations ?? []).length === 0 ? "" : `
+        <table class="cf-table">
+          <thead><tr><th>Label</th><th>Amount</th><th>At (age)</th><th>Destination</th><th></th></tr></thead>
+          <tbody>${pn.commutations.map((c) => commutationRowHTML(pn.id, c)).join("")}</tbody>
+        </table>
+      `}
+      <button class="add-row-btn" type="button" data-pension-action="add-commutation" data-pid="${pn.id}">+ Add commutation</button>
+    </div>
+  `;
+}
+
+function pensionCardHTML(pn) {
+  const account = findSuperAccount(pn.sourceAccountId);
+  return `
+    <div class="pcard" data-pid="${pn.id}">
+      <div class="pcard-head">
+        <span class="pcard-name">${escapeHTML(pn.name)}</span>
+        <span class="pcard-meta">${pensionHeadMeta(pn)}</span>
+        <button class="pcard-remove" type="button" data-pension-action="remove" data-pid="${pn.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Name</label>
+            <input type="text" maxlength="60" value="${escapeHTML(pn.name)}" data-pid="${pn.id}" data-pfield="name" />
+          </div>
+          ${isCouple() ? `
+            <div class="cf-cell">
+              <label>Owner</label>
+              <select data-pid="${pn.id}" data-pfield="owner">${superOwnerOptions(pn.owner)}</select>
+            </div>
+          ` : ""}
+          <div class="cf-cell">
+            <label>Source super account</label>
+            <select data-pid="${pn.id}" data-pfield="sourceAccountId">${superAccountOptions(pn.sourceAccountId, pn.owner)}</select>
+            ${!account ? `<p class="helper-text">No super account for this owner yet — add one under Super first.</p>` : ""}
+          </div>
+          <div class="cf-cell">
+            <label>Type</label>
+            <select data-pid="${pn.id}" data-pfield="type">
+              <option value="abp"${pn.type === "abp" ? " selected" : ""}>Account-based pension</option>
+              <option value="ttr"${pn.type === "ttr" ? " selected" : ""}>Transition to retirement</option>
+            </select>
+          </div>
+          <div class="cf-cell">
+            <label>Commencement</label>
+            ${dateRefControlHTML(pn.commenceAt, "client", `data-pid="${pn.id}" data-pfield="commenceAt"`, state.plan.client.currentAge, state.plan.endAge)}
+          </div>
+          <div class="cf-cell">
+            <label>Commencement amount ($, blank = whole balance)</label>
+            <input type="number" min="0" step="1000" value="${pn.commenceAmount ?? ""}" placeholder="Whole balance"
+                   data-pid="${pn.id}" data-pfield="commenceAmount" />
+          </div>
+          <div class="cf-cell">
+            <label class="ptg-check">
+              <input type="checkbox"${pn.reversionary ? " checked" : ""} data-pid="${pn.id}" data-pfield="reversionary" />
+              <span>Reversionary nomination</span>
+            </label>
+            <p class="helper-text">Flag only — survivor consequences are not modelled.</p>
+          </div>
+        </div>
+
+        ${pensionAllocationSectionHTML(pn)}
+
+        <div class="cf-section">
+          <div class="cf-section-title">Costs</div>
+          <div class="alloc-grid alloc-grid-profile">
+            <div class="cf-cell">
+              <label>ICR (% p.a.)</label>
+              <input type="number" min="0" max="100" step="0.01" value="${pn.icrPct}"
+                     data-pid="${pn.id}" data-pfield="icrPct" />
+            </div>
+          </div>
+        </div>
+
+        <div class="cf-section">
+          <div class="cf-section-title">Drawdown</div>
+          <div class="alloc-grid alloc-grid-profile">
+            <div class="cf-cell">
+              <label>Option</label>
+              <select data-pid="${pn.id}" data-pfield="drawdownOption">
+                <option value="minimum"${pn.drawdownOption === "minimum" ? " selected" : ""}>Minimum</option>
+                <option value="fixed"${pn.drawdownOption === "fixed" ? " selected" : ""}>Fixed amount</option>
+                <option value="expenditure"${pn.drawdownOption === "expenditure" ? " selected" : ""}>Fund expenditure shortfall</option>
+                ${pn.type === "ttr" ? `<option value="maximum"${pn.drawdownOption === "maximum" ? " selected" : ""}>Maximum (10% p.a.)</option>` : ""}
+              </select>
+            </div>
+          </div>
+          ${pn.drawdownOption === "fixed" ? `
+            <div class="alloc-grid alloc-grid-profile">
+              <div class="cf-cell">
+                <label>Amount ($/yr, today's)</label>
+                <input type="number" min="0" step="100" value="${pn.fixedAmount}"
+                       data-pid="${pn.id}" data-pfield="fixedAmount" />
+              </div>
+              <div class="cf-cell">
+                <label>Index basis</label>
+                <select data-pid="${pn.id}" data-pfield="indexBasis">
+                  <option value="none"${pn.indexBasis === "none" ? " selected" : ""}>None</option>
+                  <option value="cpi"${pn.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
+                  <option value="awote"${pn.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+                </select>
+              </div>
+              <div class="cf-cell">
+                <label>+ extra % p.a.</label>
+                <input type="number" min="-10" max="10" step="0.1" value="${pn.indexExtraPct}"
+                       data-pid="${pn.id}" data-pfield="indexExtraPct" />
+              </div>
+            </div>
+          ` : ""}
+          <p class="helper-text">The minimum drawdown always applies as a floor under any other option — a fixed amount, expenditure top-up, or (TTR only) the 10% maximum will always pay out at least the age-based minimum.</p>
+        </div>
+
+        ${pensionCommutationsHTML(pn)}
+      </div>
+    </div>
+  `;
+}
+
+function renderPensions() {
+  const pensions = state.plan.pensions ?? [];
+  const cards = pensions.map(pensionCardHTML).join("");
+  els.pensionSection.innerHTML = cards === ""
+    ? `
+      <h2 class="section-heading">Pension</h2>
+      ${pageEmptyHTML(
+        "Commence an account-based pension or transition-to-retirement income stream from an existing super account.",
+        `<button class="add-row-btn" type="button" data-pension-action="add">+ Add pension</button>`
+      )}
+    `
+    : `
+      <h2 class="section-heading">Pension</h2>
+      <div id="pensions" class="portfolio-stack">${cards}</div>
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-pension-action="add">+ Add pension</button>
+      </div>
+    `;
+}
+
+// Applies a simple (non-structural) field edit to a pension. Returns
+// true when the change is structural (needs a full card re-render —
+// owner/type switches change dependent select options and visibility).
+function applyPensionEdit(pn, field, el, commit) {
+  switch (field) {
+    case "name":
+      pn.name = commit ? (el.value.trim() || pn.name) : el.value;
+      if (commit) el.value = pn.name;
+      return false;
+    case "owner": {
+      if (!["client", "partner"].includes(el.value)) return false;
+      pn.owner = el.value;
+      // The source account may not belong to the new owner — same
+      // "drop the now-invalid reference, row survives" convention as
+      // clampPension itself (planState.js).
+      const acctOwner = findSuperAccount(pn.sourceAccountId)?.owner;
+      if (acctOwner !== pn.owner) pn.sourceAccountId = null;
+      return true;
+    }
+    case "sourceAccountId":
+      if ((state.plan.superAccounts ?? []).some((s) => s.id === el.value)) pn.sourceAccountId = el.value;
+      else if (el.value === "") pn.sourceAccountId = null;
+      return false;
+    case "type": {
+      if (!PENSION_TYPES.includes(el.value)) return false;
+      pn.type = el.value;
+      // "maximum" is TTR-only (planState.js's clampPension) — reset
+      // rather than leave a combination this tool can't legally model.
+      if (pn.type !== "ttr" && pn.drawdownOption === "maximum") pn.drawdownOption = "minimum";
+      return true;
+    }
+    case "commenceAmount":
+      pn.commenceAmount = el.value === "" ? null : clampNumber(el.value, 0);
+      if (commit) el.value = pn.commenceAmount ?? "";
+      return false;
+    case "reversionary":
+      pn.reversionary = el.checked;
+      return false;
+    case "icrPct":
+      pn.icrPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = pn.icrPct;
+      return false;
+    case "drawdownOption": {
+      if (!PENSION_DRAWDOWN_OPTIONS.includes(el.value)) return false;
+      if (el.value === "maximum" && pn.type !== "ttr") return false; // not offered by the select for an ABP, belt-and-braces
+      pn.drawdownOption = el.value;
+      return true;
+    }
+    case "fixedAmount":
+      pn.fixedAmount = clampNumber(el.value, 0);
+      if (commit) el.value = pn.fixedAmount;
+      return false;
+    case "indexBasis":
+      if (INDEX_BASES.includes(el.value)) pn.indexBasis = el.value;
+      return false;
+    case "indexExtraPct":
+      pn.indexExtraPct = clampNumber(el.value, -10, 10);
+      if (commit) el.value = pn.indexExtraPct;
+      return false;
+    case "alloc.profile":
+      pn.allocation = clampAllocation({ mode: "profile", profile: el.value }, PROFILES);
+      return false;
+    case "alloc.incomePct":
+      pn.allocation.incomePct = clampNumber(el.value, 0, ALLOC_PCT_MAX);
+      if (commit) el.value = pn.allocation.incomePct;
+      refreshPensionAllocTotal(pn.id);
+      return false;
+    case "alloc.growthPct":
+      pn.allocation.growthPct = clampNumber(el.value, 0, ALLOC_PCT_MAX);
+      if (commit) el.value = pn.allocation.growthPct;
+      refreshPensionAllocTotal(pn.id);
+      return false;
+    case "alloc.frankingPct":
+      pn.allocation.frankingPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = pn.allocation.frankingPct;
+      return false;
+    case "alloc.volBasis":
+      if (Object.keys(PROFILES).includes(el.value)) pn.allocation.volBasis = el.value;
+      return false;
+    default:
+      return false;
+  }
+}
+
+function refreshPensionAllocTotal(pid) {
+  const pn = findPension(pid);
+  if (!pn || pn.allocation.mode !== "custom") return;
+  const elTotal = document.querySelector(`[data-role="pensionAllocTotal-${pid}"]`);
+  if (elTotal) elTotal.textContent = `Total: ${(pn.allocation.incomePct + pn.allocation.growthPct).toFixed(2)}% p.a. nominal`;
+}
+
+els.pensionSection.addEventListener("input", (e) => {
+  const pid = e.target.dataset.pid;
+  const field = e.target.dataset.pfield;
+  if (!pid || !field || e.target.dataset.drRole) return; // DateRef control handled on "change" only
+  const pn = findPension(pid);
+  if (!pn) return;
+  applyPensionEdit(pn, field, e.target, false);
+  saveState();
+  refreshOutputs();
+});
+
+els.pensionSection.addEventListener("change", (e) => {
+  const pid = e.target.dataset.pid;
+  const field = e.target.dataset.pfield;
+  if (pid && field === "commenceAt" && e.target.dataset.drRole) {
+    const pn = findPension(pid);
+    if (!pn) return;
+    if (e.target.dataset.drRole === "anchor") {
+      pn.commenceAt = e.target.value === "__age__"
+        ? { kind: "age", age: resolveRef(pn.commenceAt, state.plan, projection.schedule, "client").age }
+        : { kind: "anchor", anchorId: e.target.value };
+    } else {
+      pn.commenceAt = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
+    }
+    saveState();
+    refreshOutputs();
+    renderPensions();
+    return;
+  }
+  if (pid && field) {
+    const pn = findPension(pid);
+    if (!pn) return;
+    const structural = applyPensionEdit(pn, field, e.target, true);
+    saveState();
+    refreshOutputs();
+    if (structural) renderPensions();
+    return;
+  }
+  // Commutation sub-row fields.
+  const cmid = e.target.dataset.cmid;
+  const cmfield = e.target.dataset.cmfield;
+  if (!pid || !cmid || !cmfield) return;
+  const pn = findPension(pid);
+  const c = pn?.commutations.find((x) => x.id === cmid);
+  if (!c) return;
+  if (cmfield === "label") c.label = e.target.value.trim() || c.label;
+  else if (cmfield === "amount") c.amount = e.target.value === "" ? null : clampNumber(e.target.value, 0);
+  else if (cmfield === "atAge") c.at = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
+  else if (cmfield === "destination") c.destination = COMMUTATION_DESTINATIONS.includes(e.target.value) ? e.target.value : "cash";
+  else return;
+  saveState();
+  refreshOutputs();
+});
+
+els.pensionSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-pension-action]");
+  if (!btn) return;
+  const action = btn.dataset.pensionAction;
+  if (action === "add") {
+    const owner = isCouple() && (state.plan.pensions ?? []).some((p) => p.owner === "client") ? "partner" : "client";
+    state.plan.pensions = [...(state.plan.pensions ?? []), createPension(state.plan, state.plan.pensions ?? [], state.plan.superAccounts ?? [], owner)];
+    saveState();
+    refreshOutputs();
+    renderPensions();
+    return;
+  }
+  const pid = btn.dataset.pid;
+  const pn = findPension(pid);
+  if (!pn) return;
+  if (action === "remove") {
+    if (!window.confirm(`Remove "${pn.name}"?`)) return;
+    state.plan.pensions = state.plan.pensions.filter((x) => x.id !== pid);
+  } else if (action === "alloc-mode") {
+    switchAllocMode(pn, btn.dataset.mode === "custom" ? "custom" : "profile");
+  } else if (action === "add-commutation") {
+    pn.commutations = [...(pn.commutations ?? []), createCommutation(state.plan, pn.commutations ?? [])];
+  } else if (action === "remove-commutation") {
+    pn.commutations = (pn.commutations ?? []).filter((x) => x.id !== btn.dataset.cmid);
+  } else {
+    return;
+  }
+  saveState();
+  refreshOutputs();
+  renderPensions();
 });
 
 // --- liabilities section (D3) --------------------------------------------------
@@ -6036,6 +6482,7 @@ let activeView = "composite"; // the composite chart is the default Graphs view 
 let showAssets = false;
 let assetsEntity = "all"; // Assets view entity selector: "all" | assetId
 let superEntity = "all"; // Super view entity selector: "all" | "client" | "partner" | super account id
+let pensionEntity = "all"; // Pension view entity selector: "all" | pension id
 let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liability id
 
 // Navigation, View Consolidation, and Simple Charts (spec 17), Commit 3
@@ -6147,6 +6594,7 @@ const VIEW_MOUNTS = {
   assets: () => els.viewAssets,
   tax: () => els.viewTax,
   super: () => els.viewSuper,
+  pension: () => els.viewPension,
   liabilities: () => els.viewLiabilities,
   snapshot: () => els.viewSnapshot,
   "monte-carlo-table": () => els.viewMonteCarloTable,
@@ -6213,6 +6661,7 @@ function renderActiveView() {
   else if (activeView === "assets") renderAssetsView();
   else if (activeView === "tax") renderTaxView();
   else if (activeView === "super") renderSuperTableView();
+  else if (activeView === "pension") renderPensionTableView();
   else if (activeView === "liabilities") renderLiabilitiesView();
   else if (activeView === "snapshot") renderSnapshotView();
   else if (activeView === "monte-carlo-table") renderMonteCarloTableView();
@@ -7089,6 +7538,7 @@ function renderSuperBalancesChart() {
   const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const included = (state.plan.superAccounts ?? []).filter((s) => s.include);
+  const pensions = state.plan.pensions ?? [];
   const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#b5179e", "#d97b2f", "#9a031e", "#3a86c9"];
 
   const traces = included.map((s, i) => ({
@@ -7099,6 +7549,19 @@ function renderSuperBalancesChart() {
     line: { color: palette[i % palette.length], width: 1 },
     hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(s.name)}</extra>`,
   }));
+  // Pension phase (spec 20, Commit 5) — retirement-phase balances join
+  // the same stack as a separate band, same stackgroup so the total
+  // trace height still reads as "all super + pension money", palette
+  // continuing past the accumulation accounts' own colours.
+  const pensionTraces = pensions.map((pn, i) => ({
+    x: ages,
+    y: yearIdxs.map((y) => (projection.yearly[y].pensionDetail?.[pn.id]?.closing ?? 0) * factor(y)),
+    name: pn.name, type: "scatter", mode: "lines",
+    stackgroup: "super", fill: "tonexty",
+    line: { color: palette[(included.length + i) % palette.length], width: 1, dash: "dot" },
+    hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(pn.name)}</extra>`,
+  }));
+  traces.push(...pensionTraces);
 
   if (traces.length === 0) {
     el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Add a super account to see balances here.</p>`;
@@ -8640,6 +9103,68 @@ function renderSuperTableView() {
   renderTransposed(els.superTable, buildSuperGroups(superEntity));
 }
 
+// --- View: Pension (spec 20, Commit 5) --------------------------------------
+
+function pensionDetailRows(get) {
+  return [
+    { label: "Opening balance", cell: (y) => get(y).opening, always: true },
+    { label: "Commencement", cell: (y) => get(y).commencementAmount },
+    { label: "Earnings", cell: (y) => get(y).earnings },
+    { label: "Earnings tax", cell: (y) => -get(y).earningsTax },
+    { label: "Payments (tax-free)", cell: (y) => -get(y).paymentsTaxFree },
+    { label: "Payments (taxable)", cell: (y) => -get(y).paymentsTaxable },
+    { label: "Commutations", cell: (y) => -get(y).commutations },
+  ];
+}
+
+// entity: "all" | a specific pension id.
+function buildPensionGroups(entity) {
+  const yl = projection.yearly;
+  const pensions = state.plan.pensions ?? [];
+  const zero = { opening: 0, commencementAmount: 0, earnings: 0, earningsTax: 0, payments: 0, paymentsTaxFree: 0, paymentsTaxable: 0, commutations: 0, closing: 0, taxFreeClosing: 0 };
+
+  if (entity === "all") {
+    const combined = pensionDetailRows((y) => pensions.reduce((s, pn) => {
+      const d = yl[y].pensionDetail?.[pn.id] ?? zero;
+      for (const k in s) s[k] += d[k] ?? 0;
+      return s;
+    }, { ...zero }));
+    combined.push({
+      label: "Closing balance", always: true, cls: "tl-total",
+      cell: (y) => pensions.reduce((s, pn) => s + (yl[y].pensionDetail?.[pn.id]?.closing ?? 0), 0),
+    });
+    const byPension = pensions.map((pn) => ({ label: pn.name, cell: (y) => yl[y].pensionDetail?.[pn.id]?.closing ?? 0 }));
+    byPension.push({
+      label: "Total", always: true, cls: "tl-total",
+      cell: (y) => pensions.reduce((s, pn) => s + (yl[y].pensionDetail?.[pn.id]?.closing ?? 0), 0),
+    });
+    return [
+      { title: "Combined", rows: combined },
+      { title: "Closing balance by pension", rows: byPension },
+    ];
+  }
+
+  const pn = pensions.find((x) => x.id === entity);
+  const name = pn?.name ?? "Pension";
+  const rows = pensionDetailRows((y) => yl[y].pensionDetail?.[entity] ?? zero);
+  rows.push({ label: "Closing balance", cell: (y) => (yl[y].pensionDetail?.[entity] ?? zero).closing, always: true, cls: "tl-total" });
+  rows.push({ label: "of which tax-free", cell: (y) => (yl[y].pensionDetail?.[entity] ?? zero).taxFreeClosing });
+  return [{ title: name, rows }];
+}
+
+function renderPensionTableView() {
+  const pensions = state.plan.pensions ?? [];
+  const validEntities = ["all", ...pensions.map((pn) => pn.id)];
+  if (!validEntities.includes(pensionEntity)) pensionEntity = "all"; // entity removed
+  renderEntitySelector(
+    els.pensionEntity,
+    [{ id: "all", label: "Consolidated" }, ...pensions.map((pn) => ({ id: pn.id, label: pn.name }))],
+    pensionEntity,
+    (id) => { pensionEntity = id; renderPensionTableView(); }
+  );
+  renderTransposed(els.pensionTable, buildPensionGroups(pensionEntity));
+}
+
 // --- View: Liabilities (fix batch, item 5) ----------------------------------
 
 function liabilityDetailRows(get, opts = {}) {
@@ -9021,6 +9546,16 @@ function buildTaxGroups(entity = "all") {
       { label: "Medicare levy surcharge", cell: (y) => -(td(y, p)?.medicareLevySurcharge ?? 0) },
       { label: "FHSSS release (gross)", cell: (y) => td(y, p)?.fhsssRelease ?? 0 },
       { label: "FHSSS tax offset (30%)", cell: (y) => td(y, p)?.fhsssOffset ?? 0 },
+      { label: "Taxable pension component", cell: (y) => td(y, p)?.taxablePensionComponent ?? 0 },
+      { label: "Taxable pension offset (TTR, 15%)", cell: (y) => td(y, p)?.ttrPensionOffset ?? 0 },
+      // Transfer balance account (spec 20, Commit 4/5) — a snapshot at
+      // this FY's end, not a flow: the running credited-minus-debited
+      // balance against the person's own (proportionally-indexed)
+      // personal cap, and remaining headroom (a breach shows 0
+      // headroom, not negative — see deterministic.js's own header).
+      { label: "Transfer balance account", cell: (y) => yl[y].transferBalance?.[p]?.balance ?? 0 },
+      { label: "Transfer balance personal cap", cell: (y) => yl[y].transferBalance?.[p]?.personalCap ?? 0 },
+      { label: "Transfer balance remaining cap", cell: (y) => yl[y].transferBalance?.[p]?.remainingCap ?? 0 },
     ],
   });
   const groups = [];
@@ -12246,6 +12781,7 @@ function renderAll() {
   renderLiabilities(); // after refreshOutputs — payoff FYs read the projection
   renderProperties();
   renderSuper(); // after refreshOutputs — the cap-headroom display reads the projection
+  renderPensions();
   renderGoals(); // after refreshOutputs — goalStats read the projection
   renderImplementation(); // after refreshOutputs — the fee cap/shortfall display reads the projection
   // decorateTouchedFields() itself is driven by the canvas-wide

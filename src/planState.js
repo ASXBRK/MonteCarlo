@@ -1444,6 +1444,36 @@ export function createPension(plan, existing = [], superAccounts = [], owner = "
     fixedAmount: 0,
     indexBasis: "cpi",
     indexExtraPct: 0,
+    commutations: [],
+  };
+}
+
+// --- commutations (spec 20, Commit 5) ---------------------------------------
+//
+// A partial or full lump-sum withdrawal from a pension, debiting the
+// transfer balance account at the commuted amount — a one-off, DateRef-
+// anchored sub-row of a Pension, the same shape a liability's own
+// oneOffRepayments already use. amount:null = "the whole remaining
+// balance" (a full commutation, closing the pension — see
+// deterministic.js's own header on why that needs no special-cased
+// "closed" flag: a zero balance already stops growth/payments on its
+// own). destination picks where the proceeds land.
+export const COMMUTATION_DESTINATIONS = ["cash", "super"];
+
+export function createCommutation(plan, existing = []) {
+  return {
+    id: uid("cm"), label: `Commutation ${existing.length + 1}`,
+    amount: null, at: anchorRef("end"), destination: "cash",
+  };
+}
+
+export function clampCommutation(c, plan) {
+  return {
+    id: typeof c.id === "string" && c.id ? c.id : uid("cm"),
+    label: typeof c.label === "string" && c.label.trim() ? c.label : "Commutation",
+    amount: c.amount == null ? null : clampNumber(c.amount, 0),
+    at: clampDateRef(c.at ?? anchorRef("end"), plan.client.currentAge, plan.endAge, plan),
+    destination: COMMUTATION_DESTINATIONS.includes(c.destination) ? c.destination : "cash",
   };
 }
 
@@ -1487,6 +1517,7 @@ export function clampPension(pn, plan, superAccounts = [], profiles = {}) {
     drawdownOption,
     fixedAmount: clampNumber(pn.fixedAmount, 0),
     ...clampIndexation(pn),
+    commutations: Array.isArray(pn.commutations) ? pn.commutations.map((c) => clampCommutation(c, plan)) : [],
   };
 }
 

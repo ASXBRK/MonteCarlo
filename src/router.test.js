@@ -162,14 +162,14 @@ describe("known section/view ids", () => {
   it("exposes the full input section list", () => {
     expect(INPUT_SECTIONS).toEqual([
       "setup", "tax-details", "children", "implementation", "income", "deductions", "expenses", "financial-assets", "lifestyle-assets",
-      "property", "super", "liabilities", "goals", "investment-cashflows", "settings",
+      "property", "super", "pension", "liabilities", "goals", "investment-cashflows", "settings",
     ]);
     expect(DEFAULT_INPUT_SECTION).toBe("setup");
   });
 
   it("exposes the output view list", () => {
     expect(OUTPUT_VIEWS).toEqual([
-      "projection", "cashflow", "assets", "liabilities", "super", "tax", "net-worth", "allocation", "snapshot", "assumptions",
+      "projection", "cashflow", "assets", "liabilities", "super", "pension", "tax", "net-worth", "allocation", "snapshot", "assumptions",
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
       "focus-equity", "focus-transfer-schedule",
       "focus-surplus-allocation",
@@ -187,6 +187,7 @@ describe("known section/view ids", () => {
       assets: ["chart", "table"],
       liabilities: ["chart", "table"],
       super: ["chart", "table"],
+      pension: ["table"],
       tax: ["table"],
       "net-worth": ["chart", "table"],
       allocation: ["chart"],
