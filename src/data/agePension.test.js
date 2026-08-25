@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AGE_PENSION_RATES_BASE, agePensionRatesFor, assetsTestCutOut } from "./agePension.js";
+import { AGE_PENSION_RATES_BASE, agePensionRatesFor, assetsTestCutOut, CSHC_THRESHOLDS_BASE, cshcThresholdsFor } from "./agePension.js";
 
 // Source-figure spot checks (encoding tests verify the encoding, not
 // the source — CLAUDE.md convention). Homeowner thresholds and the
@@ -147,5 +147,36 @@ describe("agePensionRatesFor — per-figure indexation bases (Commit 1)", () => 
   it("couple combined rate is exactly double the each-rate, every FY", () => {
     const r = agePensionRatesFor(2033, "indexed", 0.025, 0.035);
     expect(r.couple.rateCombined).toBeCloseTo(2 * r.couple.rateEach, 6);
+  });
+});
+
+// CSHC source-figure spot checks (spec 21b, Commit 4) — encoding tests
+// verify the encoding, not the source (CLAUDE.md convention); the two
+// figures are cross-checked two ways per the module's own header.
+describe("CSHC_THRESHOLDS_BASE / cshcThresholdsFor — 20 March 2026 base date (spec 21b, Commit 4)", () => {
+  it("carries the as-at date and source", () => {
+    expect(CSHC_THRESHOLDS_BASE.asAt).toBe("2026-03-20");
+    expect(CSHC_THRESHOLDS_BASE.source).toMatch(/Services Australia/);
+  });
+
+  it("income thresholds match the published 20 September 2025 review figures exactly", () => {
+    expect(CSHC_THRESHOLDS_BASE.single).toBe(101105);
+    expect(CSHC_THRESHOLDS_BASE.coupleCombined).toBe(161768);
+  });
+
+  it("at FY2026/27 (t=0), figures equal the base exactly", () => {
+    const r = cshcThresholdsFor(2026, "indexed", 0.025);
+    expect(r.single).toBeCloseTo(101105, 6);
+    expect(r.coupleCombined).toBeCloseTo(161768, 6);
+  });
+
+  it("indexes at CPI — a higher CPI assumption produces a higher nominal-then-deflated figure at a later FY, and frozen mode strictly declines in real terms", () => {
+    const indexed = cshcThresholdsFor(2036, "indexed", 0.04);
+    const frozen = cshcThresholdsFor(2036, "frozen", 0.04);
+    // Frozen: pure CPI deflation of a nominally-static figure, strictly below the base.
+    expect(frozen.single).toBeLessThan(CSHC_THRESHOLDS_BASE.single);
+    // Indexed: nominal compounds at CPI, then deflates by the SAME CPI
+    // — real value stays at the base (to within the $1 rounding step).
+    expect(indexed.single).toBeCloseTo(CSHC_THRESHOLDS_BASE.single, 0);
   });
 });

@@ -45,7 +45,7 @@ import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
 import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance, debitTransferBalance } from "./pensionTba.js";
-import { agePensionRatesFor, WORK_BONUS } from "./data/agePension.js";
+import { agePensionRatesFor, WORK_BONUS, cshcThresholdsFor } from "./data/agePension.js";
 import {
   assessableAssets as agePensionAssessableAssets, deemedIncome as agePensionDeemedIncome,
   assessableIncome as agePensionAssessableIncome, singleAgePensionAssessment, coupleAgePensionAssessment,
@@ -1322,6 +1322,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // right in two passes); this default only ever shows if that block
     // somehow didn't run.
     agePensionDetail: null,
+    // CSHC (spec 21b, Commit 4) — set once per FY, after the tax
+    // measurement pass (it needs the FY's adjusted taxable income);
+    // this default only ever shows if that block somehow didn't run.
+    cshcDetail: null,
     // Gifting (spec 21b, Commit 2) — the FY's total gift outflow (the
     // full amount, regardless of how much is deprived vs allowable —
     // see gifting.js's own header): a leak, set alongside agePensionDetail.
@@ -3157,6 +3161,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // pension id; declared here (outside the block below) so it
     // survives to feed row.pensionDetail[id] further down.
     let grandfatheredDetailByPension = {};
+    // CSHC (spec 21b, Commit 4) needs the SAME grandfathering split
+    // outside this block too (its own income test is assembled later,
+    // after the tax measurement pass) — hoisted here for the same
+    // reason grandfatheredDetailByPension is.
+    let grandfatheredDeemingExempt = 0;
+    let grandfatheredDeductibleIncome = 0;
+    // Pension-PHASE super balances only (never accumulation, regardless
+    // of age) — CSHC's own deeming base is narrower than the age
+    // pension's (spec's own words: "deemed income from account-based
+    // pensions", not every financial asset).
+    let pensionPhaseSuperTotal = 0;
     // Gifting (spec 21b, Commit 2) — the household total for THIS FY,
     // summed straight from the already-resolved gift events (fixed
     // month/amount, no path dependence) rather than accumulated inside
@@ -3223,11 +3238,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // the deeming base below, and their deductible-amount income
       // added straight into otherIncomeTotal instead — bypassing
       // deeming entirely, exactly like a real Centrelink assessment.
-      let grandfatheredDeemingExempt = 0;
-      let grandfatheredDeductibleIncome = 0;
       for (const pn of pensionRows) {
         if (!pensionCommenced[pn.id]) continue;
         preAssessedSuper += pensionBal[pn.id]; // pension-phase, always assessed
+        pensionPhaseSuperTotal += pensionBal[pn.id];
         const pm = pensionMeta[pn.id];
         if (!pm.grandfathered) continue;
         const lostAt = pensionGrandfatheredLostAt[pn.id];
@@ -3760,6 +3774,48 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         + (superOutcome[p]?.reportableSuperContributions ?? 0)
         + netInvestmentLoss[p];
     }
+
+    // Commonwealth Seniors Health Card (spec 21b, Commit 4) — income-
+    // tested only, no assets test. Assessable income is "adjusted
+    // taxable income" (repaymentIncome — the SAME disclosed-simplified
+    // figure already used for HELP/MLS purposes, per its own header
+    // above) plus deemed income from account-based pensions, with the
+    // SAME pre-2015 grandfathering exclusion as Commit 3 (a still-
+    // grandfathered pension's deductible-amount income counts instead
+    // of being deemed). Computed here — the earliest point BOTH
+    // repaymentIncome (from the tax measurement pass) and the
+    // grandfathering split (from the per-year setup, hoisted above) are
+    // known — assessed on the COMBINED household figure for a couple
+    // (spec's own words), reported per person since each person needs
+    // their OWN age-eligibility check.
+    const cshcThresholdsY = cshcThresholdsFor(fyStart, bracketMode, cpi);
+    const cshcDeemableAbp = Math.max(0, pensionPhaseSuperTotal - grandfatheredDeemingExempt);
+    const cshcDeemedIncomeTotal = agePensionDeemedIncome({
+      financialAssets: cshcDeemableAbp,
+      lowerRate: agePensionRatesY.deemingLowerRate, upperRate: agePensionRatesY.deemingUpperRate,
+      threshold: couple ? agePensionRatesY.couple.deemingThreshold : agePensionRatesY.single.deemingThreshold,
+    });
+    const cshcAdjustedTaxableIncome = repaymentIncome.client + repaymentIncome.partner;
+    const cshcAssessableIncomeTotal = cshcAdjustedTaxableIncome + cshcDeemedIncomeTotal + grandfatheredDeductibleIncome;
+    const cshcThreshold = couple ? cshcThresholdsY.coupleCombined : cshcThresholdsY.single;
+    const cshcMargin = cshcThreshold - cshcAssessableIncomeTotal; // positive = room to spare; negative = over
+    const cshcIncomeEligible = cshcAssessableIncomeTotal <= cshcThreshold;
+    const cshcDetailY = {
+      threshold: cshcThreshold,
+      adjustedTaxableIncome: cshcAdjustedTaxableIncome,
+      deemedIncome: cshcDeemedIncomeTotal,
+      grandfatheredDeductibleIncome,
+      assessableIncome: cshcAssessableIncomeTotal,
+      margin: cshcMargin,
+      client: {
+        ageEligible: ownerAgeAt("client", y) >= agePensionRatesY.ageOfEligibility,
+        eligible: ownerAgeAt("client", y) >= agePensionRatesY.ageOfEligibility && cshcIncomeEligible,
+      },
+      partner: couple ? {
+        ageEligible: ownerAgeAt("partner", y) >= agePensionRatesY.ageOfEligibility,
+        eligible: ownerAgeAt("partner", y) >= agePensionRatesY.ageOfEligibility && cshcIncomeEligible,
+      } : null,
+    };
     // Spouse contributions, co-contribution and LISTO (spec 19 Commit
     // 6) — both persons' pre-assessed taxable income is now known
     // (repaymentIncome/pre, just above), so this is the earliest safe
@@ -4002,6 +4058,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.superDetail[split.toId].contributionSplitIn += split.amount;
     }
     row.agePensionDetail = agePensionDetailY;
+    row.cshcDetail = cshcDetailY;
     row.giftsPaid = giftsPaidThisYear;
     for (const id of pensionIds) {
       if (grandfatheredDetailByPension[id]) Object.assign(row.pensionDetail[id], grandfatheredDetailByPension[id]);

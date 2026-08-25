@@ -5,7 +5,7 @@ import { PROFILES } from "./profiles.js";
 import { checkYearConservation } from "./conservationCheck.js";
 import { lmiPremium } from "./data/lmiRates.js";
 import { levelPayment } from "./liabilities.js";
-import { agePensionRatesFor } from "./data/agePension.js";
+import { agePensionRatesFor, cshcThresholdsFor } from "./data/agePension.js";
 
 // Minimal v3-shaped state factory. Custom allocations pin exact
 // returns without depending on profile values.
@@ -7471,5 +7471,120 @@ describe("Deeming grandfathering (spec 21b, Commit 3): engine integration", () =
     });
     const out = projectPlan(s);
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `grandfathering fixture, year ${y}`);
+  });
+});
+
+describe("Commonwealth Seniors Health Card (spec 21b, Commit 4): engine integration", () => {
+  it("eligibility flips exactly at the threshold — at and either side", () => {
+    // ratePct: 0 AND cpi: 0 on the WCA — otherwise the salary sitting in
+    // cash through the year earns interest at a small NEGATIVE real
+    // rate (0% nominal deflated by a nonzero cpi), which ALSO counts as
+    // the client's own ordinary/taxable income and would contaminate
+    // the exact-threshold hand-check below (the exact same confound the
+    // gifting tests hit — see deterministic.test.js's own Commit 2
+    // fixtures and their header comment for the full explanation).
+    const mk = (amount) => mkState({
+      endAge: 68, assets: [], cpi: 0,
+      plan: { client: { currentAge: 67 }, workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+      cashflows: {
+        income: [employmentRow({
+          amount, frequency: "annual", from: { kind: "age", age: 67 }, to: { kind: "age", age: 68 },
+          indexBasis: "cpi", sgApplies: false,
+        })],
+      },
+    });
+    const atThreshold = projectPlan(mk(101105));
+    const justAbove = projectPlan(mk(101106));
+    const justBelow = projectPlan(mk(101104));
+    const rates2026 = cshcThresholdsFor(2026, "indexed", 0.025);
+    expect(rates2026.single).toBeCloseTo(101105, 2);
+    expect(atThreshold.yearly[0].cshcDetail.assessableIncome).toBeCloseTo(101105, 2);
+    expect(atThreshold.yearly[0].cshcDetail.threshold).toBeCloseTo(101105, 2);
+    expect(atThreshold.yearly[0].cshcDetail.margin).toBeCloseTo(0, 2);
+    expect(atThreshold.yearly[0].cshcDetail.client.eligible).toBe(true); // exactly at the threshold — still eligible
+    expect(justAbove.yearly[0].cshcDetail.client.eligible).toBe(false);
+    expect(justBelow.yearly[0].cshcDetail.client.eligible).toBe(true);
+  });
+
+  it("a grandfathered pension is excluded from the CSHC income test — deemed instead for the identical pension without grandfathering", () => {
+    const base = {
+      endAge: 65, assets: [],
+      plan: {
+        client: { currentAge: 62, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 300000, allocation: zeroRealSuperAlloc() })],
+      },
+    };
+    const outGF = projectPlan(mkState({
+      ...base,
+      plan: {
+        ...base.plan,
+        pensions: [pensionRow({
+          commenceAt: { kind: "age", age: 62 },
+          grandfathered: true, grandfatheredPurchasePrice: 200000, grandfatheredLifeExpectancyYears: 20,
+        })],
+      },
+    }));
+    const outNoGF = projectPlan(mkState({
+      ...base,
+      plan: { ...base.plan, pensions: [pensionRow({ commenceAt: { kind: "age", age: 62 } })] },
+    }));
+    const y = 1;
+    expect(outGF.yearly[y].cshcDetail.deemedIncome).toBe(0);
+    expect(outNoGF.yearly[y].cshcDetail.deemedIncome).toBeGreaterThan(0);
+    // The grandfathered pension's deductible-amount income still counts
+    // (it isn't simply dropped) — assessableIncome is nonzero even
+    // though deemedIncome is 0.
+    expect(outGF.yearly[y].cshcDetail.grandfatheredDeductibleIncome).toBeGreaterThan(0);
+    expect(outGF.yearly[y].cshcDetail.assessableIncome).toBeCloseTo(outGF.yearly[y].cshcDetail.grandfatheredDeductibleIncome, 2);
+  });
+
+  it("a couple is assessed on COMBINED income against the couple threshold, not each partner's own income against the single threshold", () => {
+    const s = mkState({
+      endAge: 68, assets: [], cpi: 0,
+      plan: {
+        household: "couple", client: { currentAge: 67 }, partner: { currentAge: 67 },
+        workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 }, // see the threshold test's own comment
+      },
+      cashflows: {
+        income: [
+          employmentRow({
+            id: "i1", owner: "client", amount: 85000, frequency: "annual",
+            from: { kind: "age", age: 67 }, to: { kind: "age", age: 68 }, indexBasis: "cpi", sgApplies: false,
+          }),
+          employmentRow({
+            id: "i2", owner: "partner", amount: 85000, frequency: "annual",
+            from: { kind: "age", age: 67 }, to: { kind: "age", age: 68 }, indexBasis: "cpi", sgApplies: false,
+          }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].cshcDetail;
+    // Neither partner's own $85,000 exceeds the SINGLE threshold
+    // ($101,105), but the combined $170,000 exceeds the COUPLE
+    // threshold ($161,768) — the couple test, not two single tests.
+    expect(d.adjustedTaxableIncome).toBeCloseTo(170000, 2);
+    expect(d.threshold).toBeCloseTo(161768, 2);
+    expect(d.client.eligible).toBe(false);
+    expect(d.partner.eligible).toBe(false);
+  });
+
+  it("CSHC eligibility survives after age pension entitlement reaches zero via the assets test — CSHC has no assets test at all", () => {
+    const s = mkState({
+      endAge: 68, assets: [],
+      plan: {
+        client: { currentAge: 67, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 3000000, allocation: { mode: "custom", incomePct: 0, growthPct: 0, frankingPct: 0, volBasis: "Balanced" } })],
+      },
+    });
+    const out = projectPlan(s);
+    // The $3m ACCUMULATION balance (assessed at age pension age) drives
+    // the assets test to zero entitlement — no other income/assets here.
+    expect(out.yearly[0].agePensionDetail.entitlement).toBe(0);
+    // CSHC has no assets test at all, and accumulation super is never
+    // an ABP — with $0 adjusted taxable income and nothing to deem, it
+    // remains eligible regardless of the age pension outcome.
+    expect(out.yearly[0].cshcDetail.assessableIncome).toBe(0);
+    expect(out.yearly[0].cshcDetail.client.eligible).toBe(true);
   });
 });

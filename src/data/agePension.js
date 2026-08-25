@@ -184,6 +184,46 @@ export const WORK_BONUS = Object.freeze({
   startingBalance: 4000,
 });
 
+// Commonwealth Seniors Health Card (spec 21b, Commit 4) — income-tested
+// only, no assets test at all. AS AT the 20 March 2026 base date — the
+// standing 20 September 2025 review figures (CSHC reviews annually each
+// 20 September against CPI; no new review fell between then and this
+// tool's FY2026/27 base). Cross-checked two ways: (a) two independent
+// published summaries agree to the dollar, and (b) confirmed directly
+// against Services Australia's own income-test page. Deeming for CSHC
+// purposes uses the SAME determination as the age pension's own
+// (deemingLowerRate/deemingUpperRate/deemingThreshold above) — a single
+// Social Security Act deeming regime governs both programs identically,
+// so no separate CSHC deeming figure is stored here.
+export const CSHC_THRESHOLDS_BASE = Object.freeze({
+  asAt: "2026-03-20",
+  source: "Services Australia, Commonwealth Seniors Health Card income test (20 September 2025 review) — cross-checked against two independent published summaries",
+  single: 101105,
+  coupleCombined: 161768,
+  // Not modelled (disclosed): the higher threshold for couples separated
+  // by illness/respite/prison (this tool has no such household concept
+  // anywhere else), and the per-dependent-child add-on (no CSHC-specific
+  // child adjustment exists in this tool's household model).
+});
+
+// cshcThresholdsFor(fyStartYear, bracketMode, cpi) → this FY's
+// CPI-indexed thresholds, same frozen-vs-indexed bracketMode behaviour
+// as agePensionRatesFor. Rounded to the nearest dollar (no clean
+// historical rounding step like the age pension's own $500/$200/$52
+// steps applies to these two published figures).
+export function cshcThresholdsFor(fyStartYear, bracketMode = "indexed", cpi = 0.025) {
+  const b = CSHC_THRESHOLDS_BASE;
+  const tReal = Math.max(0, fyStartYear - BASE_FY_START_YEAR);
+  const tNominal = bracketMode === "frozen" ? 0 : tReal;
+  const deflate = Math.pow(1 + cpi, tReal);
+  return {
+    asAt: b.asAt,
+    source: b.source,
+    single: nominalOf(b.single, cpi, 1, tNominal) / deflate,
+    coupleCombined: nominalOf(b.coupleCombined, cpi, 1, tNominal) / deflate,
+  };
+}
+
 // Assets-test cut-out point: the assessable-assets level at which
 // entitlement reaches zero under the assets test alone — derived from
 // the full-pension threshold, the (real, already-deflated) annual
