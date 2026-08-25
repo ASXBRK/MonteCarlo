@@ -1328,6 +1328,41 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     expect(normalisePensions(null, clampPlan(couplePlan(), PROFILES), [], PROFILES)).toEqual([]);
   });
 
+  it("createPension defaults to the minimum drawdown option (spec 20, Commit 2)", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const su = createSuperAccount(plan, [], PROFILES, "client");
+    const pn = createPension(plan, [], [su], "client");
+    expect(pn.drawdownOption).toBe("minimum");
+    expect(pn.fixedAmount).toBe(0);
+  });
+
+  it("clampPension: 'maximum' is TTR-only — an ABP with it stored is reset to 'minimum', never silently honoured (input integrity)", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const su = createSuperAccount(plan, [], PROFILES, "client");
+    const abpWithMax = clampPension(
+      { owner: "client", sourceAccountId: su.id, type: "abp", drawdownOption: "maximum", commenceAt: { kind: "age", age: 65 } },
+      plan, [su], PROFILES
+    );
+    expect(abpWithMax.drawdownOption).toBe("minimum");
+    // The same option is preserved for a TTR.
+    const ttrWithMax = clampPension(
+      { owner: "client", sourceAccountId: su.id, type: "ttr", drawdownOption: "maximum", commenceAt: { kind: "age", age: 65 } },
+      plan, [su], PROFILES
+    );
+    expect(ttrWithMax.drawdownOption).toBe("maximum");
+  });
+
+  it("clampPension defends a junk drawdownOption and clamps fixedAmount to non-negative", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const su = createSuperAccount(plan, [], PROFILES, "client");
+    const pn = clampPension(
+      { owner: "client", sourceAccountId: su.id, type: "abp", drawdownOption: "not-a-real-option", fixedAmount: -500, commenceAt: { kind: "age", age: 65 } },
+      plan, [su], PROFILES
+    );
+    expect(pn.drawdownOption).toBe("minimum");
+    expect(pn.fixedAmount).toBe(0);
+  });
+
   it("super accounts are structurally invisible to fundingOrder and settings — there is no path to include one", () => {
     // normaliseFundingOrder/normaliseSettings only ever consult
     // state.assets; a super account id is never even a candidate.

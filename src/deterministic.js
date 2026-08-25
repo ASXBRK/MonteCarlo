@@ -43,6 +43,7 @@ import { PROFILES, DEFENSIVE_PROFILE, impliedFrankingPct } from "./profiles.js";
 import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
+import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
 import { helpRatesFor, helpRepaymentAmount } from "./data/helpRates.js";
 import { mlsRatesFor, mlsSurchargeAmount } from "./data/mlsRates.js";
 import { fhsssAcceptContribution, fhsssReleaseAmounts } from "./fhsss.js";
@@ -287,6 +288,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       owner: pn.owner,
       sourceAccountId: pn.sourceAccountId,
       type: pn.type,
+      drawdownOption: pn.drawdownOption,
+      fixedAmount: pn.fixedAmount,
+      indexBasis: pn.indexBasis,
+      indexExtraPct: pn.indexExtraPct,
     };
   }
   const pensionBal = {};
@@ -299,11 +304,87 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // then-current components, and never recomputed again — "the single
   // most important mechanical difference from accumulation" (spec 20's
   // own words). Every subsequent debit (growth touches neither side;
-  // a future payment/commutation, Commits 2/5, will) reduces
-  // pensionTaxFree by exactly `debit × this fixed proportion`, NOT by
-  // the live balance ratio the way withdrawFromSuper's own taxFreeFraction is.
+  // a payment/commutation does) reduces pensionTaxFree by exactly
+  // `debit × this fixed proportion`, NOT by the live balance ratio the
+  // way withdrawFromSuper's own taxFreeFraction is.
   const pensionFixedProportion = {};
   const pensionCommenced = {}; // guards the one-off transfer firing at most once per pension
+  // The commencement amount, CAPPED via reserveFromSuper against
+  // whatever adviser fees/Division 293/296/FHSSS already claimed on the
+  // SAME account this SAME year — resolved once per FY, before the
+  // monthly loop even starts (see the reserveFromSuper block, later in
+  // this function). Read (not written) by the in-month commencement
+  // transfer below.
+  const pensionCommenceReserved = {};
+
+  // Pay `want` real dollars from a pension, proportioning tax-free/
+  // taxable at the FIXED commencement-time ratio — never recalculated,
+  // the mirror of withdrawFromSuper but for the proportioning rule's
+  // OTHER branch (see this block's own header). Never cascades to
+  // another pocket, same convention as withdrawFromSuper.
+  function withdrawFromPension(id, want) {
+    const balance = pensionBal[id];
+    const paid = Math.min(want, Math.max(0, balance));
+    if (paid <= 0) return 0;
+    pensionTaxFree[id] -= paid * pensionFixedProportion[id];
+    pensionBal[id] -= paid;
+    return paid;
+  }
+
+  // --- drawdown, minimums, and payments (spec 20, Commit 2) ------------------
+  //
+  // pensionAnnualAmount[id]: this FY's determined payment, resolved
+  // ONCE per FY — either in the per-year setup below (an already-
+  // commenced pension, whose 1 July balance is known before either
+  // pass runs) or inline in the monthly loop, right after the
+  // commencement transfer fires (a newly-commencing pension, whose
+  // basis is the just-transferred amount — see minDrawdownAmount's own
+  // header on why this is ALWAYS a full 12-month basis in this engine:
+  // commencement can only ever land on 1 July). null for an
+  // "expenditure" pension — its payment is resolved dynamically, month
+  // by month, inside the deficit-funding step (see the "d." block).
+  // pensionMinThisYear[id]: this FY's minimum — the floor under every
+  // option, and (for "expenditure") the FY-end top-up target.
+  // pensionPaidYtd[id]: running total actually paid so far this FY —
+  // real-pass only (mirrors superOutcome/superCapUsage's own "resolved
+  // once, credited only in the real pass" shape).
+  const pensionAnnualAmount = {};
+  const pensionMinThisYear = {};
+  const pensionPaidYtd = {};
+  for (const pn of pensionRows) {
+    pensionAnnualAmount[pn.id] = 0;
+    pensionMinThisYear[pn.id] = 0;
+    pensionPaidYtd[pn.id] = 0;
+  }
+  // The FY's payment amount for a pension whose basis (1 July balance,
+  // or — in its own commencement year — the just-transferred amount)
+  // is already known. Shared by the per-year setup (ongoing pensions)
+  // and the in-month commencement handler (a newly-commencing pension).
+  function resolvePensionThisYear(pn, basis, ownerAge, y) {
+    const pm = pensionMeta[pn.id];
+    const minAmount = minDrawdownAmount(basis, ownerAge, 12);
+    pensionMinThisYear[pn.id] = minAmount;
+    if (pm.drawdownOption === "expenditure") {
+      pensionAnnualAmount[pn.id] = null; // resolved dynamically — see the header above
+      return;
+    }
+    let requested = 0;
+    if (pm.drawdownOption === "fixed") {
+      const basisRate = pm.indexBasis === "awote" ? awoteAssum : pm.indexBasis === "cpi" ? cpi : 0;
+      const g = basisRate + (pm.indexExtraPct ?? 0) / 100;
+      // Real amount at FY start — the annual-figure form of the locked
+      // indexation formula (no /12: this IS the annual amount, not a
+      // monthly slice of one — see propFlowAt's own comment above for
+      // the sibling monthly-slice form of the identical formula).
+      requested = pm.fixedAmount * Math.pow((1 + g) / (1 + cpi), yearStartIdx(y) / 12);
+    } else if (pm.drawdownOption === "maximum" && pm.type === "ttr") {
+      requested = basis * TTR_MAX_DRAWDOWN_PCT;
+    }
+    // "minimum" (requested stays 0) and every other option: the minimum
+    // always applies as a floor — "a plan that draws less than the
+    // minimum is not a plan; it is a compliance breach" (spec's own words).
+    pensionAnnualAmount[pn.id] = Math.max(minAmount, requested);
+  }
   for (const pn of pensionRows) {
     pensionBal[pn.id] = 0;
     pensionSeries[pn.id] = new Float64Array(months + 1);
@@ -1095,19 +1176,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }])),
     superClosing: 0,
     superCapUsage: { client: null, partner: null },
-    // Per-pension detail (spec 20, Commit 1): opening/closing balance,
+    // Per-pension detail (spec 20, Commits 1-2): opening/closing balance,
     // the commencement transfer (nonzero only in the pension's own
-    // commencement FY), and fund earnings/earnings-tax — the SAME
-    // 15%/10% haircut shape as superDetail above (a Commit 1 placeholder
-    // — Commit 3 zero-rates an ABP in retirement phase). Payments/
-    // commutations/taxFreeClosing arrive in Commits 2/5, the same
-    // incremental growth superDetail's own fields went through across
-    // Tier 1.2's four commits. taxFreeProportion is null until the
-    // pension's own commencement fires this run, then fixed for every
-    // later year — the proportioning rule (see pensionFixedProportion
-    // in the engine setup above).
+    // commencement FY), fund earnings/earnings-tax (the SAME 15%/10%
+    // haircut shape as superDetail above — a Commit 1 placeholder,
+    // Commit 3 zero-rates an ABP in retirement phase), and payments —
+    // split tax-free/taxable at the FIXED commencement-time proportion
+    // (see pensionFixedProportion in the engine setup above), never the
+    // live ratio. Commutations/taxFreeClosing arrive in Commit 5, the
+    // same incremental growth superDetail's own fields went through
+    // across Tier 1.2's four commits. taxFreeProportion is null until
+    // the pension's own commencement fires this run, then fixed for
+    // every later year.
     pensionDetail: Object.fromEntries(pensionIds.map((id) => [id, {
-      opening: 0, commencementAmount: 0, earnings: 0, earningsTax: 0, closing: 0, taxFreeProportion: null,
+      opening: 0, commencementAmount: 0, earnings: 0, earningsTax: 0,
+      payments: 0, paymentsTaxFree: 0, paymentsTaxable: 0,
+      closing: 0, taxFreeProportion: null,
     }])),
     pensionClosing: 0,
     // Focus Commit 3 (docs/specs/12-focus-views.md) follow-on: the
@@ -1154,7 +1238,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     const acc = {};
     for (const p of persons) {
-      acc[p] = { ordinary: 0, franked: 0, unfranked: 0, deductions: 0, netCapitalGain: 0, incomeMonths: new Set(), fhsssTaxableRelease: 0 };
+      acc[p] = {
+        ordinary: 0, franked: 0, unfranked: 0, deductions: 0, netCapitalGain: 0, incomeMonths: new Set(), fhsssTaxableRelease: 0,
+        // Pension phase, Commit 2: the taxable component of a pre-60
+        // TTR payment — assessable at marginal rates with a 15%
+        // non-refundable offset (see assessPerson's own ttrPensionTaxable
+        // param). Structurally always 0 in this build: EVERY reachable
+        // commencement requires age >= 60 (pensionMinCommenceAge's own
+        // gate — TTR floors at preservation age 60 same as ABP), so no
+        // payment this engine can ever produce is pre-60. Wired anyway,
+        // for genuine spec correctness and direct unit-testability —
+        // see Tax/annual.test.js.
+        ttrPensionTaxable: 0,
+      };
     }
     // Per-property net-rental tracking for the gearing rules (D4).
     acc._propNet = Object.fromEntries(props.map((p) => [p.id, {
@@ -1547,7 +1643,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           pensionCommenced[pn.id] = true;
           const pm = pensionMeta[pn.id];
           const sourceBal = superBal[pm.sourceAccountId];
-          const amount = Math.min(pn.commenceAmount == null ? sourceBal : pn.commenceAmount, Math.max(0, sourceBal));
+          // Capped via reserveFromSuper (resolved once per FY, before
+          // the monthly loop even starts — see that block's own header)
+          // against whatever adviser fees/Division 293/296/FHSSS
+          // already claimed on the SAME account this SAME year, THEN
+          // defensively re-capped against whatever's actually still
+          // there right now (belt and braces — nothing else should have
+          // touched this account between reservation and here, but
+          // matching withdrawFromSuper's own Math.min discipline costs
+          // nothing).
+          const amount = Math.min(pensionCommenceReserved[pn.id] ?? 0, Math.max(0, sourceBal));
           if (amount <= 0) continue; // nothing to commence with — leaves the pension permanently at 0, same as a purchase event with no funds
           const taxFreeFraction = sourceBal > 0 ? superTaxFree[pm.sourceAccountId] / sourceBal : 0;
           const taxFreeAmount = amount * taxFreeFraction;
@@ -1558,6 +1663,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           pensionFixedProportion[pn.id] = taxFreeFraction; // fixed for life — see the block header above
           row.pensionDetail[pn.id].commencementAmount += amount;
           row.pensionDetail[pn.id].taxFreeProportion = taxFreeFraction;
+          // Drawdown (spec 20, Commit 2): this FY's minimum/payment,
+          // resolved NOW — the commencement amount IS the 1 July basis
+          // (commencement can only ever land on 1 July — see
+          // minDrawdownAmount's own header), unreachable from the
+          // per-year setup above since it ran before this transfer
+          // existed. Every LATER year resolves there instead.
+          resolvePensionThisYear(pn, pensionBal[pn.id], ownerAgeAt(pm.owner, y), y);
         }
 
         for (const id of superIds) {
@@ -2130,6 +2242,55 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         if (row) { row.goals[g.id].contribution += contributed; goalAccruedTotal[g.id] += contributed; }
       }
 
+      // c-pension. Pension payments (spec 20, Commit 2) — "minimum",
+      // "fixed" and "maximum" pay a smooth, SCHEDULED monthly slice of
+      // this FY's already-determined annual amount (pensionAnnualAmount,
+      // resolved once — see the per-year setup and the commencement
+      // block above). "expenditure" pensions are null here (resolved
+      // dynamically, in the deficit-funding step below) and skipped.
+      //
+      // A TRANSFER (pensionBal → the WCA), not new household income —
+      // credited DIRECTLY to wcaBal, real-pass only, exactly like an
+      // existing super withdrawal already is (see the deficit-funding
+      // "d." block's own withdrawFromSuper calls) — NOT folded into
+      // `inc`/row.income, which would double-count it: the debit
+      // already leaves the ledger's books via pensionClosing's own
+      // decrease, so counting the SAME dollar again as "income" in the
+      // conservation invariant would claim credit for value that never
+      // actually increased net worth (found via the invariant itself —
+      // exactly the class of bug its own header describes). Reported
+      // instead via the dedicated row.pensionDetail[*].payments fields,
+      // the same shape row.superDetail[*].withdrawals already uses.
+      //
+      // The tax-measurement split (ttrPensionTaxable) is UNGATED — the
+      // measurement pass needs to see it too — computed from the
+      // THEORETICAL scheduled amount rather than the real pass's capped
+      // `paid` (only the real pass can know if the balance ran dry
+      // mid-year, an extreme-crash edge case); harmless in practice
+      // since every reachable payment in this build is tax-free anyway
+      // (see acc[p]'s own header).
+      const monthsInFy = last - first;
+      for (const pn of pensionRows) {
+        if (!pensionCommenced[pn.id]) continue;
+        const annual = pensionAnnualAmount[pn.id];
+        if (annual == null) continue; // "expenditure" — see the deficit-funding step
+        const scheduled = annual / monthsInFy;
+        if (scheduled <= 0) continue;
+        const pm = pensionMeta[pn.id];
+        const scheduledTaxable = scheduled - scheduled * pensionFixedProportion[pn.id];
+        if (ownerAgeAt(pm.owner, y) < 60) acc[pm.owner].ttrPensionTaxable += scheduledTaxable;
+        if (row) {
+          const paid = withdrawFromPension(pn.id, scheduled);
+          if (paid <= 0) continue;
+          wcaBal += paid;
+          pensionPaidYtd[pn.id] += paid;
+          const taxFreeAmount = paid * pensionFixedProportion[pn.id];
+          row.pensionDetail[pn.id].payments += paid;
+          row.pensionDetail[pn.id].paymentsTaxFree += taxFreeAmount;
+          row.pensionDetail[pn.id].paymentsTaxable += paid - taxFreeAmount;
+        }
+      }
+
       // c. Household net, including tax outflows (decision 14) —
       // applied to the WCA balance rather than spent/sold immediately
       // (Working Cash Account fix): this is what lets an annual lump
@@ -2236,6 +2397,36 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // before falling back to super then truly unfunded.
       if (wcaBal < wca.minimumBalance) {
         let shortfall = wca.minimumBalance - wcaBal;
+        // "Expenditure" pensions (spec 20, Commit 2) — "draw what the
+        // household needs, floored at the minimum" (the "Expend"
+        // behaviour Xtools removed — see docs/reference/
+        // xtools-calm-reference.md §10 item 2: "that is our deficit
+        // funding"). Tried FIRST, ahead of ordinary asset liquidation —
+        // a retiree draws their pension income before selling other
+        // assets, and the minimum-floor top-up below tops this same
+        // running total up at FY-end regardless. Real-pass only, same
+        // structural convention as the released-super draw further
+        // below in this same block (no measurement-pass equivalent —
+        // see pensionIncomeThisMonth's own header above for why that's
+        // an accepted, pre-existing shape in this engine, not new).
+        if (row) {
+          for (const pn of pensionRows) {
+            if (shortfall <= 0) break;
+            if (!pensionCommenced[pn.id] || pensionMeta[pn.id].drawdownOption !== "expenditure") continue;
+            const paid = withdrawFromPension(pn.id, shortfall);
+            if (paid <= 0) continue;
+            shortfall -= paid;
+            wcaBal += paid;
+            const pm = pensionMeta[pn.id];
+            const taxFreeAmount = paid * pensionFixedProportion[pn.id];
+            const taxableAmount = paid - taxFreeAmount;
+            pensionPaidYtd[pn.id] += paid;
+            row.pensionDetail[pn.id].payments += paid;
+            row.pensionDetail[pn.id].paymentsTaxFree += taxFreeAmount;
+            row.pensionDetail[pn.id].paymentsTaxable += taxableAmount;
+            if (ownerAgeAt(pm.owner, y) < 60) acc[pm.owner].ttrPensionTaxable += taxableAmount;
+          }
+        }
         const gainRatio = (id) => {
           if (!meta[id].cgt) return -Infinity; // no CGT — realises nothing, always sells first
           const value = bal[id];
@@ -2294,6 +2485,33 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           wcaBal = wca.minimumBalance;
         }
         recordUnfunded(shortfall, m);
+      }
+
+      // FY-end minimum top-up for "expenditure" pensions (spec 20,
+      // Commit 2): "the minimum always applies as a floor. A plan that
+      // draws less than the minimum is not a plan; it is a compliance
+      // breach" (spec's own words) — an expenditure pension that never
+      // needed to cover a shortfall this FY (or covered less than its
+      // own minimum) still pays the difference, unconditionally, in the
+      // FY's last month. Real-pass only, same reason as the deficit-
+      // funding draw above.
+      if (row && m === last - 1) {
+        for (const pn of pensionRows) {
+          if (!pensionCommenced[pn.id] || pensionMeta[pn.id].drawdownOption !== "expenditure") continue;
+          const owed = pensionMinThisYear[pn.id] - pensionPaidYtd[pn.id];
+          if (owed <= 0) continue;
+          const paid = withdrawFromPension(pn.id, owed);
+          if (paid <= 0) continue;
+          wcaBal += paid;
+          const pm = pensionMeta[pn.id];
+          const taxFreeAmount = paid * pensionFixedProportion[pn.id];
+          const taxableAmount = paid - taxFreeAmount;
+          pensionPaidYtd[pn.id] += paid;
+          row.pensionDetail[pn.id].payments += paid;
+          row.pensionDetail[pn.id].paymentsTaxFree += taxFreeAmount;
+          row.pensionDetail[pn.id].paymentsTaxable += taxableAmount;
+          if (ownerAgeAt(pm.owner, y) < 60) acc[pm.owner].ttrPensionTaxable += taxableAmount;
+        }
       }
 
       // FY-end sweep (Surplus and Deficit Allocation spec, Commit 1):
@@ -2654,6 +2872,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       + divReleaseCash.client + divReleaseCash.partner - refundDue;
     const cgtDueDetail = y > 0 ? pendingCgt : { client: 0, partner: 0 };
 
+    // Pension drawdown (spec 20, Commit 2): resolved ONCE per FY, before
+    // either pass, for every ALREADY-commenced pension (from a prior
+    // year) — pensionBal hasn't been touched yet this FY by either pass
+    // (growth/payments are real-pass-only, gated behind `if (row)`
+    // below), so it correctly reads as this FY's 1 July balance. A
+    // pension commencING this exact FY is resolved separately, inline,
+    // right after its commencement transfer fires — its basis isn't
+    // known until then. pensionPaidYtd resets here too, every FY,
+    // regardless of pass (a plain counter — resetting it in a pass that
+    // doesn't credit anything is harmless).
+    for (const pn of pensionRows) {
+      pensionPaidYtd[pn.id] = 0;
+      if (!pensionCommenced[pn.id]) continue; // not yet — resolved at commencement instead
+      const ownerAge = ownerAgeAt(pensionMeta[pn.id].owner, y);
+      resolvePensionThisYear(pn, pensionBal[pn.id], ownerAge, y);
+    }
+
     // Super contribution caps (Tier 1.2, Commit 2): resolved ONCE per
     // FY, before either pass — concessional carry-forward and NCC
     // bring-forward are year-SEQUENTIAL state that must advance exactly
@@ -2863,6 +3098,25 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       }
     }
 
+    // Pension commencement (spec 20, Commit 1) — a FIFTH mechanism that
+    // can claim from a super account this same year, resolved through
+    // the SAME reserveFromSuper ledger as adviser fees/Division
+    // 293/296/FHSSS above (appended last in the fixed claim order —
+    // see reserveFromSuper's own header). Without this, a pension
+    // commencing this FY would read the account's LIVE balance directly
+    // inside the monthly loop, oblivious to what the other four
+    // mechanisms already reserved against the SAME account this same
+    // year — exactly the class of bug reserveFromSuper exists to
+    // prevent (found via the conservation invariant itself, once a
+    // randomised pension shared an account with an FHSSS-eligible
+    // contribution often enough to hit it).
+    for (const pn of pensionRows) {
+      if (pensionCommenced[pn.id] || pensionCommenceMonth[pn.id] !== yearStart(y)) continue;
+      const sourceId = pensionMeta[pn.id].sourceAccountId;
+      const requested = pn.commenceAmount == null ? Math.max(0, superBal[sourceId] ?? 0) : pn.commenceAmount;
+      pensionCommenceReserved[pn.id] = reserveFromSuper(sourceId, requested);
+    }
+
     // FY rollover: this-FY pool additions age into old money.
     for (const id of ids) if (meta[id].cgt) pools[id] = poolNewFy(pools[id]);
 
@@ -3027,6 +3281,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         taxProfile: state.plan[p]?.taxProfile ?? null,
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
         fhsssTaxableRelease: measured[p].fhsssTaxableRelease ?? 0,
+        ttrPensionTaxable: measured[p].ttrPensionTaxable ?? 0,
       });
       // Disclosed simplification: excludes this FY's own realised
       // capital gain, which this engine only ever assesses in a later,
@@ -3127,6 +3382,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         taxProfile: state.plan[p]?.taxProfile ?? null,
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
         fhsssTaxableRelease: measured[p].fhsssTaxableRelease ?? 0,
+        ttrPensionTaxable: measured[p].ttrPensionTaxable ?? 0,
       });
       assessed[p] = a;
 

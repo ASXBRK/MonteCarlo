@@ -2590,16 +2590,30 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       for (const p of persons) {
         if (Math.random() < 0.5) {
           const acct = superAccounts.find((sa) => sa.owner === p);
+          const type = pick(["abp", "ttr"]);
+          // Drawdown (spec 20, Commit 2) — "maximum" only ever picked
+          // for a TTR (the same input-integrity rule clampPension
+          // itself enforces, mirrored here since this raw state
+          // bypasses the clamp), exercising every option's own payment
+          // path, the minimum-as-floor interaction (a deliberately
+          // small fixedAmount, well below what the minimum would be for
+          // a six-figure balance), and the deficit-funding-vs-FY-end-
+          // top-up split for "expenditure".
+          const drawdownOption = pick(type === "ttr" ? ["minimum", "fixed", "expenditure", "maximum"] : ["minimum", "fixed", "expenditure"]);
           pensions.push({
             id: `pn_${p}`, name: `Pension ${p}`, owner: p,
             sourceAccountId: acct.id,
             commenceAt: { kind: "age", age: randInt(startAge, endAge) },
-            type: pick(["abp", "ttr"]),
+            type,
             commenceAmount: Math.random() < 0.5 ? null : rand(0, acct.balance),
             reversionary: Math.random() < 0.3,
             taxFreeProportion: null,
             allocation: randomAllocation(),
             icrPct: 0,
+            drawdownOption,
+            fixedAmount: drawdownOption === "fixed" ? rand(0, 20000) : 0,
+            indexBasis: pick(["none", "cpi", "awote"]),
+            indexExtraPct: rand(0, 2),
           });
         }
       }
@@ -6216,31 +6230,41 @@ describe("Pension phase (spec 20, Commit 1): accounts, commencement, and the pro
     expect(out.yearly[2].pensionDetail.pn1.taxFreeProportion).toBeCloseTo(0.4, 4);
   });
 
-  it("a real (nonzero) return dilutes the LIVE ratio while the reported proportion stays fixed — the actual mechanical distinction from accumulation", () => {
-    const out = projectPlan(mkState({
+  it("a real (nonzero) return dilutes what a LIVE ratio would be while the reported proportion stays fixed — the actual mechanical distinction from accumulation", () => {
+    const mkScenario = (incomePct) => mkState({
       endAge: 63,
       plan: {
         client: { currentAge: 60, retirementAge: 60 },
         superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 50000, allocation: zeroRealSuperAlloc() })],
         pensions: [pensionRow({
-          // A real positive return: incomePct grossed up the same way
-          // zeroRealSuperAlloc does, plus a bit more.
-          allocation: { mode: "custom", incomePct: (0.025 / 0.85) * 100 + 5, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+          allocation: { mode: "custom", incomePct, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
         })],
       },
-    }));
-    const closing = out.yearly[2].pensionDetail.pn1.closing;
-    const liveRatio = out.yearly[2].pensionDetail.pn1.taxFreeProportion; // reported figure — must be the FIXED 0.5, not this
-    expect(closing).toBeGreaterThan(100000); // genuine growth happened
-    expect(liveRatio).toBeCloseTo(0.5, 4); // still exactly the commencement-time proportion
+    });
+    // Same commencement, same drawdown option (minimum, spec 20 Commit
+    // 2's default — draws down every year regardless), differing ONLY
+    // in whether the account actually earns a real return.
+    const flat = projectPlan(mkScenario(zeroRealSuperAlloc().incomePct));
+    const grown = projectPlan(mkScenario((0.025 / 0.85) * 100 + 5)); // zeroRealSuperAlloc's own grossed-up rate, plus a real 5%
+    const flatClosing = flat.yearly[2].pensionDetail.pn1.closing;
+    const grownClosing = grown.yearly[2].pensionDetail.pn1.closing;
+    // Genuine growth happened despite the minimum drawdown ALSO
+    // shrinking the balance every year in both scenarios.
+    expect(grownClosing).toBeGreaterThan(flatClosing);
+    // The reported proportion is the SAME fixed 0.5 either way — a
+    // payment draws both sides in that fixed proportion (never
+    // recalculating it), and growth touches only the taxable side but
+    // never the REPORTED figure, which stays pinned at commencement.
+    expect(flat.yearly[2].pensionDetail.pn1.taxFreeProportion).toBeCloseTo(0.5, 4);
+    expect(grown.yearly[2].pensionDetail.pn1.taxFreeProportion).toBeCloseTo(0.5, 4);
     // If the engine had (wrongly) recalculated live like accumulation
-    // does, taxFree/closing would now be BELOW 0.5 (growth dilutes the
-    // ratio, since growth only ever adds to the taxable side) — confirm
-    // that the fixed reported figure does NOT equal what a live
-    // recompute would give, proving this is genuinely fixed, not
-    // coincidentally equal.
-    const wouldBeLiveRatio = 50000 / closing; // taxFree never grows; only closing does
-    expect(wouldBeLiveRatio).toBeLessThan(0.5);
+    // does, the grown scenario's live ratio would now read BELOW 0.5
+    // (growth dilutes it, since growth only ever adds to the taxable
+    // side, while the flat scenario's live ratio would still read
+    // exactly 0.5) — the two scenarios' CLOSING balances diverge
+    // (asserted above) while their REPORTED proportions do not,
+    // confirming the reported figure tracks commencement, not the
+    // live balance.
   });
 
   it("a PARTIAL commencement transfers components proportionally, leaving the source account with the same ratio it started with", () => {
@@ -6253,7 +6277,12 @@ describe("Pension phase (spec 20, Commit 1): accounts, commencement, and the pro
       },
     }));
     expect(out.yearly[0].pensionDetail.pn1.commencementAmount).toBeCloseTo(60000, 0);
-    expect(out.yearly[0].pensionDetail.pn1.closing).toBeCloseTo(60000, 0);
+    // closing is the commencement amount LESS this FY's own minimum
+    // drawdown (spec 20 Commit 2's default option, applying from the
+    // very year of commencement — see minDrawdownAmount's own header on
+    // why commencement always gives a full 12-month basis): under 65,
+    // 4% of the 60,000 basis.
+    expect(out.yearly[0].pensionDetail.pn1.closing).toBeCloseTo(60000 * 0.96, 0);
     expect(out.yearly[0].pensionDetail.pn1.taxFreeProportion).toBeCloseTo(0.4, 4); // same 40% ratio as the whole account
     // The remainder stays behind in the source account, at the SAME
     // proportion (a proportional split preserves the ratio on both sides).
@@ -6278,7 +6307,9 @@ describe("Pension phase (spec 20, Commit 1): accounts, commencement, and the pro
     expect(out.yearly[0].pensionDetail.pn1.commencementAmount).toBe(0);
     // Client turns 60 in plan year 5 (currentAge 55 + 5).
     expect(out.yearly[5].pensionDetail.pn1.commencementAmount).toBeCloseTo(100000, 0);
-    expect(out.yearly[5].pensionDetail.pn1.closing).toBeCloseTo(100000, 0);
+    // closing is net of that same FY's minimum drawdown (4% under 65) —
+    // see the partial-commencement test's own comment above.
+    expect(out.yearly[5].pensionDetail.pn1.closing).toBeCloseTo(100000 * 0.96, 0);
   });
 
   it("condition-of-release gating: a TTR only needs preservation age (60) — commences there regardless of retirementAge, unlike an ABP requested at the same age with the same retirementAge", () => {
@@ -6386,6 +6417,166 @@ describe("Pension phase (spec 20, Commit 1): accounts, commencement, and the pro
     for (const [i, s] of scenarios.entries()) {
       const out = projectPlan(s);
       for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `pension scenario ${i}, year ${y}`);
+    }
+  });
+});
+
+describe("Pension phase (spec 20, Commit 2): drawdown, minimums, and payment tax", () => {
+  it("each age band's minimum applies against the 1 July basis, for the default 'minimum' option", () => {
+    // Under 65 (4%) vs 65-74 (5%): same basis, different band, via the
+    // owner's age at commencement.
+    const under65 = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow()],
+      },
+    }));
+    expect(under65.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(100000 * 0.04, 0);
+
+    const at70 = projectPlan(mkState({
+      endAge: 73,
+      plan: {
+        client: { currentAge: 70, retirementAge: 65 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow()],
+      },
+    }));
+    expect(at70.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(100000 * 0.05, 0);
+  });
+
+  it("the minimum is a FLOOR under 'fixed' — a fixedAmount below the minimum is topped up to it", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ drawdownOption: "fixed", fixedAmount: 1000, indexBasis: "none", indexExtraPct: 0 })],
+      },
+    }));
+    // 4% of 100,000 = 4,000 — well above the requested 1,000.
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(4000, 0);
+  });
+
+  it("'fixed' pays the requested amount when it's above the minimum", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ drawdownOption: "fixed", fixedAmount: 20000, indexBasis: "none", indexExtraPct: 0 })],
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(20000, 0);
+  });
+
+  it("'maximum' (TTR only) pays 10% of the basis when that exceeds the minimum", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ type: "ttr", drawdownOption: "maximum" })],
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(10000, 0); // 10% of 100,000
+  });
+
+  it("the minimum is a FLOOR under 'maximum' too — at 95+, the 14% minimum exceeds the flat 10% maximum", () => {
+    const out = projectPlan(mkState({
+      endAge: 97,
+      plan: {
+        client: { currentAge: 95, retirementAge: 65 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ type: "ttr", drawdownOption: "maximum" })],
+      },
+    }));
+    // TTR gates at flat preservation age (60) — already met at 95, so
+    // this commences immediately. minDrawdownPct(95) = 14% > the 10%
+    // maximum, so the FLOOR wins.
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(100000 * 0.14, 0);
+  });
+
+  it("'expenditure' pays nothing beyond the minimum when the household never needed it — an unconditional FY-end compliance top-up", () => {
+    const out = projectPlan(mkState({
+      endAge: 62,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ drawdownOption: "expenditure" })],
+        workingCash: { balance: 500000, minimumBalance: 0, ratePct: 0 }, // no deficit ever
+      },
+    }));
+    // Nothing needed all year, yet the minimum still pays — "a plan
+    // that draws less than the minimum is not a plan; it is a
+    // compliance breach" (spec's own words).
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(100000 * 0.04, 0);
+  });
+
+  it("'expenditure' draws to cover an actual household shortfall, ahead of ordinary asset liquidation", () => {
+    const expenditureOut = projectPlan(mkState({
+      endAge: 61,
+      assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 200000 })],
+      fundingOrder: ["a1"],
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 500000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ drawdownOption: "expenditure" })],
+        workingCash: { balance: 0, minimumBalance: 5000, ratePct: 0 },
+      },
+      cashflows: { expenses: [cf({ id: "exp1", assetId: null, amount: 100000 / 12, frequency: "monthly", from: { kind: "age", age: 60 }, to: { kind: "age", age: 61 } })] },
+    }));
+    // The pension (well above the shortfall) covers the whole
+    // household expense — the financial asset is never touched.
+    expect(expenditureOut.yearly[0].perAssetClosing.a1).toBeCloseTo(200000, 0);
+    expect(expenditureOut.yearly[0].pensionDetail.pn1.payments).toBeGreaterThan(90000);
+  });
+
+  it("post-60 payments are entirely tax-free — presence of a pension changes household cash but not assessed tax", () => {
+    const withoutPension = projectPlan(mkState({
+      endAge: 67,
+      plan: {
+        client: { currentAge: 65, retirementAge: 65 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+      },
+      cashflows: { income: [employmentRow({ amount: 80000, from: { kind: "age", age: 65 }, to: { kind: "age", age: 67 } })] },
+    }));
+    const withPension = projectPlan(mkState({
+      endAge: 67,
+      plan: {
+        client: { currentAge: 65, retirementAge: 65 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ commenceAt: { kind: "age", age: 65 } })],
+      },
+      cashflows: { income: [employmentRow({ amount: 80000, from: { kind: "age", age: 65 }, to: { kind: "age", age: 67 } })] },
+    }));
+    // Same income tax either way — the payment never touches assessable income.
+    expect(withPension.yearly[0].tax).toBeCloseTo(withoutPension.yearly[0].tax, 0);
+    // But the pension DID pay out real cash (closing balance differs).
+    expect(withPension.yearly[0].pensionDetail.pn1.payments).toBeGreaterThan(0);
+  });
+
+  it("conservation holds across every drawdown option, including the expenditure floor top-up", () => {
+    const options = ["minimum", "fixed", "expenditure", "maximum"];
+    for (const [i, drawdownOption] of options.entries()) {
+      const out = projectPlan(mkState({
+        endAge: 64,
+        assets: [mkAsset({ id: "a1", allocation: { mode: "custom", incomePct: 3, growthPct: 2, frankingPct: 0, volBasis: "Balanced" }, balance: 50000 })],
+        fundingOrder: ["a1"],
+        plan: {
+          client: { currentAge: 60, retirementAge: 60 },
+          superAccounts: [superAcct({ balance: 200000, taxFreeComponent: 60000, allocation: { mode: "custom", incomePct: 5, growthPct: 1, frankingPct: 0, volBasis: "Balanced" } })],
+          pensions: [pensionRow({
+            type: drawdownOption === "maximum" ? "ttr" : "abp",
+            drawdownOption,
+            fixedAmount: 15000, indexBasis: "cpi", indexExtraPct: 0,
+          })],
+          workingCash: { balance: 2000, minimumBalance: 2000, ratePct: 1 },
+        },
+        cashflows: { expenses: [cf({ id: "exp1", assetId: null, amount: 4000, frequency: "monthly", from: { kind: "age", age: 60 }, to: { kind: "age", age: 120 } })] },
+      }));
+      for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `drawdown option "${drawdownOption}" (${i}), year ${y}`);
     }
   });
 });

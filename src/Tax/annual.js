@@ -126,6 +126,18 @@ export function assessPerson({
   // a parallel one.
   fhsssTaxableRelease = 0,
   fhsssOffsetRate = 0.30,
+  // Pension phase (spec 20, Commit 2): the taxable component of a
+  // pre-60 TTR pension payment — assessable at the member's marginal
+  // rate with a 15% non-refundable offset (the taxable component's
+  // OWN 15% fund contributions-tax credited back, not exempting it —
+  // same "add to income, credit back a flat offset" shape as
+  // excessConcessionalContributions/fhsssTaxableRelease above). The
+  // tax-free component of a pension payment never reaches this
+  // function at all — it's excluded from ordinaryIncome upstream,
+  // the same way a genuine-redundancy tax-free amount is (see
+  // deterministic.js's own a-termination comment).
+  ttrPensionTaxable = 0,
+  ttrPensionOffsetRate = 0.15,
 }) {
   const { key, k } = bracketSettings(fyStartYear, bracketMode, cpi);
   const nonResident = taxProfile?.residency === "nonResident";
@@ -145,7 +157,8 @@ export function assessPerson({
   // zero (revenue losses are not carried in this model).
   const excessCC = Math.max(0, excessConcessionalContributions);
   const fhsssRelease = Math.max(0, fhsssTaxableRelease);
-  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease);
+  const ttrPension = Math.max(0, ttrPensionTaxable);
+  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease + ttrPension);
 
   // Capital losses: a net loss year adds to the carry-forward; a gain
   // year consumes carried losses before any tax (losses never offset
@@ -173,7 +186,10 @@ export function assessPerson({
   // non-refundable (capped at whatever income tax remains) — same
   // "credited back, not exempting" shape as excessCcOffset.
   const fhsssOffset = Math.min(fhsssRelease * fhsssOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset));
-  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset + medicare - frankingCredits;
+  // Pension phase, Commit 2: applies last, same non-refundable,
+  // "credited back" shape as the other two offsets above.
+  const ttrPensionOffset = Math.min(ttrPension * ttrPensionOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset - fhsssOffset));
+  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset + medicare - frankingCredits;
 
   // CGT: the gain stacks on top of the income base. Marginal tax and
   // Medicare on the gain by differencing; post-reform (FY2027-28
@@ -193,6 +209,7 @@ export function assessPerson({
     lito: litoApplied,
     excessCcOffset,
     fhsssOffset,
+    ttrPensionOffset,
     frankingCredits,
     netIncomeTax,
     cgtTax,

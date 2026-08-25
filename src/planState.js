@@ -1408,6 +1408,17 @@ export function pensionMinCommenceAge(type, ownerRetirementAge, rates = SUPER_RA
   return type === "ttr" ? rates.preservationAge : superReleaseAge(ownerRetirementAge, rates);
 }
 
+// Drawdown options (spec 20, Commit 2): minimum (default) is always a
+// floor under every other option, so it needs no dedicated field beyond
+// the option itself. "maximum" (a flat 10% of the 1 July balance) is
+// TTR-only — see pensionRates.js's own header on why the option stays
+// tied to the stored type, not to the retirement-phase conversion (spec
+// 20 Commit 3). fixedAmount/indexBasis/indexExtraPct are only READ when
+// drawdownOption is "fixed", but always clamped/present, the same
+// convention every other conditionally-used indexed amount in this
+// schema already follows (e.g. a liability's revertRatePct).
+export const PENSION_DRAWDOWN_OPTIONS = ["minimum", "fixed", "expenditure", "maximum"];
+
 export function createPension(plan, existing = [], superAccounts = [], owner = "client") {
   const account = superAccounts.find((s) => s.owner === owner) ?? null;
   const person = owner === "partner" ? plan.partner : plan.client;
@@ -1427,6 +1438,12 @@ export function createPension(plan, existing = [], superAccounts = [], owner = "
     taxFreeProportion: null, // see module header — engine-derived only, never stored here
     allocation: { mode: "profile", profile: account?.allocation?.mode === "profile" ? account.allocation.profile : null },
     icrPct: 0,
+    // Smart default (spec 20 Commit 5's own instruction): drawdown
+    // defaults to minimum.
+    drawdownOption: "minimum",
+    fixedAmount: 0,
+    indexBasis: "cpi",
+    indexExtraPct: 0,
   };
 }
 
@@ -1448,6 +1465,13 @@ export function clampPension(pn, plan, superAccounts = [], profiles = {}) {
   // whenever owner is "partner" and the two ages diverge. deterministic.js
   // is the sole place the gate is enforced, against the owner's real age.
   const commenceAt = clampDateRef(pn.commenceAt ?? anchorRef("retirement-client"), plan.client.currentAge, plan.endAge, plan);
+  const requestedDrawdown = PENSION_DRAWDOWN_OPTIONS.includes(pn.drawdownOption) ? pn.drawdownOption : "minimum";
+  // Input integrity: "maximum" is TTR-only (spec's own words) — an ABP
+  // with this option stored (e.g. surviving a type change from ttr to
+  // abp) isn't a real, legal combination this tool can model, so it's
+  // reset to the safe default rather than silently doing something an
+  // ABP was never entitled to.
+  const drawdownOption = requestedDrawdown === "maximum" && type !== "ttr" ? "minimum" : requestedDrawdown;
   return {
     id: typeof pn.id === "string" && pn.id ? pn.id : uid("pn"),
     name: typeof pn.name === "string" && pn.name.trim() ? pn.name : "Pension",
@@ -1460,6 +1484,9 @@ export function clampPension(pn, plan, superAccounts = [], profiles = {}) {
     taxFreeProportion: null,
     allocation: clampAllocation(pn.allocation, profiles),
     icrPct: clampNumber(pn.icrPct, 0, 100),
+    drawdownOption,
+    fixedAmount: clampNumber(pn.fixedAmount, 0),
+    ...clampIndexation(pn),
   };
 }
 

@@ -247,3 +247,48 @@ describe("FHSSS taxable release (Document Set Commit 3)", () => {
     expect(explicit).toEqual(base);
   });
 });
+
+// Pension phase (spec 20, Commit 2): the taxable component of a pre-60
+// TTR payment. Structurally unreachable end-to-end via the full engine
+// in this build — every commencement (ABP or TTR) requires the owner to
+// be at least the flat preservation age (60), and ages only increase
+// from there, so no payment this engine's deterministic.js can ever
+// actually produce is pre-60 (see pensionMinCommenceAge's own header,
+// planState.js, and acc[p]'s own comment, deterministic.js). Tested
+// here directly against the pure function instead — the general ATO
+// mechanic is implemented correctly and unit-tested, the same "correct
+// but currently unreachable" shape this file's own excess-CC/FHSSS
+// offset tests would also use if this app modelled a configurable
+// preservation age below 60.
+describe("Pension phase, Commit 2 — pre-60 TTR taxable pension payment", () => {
+  it("the taxable component is taxed at the marginal rate, offset by 15%", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    const withPension = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, ttrPensionTaxable: 10000 });
+    expect(withPension.taxableIncome).toBeCloseTo(base.taxableIncome + 10000, 6);
+    expect(withPension.ttrPensionOffset).toBeCloseTo(1500, 6); // 15% of 10,000
+    const marginalOnPension = withPension.incomeTax - base.incomeTax;
+    const medicareOnPension = withPension.medicare - base.medicare;
+    expect(withPension.netIncomeTax - base.netIncomeTax).toBeCloseTo(marginalOnPension + medicareOnPension - 1500, 2);
+  });
+
+  it("the offset is non-refundable — capped at the tax payable, applied after LITO, the excess-CC offset, and the FHSSS offset", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 0, ttrPensionTaxable: 5000 });
+    expect(a.ttrPensionOffset).toBeLessThanOrEqual(a.incomeTax);
+  });
+
+  it("stacks correctly alongside excess-CC and FHSSS offsets in the same year — all three non-refundable, applied in sequence", () => {
+    const a = assessPerson({
+      fyStartYear: 2027, ordinaryIncome: 100000,
+      excessConcessionalContributions: 5000, fhsssTaxableRelease: 10000, ttrPensionTaxable: 8000,
+    });
+    expect(a.excessCcOffset).toBeCloseTo(750, 6); // 15% of 5,000
+    expect(a.fhsssOffset).toBeCloseTo(3000, 6); // 30% of 10,000
+    expect(a.ttrPensionOffset).toBeCloseTo(1200, 6); // 15% of 8,000, unaffected — plenty of tax remains
+  });
+
+  it("zero taxable component (the default — every reachable in-engine payment is tax-free) leaves every figure unchanged", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000 });
+    const explicit = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000, ttrPensionTaxable: 0 });
+    expect(explicit).toEqual(base);
+  });
+});
