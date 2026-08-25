@@ -276,6 +276,48 @@ function clampPersonSuper(raw) {
   };
 }
 
+// --- Death benefits (spec 22, Commit 1) -------------------------------------
+//
+// A person-level election (like taxProfile/super) rather than a
+// top-level row-list the way gifts/pensions are — each person
+// nominates beneficiaries for their OWN super/pension death benefit;
+// there's no cross-person list. `relationship` alone determines tax
+// dependency — the user is never asked to classify "dependant" directly
+// (spec's own words: "that is the part they get wrong").
+export const DEATH_BENEFIT_RELATIONSHIPS = ["spouse", "adultChild", "minorChild", "interdependent", "financialDependant", "estate"];
+
+// Tax dependants (NANE regardless of component): a spouse, a minor
+// child, an interdependency partner, or a financial dependant. An adult
+// child is NOT a tax dependant — the spec's own "single most common and
+// most expensive case." "estate" is neither a dependant nor a plain
+// non-dependant — Commit 1's own table taxes it like a non-dependant
+// but WITHOUT Medicare (the real ATO distinction the spec's header
+// calls out as "frequently missed"), so it's excluded from this
+// predicate and handled as its own case at the point of tax.
+export function isDeathBenefitTaxDependant(relationship) {
+  return relationship === "spouse" || relationship === "minorChild"
+    || relationship === "interdependent" || relationship === "financialDependant";
+}
+
+export function createDeathBenefitBeneficiary(existing = []) {
+  return { id: uid("db"), label: `Beneficiary ${existing.length + 1}`, relationship: "spouse", sharePct: 100 };
+}
+
+export function clampDeathBenefitBeneficiary(b) {
+  return {
+    id: typeof b?.id === "string" && b.id ? b.id : uid("db"),
+    label: typeof b?.label === "string" && b.label.trim() ? b.label.trim() : "Beneficiary",
+    relationship: DEATH_BENEFIT_RELATIONSHIPS.includes(b?.relationship) ? b.relationship : "spouse",
+    sharePct: clampNumber(b?.sharePct, 0, 100),
+  };
+}
+
+export function clampDeathBenefit(raw) {
+  return {
+    beneficiaries: Array.isArray(raw?.beneficiaries) ? raw.beneficiaries.map(clampDeathBenefitBeneficiary) : [],
+  };
+}
+
 function clampPerson(raw, start) {
   const parsed = typeof raw?.dob === "string" ? ageAtDate(raw.dob, start.year, start.month) : null;
   let dob = raw?.dob;
@@ -302,6 +344,9 @@ function clampPerson(raw, start) {
     // (MLS off unless the user says otherwise) — the safer default for
     // an advice tool, per the spec.
     privateHospitalCover: raw?.privateHospitalCover !== false,
+    // Death benefits (spec 22, Commit 1) — beneficiary nomination for
+    // THIS person's own super/pension death benefit.
+    deathBenefit: clampDeathBenefit(raw?.deathBenefit),
   };
 }
 

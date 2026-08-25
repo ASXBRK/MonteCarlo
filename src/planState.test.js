@@ -34,6 +34,8 @@ import {
   createSurplusPeriod, legacySurplusPeriod, clampSurplusPeriod, normaliseSurplusPeriods,
   ADJUSTMENT_TARGETS, ADJUSTMENT_TARGET_LABELS, createAdjustment, clampAdjustment, normaliseAdjustments,
   createHeas, clampHeas, refineHeasProperty,
+  DEATH_BENEFIT_RELATIONSHIPS, isDeathBenefitTaxDependant,
+  createDeathBenefitBeneficiary, clampDeathBenefitBeneficiary, clampDeathBenefit,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2249,5 +2251,54 @@ describe("Home Equity Access Scheme (spec 21b, Commit 5): plan model", () => {
     const s = { ...defaultState(PROFILES, NOW), plan: { ...defaultState(PROFILES, NOW).plan, heas: { enabled: true, propertyId: property.id } }, properties: [property] };
     const clamped = clampAllToPlan(s, PROFILES);
     expect(clamped.plan.heas).toEqual({ enabled: true, propertyId: property.id });
+  });
+});
+
+describe("Death benefits (spec 22, Commit 1): plan model", () => {
+  it("isDeathBenefitTaxDependant: spouse/minorChild/interdependent/financialDependant are dependants; adultChild and estate are not", () => {
+    expect(isDeathBenefitTaxDependant("spouse")).toBe(true);
+    expect(isDeathBenefitTaxDependant("minorChild")).toBe(true);
+    expect(isDeathBenefitTaxDependant("interdependent")).toBe(true);
+    expect(isDeathBenefitTaxDependant("financialDependant")).toBe(true);
+    expect(isDeathBenefitTaxDependant("adultChild")).toBe(false);
+    expect(isDeathBenefitTaxDependant("estate")).toBe(false);
+  });
+
+  it("createDeathBenefitBeneficiary defaults to a spouse at 100%", () => {
+    const b = createDeathBenefitBeneficiary();
+    expect(b.relationship).toBe("spouse");
+    expect(b.sharePct).toBe(100);
+  });
+
+  it("clampDeathBenefitBeneficiary defends a junk relationship and clamps sharePct to [0,100]", () => {
+    const b = clampDeathBenefitBeneficiary({ id: "b1", label: "Jo", relationship: "not-a-real-one", sharePct: 150 });
+    expect(DEATH_BENEFIT_RELATIONSHIPS).toContain(b.relationship);
+    expect(b.relationship).toBe("spouse"); // the defensive default
+    expect(b.sharePct).toBe(100);
+    expect(clampDeathBenefitBeneficiary({ sharePct: -10 }).sharePct).toBe(0);
+  });
+
+  it("clampDeathBenefit defends non-array input and clamps every beneficiary", () => {
+    expect(clampDeathBenefit(undefined)).toEqual({ beneficiaries: [] });
+    expect(clampDeathBenefit({ beneficiaries: "not-an-array" })).toEqual({ beneficiaries: [] });
+    const d = clampDeathBenefit({ beneficiaries: [{ relationship: "adultChild", sharePct: 60 }] });
+    expect(d.beneficiaries).toHaveLength(1);
+    expect(d.beneficiaries[0].relationship).toBe("adultChild");
+    expect(d.beneficiaries[0].sharePct).toBe(60);
+  });
+
+  it("clampPerson (via clampPlan) always carries a deathBenefit field, defaulting to no beneficiaries", () => {
+    const plan = clampPlan(couplePlan());
+    expect(plan.client.deathBenefit).toEqual({ beneficiaries: [] });
+    expect(plan.partner.deathBenefit).toEqual({ beneficiaries: [] });
+  });
+
+  it("clampPlan round-trips a real nomination", () => {
+    const plan = clampPlan({
+      ...couplePlan(),
+      client: { currentAge: 40, deathBenefit: { beneficiaries: [{ id: "b1", label: "Spouse", relationship: "spouse", sharePct: 70 }, { id: "b2", label: "Adult child", relationship: "adultChild", sharePct: 30 }] } },
+    });
+    expect(plan.client.deathBenefit.beneficiaries).toHaveLength(2);
+    expect(plan.client.deathBenefit.beneficiaries[1].relationship).toBe("adultChild");
   });
 });

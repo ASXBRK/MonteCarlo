@@ -7766,3 +7766,123 @@ describe("Home Equity Access Scheme (spec 21b, Commit 5): engine integration", (
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `HEAS fixture, year ${y}`);
   });
 });
+
+describe("Death benefits (spec 22, Commit 1): engine integration", () => {
+  const beneficiary = (over = {}) => ({ id: "b1", label: "Beneficiary", relationship: "spouse", sharePct: 100, ...over });
+
+  it("a dependant (spouse) receives the whole amount NANE — no tax at all", () => {
+    const s = mkState({
+      endAge: 41, assets: [],
+      plan: {
+        superAccounts: [superAcct({ balance: 500000, taxFreeComponent: 100000, allocation: zeroRealSuperAlloc() })],
+        client: { currentAge: 40, deathBenefit: { beneficiaries: [beneficiary({ relationship: "spouse" })] } },
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[out.yearly.length - 1].deathBenefitDetail.client;
+    const b = d.byBeneficiary[0];
+    expect(b.isDependant).toBe(true);
+    expect(b.taxFree).toBeCloseTo(100000, 2);
+    expect(b.taxableTaxed).toBeCloseTo(400000, 2);
+    expect(b.tax).toBe(0);
+    expect(b.net).toBeCloseTo(500000, 2);
+  });
+
+  it("an adult child (non-dependant) is taxed at 15% plus Medicare on the taxable element only — the tax-free component is always NANE", () => {
+    const s = mkState({
+      endAge: 41, assets: [],
+      plan: {
+        superAccounts: [superAcct({ balance: 500000, taxFreeComponent: 100000, allocation: zeroRealSuperAlloc() })],
+        client: { currentAge: 40, deathBenefit: { beneficiaries: [beneficiary({ relationship: "adultChild" })] } },
+      },
+    });
+    const out = projectPlan(s);
+    const b = out.yearly[out.yearly.length - 1].deathBenefitDetail.client.byBeneficiary[0];
+    expect(b.isDependant).toBe(false);
+    // 400,000 taxable × (15% + 2% Medicare) = 400,000 × 0.17 = 68,000.
+    expect(b.tax).toBeCloseTo(400000 * 0.17, 2);
+    expect(b.net).toBeCloseTo(500000 - 68000, 2);
+  });
+
+  it("the estate is taxed at 15% with NO Medicare — the real, frequently-missed distinction", () => {
+    const s = mkState({
+      endAge: 41, assets: [],
+      plan: {
+        superAccounts: [superAcct({ balance: 500000, taxFreeComponent: 100000, allocation: zeroRealSuperAlloc() })],
+        client: { currentAge: 40, deathBenefit: { beneficiaries: [beneficiary({ relationship: "estate" })] } },
+      },
+    });
+    const out = projectPlan(s);
+    const b = out.yearly[out.yearly.length - 1].deathBenefitDetail.client.byBeneficiary[0];
+    // 400,000 × 15% = 60,000 — no Medicare add-on.
+    expect(b.tax).toBeCloseTo(60000, 2);
+    expect(b.net).toBeCloseTo(500000 - 60000, 2);
+  });
+
+  it("a split across three beneficiaries apportions every component proportionally, and the totals reconcile to the account", () => {
+    const s = mkState({
+      endAge: 41, assets: [],
+      plan: {
+        superAccounts: [superAcct({ balance: 500000, taxFreeComponent: 100000, allocation: zeroRealSuperAlloc() })],
+        client: {
+          currentAge: 40,
+          deathBenefit: {
+            beneficiaries: [
+              beneficiary({ id: "b1", relationship: "spouse", sharePct: 50 }),
+              beneficiary({ id: "b2", relationship: "adultChild", sharePct: 30 }),
+              beneficiary({ id: "b3", relationship: "estate", sharePct: 20 }),
+            ],
+          },
+        },
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[out.yearly.length - 1].deathBenefitDetail.client;
+    const [spouse, child, estate] = d.byBeneficiary;
+    expect(spouse.taxFree).toBeCloseTo(50000, 2); // 50% of 100,000
+    expect(spouse.taxableTaxed).toBeCloseTo(200000, 2); // 50% of 400,000
+    expect(spouse.tax).toBe(0);
+    expect(child.taxableTaxed).toBeCloseTo(120000, 2); // 30% of 400,000
+    expect(child.tax).toBeCloseTo(120000 * 0.17, 2);
+    expect(estate.taxableTaxed).toBeCloseTo(80000, 2); // 20% of 400,000
+    expect(estate.tax).toBeCloseTo(80000 * 0.15, 2);
+    // The three shares reconcile exactly to the account's own total.
+    expect(d.totals.gross).toBeCloseTo(500000, 2);
+    expect(d.totals.tax).toBeCloseTo(spouse.tax + child.tax + estate.tax, 6);
+  });
+
+  it("components are sourced correctly from a pension (its own fixed proportion) versus an accumulation account (its own live ratio) — both appear as distinct account entries", () => {
+    const s = mkState({
+      endAge: 62,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60, deathBenefit: { beneficiaries: [beneficiary({ relationship: "spouse" })] } },
+        superAccounts: [
+          superAcct({ id: "su1", balance: 300000, taxFreeComponent: 60000, allocation: zeroRealSuperAlloc() }),
+          superAcct({ id: "su2", balance: 200000, taxFreeComponent: 0, allocation: zeroRealSuperAlloc() }),
+        ],
+        pensions: [pensionRow({ id: "pn1", sourceAccountId: "su1", commenceAt: { kind: "age", age: 60 }, allocation: zeroRealAlloc() })],
+      },
+    });
+    const out = projectPlan(s);
+    const final = out.yearly[out.yearly.length - 1];
+    const d = final.deathBenefitDetail.client;
+    const pensionAccount = d.accounts.find((a) => a.id === "pn1");
+    const superAccount = d.accounts.find((a) => a.id === "su2");
+    expect(pensionAccount.kind).toBe("pension");
+    expect(pensionAccount.taxFree).toBeCloseTo(final.pensionDetail.pn1.taxFreeClosing, 6);
+    expect(pensionAccount.closing).toBeCloseTo(final.pensionDetail.pn1.closing, 6);
+    expect(superAccount.kind).toBe("super");
+    expect(superAccount.taxFree).toBeCloseTo(final.superDetail.su2.taxFreeClosing, 6);
+    expect(superAccount.taxFree).toBeCloseTo(0, 6); // su2's own taxFreeComponent was 0
+  });
+
+  it("regression gate: a scenario with no beneficiaries reports null death benefit detail, never breaking any existing projection", () => {
+    const s = mkState({
+      endAge: 41, assets: [],
+      plan: { superAccounts: [superAcct({ balance: 500000, taxFreeComponent: 100000 })] },
+    });
+    const out = projectPlan(s);
+    const final = out.yearly[out.yearly.length - 1];
+    expect(final.deathBenefitDetail).toEqual({ client: null, partner: null });
+  });
+});

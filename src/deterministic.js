@@ -47,6 +47,8 @@ import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js"
 import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance, debitTransferBalance } from "./pensionTba.js";
 import { agePensionRatesFor, WORK_BONUS, cshcThresholdsFor } from "./data/agePension.js";
 import { HEAS_BASE, heasEffectiveAnnualRate, heasMaxLoanAmount } from "./data/heas.js";
+import { isDeathBenefitTaxDependant } from "./planState.js";
+import { LEG } from "./Tax/engine.js";
 import {
   assessableAssets as agePensionAssessableAssets, deemedIncome as agePensionDeemedIncome,
   assessableIncome as agePensionAssessableIncome, singleAgePensionAssessment, coupleAgePensionAssessment,
@@ -152,6 +154,94 @@ function ownerShares(asset, couple) {
 // measurement/real-pass replay reason as shockFor. Omitted (the
 // default), both are exactly the plan's normal deterministic
 // expectation — bit-identical to every existing regression gate.
+// Death benefits (spec 22, Commit 1) — a TERMINAL planning figure only,
+// computed ONCE against the FINAL projection year's already-closed
+// super/pension balances: "if this balance passes to these
+// beneficiaries, this is what they receive" (spec's own words) — no
+// projection branches, not partner-death modelling. Pure and
+// side-effect-free; called once per person after the year loop
+// finishes, never per-year.
+//
+// Components are read straight from the SAME superTaxFree/
+// pensionTaxFree tracking every other engine feature already relies
+// on — a pension's tax-free proportion is FIXED at commencement
+// (pensionFixedProportion), an accumulation account's is the LIVE
+// ratio — so "sourced correctly from a pension (fixed) versus an
+// accumulation account (recalculated)" (the spec's own test) is
+// already true by construction, not something this function derives
+// itself.
+//
+// The untaxed element applies only to untaxed-source funds (some
+// public sector); NOT modelled (disclosed) — this tool has no
+// untaxed-source fund concept anywhere — so taxableUntaxed is always
+// 0, reported as its own column rather than silently omitted.
+//
+// Tax (Commit 1's own table): a dependant (spouse/minor child/
+// interdependent/financial dependant) receives every component NANE,
+// regardless of tax-free vs taxable — no tax at all. A non-dependant
+// (the common case: an adult child) pays 15%/30% PLUS Medicare (a flat
+// 2%, not shaded — this is a beneficiary who isn't one of the two
+// modelled taxpayers, so there is no "other income" to shade against;
+// the spec's own table gives flat rates, not a marginal calculation).
+// "estate" is taxed like a non-dependant but WITHOUT Medicare — the
+// real, frequently-missed ATO distinction the spec's own header calls
+// out — a disclosed simplification of "taxed per ultimate beneficiary"
+// (not modelled: this tool has no concept of who the estate's own
+// beneficiaries are).
+function computeDeathBenefitForPerson(owner, person, superAccounts, pensionRows, finalRow) {
+  const beneficiaries = person?.deathBenefit?.beneficiaries ?? [];
+  if (beneficiaries.length === 0) return null;
+
+  const accounts = [];
+  for (const s of superAccounts) {
+    if (s.owner !== owner) continue;
+    const d = finalRow.superDetail[s.id];
+    if (!d) continue;
+    const taxFree = Math.min(Math.max(0, d.taxFreeClosing), d.closing);
+    accounts.push({ id: s.id, name: s.name, kind: "super", closing: d.closing, taxFree, taxableTaxed: Math.max(0, d.closing - taxFree), taxableUntaxed: 0 });
+  }
+  for (const pn of pensionRows) {
+    if (pn.owner !== owner) continue;
+    const d = finalRow.pensionDetail[pn.id];
+    if (!d) continue;
+    const taxFree = Math.min(Math.max(0, d.taxFreeClosing), d.closing);
+    accounts.push({ id: pn.id, name: pn.name, kind: "pension", closing: d.closing, taxFree, taxableTaxed: Math.max(0, d.closing - taxFree), taxableUntaxed: 0 });
+  }
+
+  const byBeneficiary = beneficiaries.map((b) => {
+    const share = b.sharePct / 100;
+    const isDependant = isDeathBenefitTaxDependant(b.relationship);
+    const isEstate = b.relationship === "estate";
+    let taxFreeTotal = 0, taxableTaxedTotal = 0, taxableUntaxedTotal = 0, taxTotal = 0;
+    const perAccount = accounts.map((a) => {
+      const taxFreeShare = a.taxFree * share;
+      const taxableTaxedShare = a.taxableTaxed * share;
+      const taxableUntaxedShare = a.taxableUntaxed * share;
+      const tax = isDependant ? 0
+        : isEstate ? taxableTaxedShare * 0.15 + taxableUntaxedShare * 0.30
+          : taxableTaxedShare * (0.15 + LEG.medicareLevy) + taxableUntaxedShare * (0.30 + LEG.medicareLevy);
+      taxFreeTotal += taxFreeShare; taxableTaxedTotal += taxableTaxedShare; taxableUntaxedTotal += taxableUntaxedShare; taxTotal += tax;
+      return {
+        accountId: a.id, accountName: a.name, kind: a.kind,
+        taxFree: taxFreeShare, taxableTaxed: taxableTaxedShare, taxableUntaxed: taxableUntaxedShare, tax,
+      };
+    });
+    const gross = taxFreeTotal + taxableTaxedTotal + taxableUntaxedTotal;
+    return {
+      id: b.id, label: b.label, relationship: b.relationship, sharePct: b.sharePct, isDependant,
+      accounts: perAccount,
+      taxFree: taxFreeTotal, taxableTaxed: taxableTaxedTotal, taxableUntaxed: taxableUntaxedTotal,
+      gross, tax: taxTotal, net: gross - taxTotal,
+    };
+  });
+
+  const totals = byBeneficiary.reduce((acc, b) => ({
+    gross: acc.gross + b.gross, tax: acc.tax + b.tax, net: acc.net + b.net,
+  }), { gross: 0, tax: 0, net: 0 });
+
+  return { accounts, byBeneficiary, totals };
+}
+
 export function projectPlan(state, profiles = PROFILES, mc = null) {
   const shockFor = mc?.shockFor ?? (() => 0);
   // Monte Carlo rate linkage (What-if spec, Commit 5): the deviation
@@ -1347,6 +1437,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // (real $, a liability — see row.netAssets's own subtraction of
     // heasDetail.closing).
     heasDetail: { opening: 0, interest: 0, drawn: 0, mla: 0, securityValue: 0, closing: 0 },
+    // Death benefits (spec 22, Commit 1) — a TERMINAL planning figure
+    // only: set on the FINAL projection year's row alone (after the
+    // year loop finishes), never per-year — "the tax outcome of the
+    // super balance at the projection's end," the spec's own words, not
+    // a year-by-year accrual. null on every other year, and null here
+    // too whenever a person has no beneficiaries nominated.
+    deathBenefitDetail: null,
     // Gifting (spec 21b, Commit 2) — the FY's total gift outflow (the
     // full amount, regardless of how much is deprived vs allowable —
     // see gifting.js's own header): a leak, set alongside agePensionDetail.
@@ -4595,6 +4692,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       fyLabel: schedule.fyLabels[y],
       clientAge: schedule.clientAges[y],
       total: totalUnfunded,
+    };
+  }
+
+  // Death benefits (spec 22, Commit 1) — the final projection year's
+  // row alone; see computeDeathBenefitForPerson's own header for why
+  // this is a terminal figure, not a per-year one.
+  const finalRow = yearly[yearly.length - 1];
+  if (finalRow) {
+    finalRow.deathBenefitDetail = {
+      client: computeDeathBenefitForPerson("client", state.plan.client, superAccounts, pensionRows, finalRow),
+      partner: couple ? computeDeathBenefitForPerson("partner", state.plan.partner, superAccounts, pensionRows, finalRow) : null,
     };
   }
 
