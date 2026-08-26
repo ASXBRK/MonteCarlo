@@ -1897,6 +1897,68 @@ describe("Spec 26 Commit 2 — defined benefit pensions", () => {
   });
 });
 
+describe("Spec 26 Commit 3 — defined benefit Centrelink treatment", () => {
+  it("income-test-only: assessable income carries the deductible-amount figure, assessable assets are untouched", () => {
+    const s = mkState({
+      endAge: 68, assets: [],
+      plan: {
+        client: { currentAge: 67 },
+        definedBenefits: [dbRow({ annualPension: 50000, taxFreeProportion: 20, commenceAt: { kind: "age", age: 67 } })],
+      },
+    });
+    const out = projectPlan(s);
+    const expectedDeductible = 50000 * 0.20;
+    const expectedAssessable = 50000 - expectedDeductible;
+    expect(out.yearly[0].agePensionDetail.dbAssessableIncome).toBeCloseTo(expectedAssessable, 2);
+    // No other assets/income in this fixture: otherIncome is EXACTLY
+    // the DB assessable figure, not the bare gross pension.
+    expect(out.yearly[0].agePensionDetail.otherIncome).toBeCloseTo(expectedAssessable, 2);
+    expect(out.yearly[0].agePensionDetail.deemedIncome).toBe(0);
+    // The asset-test exemption: no balance exists anywhere for a DB
+    // pension to contribute to assessableAssets — "invisible unless
+    // modelled" (spec's own words), verified directly.
+    expect(out.yearly[0].agePensionDetail.assessableAssets).toBe(0);
+  });
+
+  it("a bigger deductible amount (higher tax-free proportion) reduces assessable income, for the SAME gross pension", () => {
+    const build = (taxFreeProportion) => mkState({
+      endAge: 68, assets: [],
+      plan: {
+        client: { currentAge: 67 },
+        definedBenefits: [dbRow({ annualPension: 60000, taxFreeProportion, commenceAt: { kind: "age", age: 67 } })],
+      },
+    });
+    const low = projectPlan(build(0));
+    const high = projectPlan(build(50));
+    expect(high.yearly[0].agePensionDetail.dbAssessableIncome).toBeLessThan(low.yearly[0].agePensionDetail.dbAssessableIncome);
+    expect(high.yearly[0].agePensionDetail.dbAssessableIncome).toBeCloseTo(60000 * 0.5, 2);
+  });
+
+  it("before commencement, a DB pension contributes nothing to the income test at all", () => {
+    const s = mkState({
+      endAge: 68, assets: [],
+      plan: {
+        client: { currentAge: 67 },
+        definedBenefits: [dbRow({ annualPension: 50000, commenceAt: { kind: "age", age: 90 } })], // never commences within this short window
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].agePensionDetail.dbAssessableIncome).toBe(0);
+    expect(out.yearly[0].agePensionDetail.otherIncome).toBe(0);
+  });
+
+  it("regression gate: no definedBenefits leaves the age pension assessment unaffected", () => {
+    const withDb = mkState({
+      endAge: 68, assets: [],
+      plan: { client: { currentAge: 67 }, definedBenefits: [dbRow({ annualPension: 0 })] },
+    });
+    const without = mkState({ endAge: 68, assets: [], plan: { client: { currentAge: 67 } } });
+    const outWith = projectPlan(withDb);
+    const outWithout = projectPlan(without);
+    expect(outWith.yearly[0].agePensionDetail.entitlement).toBeCloseTo(outWithout.yearly[0].agePensionDetail.entitlement, 2);
+  });
+});
+
 // --- Tier 1.2, Commit 2: caps, contributions tax, Division 293 --------------
 
 function scRow(over = {}) {

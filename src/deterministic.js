@@ -810,6 +810,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const dbTbaCredited = {};
   for (const db of dbRows) dbTbaCredited[db.id] = false;
 
+  // This FY's indexed annual amount for a defined benefit pension — a
+  // pure formula (fyStart/y only), shared by runYear's own monthly
+  // credit (real dollars/12 per month) and the age-pension income-test
+  // setup below (spec 26, Commit 3), which both need the IDENTICAL
+  // figure and must never independently re-derive it (a formula
+  // duplicated in two places is a formula that can silently drift).
+  function dbAnnualAmountFor(db, y) {
+    const dm = dbMeta[db.id];
+    const basisRate = dm.indexBasis === "awote" ? awoteAssum : dm.indexBasis === "cpi" ? cpi : 0;
+    const g = basisRate + (dm.indexExtraPct ?? 0) / 100;
+    return dm.annualPension * Math.pow((1 + g) / (1 + cpi), yearStartIdx(y) / 12);
+  }
+
   // Commutation events (spec 20, Commit 5) — resolved once per
   // commutation row, same "fires in July of its resolved plan year, or
   // never" convention as commencement just above. A pension can carry
@@ -1983,19 +1996,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       return paid;
     }
     // Defined benefit pensions (spec 26, Commit 2) — this FY's annual
-    // amount, indexed from the client's stated figure. A pure formula
-    // (fyStart/y only — no balance, no schedule dependency), so it is
+    // amount, via the shared dbAnnualAmountFor formula (outer scope) —
     // resolved here, directly, rather than in an outer per-year setup
     // the way pensionAnnualAmount needs (that one depends on a LIVE 1
-    // July balance; this one doesn't). Same indexation shape as a fixed-
-    // drawdown pension (resolvePensionThisYear's own `requested` line).
+    // July balance; this one doesn't).
     const dbAnnualAmountThisYear = {};
-    for (const db of dbRows) {
-      const dm = dbMeta[db.id];
-      const basisRate = dm.indexBasis === "awote" ? awoteAssum : dm.indexBasis === "cpi" ? cpi : 0;
-      const g = basisRate + (dm.indexExtraPct ?? 0) / 100;
-      dbAnnualAmountThisYear[db.id] = dm.annualPension * Math.pow((1 + g) / (1 + cpi), yearStartIdx(y) / 12);
-    }
+    for (const db of dbRows) dbAnnualAmountThisYear[db.id] = dbAnnualAmountFor(db, y);
     const recordUnfunded = (amount, m) => {
       if (amount <= 0) return;
       if (row) row.unfundedCashflow += amount;
@@ -4525,6 +4531,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         threshold: couple ? agePensionRatesY.couple.deemingThreshold : agePensionRatesY.single.deemingThreshold,
       });
       otherIncomeTotal += grandfatheredDeductibleIncome;
+      // Defined benefit pensions (spec 26, Commit 3) — income-test ONLY:
+      // never added to financialAssets/preAssessedSuper above (there is
+      // no account balance to assess — the spec's own point, "that
+      // asset-test exemption is a material planning advantage and is
+      // invisible unless modelled"), and bypasses deeming entirely,
+      // exactly the same shape the grandfathered-pension deductible-
+      // income figure just above already uses. Assessable = gross less
+      // its OWN deductible amount (the tax-free component) — the spec's
+      // own formula, distinct from the untaxed-element tax treatment
+      // (a Commit 2 concern; Centrelink never sees that split).
+      let dbAssessableIncomeTotal = 0;
+      for (const db of dbRows) {
+        if (dbCommenceMonth[db.id] == null || dbCommenceMonth[db.id] > yearStart(y)) continue;
+        const gross = dbAnnualAmountFor(db, y);
+        const deductible = gross * dbMeta[db.id].taxFreeProportion;
+        dbAssessableIncomeTotal += Math.max(0, gross - deductible);
+      }
+      otherIncomeTotal += dbAssessableIncomeTotal;
       const assessableIncomeTotal = agePensionAssessableIncome({ deemedIncome: deemedIncomeTotal, otherIncome: otherIncomeTotal });
 
       const assessment = couple
@@ -4553,6 +4577,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         entitlement: paid.client + paid.partner,
         grandfatheredDeductibleIncome: grandfatheredDeductibleIncome,
         grandfatheredDeemingExempt: grandfatheredDeemingExempt,
+        // Defined benefit pensions (spec 26, Commit 3) — the income-
+        // test-only assessable amount already folded into otherIncome
+        // above, reported separately so the Age pension table can show
+        // it as its own row ("income-test-only treatment" — the spec's
+        // own words).
+        dbAssessableIncome: dbAssessableIncomeTotal,
         client: {
           ageEligible: ageEligible.client, eligible: state.plan.client?.taxProfile?.centrelinkEligible !== false, paid: paid.client,
           workBonusExempt: workBonusExemptByOwner.client, workBonusBank: workBonusBank.client ?? 0,
