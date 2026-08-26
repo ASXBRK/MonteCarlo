@@ -1267,6 +1267,75 @@ producing a no-op arm indistinguishable from "Current plan" with no
 visible cue — fixed same session. Conservation holds across 5+ sweeps
 per commit.
 
+### Superannuation death benefits (spec 22, 3 commits)
+`8dbbc6e` lump sum tax on the terminal balance; `faa752c` reversionary
+pensions and the survivor's cap; `f4847d7` outputs and re-contribution
+comparison. Depended on Pension phase (spec 20) — reversionary pensions
+and the transfer balance account on death both need it. Explicitly NOT
+partner-death modelling (the spec's own words) — no projection branch,
+no survivor scenario; a terminal planning figure only, computed once
+against the FINAL projection year's already-closed balances: "if this
+balance passes to these beneficiaries, this is what they receive."
+
+`plan.<person>.deathBenefit = { beneficiaries: [{id, label,
+relationship, sharePct}] }` — a person-level election (like taxProfile/
+super), not a top-level row-list, since each person nominates
+beneficiaries for their OWN super/pension death benefit only.
+`relationship` (spouse/adultChild/minorChild/interdependent/
+financialDependant/estate) alone derives tax dependency — the user is
+never asked to classify dependant status directly, the spec's own
+"that is the part they get wrong." Tax: a dependant is NANE regardless
+of component; a non-dependant (the common, expensive case — an adult
+child) pays 15%/30% plus a flat 2% Medicare (no shading — there is no
+"other income" to shade against for a beneficiary this tool doesn't
+model as a taxpayer); the estate is taxed like a non-dependant but
+WITHOUT Medicare, the real, frequently-missed ATO distinction the
+spec's header calls out. Components sourced straight from the existing
+superTaxFree/pensionTaxFree tracking (fixed-at-commencement for a
+pension, live ratio for accumulation) — correct by construction, not
+re-derived. The untaxed element is disclosed as not modelled (this
+tool has no untaxed-source-fund concept), always 0, its own column.
+
+Reversionary pensions (spec 20 Commit 1's inert flag, given real
+consequences): continue directly to the spouse instead of being paid
+as a lump sum, NANE always; the transfer balance credit lands at the
+value AT THE DATE OF DEATH (this FY's closing balance, no further
+growth simulated) against the survivor's OWN transfer balance account
+(pensionTba.js's existing creditTransferBalance), with the excess and
+its notional tax rate flagged when it pushes the survivor over their
+own cap — the real planning issue. The twelve-month legal delay before
+the credit applies is disclosed as a timing fact only, never simulated.
+Input integrity: `reversionary` now resets to false with no partner in
+the household (meaningless with nobody to revert to).
+
+Outputs: a new Output table (a plain table, not the year-columns
+transposed-ledger machinery — this is a single terminal figure, not a
+year series) listing tax-free/taxable/tax/net per person per account
+per beneficiary share, reversionary pensions as their own rows, plus a
+household total; a new Focus → Death benefits view comparing the
+current nomination against alternative single-beneficiary types (a
+pure recombination of the same final-year components, no
+re-projection needed — deathBenefitTax() exported from deterministic.js
+so the two can never quietly diverge) and, when the plan already models
+an actual super withdrawal + non-concessional contribution pair, a
+re-contribution comparison (both arms real projectPlan() runs on
+clones) with a `cannotHelp` flag when every beneficiary is already a
+tax dependant. Non-prescriptive throughout: reports the tax difference
+and constraints, never labels a nomination or strategy as "better."
+
+Neither Commit 1's lump sum tax nor Commit 2's reversionary credit is a
+new money flow (both are terminal disclosures with no cash actually
+moving inside the projection), so randomScenario()/conservationCheck.js
+needed no extension for this spec. Browser-verified end to end
+(empty and populated states, both views, plus the re-contribution
+picker) with zero bugs found. Full suite green throughout (1390 tests
+at Commit 3).
+
+**Known gap, disclosed:** no dedicated input UI exists yet for adding/
+editing `plan.<person>.deathBenefit.beneficiaries` — settable via
+state/JSON import only. This matches gifts (spec 21b Commit 2), which
+has the identical gap; both are candidates for a future input-UI pass.
+
 ---
 
 ## WHERE WE'RE GOING
