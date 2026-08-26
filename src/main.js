@@ -74,6 +74,7 @@ import { eligibleSalarySacrificeRows, buildSalarySacrificeFocus } from "./focusS
 import { buildAgePensionStrategyFocus } from "./focusAgePensionStrategy.js";
 import { alternativeNominations, buildRecontributionFocus } from "./focusDeathBenefits.js";
 import { eligibleDebtPayoffLoans, buildDebtPayoffFocus, solveExtraRepaymentForPayoffDate } from "./focusDebtPayoff.js";
+import { eligibleDebtRecyclingLoans, buildDebtRecyclingFocus } from "./focusDebtRecycling.js";
 import {
   computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
   STAMP_DUTY_META, LMI_META, FHBG_META,
@@ -270,6 +271,7 @@ const els = {
   viewFocusFhsss: $("viewFocusFhsss"),
   viewFocusSalarySacrifice: $("viewFocusSalarySacrifice"),
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
+  viewFocusDebtRecycling: $("viewFocusDebtRecycling"),
   viewFocusSurplusAllocation: $("viewFocusSurplusAllocation"),
   viewFocusPprExemption: $("viewFocusPprExemption"),
   viewFocusAgePension: $("viewFocusAgePension"),
@@ -518,6 +520,7 @@ const OUTPUT_NAV = {
     { id: "focus-fhsss", label: "FHSSS" },
     { id: "focus-salary-sacrifice", label: "Salary sacrifice" },
     { id: "focus-debt-payoff", label: "Debt payoff" },
+    { id: "focus-debt-recycling", label: "Debt recycling" },
     { id: "focus-surplus-allocation", label: "Surplus allocation" },
     { id: "focus-ppr-exemption", label: "Main residence exemption" },
     { id: "focus-age-pension", label: "Age pension" },
@@ -6676,6 +6679,7 @@ const VIEW_MOUNTS = {
   "focus-fhsss": () => els.viewFocusFhsss,
   "focus-salary-sacrifice": () => els.viewFocusSalarySacrifice,
   "focus-debt-payoff": () => els.viewFocusDebtPayoff,
+  "focus-debt-recycling": () => els.viewFocusDebtRecycling,
   "focus-surplus-allocation": () => els.viewFocusSurplusAllocation,
   "focus-ppr-exemption": () => els.viewFocusPprExemption,
   "focus-age-pension": () => els.viewFocusAgePension,
@@ -6748,6 +6752,7 @@ function renderActiveView() {
   else if (activeView === "focus-fhsss") renderFocusFhsssView();
   else if (activeView === "focus-salary-sacrifice") renderFocusSalarySacrificeView();
   else if (activeView === "focus-debt-payoff") renderFocusDebtPayoffView();
+  else if (activeView === "focus-debt-recycling") renderFocusDebtRecyclingView();
   else if (activeView === "focus-surplus-allocation") renderFocusSurplusAllocationView();
   else if (activeView === "focus-ppr-exemption") renderFocusPprExemptionView();
   else if (activeView === "focus-age-pension") renderFocusAgePensionView();
@@ -9762,6 +9767,24 @@ function liabilityDetailRows(get, opts = {}) {
     // shows 0% throughout — it charges no interest, only indexation
     // (its own row above).
     ...(opts.combined ? [] : [{ label: "Interest rate (% p.a., nominal)", cell: (y) => get(y).ratePct ?? 0, pct: true }]),
+    // Drawdowns and dynamic deductibility (spec 24, Commit 3) — the
+    // point of the whole feature, invisible otherwise: how much of
+    // THIS loan's balance is currently investment- vs private-purpose.
+    // investmentBalance/privateBalance are reported for every liability
+    // regardless of whether it ever drew down (deterministic.js derives
+    // them from the STATIC opening split when dynamic tracking never
+    // engaged), so this row is meaningful even for a plain part-
+    // deductible loan. Summing across loans in the combined view still
+    // means something (a household-wide blended proportion), unlike
+    // the interest rate above — so it isn't excluded there.
+    {
+      label: "Deductible proportion", pct: true,
+      cell: (y) => {
+        const d = get(y);
+        const total = (d.investmentBalance ?? 0) + (d.privateBalance ?? 0);
+        return total > 0 ? (d.investmentBalance / total) * 100 : 0;
+      },
+    },
   ];
 }
 
@@ -9785,7 +9808,10 @@ function liabilitiesPayoffFooter(liabIds) {
 function buildLiabilitiesGroups(entity) {
   const yl = projection.yearly;
   const liabIds = Object.keys(yl[0]?.liabilities ?? {});
-  const zero = { opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, surplusRepayment: 0, indexation: 0, ratePct: 0 };
+  const zero = {
+    opening: 0, drawdown: 0, interest: 0, principal: 0, offsetApplied: 0, closing: 0, extraRepayment: 0,
+    surplusRepayment: 0, indexation: 0, ratePct: 0, investmentBalance: 0, privateBalance: 0,
+  };
 
   if (entity === "all") {
     const combined = liabilityDetailRows((y) => liabIds.reduce((s, lid) => {
@@ -11095,6 +11121,154 @@ els.viewFocusDebtPayoff.addEventListener("click", (e) => {
   saveState();
   refreshOutputs();
 });
+
+// --- Debt recycling (spec 24, Commit 3) -------------------------------------
+//
+// Every figure below is read straight off `projection` (and a SEPARATE
+// real projectPlan() run with recycling switched off) via
+// src/focusDebtRecycling.js's buildDebtRecyclingFocus — this file only
+// renders it. The strategy's own risk — the benefit depends on the
+// destination investment's return beating the after-tax cost of
+// carrying a larger loan — is stated here, in the view, not just
+// implied by the chart; non-prescriptive, as always: this shows what
+// the plan's own numbers do, it recommends nothing.
+let focusDebtRecyclingLoanId = null;
+
+function renderFocusDebtRecyclingView() {
+  const emptyMsg = "How a debt recycling plan converts non-deductible debt into deductible debt over time — the tax saved, the investment it builds, and when (if ever) it catches up to not recycling at all — add a loan with debt recycling enabled to see it.";
+  const loans = eligibleDebtRecyclingLoans(state);
+  if (loans.length === 0) {
+    els.viewFocusDebtRecycling.innerHTML = focusEmptyStateHTML(emptyMsg, "liabilities");
+    return;
+  }
+  if (!loans.some((l) => l.id === focusDebtRecyclingLoanId)) {
+    focusDebtRecyclingLoanId = loans[0].id;
+  }
+  const f = buildDebtRecyclingFocus({ out: projection, state, liabilityId: focusDebtRecyclingLoanId });
+  if (!f) {
+    els.viewFocusDebtRecycling.innerHTML = focusEmptyStateHTML(emptyMsg, "liabilities");
+    return;
+  }
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const breakEvenLine = f.breakEven
+    ? `${escapeHTML(f.breakEven.fyLabel)} (age ${f.breakEven.age})`
+    : "Not reached within this projection";
+
+  els.viewFocusDebtRecycling.innerHTML = `
+    <h2 class="section-heading">Debt recycling</h2>
+    ${loans.length > 1 ? `<div id="focusDebtRecyclingEntity" class="seg-toggle entity-select" role="tablist" aria-label="Loan"></div>` : ""}
+    <div class="focus-panel">
+      <div class="focus-section">
+        <p class="helper-warning">Debt recycling replaces non-deductible debt with deductible debt by redrawing repaid principal into an investment. The extra tax-deductible interest is not a free benefit: it comes with a larger ongoing loan balance than paying the loan off outright would leave, and whether it's worthwhile depends on the destination investment's own return exceeding the after-tax cost of that extra debt. Nothing here recommends the strategy — it shows what this plan's own numbers do, against the same plan without it.</p>
+      </div>
+      <div class="focus-section">
+        <h3>${escapeHTML(f.liability.name)}</h3>
+        <div class="summary-strip">
+          <div class="stat stat-headline"><div class="stat-label">Net worth catches up to not recycling</div><div class="stat-value">${breakEvenLine}</div></div>
+          <div class="stat"><div class="stat-label">Deductible interest this year</div><div class="stat-value">${fmtMoney(f.series[0].deductibleInterest * factor(0))}</div></div>
+          <div class="stat"><div class="stat-label">Extra tax saved this year</div><div class="stat-value">${fmtMoney(f.series[0].taxSaved * factor(0))}</div></div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Total loan balance: recycling vs not</h3>
+        <div id="focusDebtRecyclingDebtChart"></div>
+      </div>
+      <div class="focus-section">
+        <h3>Destination investment: recycling vs not</h3>
+        <div id="focusDebtRecyclingInvestChart"></div>
+      </div>
+    </div>
+  `;
+  if (loans.length > 1) {
+    renderEntitySelector(
+      $("focusDebtRecyclingEntity"),
+      loans.map((l) => ({ id: l.id, label: l.name })),
+      focusDebtRecyclingLoanId,
+      (id) => { focusDebtRecyclingLoanId = id; renderFocusDebtRecyclingView(); }
+    );
+  }
+  renderFocusDebtRecyclingCharts(f, factor);
+}
+
+function focusDebtRecyclingChartLayout(ages, yTitle) {
+  return {
+    margin: { l: 70, r: 20, t: 24, b: 40 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `${yTitle} (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  };
+}
+
+function renderFocusDebtRecyclingCharts(f, factor) {
+  const debtEl = $("focusDebtRecyclingDebtChart");
+  const investEl = $("focusDebtRecyclingInvestChart");
+  if (typeof Plotly === "undefined") {
+    if (debtEl) debtEl.innerHTML = chartUnavailableHTML();
+    if (investEl) investEl.innerHTML = chartUnavailableHTML();
+    return;
+  }
+  const ages = f.series.map((r) => r.age);
+  if (debtEl) {
+    Plotly.react(debtEl, [
+      {
+        x: ages, y: f.series.map((r) => r.totalDebt * factor(r.year)), name: "With recycling",
+        type: "scatter", mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2 },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>With recycling</extra>",
+      },
+      {
+        x: ages, y: f.series.map((r) => r.totalDebtWithout * factor(r.year)), name: "Without recycling",
+        type: "scatter", mode: "lines", line: { color: "rgb(217, 90, 40)", width: 2, dash: "dash" },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Without recycling</extra>",
+      },
+    ], focusDebtRecyclingChartLayout(ages, "Total loan balance"), { displayModeBar: false, responsive: true });
+  }
+  if (investEl) {
+    Plotly.react(investEl, [
+      {
+        x: ages, y: f.series.map((r) => r.investmentBalance * factor(r.year)), name: "With recycling",
+        type: "scatter", mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2 },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>With recycling</extra>",
+      },
+      {
+        x: ages, y: f.series.map((r) => r.investmentBalanceWithout * factor(r.year)), name: "Without recycling",
+        type: "scatter", mode: "lines", line: { color: "rgb(217, 90, 40)", width: 2, dash: "dash" },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Without recycling</extra>",
+      },
+    ], focusDebtRecyclingChartLayout(ages, "Destination investment balance"), { displayModeBar: false, responsive: true });
+  }
+}
+
+function exportFocusDebtRecyclingCSV() {
+  const f = buildDebtRecyclingFocus({ out: projection, state, liabilityId: focusDebtRecyclingLoanId });
+  if (!f) return;
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lines = [
+    ["Section", "Item", "Value"].map(csvEsc).join(","),
+    [csvEsc(f.liability.name), csvEsc("Net worth catches up to not recycling"), csvEsc(f.breakEven ? `${f.breakEven.fyLabel} (age ${f.breakEven.age})` : "Not reached within this projection")].join(","),
+  ];
+  lines.push("", [
+    "Year", "Age", "FY",
+    "Deductible interest (with)", "Deductible interest (without)", "Extra tax saved",
+    "Total debt (with)", "Total debt (without)",
+    "Investment balance (with)", "Investment balance (without)",
+  ].map(csvEsc).join(","));
+  for (const r of f.series) {
+    const fac = factor(r.year);
+    lines.push([
+      r.year, r.age, csvEsc(r.fyLabel),
+      (r.deductibleInterest * fac).toFixed(2), (r.deductibleInterestWithout * fac).toFixed(2), (r.taxSaved * fac).toFixed(2),
+      (r.totalDebt * fac).toFixed(2), (r.totalDebtWithout * fac).toFixed(2),
+      (r.investmentBalance * fac).toFixed(2), (r.investmentBalanceWithout * fac).toFixed(2),
+    ].join(","));
+  }
+  downloadCSV("focus-debt-recycling", lines);
+}
 
 // --- Surplus and deficit allocation, Focus view (spec 16, Commit 3) --------
 //
@@ -12854,6 +13028,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-fhsss") exportFocusFhsssCSV();
   else if (activeView === "focus-salary-sacrifice") exportFocusSalarySacrificeCSV();
   else if (activeView === "focus-debt-payoff") exportFocusDebtPayoffCSV();
+  else if (activeView === "focus-debt-recycling") exportFocusDebtRecyclingCSV();
   else if (activeView === "focus-surplus-allocation") exportFocusSurplusAllocationCSV();
   else if (activeView === "focus-ppr-exemption") exportFocusPprExemptionCSV();
   else if (activeView === "focus-lookups") exportFocusLookupsCSV();

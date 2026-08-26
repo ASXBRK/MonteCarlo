@@ -37,6 +37,17 @@ export function buildEquityFocus({ out, state }) {
     return { year: y, age: out.schedule.clientAges[y], fyLabel: out.schedule.fyLabels[y], byProperty, total };
   });
 
+  // Drawdowns and debt recycling (spec 24, Commits 1/2) — usableEquity
+  // (property value × ceiling − the SECURED loan's own closing balance)
+  // already reflects a drawdown or a recycling redraw for free: both
+  // increase the loan's closing balance directly, deterministic.js
+  // never recomputes usableEquity separately for them. This is purely a
+  // disclosure note so the Debt drawdowns/recycling view and this one
+  // agree about how much room is left, not a second calculation.
+  const drawingDown = (state.liabilities ?? []).filter((l) =>
+    properties.some((p) => p.id === l.linkedAssetId) && ((l.drawdowns?.length ?? 0) > 0 || l.recycling?.enabled === true)
+  );
+
   return {
     properties: properties.map((p) => ({ id: p.id, name: p.name, equityCeilingPct: p.equityCeilingPct })),
     byYear,
@@ -44,5 +55,8 @@ export function buildEquityFocus({ out, state }) {
     // filtered to this concern — read through, never recomputed.
     warnings: (out.propertyWarnings ?? []).filter((w) => w.type === "insufficientEquity"),
     disclosure: "Usable equity is a security constraint only — the amount a lender would typically lend against a property's value, net of what's already owed. It is not a serviceability assessment: a lender also tests income against the loan, which this tool does not model. Nothing here implies a purchase is approvable.",
+    drawdownNote: drawingDown.length > 0
+      ? `A drawdown or debt recycling plan against ${drawingDown.map((l) => l.name).join(", ")} is already reducing the usable equity shown here — the same balance increase both views read from.`
+      : null,
   };
 }

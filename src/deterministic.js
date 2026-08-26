@@ -2774,13 +2774,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           // Snapshot, not a sum — overwritten every month so it holds
           // the year-end value, same convention as closing.
           row.liabilities[l.id].offsetApplied = offsetNom * defl;
-          // Drawdowns and dynamic deductibility (spec 24, Commit 1) —
-          // same snapshot convention; 0/0 for a liability that never
-          // uses dynamic deductibility (investBal/privateBal don't
-          // exist for it at all).
-          if (md.usesDynamicDeductibility) {
-            row.liabilities[l.id].investmentBalance = investBal[l.id] * defl;
-            row.liabilities[l.id].privateBalance = privateBal[l.id] * defl;
+          // Drawdowns and dynamic deductibility (spec 24, Commits 1/3) —
+          // same snapshot convention. Reported for EVERY liability, not
+          // just one using dynamic tracking (investBal/privateBal don't
+          // exist for the others) — derived from currentDeductibleFraction
+          // either way, so the Liabilities table's own "deductible
+          // proportion" row has one uniform field to read regardless of
+          // whether this loan ever drew down or recycled.
+          {
+            const frac = currentDeductibleFraction(l.id);
+            // Deflated at inflAt(m+1), matching `closing`'s OWN deflator
+            // (liabSeries[l.id][m+1] = b1/inflAt(m+1)) exactly — using
+            // `defl` (1/inflAt(m), this month's own factor) here instead
+            // would leave a small but real one-month CPI mismatch
+            // against `closing`, since both read the SAME b1.
+            const closingDefl = 1 / inflAt(m + 1);
+            row.liabilities[l.id].investmentBalance = b1 * closingDefl * frac;
+            row.liabilities[l.id].privateBalance = b1 * closingDefl * (1 - frac);
           }
           // Nominal annual rate applying THIS month (Commit 1) —
           // rollover always lands on a plan-year boundary (July), so a

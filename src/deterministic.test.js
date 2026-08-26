@@ -8782,8 +8782,15 @@ describe("Loan drawdowns and dynamic deductibility (spec 24, Commit 1)", () => {
     const a = projectPlan(s);
     const b = projectPlan(s);
     expect(a).toEqual(b);
-    expect(a.yearly[0].liabilities.lb1.investmentBalance).toBe(0); // dynamic tracking never engaged
-    expect(a.yearly[0].liabilities.lb1.privateBalance).toBe(0);
+  });
+
+  it("investmentBalance/privateBalance are reported for EVERY liability (spec 24, Commit 3's own Liabilities table row needs this), not just one using dynamic tracking — derived from the static opening split when dynamic tracking never engaged", () => {
+    const s = withLoan(loan({ deductiblePct: 35 }));
+    const out = projectPlan(s);
+    const row = out.yearly[0].liabilities.lb1;
+    const total = row.investmentBalance + row.privateBalance;
+    expect(total).toBeCloseTo(row.closing, 2);
+    expect(row.investmentBalance / total).toBeCloseTo(0.35, 6);
   });
 });
 

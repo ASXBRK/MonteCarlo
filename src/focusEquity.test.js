@@ -128,6 +128,19 @@ describe("buildEquityFocus", () => {
     expect(f.disclosure).toMatch(/not a serviceability assessment/i);
   });
 
+  it("notes when a drawdown or recycling plan against a linked loan is already consuming usable equity (spec 24, Commit 3)", () => {
+    const withDrawdown = mkState({
+      properties: [prop()],
+      liabilities: [loan({ drawdowns: [{ id: "dd1", amount: 20000, at: { kind: "age", age: 40 }, purpose: "investment", destination: "cash" }] })],
+    });
+    const f1 = buildEquityFocus({ out: projectPlan(withDrawdown), state: withDrawdown });
+    expect(f1.drawdownNote).toMatch(/Home loan/);
+
+    const plain = mkState({ properties: [prop()], liabilities: [loan()] });
+    const f2 = buildEquityFocus({ out: projectPlan(plain), state: plain });
+    expect(f2.drawdownNote).toBeNull();
+  });
+
   it("never mutates the caller's state", () => {
     const state = mkState({ properties: [prop()], liabilities: [loan()] });
     const before = JSON.stringify(state);
