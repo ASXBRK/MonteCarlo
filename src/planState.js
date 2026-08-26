@@ -1243,6 +1243,21 @@ export function createLiability(plan, existing = []) {
     creditLimit: null,
     drawdowns: [],
     repaymentAllocation: "proportional",
+    // Debt recycling (spec 24, Commit 2) — surplus pays down the home
+    // loan, an equal amount is redrawn for investment, converting
+    // non-deductible interest into deductible without changing total
+    // debt. from/to bound WHEN the strategy runs each year;
+    // destinationAssetId is where the redraw lands; matchRepayments is
+    // the whole point of the strategy (redraw = principal repaid this
+    // FY) — false pauses the redraw without disabling the plan outright.
+    recycling: {
+      enabled: false,
+      from: anchorRef("start"),
+      to: anchorRef("end"),
+      destinationAssetId: null,
+      matchRepayments: true,
+      annualCap: null,
+    },
   };
 }
 
@@ -1321,6 +1336,24 @@ export function clampDrawdown(d, plan, destinationIds) {
   };
 }
 
+// Debt recycling (spec 24, Commit 2) — destinationAssetId is a
+// financial asset only (never lifestyle — the same rule fundingOrder/
+// surplus-invest already enforce), dropped (not coerced) when it
+// doesn't resolve, same as clampBonusDestination's own rule; a dropped
+// destination effectively disables the redraw (deterministic.js has
+// nowhere to send it), same "falls through" shape a dangling bonus
+// destination already has.
+function clampRecycling(r, plan, financialIds) {
+  const { from, to } = clampFromTo(r ?? {}, plan.client.currentAge, plan.endAge, plan);
+  return {
+    enabled: r?.enabled === true,
+    from, to,
+    destinationAssetId: financialIds.has(r?.destinationAssetId) ? r.destinationAssetId : null,
+    matchRepayments: r?.matchRepayments !== false,
+    annualCap: r?.annualCap == null ? null : clampNumber(r.annualCap, 0),
+  };
+}
+
 export function clampLiability(l, plan, assets, properties = []) {
   const financialIds = new Set(assets.filter((a) => isFinancial(a)).map((a) => a.id));
   // linkedAssetId may reference any asset OR a property (D4).
@@ -1389,6 +1422,7 @@ export function clampLiability(l, plan, assets, properties = []) {
     // silently allow or silently forbid — deterministic.js surfaces the
     // warning; this only stores the choice.
     repaymentAllocation: l.repaymentAllocation === "privateFirst" ? "privateFirst" : "proportional",
+    recycling: clampRecycling(l.recycling, plan, financialIds),
   };
 }
 

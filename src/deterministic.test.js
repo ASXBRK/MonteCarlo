@@ -2875,6 +2875,22 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           destination: pick(["cash", pick(assets).id]),
         });
       }
+      // Debt recycling (spec 24, Commit 2) — a genuine new money flow
+      // (a redraw moves money into its destination asset, marked
+      // investment-purpose, offset by the SAME increase to the loan
+      // balance — the identical shape a Commit 1 drawdown already is,
+      // see conservationCheck.js's own header). annualCap spans
+      // unset/generous/tight (sometimes well below what a year's own
+      // principal repayment would be, exercising the cap-binding path);
+      // destinationAssetId sometimes dangling (falls through, no
+      // redraw at all).
+      liab.recycling = {
+        enabled: Math.random() < 0.3,
+        from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
+        destinationAssetId: pick([...assets.map((a) => a.id), "nonexistent"]),
+        matchRepayments: Math.random() < 0.9,
+        annualCap: pick([null, rand(100, 30000)]),
+      };
       liabilities.push(liab);
     }
 
@@ -8768,5 +8784,106 @@ describe("Loan drawdowns and dynamic deductibility (spec 24, Commit 1)", () => {
     expect(a).toEqual(b);
     expect(a.yearly[0].liabilities.lb1.investmentBalance).toBe(0); // dynamic tracking never engaged
     expect(a.yearly[0].liabilities.lb1.privateBalance).toBe(0);
+  });
+});
+
+// --- Spec 24, Commit 2: debt recycling --------------------------------------
+
+describe("Debt recycling (spec 24, Commit 2)", () => {
+  const loan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 400000, interestRatePct: 6, termYears: 25, repayment: "pi",
+    ioYears: 0, deductiblePct: 0, linkedAssetId: null, offsetAssetId: null,
+    extraRepayments: [], oneOffRepayments: [],
+    creditLimit: null, drawdowns: [], repaymentAllocation: "proportional",
+    recycling: {
+      enabled: true, from: { kind: "age", age: 40 }, to: { kind: "age", age: 60 },
+      destinationAssetId: "a1", matchRepayments: true, annualCap: null,
+    },
+    ...over,
+  });
+  const withLoan = (l, years = 6) => ({
+    ...mkState({
+      endAge: 40 + years, assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 0 })],
+      // Ample income so the mortgage's own contractual repayment never
+      // needs deficit-funding from a1 itself — that would drain the
+      // SAME asset the redraw credits, confounding "grows by the
+      // redrawn amount" with an unrelated withdrawal.
+      cashflows: { income: [employmentRow({ amount: 200000, sgApplies: false, to: { kind: "age", age: 40 + years } })] },
+    }),
+    liabilities: [l],
+  });
+  const ratio = (row) => {
+    const total = row.investmentBalance + row.privateBalance;
+    return total > 0 ? row.investmentBalance / total : 0;
+  };
+
+  it("total debt stays flat (nominal) once recycling is running — the redraw replaces the repaid principal", () => {
+    const out = projectPlan(withLoan(loan()));
+    // The reported closing balance is REAL dollars (this engine's own
+    // convention), so even a NOMINALLY flat recycled loan still shows
+    // some real-dollar decay from ordinary CPI erosion — the same
+    // "liabilityRevaluation" effect any fixed-nominal debt has,
+    // recycled or not (CLAUDE.md's own locked convention). Isolate the
+    // recycling-specific claim by comparing against a PLAIN
+    // interest-only loan of the identical balance/rate: an IO loan's
+    // nominal balance is ALSO exactly flat, so if recycling is truly
+    // replacing principal like-for-like, the two should decay at
+    // essentially the same real rate — not diverge like a genuinely
+    // amortising loan would.
+    const io = projectPlan(withLoan(loan({ repayment: "io", ioYears: 25, recycling: { ...loan().recycling, enabled: false } })));
+    expect(out.yearly[3].liabilities.lb1.closing).toBeCloseTo(io.yearly[3].liabilities.lb1.closing, -3);
+  });
+
+  it("without recycling, the SAME loan's balance declines normally — the contrast that makes 'stays flat' meaningful", () => {
+    const withRecycling = projectPlan(withLoan(loan()));
+    const without = projectPlan(withLoan(loan({ recycling: { ...loan().recycling, enabled: false } })));
+    expect(without.yearly[3].liabilities.lb1.closing).toBeLessThan(without.yearly[0].liabilities.lb1.closing - 1000);
+    expect(withRecycling.yearly[3].liabilities.lb1.closing).toBeGreaterThan(without.yearly[3].liabilities.lb1.closing + 1000);
+  });
+
+  it("the deductible proportion climbs each cycle — every redraw is marked investment-purpose", () => {
+    const out = projectPlan(withLoan(loan()));
+    const r0 = ratio(out.yearly[0].liabilities.lb1);
+    const r1 = ratio(out.yearly[1].liabilities.lb1);
+    const r2 = ratio(out.yearly[2].liabilities.lb1);
+    expect(r1).toBeGreaterThan(r0);
+    expect(r2).toBeGreaterThan(r1);
+  });
+
+  it("the destination asset grows by the redrawn amounts", () => {
+    const out = projectPlan(withLoan(loan()));
+    // Started at $0 — every dollar in it by year 3 came from redraws.
+    expect(out.yearly[3].perAssetDetail.a1.closing).toBeGreaterThan(0);
+    const totalRedrawn = [0, 1, 2, 3].reduce((s, y) => s + out.yearly[y].liabilities.lb1.drawdown, 0);
+    expect(out.yearly[3].perAssetDetail.a1.closing).toBeCloseTo(totalRedrawn, 0);
+  });
+
+  it("the annual cap binds — a cap below the repaid principal redraws only the capped amount, and total debt no longer stays flat", () => {
+    const uncapped = projectPlan(withLoan(loan()));
+    const capped = projectPlan(withLoan(loan({ recycling: { ...loan().recycling, annualCap: 500 } })));
+    // A tiny cap ($500/yr against a $400k loan's own ~$15k/yr principal)
+    // redraws far less — the loan actually shrinks over time.
+    expect(capped.yearly[3].liabilities.lb1.closing).toBeLessThan(uncapped.yearly[3].liabilities.lb1.closing - 5000);
+    expect(capped.yearly[3].liabilities.lb1.closing).toBeLessThan(capped.yearly[0].liabilities.lb1.closing);
+  });
+
+  it("interest deductions rise in step with the growing investment-purpose balance", () => {
+    const out = projectPlan(withLoan(loan()));
+    // Same nominal interest rate/balance each year (recycling keeps the
+    // TOTAL flat) — only the DEDUCTIBLE portion changes, so a growing
+    // ratio directly implies growing deductible interest.
+    const y0 = out.yearly[0].liabilities.lb1;
+    const y2 = out.yearly[2].liabilities.lb1;
+    const deductibleInterest = (row) => row.interest * (row.investmentBalance / (row.investmentBalance + row.privateBalance));
+    expect(deductibleInterest(y2)).toBeGreaterThan(deductibleInterest(y0));
+  });
+
+  it("regression gate: a liability with recycling disabled is unaffected by the field's mere presence", () => {
+    const disabled = loan({ recycling: { ...loan().recycling, enabled: false } });
+    const noField = loan({ recycling: undefined });
+    const a = projectPlan(withLoan(disabled));
+    const b = projectPlan(withLoan(noField));
+    expect(a.yearly[3].liabilities.lb1.closing).toBeCloseTo(b.yearly[3].liabilities.lb1.closing, 2);
   });
 });

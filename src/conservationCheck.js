@@ -300,6 +300,17 @@
 // this one was found by running the sweep, not by inspection, exactly
 // the point of extending randomScenario() BEFORE trusting the reasoning.
 //
+// Debt recycling (spec 24, Commit 2) — a redraw here is EXACTLY the
+// same shape as a Commit 1 drawdown (money moves into a destination
+// asset, offset by the same increase to the loan balance, marked
+// investment-purpose), just resolved dynamically each FY from that
+// year's own principal repayment instead of a fixed user-entered
+// amount — it reuses the identical drawdownIncomeThisMonth/
+// drawdownAssetCredits channel, so it needs no term of its own either.
+// Verified across hundreds of randomised runs (randomScenario() enables
+// recycling on ~30% of generated liabilities, with a sometimes-tight
+// annualCap and a sometimes-dangling destination) with NO new named term.
+//
 // Monte Carlo's random return shocks (Session B) touch none of the
 // terms above except `row.growth`/superDetail's earnings figures
 // themselves — those are accumulated from whatever return was actually

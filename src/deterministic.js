@@ -1007,7 +1007,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // deductible loan, with no drawdown at all). Every other liability
     // — the entire pre-Commit-1 universe — never allocates these,
     // guaranteeing the regression gate exactly, not approximately.
-    const usesDynamicDeductibility = (l.drawdowns?.length ?? 0) > 0 || l.repaymentAllocation === "privateFirst";
+    // Debt recycling (spec 24, Commit 2) — a recycling plan is the
+    // THIRD thing (alongside a drawdown and privateFirst) that can move
+    // the deductible proportion away from its opening value, so it ALSO
+    // engages dynamic tracking. Bounds resolved once here, same as
+    // fixedUntil/rolloverYear above.
+    const recycling = l.recycling?.enabled ? {
+      fromYear: resolveRef(l.recycling.from, state.plan, schedule, "client").planYear,
+      toYear: resolveRef(l.recycling.to, state.plan, schedule, "client").planYear,
+      destinationAssetId: l.recycling.destinationAssetId,
+      matchRepayments: l.recycling.matchRepayments !== false,
+      annualCap: l.recycling.annualCap ?? null,
+    } : null;
+    const usesDynamicDeductibility = (l.drawdowns?.length ?? 0) > 0 || l.repaymentAllocation === "privateFirst" || !!recycling;
     liabMeta[l.id] = {
       i,
       termM,
@@ -1019,6 +1031,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       usesDynamicDeductibility,
       repaymentAllocation: l.repaymentAllocation === "privateFirst" ? "privateFirst" : "proportional",
       creditLimit: l.creditLimit ?? null,
+      recycling,
       shares: ownerShares(l, couple),
       propertyId: l.propertyId ?? null, // interest joins that property's gearing calc
       rateType, revertRate, rolloverMonth, rolloverYear,
@@ -2778,6 +2791,59 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           // correct: HELP charges no interest, only indexation.
           row.liabilities[l.id].ratePct = rate * 12 * 100;
           liabSeries[l.id][m + 1] = b1 / inflAt(m + 1);
+        }
+      }
+
+      // Debt recycling (spec 24, Commit 2) — resolved once per FY, at
+      // its LAST month, right here (BEFORE household net/inc below, so
+      // its cash credit can flow through drawdownIncomeThisMonth the
+      // same way an ordinary drawdown's does). Redraws an amount equal
+      // to THIS FY's contractual + extra principal reduction (NOT the
+      // FY-end surplus-allocation sweep further below, which hasn't run
+      // yet at this point in the month — a disclosed scope: recycling
+      // matches ordinary amortisation/extra repayments, not also a
+      // separate surplus-sweep targeting the same loan in the same FY),
+      // capped at annualCap and at whatever credit-limit headroom
+      // remains, marked investment-purpose (the whole point of the
+      // strategy), and directed to its destination asset. Real-pass
+      // only, same convention as every other bucket/loanBal mutation —
+      // a structurally invalid/unresolved destination falls through
+      // (no redraw at all, the same "falls through" shape a dangling
+      // bonus destination already has).
+      if (row && m === last - 1) {
+        for (const l of liabs) {
+          const rec = liabMeta[l.id].recycling;
+          if (!rec || y < rec.fromYear || y > rec.toYear || !rec.matchRepayments) continue;
+          if (!rec.destinationAssetId || !(rec.destinationAssetId in bal)) continue;
+          const repaidThisFy = row.liabilities[l.id].principal + row.liabilities[l.id].extraRepayment;
+          if (repaidThisFy <= 0) continue;
+          const requestedReal = rec.annualCap != null ? Math.min(repaidThisFy, rec.annualCap) : repaidThisFy;
+          const inflNow = inflAt(m);
+          const requestedNominal = requestedReal * inflNow;
+          const limit = liabMeta[l.id].creditLimit;
+          const headroomNominal = limit == null ? Infinity : Math.max(0, limit * inflNow - loanBal[l.id]);
+          const actualNominal = Math.min(requestedNominal, headroomNominal);
+          if (actualNominal <= 0) continue;
+          loanBal[l.id] += actualNominal;
+          investBal[l.id] += actualNominal; // "mark it investment-purpose" — the spec's own words
+          // liabSeries[l.id][m+1] (→ row.liabilities[l.id].closing) was
+          // already written by the liability loop above, BEFORE this
+          // redraw — re-stamp it now, or the reported closing balance
+          // (and hence liabilitiesClosing/netAssets) would understate
+          // the redraw for this exact FY, even though loanBal itself
+          // (what next year's own amortisation actually starts from)
+          // is already correct.
+          liabSeries[l.id][m + 1] = loanBal[l.id] / inflAt(m + 1);
+          const actualReal = actualNominal / inflNow;
+          if (actualReal < requestedReal - 1e-6) {
+            drawdownWarnings.push({
+              liabilityId: l.id, type: "creditLimitBound",
+              reason: `${l.name ?? "This loan"}: debt recycling's redraw exceeds the facility limit — only $${Math.round(actualReal).toLocaleString()} of $${Math.round(requestedReal).toLocaleString()} redrawn`,
+            });
+          }
+          row.liabilities[l.id].drawdown += actualReal;
+          drawdownIncomeThisMonth += actualReal;
+          drawdownAssetCredits.push({ destination: rec.destinationAssetId, amount: actualReal });
         }
       }
 

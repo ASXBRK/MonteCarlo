@@ -2696,3 +2696,61 @@ describe("Loan drawdowns and dynamic deductibility (spec 24, Commit 1): plan mod
     expect(l.drawdowns[0].purpose).toBe("investment");
   });
 });
+
+describe("Debt recycling (spec 24, Commit 2): plan model", () => {
+  it("createLiability defaults recycling to disabled with no destination", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const l = createLiability(plan, []);
+    expect(l.recycling.enabled).toBe(false);
+    expect(l.recycling.destinationAssetId).toBeNull();
+    expect(l.recycling.matchRepayments).toBe(true);
+    expect(l.recycling.annualCap).toBeNull();
+  });
+
+  it("clampLiability: destinationAssetId is dropped (not coerced) when it doesn't resolve to a financial asset", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const assets = [
+      { id: "a1", class: "financial", include: true },
+      { id: "ls1", class: "lifestyle", include: true },
+    ];
+    const withValid = clampLiability({ recycling: { enabled: true, destinationAssetId: "a1" } }, plan, assets);
+    expect(withValid.recycling.destinationAssetId).toBe("a1");
+    const withLifestyle = clampLiability({ recycling: { enabled: true, destinationAssetId: "ls1" } }, plan, assets);
+    expect(withLifestyle.recycling.destinationAssetId).toBeNull(); // lifestyle never a valid destination
+    const withDangling = clampLiability({ recycling: { enabled: true, destinationAssetId: "nonexistent" } }, plan, assets);
+    expect(withDangling.recycling.destinationAssetId).toBeNull();
+  });
+
+  it("clampLiability: matchRepayments defaults true (only an explicit false pauses it); annualCap null means uncapped", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(clampLiability({ recycling: {} }, plan, []).recycling.matchRepayments).toBe(true);
+    expect(clampLiability({ recycling: { matchRepayments: false } }, plan, []).recycling.matchRepayments).toBe(false);
+    expect(clampLiability({ recycling: { annualCap: -500 } }, plan, []).recycling.annualCap).toBe(0);
+    expect(clampLiability({ recycling: { annualCap: 20000 } }, plan, []).recycling.annualCap).toBe(20000);
+  });
+
+  it("clampLiability tolerates a missing recycling field entirely (pre-Commit-2 raw state)", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(() => clampLiability({}, plan, [])).not.toThrow();
+    expect(clampLiability({}, plan, []).recycling.enabled).toBe(false);
+  });
+
+  it("hydrate round-trips a liability's recycling plan", () => {
+    const s = defaultState(PROFILES, NOW);
+    const asset2 = { ...createAsset(s.plan, s.assets, PROFILES), id: "a2" };
+    s.assets.push(asset2);
+    const liability = createLiability(s.plan, []);
+    s.liabilities = [{
+      ...liability, balance: 400000,
+      recycling: {
+        enabled: true, from: { kind: "age", age: 40 }, to: { kind: "age", age: 55 },
+        destinationAssetId: "a2", matchRepayments: true, annualCap: 15000,
+      },
+    }];
+    const back = hydrate(serialize(s), PROFILES);
+    const rec = back.liabilities[0].recycling;
+    expect(rec.enabled).toBe(true);
+    expect(rec.destinationAssetId).toBe("a2");
+    expect(rec.annualCap).toBe(15000);
+  });
+});
