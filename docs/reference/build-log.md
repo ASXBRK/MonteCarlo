@@ -3,8 +3,8 @@
 Repo `ASXBRK/MonteCarlo`, branch `claude/monte-carlo-investment-app-R9XSB`.
 Rewritten stock-take, grouped by area rather than by spec — the specs
 themselves (`docs/specs/`) hold the full commit-by-commit reasoning; this
-file is the map of where things landed. 192 commits in, branch head at
-time of writing `8eaeb50`.
+file is the map of where things landed. 229 commits in, branch head at
+time of writing `317f9ec`.
 
 This file is updated in the SAME commit as the work it describes, per
 CLAUDE.md's Workflow rules ("Keep `docs/reference/build-log.md` current:
@@ -1488,16 +1488,103 @@ pension's own established convention. Full suite 1598 tests at Commit
 3 close-out; conservation sweep and the decomposition-reconciliation
 sweep both clean across 5+ runs.
 
-**Known gap, disclosed, across specs 25/26:** no dedicated input UI
-exists yet for bonds/superRollovers (spec 25/26 Commit 1) or
-definedBenefits (spec 26 Commit 2) — settable via state/JSON import
-only, the identical gap gifts and death-benefit beneficiaries already
-carry. The Pensions/Age pension/Key figures table output work spec 26
-Commit 3 describes is likewise not yet wired into main.js — the engine
-produces every figure those tables would need
-(`row.definedBenefitDetail`, the 16× transfer balance credit,
-`agePensionDetail.dbAssessableIncome`), but the view-rail wiring itself
-is deferred. All are candidates for a future input/output-UI pass.
+**Gap closed by spec 27 (UI gap sweep, below):** the input UI for
+bonds/superRollovers/definedBenefits/gifts/death-benefit beneficiaries
+named here as missing, and the Pensions/Age pension/Key figures table
+output work spec 26 Commit 3 described but never wired, all landed —
+see the spec 27 entry below.
+
+### UI gap sweep (spec 27, 5 commits)
+`365ab26` defined benefit pensions and super rollovers; `5873c31` gifts
+and death benefit nominations; `7031e47` investment and education
+bonds; `034f446` outstanding output views; `a1ab5a9` reachability test
+and verification.
+
+Closed the input-UI gap disclosed above (spec 26's own entry): a
+defined-benefit-pension card (own commencement, tax components, and
+the 16× transfer-balance-cap credit shown distinctly at entry, e.g.
+"$80,000 pa uses $1,280,000 of your transfer balance cap"); super
+rollovers as a new cashflow-row kind (from/to account, whole-balance-
+or-amount, a live untaxed→taxed rollover-tax estimate); a household-
+level Gifts block in Settings (no natural "Age pension" input section
+exists, so this resolves the spec's own open question) with the live
+$10,000/yr and $30,000/five-year running position and deprived amount;
+per-person death-benefit-nomination editors in Tax details (share %
+clamped to remaining headroom so the total can never exceed 100%,
+mirroring the surplus-allocation percentage field's own convention;
+tax dependency derived from relationship and shown directly, never
+asked for); bond cards + contributions in Investment cashflows, with
+the ten-year date and 125% headroom shown live, sourced straight off
+engine output. Output-side: the Pensions table gained a "Defined
+benefit" group (gross/deductible/assessable — deliberately no "tax"
+row, since the engine assesses tax at the whole-of-person level with
+no per-DB-pension figure to show) and the 16× TBA credit as a distinct
+footnote; the Age pension table gained the already-computed
+`dbAssessableIncome` as its own row; Key figures gained a DB-income
+line (explicitly not a balance); the Cashflow table (and Snapshot/
+Compare via `cashflowStatement.js`) gained DB income and a Gifts
+outflow row, with the DB pension's genuinely-assessable portion folded
+into Assessable Income's own total (unlike the age pension row, which
+stays display-only) so Taxable Income keeps reconciling to what Tax on
+Taxable Income was actually calculated on.
+
+Found and fixed along the way, all disclosed as reachability gaps
+rather than new engine work: `router.js`'s `OUTPUT_VIEWS`/
+`OUTPUT_SUBJECT_FORMS` never listed bonds, focus-debt-recycling, or
+focus-education-funding — all three were fully built (specs 24/25) but
+`resolveRoute()` silently bounced every visit back to Setup, and
+`router.test.js`'s own coverage assertions had been asserting the
+broken list as correct; `createDeathBenefitBeneficiary()` defaulted
+every new beneficiary to 100% regardless of what was already nominated
+(inert until this spec built the UI to add a second one, at which
+point it would have silently double-counted); the Super output table
+never displayed `rolloverIn`/`rolloverOut`/`rolloverTax` despite the
+engine computing them since spec 26 Commit 1, so a rolled-over account
+never reconciled visibly. **Known gap, disclosed, found by the new
+reachability test (Commit 5), NOT fixed here:** `plan.employers` (spec
+23) has zero reachable UI anywhere in `main.js` — no input section, no
+output view, no employerId control on an income row — pre-dating this
+spec and outside its own five-commit scope; documented via a
+deliberately-failing (`it.fails`) test that will itself start failing,
+forcing an update, the moment someone builds it.
+
+### Conservation generator: boundary coverage (spec 28, 2 commits)
+`f41b63c` threshold-aware value generation; `317f9ec` coverage
+reporting and threshold rule.
+
+`randomScenario()` (`src/deterministic.test.js`) now draws every
+registered threshold's value from 5 strata — wellBelow/justBelow/at/
+justAbove/wellAbove around it — instead of a uniform range that might
+never land near a boundary by chance: every tax bracket/Medicare-
+shading/MLS/HELP/LITO/Division-293/296 boundary; the concessional cap,
+carry-forward TSB gate, every bring-forward tier (incl. the ~$2.1m nil
+tier that hid a real bug), the untaxed plan cap, contribution age
+limits, preservation/release age; minimum-drawdown age bands and the
+transfer balance cap; age-pension assets/income-test thresholds,
+deeming, the Work Bonus's own exempt-annual input, gifting, age
+pension age; the 80% LMI/LVR boundary, a land tax threshold; the bond
+ten-year date and 125% contribution cap; the projection's own start
+month (previously always July). Added 6 degenerate states (zero
+balances; a single-year projection; no income; every asset excluded; a
+liability larger than all assets; an unfundable goal) and a fourth age
+cohort landing near a boundary age. Two spec-named items are
+deliberately NOT in the tight registry, disclosed in code: the Work
+Bonus BANK figures ($0/$11,800) are a path-dependent accumulated
+output no single input draw can stratify (the $7,800 exempt-annual
+INPUT that drives it is registered instead); "exactly one year"
+doesn't fit a 5-stratum model (no valid "well below 1") and is covered
+as a degenerate-state presence case instead. A new coverage-report
+test runs a real 2,000-scenario sweep, prints the per-threshold hit
+table, and fails if any registered threshold has an unexercised
+stratum — CLAUDE.md's "new money flow" rule gained a parallel "new
+threshold" rule requiring the same discipline going forward.
+
+Defects found: **none** — a 3,000-scenario sweep (Commit 1) and a
+2,000-scenario sweep (Commit 2), both plus every degenerate state,
+passed conservation cleanly. The two blind spots that motivated this
+spec (the FY-final-month super-drawdown ordering bug; the bring-
+forward-nil-tier NCC rejection) were already fixed in earlier work;
+this pass found no third instance of the class.
 
 ---
 
