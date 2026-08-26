@@ -1338,6 +1338,169 @@ has the identical gap; both are candidates for a future input-UI pass.
 
 ---
 
+### Income completeness (spec 23, 4 commits)
+`1e7632d` employers as a first-class concept; `6c1fb82` bonus,
+allowance and overtime income types; `a98299b` salary packaging by
+employer type; `dbdfdad` novated leases.
+
+`plan.employers = [{id, name, ownerId}]` — SG and the maximum
+contribution base now apply PER EMPLOYER, not to a person's aggregated
+income (two $200k jobs generate SG on both, up to the cap on each).
+Bonus/allowance/overtime are now distinct income categories: a bonus
+pays once, in a nominated month, and can be directed
+(loanRepayment/superContribution/asset) via `bonusDestination`, its
+after-tax amount resolved by differencing two isolated-employment
+`assessPerson` calls; an allowance carries its own `taxable` flag;
+**overtime is assessable but never generates SG** — forced off in both
+`clampIncomeRow` and defensively in schedule.js's own SG-loop filter,
+closing the "SG on all employment income" gap the user's own briefing
+flagged directly (shift-worker overtime was overstating super before
+this commit). Salary packaging: `employer.fbtType`
+(standard/fbtExempt/fbtRebatable) with independent living-expense/meal-
+entertainment caps; novated leases get their own always-FBT-liable
+statutory-formula calculation regardless of employer type. **The FBT
+caps are NOT in the firm reference at all** (unlike every other
+indicative figure in this file) — `employer.fbtCaps` therefore carries
+NO built-in default, not even an indicative one: both start at 0
+(nothing exempt) until the adviser enters the real, current ATO figure.
+Reportable fringe benefits correctly feed HELP/MLS/Division 293 income
+— "the sting" that packaging can increase, not just decrease, a
+client's obligations elsewhere.
+
+None of these four commits needed a new conservation term (SG-cap
+grouping, bonus/lease cash costs and FBT all reuse existing pockets —
+each checked against and confirmed, not assumed). Full suite 1450
+tests at Commit 4 close-out; conservation sweep clean throughout.
+
+### Drawdowns and debt recycling (spec 24, 3 commits)
+`c3e837c` loan drawdowns and dynamic deductibility; `5ee11f7` debt
+recycling; `2e066e2` outputs and Focus view.
+
+"Deductibility follows the USE of borrowed funds, not the security" —
+`deductiblePct` becomes the OPENING investment/private split, engine-
+derived from there via two live nominal buckets that always sum to the
+loan's own balance. Repayments reduce both buckets PROPORTIONALLY by
+default (keeps the deductible proportion constant, the legally correct
+reading); `repaymentAllocation: "privateFirst"` reduces the private
+bucket first instead — **permitted on a single mixed loan, but flagged
+as an aggressive assumption the ATO wouldn't accept**, exactly the
+"permit and disclose, neither silently allow nor silently forbid"
+instruction this feature was built against. Debt recycling
+(`liability.recycling`) redraws the FY's own repaid principal (or an
+annual cap) into a destination asset, marking it investment-purpose,
+so the deductible proportion climbs every cycle while total nominal
+debt stays flat. A drawdown's cash/asset side needed a genuine fix, not
+just a check, mid-Commit-1: the conservation sweep caught a gap exactly
+equal to the drawdown amount from an initial "credit the destination
+directly" attempt, fixed by routing through the SAME non-assessable
+`inc` channel HEAS's own drawdown already used. Outputs: Liabilities
+table gains investment/private balance columns and a Deductible
+proportion row; Focus → Debt recycling compares the recycled plan
+against the same plan without recycling (years-to-break-even = first
+year the recycled arm's own netAssets catches up), stating the
+strategy's real risk (total debt does not fall) in the view itself.
+Full suite 1479 tests at Commit 2; conservation sweep clean across 10+
+runs (5 reproduced the drawdown-credit bug every time before the fix,
+5 confirmed it gone after).
+
+### Investment and education bonds (spec 25, 3 commits)
+`5545705` structure, tax, and the ten-year/125% rules; `12a1163`
+engine integration and outputs; `a896449` education bonds and the
+funding comparison.
+
+A top-level `bonds` array (sibling of assets/liabilities, this
+codebase's own convention) with the ten-year maturity clock, the 125%
+contribution-cap rule, and the internal 30%-less-franking tax
+(`bonds.js`, pure). Growth nets the internal tax haircut; only gains
+are taxed (no fund-level CGT discount modelled, disclosed). Bonds
+participate in deficit funding on the same footing as any financial
+asset; an unmatured bond's withdrawal earnings are assessed via a NEW
+`pendingBondTax` mechanism mirroring `pendingCgt` exactly — required
+for the same structural reason CGT has its own one-year lag (a deficit
+sale's exact size depends on that month's real tax outflow, which the
+measurement pass never simulates, so the two passes can genuinely draw
+different amounts; the first version of this wiring sized the tax from
+the measurement pass and was wrong, caught by a full standalone
+reproduction). Education bonds recover the internal tax on withdrawals
+used for eligible education expenses (`bondEducationBenefit`, the
+verified $30-per-$70 mechanic — see the "Unverified data" note below
+for how this was checked and what remains unconfirmed) and auto-fund a
+linked child's own modelled fee schedule. Focus → Education funding
+runs the SAME seed lump sum through three real `projectPlan()` clones —
+an ordinary taxable asset, a plain investment bond, an education bond —
+explicitly flagging whenever a bond arm ends up worse than saving
+outside one (verified against a deliberately low-marginal-rate
+scenario). Full suite green throughout; conservation sweep and the net
+worth decomposition's exact-reconciliation sweep both clean across
+10+ runs.
+
+### Defined benefit superannuation (spec 26, 3 commits)
+`8432826` untaxed superannuation elements; `79fb638` defined benefit
+pensions; `11398ab` Centrelink treatment and outputs.
+
+Untaxed-status super accounts (`taxedStatus: "untaxed"` — West State
+Super and similar): no 15% contributions/earnings tax inside the fund;
+a post-60 benefit (withdrawal or rollover) is instead assessed on the
+member, on its untaxed-element proportion, against a lifetime per-
+person cap (`superRates.js`'s already-CONFIRMED `untaxedPlanCap`,
+reused directly, never hardcoded) — 15% offset within the cap, a flat
+47% above it, via a NEW `pendingUntaxedSuperTax` mechanism mirroring
+`pendingBondTax`. A rollover crystallises the SAME 15%/47% as a direct
+fund-level tax (no lag — it's not a personal income-tax event at all).
+Found and fixed along the way: a REJECTED non-concessional
+contribution was debiting the FULL requested amount from household
+cash while crediting only the accepted portion to super — a pre-
+existing, unrelated latent bug this spec's own cap-boundary fixture
+newly exposed (a client's TSB had never before approached the bring-
+forward "nil" tier in `randomScenario()`), closed at its source
+(`superContribCashOut` now sized off the accepted amount).
+
+`plan.definedBenefits` — a WA state-scheme pension the client's own
+statement states (no source account, no balance: "we do not compute
+what the fund's actuary computes"). **The transfer balance account
+credits at the pension's special value, annual pension × 16 — NOT the
+pension amount itself** — the canonical trap this spec named directly
+("getting this wrong... understates cap usage sixteenfold"), verified
+by a dedicated test. The untaxed element is assessable with its OWN
+10% offset (distinct from the untaxed-lump-sum 15%); the taxed element
+is tax-free from commencement. **The defined benefit income cap is NOT
+a standalone firm-reference figure** — the spec's own $125,000 is
+stale against the current $2,100,000 general transfer balance cap, so
+it is instead DERIVED as that cap ÷ 16 (ITAA97 s307-462(3)), computed
+fresh per FY so it moves with the SAME indexation the GTBC already
+gets — a stronger basis than either a bare assertion or a manual-
+override placeholder, and disclosed as such in `superRates.js`'s own
+header. Where a person's DB income exceeds the derived cap, 50% of the
+excess is added to assessable income with no offset. Notional taxed
+contributions consume concessional cap headroom while the member is
+still accruing (before their own commencement) without crediting any
+account (grandfathering of that cap is disclosed, not modelled).
+Centrelink: income-test-only, never an assessable asset (structurally
+guaranteed — a DB pension is never merged into any account list the
+assets test reads), assessable income = gross less its own deductible
+amount, mirroring the existing grandfathered-pension pattern exactly.
+A first attempt at a dedicated `dbPensionInflow` conservation term
+double-counted the DB payment (it is credited directly into `inc`, the
+same channel `agePensionMonthly` already uses, and was therefore
+already inside `row.income`) — caught immediately by the net-worth-
+decomposition reconciliation sweep and reverted in favour of the age
+pension's own established convention. Full suite 1598 tests at Commit
+3 close-out; conservation sweep and the decomposition-reconciliation
+sweep both clean across 5+ runs.
+
+**Known gap, disclosed, across specs 25/26:** no dedicated input UI
+exists yet for bonds/superRollovers (spec 25/26 Commit 1) or
+definedBenefits (spec 26 Commit 2) — settable via state/JSON import
+only, the identical gap gifts and death-benefit beneficiaries already
+carry. The Pensions/Age pension/Key figures table output work spec 26
+Commit 3 describes is likewise not yet wired into main.js — the engine
+produces every figure those tables would need
+(`row.definedBenefitDetail`, the 16× transfer balance credit,
+`agePensionDetail.dbAssessableIncome`), but the view-rail wiring itself
+is deferred. All are candidates for a future input/output-UI pass.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
@@ -1388,6 +1551,30 @@ has the identical gap; both are candidates for a future input-UI pass.
   on this for advice. The gross-up rate (1.8868) and the FBT rate (47%)
   are the ATO's own long-standing statutory constants, not caps, and are
   built in.
+- **Education bond benefit mechanics** (`bonds.js`'s `bondEducationBenefit`,
+  spec 25 Commit 3) — direct fetch of a PDS or ATO page was blocked by
+  this environment's own egress controls for every provider/ATO/
+  financial-media domain tried. The specific numeric mechanic built
+  ("$30 recovered for every $70 withdrawn from the earnings component,
+  for an eligible education expense") is corroborated across two
+  independent web searches that both surfaced the SAME figure quoted
+  from a named provider's own education-bond materials (Australian
+  Unity's Lifeplan Education Bond) — judged adequate to implement the
+  real mechanic rather than falling back to the plain-investment-bond
+  treatment, but this is corroboration, not a primary-source
+  confirmation. Confirm against the actual PDS before relying on this
+  for advice. Not modelled at all (no source found either way): any
+  annual/lifetime cap on the benefit itself.
+- **Defined benefit income cap** (`superRates.js`'s `dbIncomeCap`, spec
+  26 Commit 2) — not a standalone firm-reference figure; DERIVED as the
+  general transfer balance cap ÷ 16 (ITAA97 s307-462(3)), which the
+  au-fy-figures skill's own current $131,250 figure confirms exactly
+  against the $2,100,000 GTBC already in this file. A stronger basis
+  than a bare assertion, but still confirm against the firm's own
+  current published DB income cap before relying on this for advice —
+  particularly in a year the GTBC itself hasn't just moved, where a
+  directly-published cap could in principle diverge from the derived
+  one.
 
 ### Deferred — do not build
 
