@@ -3212,6 +3212,47 @@ function deductionRowHTML(r) {
   `;
 }
 
+// Bond contributions (spec 25, Commit 1 engine; spec 27 Commit 3 UI) —
+// flat, bondId-referencing rows under cashflows.bondContributions, the
+// SAME convention super's own contributions/withdrawals use (planState
+// .js's own header) — so this fits the generic CF_MOUNTS row machinery
+// (rowHTMLFor/applyRowEdit) with a bondId select in place of the
+// ordinary assetId one, plus a Label column bond contributions carry
+// that plain asset contributions don't.
+function bondOptions(selected) {
+  const bonds = state.bonds ?? [];
+  if (bonds.length === 0) return `<option value="">No bond entered yet</option>`;
+  return bonds.map((b) => `<option value="${b.id}"${b.id === selected ? " selected" : ""}>${escapeHTML(b.name)}</option>`).join("");
+}
+
+function bondContributionRowHTML(bc) {
+  return `
+    <tr class="cf-tr" data-cfid="${bc.id}">
+      <td class="cf-td-label">
+        <input type="text" value="${escapeHTML(bc.label)}" maxlength="60"
+               data-kind="bondContributions" data-cfid="${bc.id}" data-field="label" />
+      </td>
+      <td class="cf-td-asset">
+        <select data-kind="bondContributions" data-cfid="${bc.id}" data-field="bondId">${bondOptions(bc.bondId)}</select>
+      </td>
+      ${amountTdHTML("bondContributions", bc.id, bc.amount)}
+      <td class="cf-td-freq">
+        <select data-kind="bondContributions" data-cfid="${bc.id}" data-field="frequency">
+          <option value="monthly"${bc.frequency === "monthly" ? " selected" : ""}>Monthly</option>
+          <option value="annual"${bc.frequency === "annual" ? " selected" : ""}>Annual</option>
+        </select>
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(bc.from, "client", `data-kind="bondContributions" data-cfid="${bc.id}" data-field="from"`, 18, 120)}</td>
+      <td class="cf-td-date">${dateRefControlHTML(bc.to, "client", `data-kind="bondContributions" data-cfid="${bc.id}" data-field="to"`, 18, 120)}</td>
+      ${indexationTdHTML("bondContributions", bc)}
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="bondContributions" data-cfid="${bc.id}">×</button>
+      </td>
+    </tr>
+  `;
+}
+
 function contributionRowHTML(kind, cf) {
   return `
     <tr class="cf-tr" data-cfid="${cf.id}">
@@ -3362,6 +3403,7 @@ const cfHeaders = {
   contributions: () => `<th>Asset</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
   withdrawals: () => `<th>Asset</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
   lumpSums: () => `<th>Asset</th><th>Amount ($)</th><th>Direction</th><th>At</th>`,
+  bondContributions: () => `<th>Label</th><th>Bond</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
   // No Indexation column — dropped to a second line beneath each row
   // (Cashflow sections: table layout, point 6) — this section alone
   // has too many columns to fit it on the same line at 1280px.
@@ -3479,13 +3521,15 @@ function renderCashflows() {
     "Add expenses to model the household's regular spending."
   );
 
-  const allEmpty = cf.contributions.length === 0 && cf.withdrawals.length === 0 && cf.lumpSums.length === 0;
+  const bonds = state.bonds ?? [];
+  const allEmpty = cf.contributions.length === 0 && cf.withdrawals.length === 0 && cf.lumpSums.length === 0
+    && bonds.length === 0 && (cf.bondContributions ?? []).length === 0;
   els.investSection.innerHTML = allEmpty
     ? `
       <h2 class="section-heading">Investment cashflows</h2>
       ${pageEmptyHTML(
-        "Add contributions, withdrawals, or one-off amounts to model cashflows into and out of your assets.",
-        `${addRowBtn("contributions", "Add contribution")}${addRowBtn("withdrawals", "Add withdrawal")}${addRowBtn("lumpSums", "Add one-off amount")}`
+        "Add contributions, withdrawals, or one-off amounts to model cashflows into and out of your assets, or a bond to model a tax-paid investment or education bond.",
+        `${addRowBtn("contributions", "Add contribution")}${addRowBtn("withdrawals", "Add withdrawal")}${addRowBtn("lumpSums", "Add one-off amount")}<button class="add-row-btn" type="button" data-bond-action="add">+ Add bond</button>`
       )}
     `
     : `
@@ -3500,8 +3544,341 @@ function renderCashflows() {
             cf.lumpSums.map(lumpSumRowHTML).join(""))}
         </div>
       </div>
+      ${bondsBlockHTML(bonds, cf)}
     `;
 }
+
+// --- Investment and education bonds (spec 25 engine; spec 27 Commit 3 UI) --
+//
+// Cards mirror the super-account card shape (a .pcard per bond,
+// direct-mutate-then-saveState, same as els.superSection) — bonds have
+// the same "named vehicle with a balance, an allocation, and its own
+// contribution rows" shape super accounts do, not a single asset-
+// targeted cashflow row. Lives inside "Investment cashflows"
+// (els.investSection) since there is no dedicated bonds INPUT section
+// (router.js's own INPUT_SECTIONS has none) — investment cashflows is
+// where every other financial-vehicle contribution/withdrawal already
+// lives.
+function findBond(bdid) {
+  return (state.bonds ?? []).find((b) => b.id === bdid) ?? null;
+}
+
+function bondHeadMeta(b) {
+  const ownerLabel = b.owner === "partner" ? partnerName() : b.owner === "joint" ? "Joint" : clientName();
+  const typeLabel = b.type === "education" ? "Education bond" : "Investment bond";
+  return `${ownerLabel} · ${typeLabel} · ${fmtMoney(b.balance)}`;
+}
+
+// The ten-year date and the 125% contribution headroom are the two
+// things the spec requires be visible AT ENTRY — both read straight off
+// the engine's own already-computed bondDetail (year 0's snapshot, "as
+// at" the projection's first FY) rather than re-derived here, the same
+// "every figure already exists in projectPlan() output" principle
+// spec 27 states for itself. Any contributionCapBreach warning for this
+// bond (bondWarnings — computed by the engine, never surfaced by any UI
+// until this commit) is shown directly beneath.
+function bondLiveInfoHTML(b) {
+  const detail = projection?.yearly?.[0]?.bondDetail?.[b.id];
+  const warnings = (projection?.bondWarnings ?? []).filter((w) => w.bondId === b.id);
+  const infoLine = detail
+    ? `${detail.yearsToMaturity.toFixed(1)} years to the ten-year date · ${fmtMoney(detail.contributionHeadroom)} contribution headroom before next FY resets the clock (as at ${escapeHTML(projection.schedule.fyLabels[0])})`
+    : "";
+  return `
+    ${infoLine ? `<p class="helper-text">${infoLine}</p>` : ""}
+    ${warnings.map((w) => `<p class="helper-warning">${escapeHTML(w.reason)}</p>`).join("")}
+  `;
+}
+
+function bondAllocationSectionHTML(b) {
+  const alloc = b.allocation;
+  const isCustom = alloc.mode === "custom";
+  const seg = `
+    <div class="seg-toggle" role="radiogroup" aria-label="Allocation mode">
+      <button class="seg-option${!isCustom ? " active" : ""}" type="button"
+              data-bond-action="alloc-mode" data-bdid="${b.id}" data-mode="profile"
+              aria-pressed="${!isCustom}">Firm profile</button>
+      <button class="seg-option${isCustom ? " active" : ""}" type="button"
+              data-bond-action="alloc-mode" data-bdid="${b.id}" data-mode="custom"
+              aria-pressed="${isCustom}">Custom</button>
+    </div>
+  `;
+  if (!isCustom) {
+    return `
+      <div class="cf-section">
+        <div class="cf-section-title">Allocation</div>
+        ${seg}
+        <div class="alloc-grid alloc-grid-profile">
+          <div class="cf-cell">
+            <label>Risk profile</label>
+            <select data-bdid="${b.id}" data-bdfield="alloc.profile">${profileOptions(alloc.profile)}</select>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  const total = (alloc.incomePct + alloc.growthPct).toFixed(2);
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Allocation</div>
+      ${seg}
+      <div class="alloc-grid">
+        <div class="cf-cell">
+          <label>Income (% p.a.)</label>
+          <input type="number" min="0" max="${ALLOC_PCT_MAX}" step="0.05" value="${alloc.incomePct}"
+                 data-bdid="${b.id}" data-bdfield="alloc.incomePct" />
+        </div>
+        <div class="cf-cell">
+          <label>Growth (% p.a.)</label>
+          <input type="number" min="0" max="${ALLOC_PCT_MAX}" step="0.05" value="${alloc.growthPct}"
+                 data-bdid="${b.id}" data-bdfield="alloc.growthPct" />
+        </div>
+        <div class="cf-cell">
+          <label>Franking (%)</label>
+          <input type="number" min="0" max="100" step="1" value="${alloc.frankingPct}"
+                 data-bdid="${b.id}" data-bdfield="alloc.frankingPct" />
+        </div>
+        <div class="cf-cell alloc-total">
+          <label>&nbsp;</label>
+          <div class="alloc-total-value" data-role="bondAllocTotal-${b.id}">Total: ${total}% p.a. nominal</div>
+        </div>
+      </div>
+      <div class="alloc-grid alloc-grid-vol">
+        <div class="cf-cell">
+          <label>Volatility basis</label>
+          <select data-bdid="${b.id}" data-bdfield="alloc.volBasis">${profileOptions(alloc.volBasis)}</select>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function bondCardHTML(b) {
+  const isCollapsed = collapsed.get(b.id) === true;
+  const excluded = !b.include;
+  const head = `
+    <div class="pcard-head" data-bond-action="toggle-collapse" data-bdid="${b.id}">
+      <button class="pcard-chevron${isCollapsed ? "" : " open"}" type="button"
+              aria-label="${isCollapsed ? "Expand" : "Collapse"}"
+              data-bond-action="toggle-collapse" data-bdid="${b.id}">▸</button>
+      <span class="pcard-name" data-role="bondHeadName">${escapeHTML(b.name)}</span>
+      <span class="pcard-meta" data-role="bondHeadMeta">${bondHeadMeta(b)}</span>
+      <label class="pcard-include" title="Include in projection totals">
+        <input type="checkbox"${b.include ? " checked" : ""}
+               data-bond-action="toggle-include" data-bdid="${b.id}" />
+        <span>Include</span>
+      </label>
+      <button class="pcard-remove" type="button" data-bond-action="remove" data-bdid="${b.id}">Remove</button>
+    </div>
+  `;
+  if (isCollapsed) {
+    return `<div class="pcard${excluded ? " excluded" : ""}" data-bdid="${b.id}">${head}</div>`;
+  }
+  const children = state.plan.children ?? [];
+  return `<div class="pcard${excluded ? " excluded" : ""}" data-bdid="${b.id}">${head}
+    <div class="pcard-body">
+      <div class="pcard-details${isCouple() ? " with-owner" : ""}">
+        <div class="cf-cell pcard-name-cell">
+          <label>Name</label>
+          <input type="text" value="${escapeHTML(b.name)}" maxlength="60" data-bdid="${b.id}" data-bdfield="name" />
+        </div>
+        <div class="cf-cell">
+          <label>Type</label>
+          <select data-bdid="${b.id}" data-bdfield="type">
+            ${BOND_TYPES.map((t) => `<option value="${t}"${b.type === t ? " selected" : ""}>${t === "education" ? "Education bond" : "Investment bond"}</option>`).join("")}
+          </select>
+        </div>
+        ${isCouple() ? `
+          <div class="cf-cell">
+            <label>Owner</label>
+            <select data-bdid="${b.id}" data-bdfield="owner">
+              <option value="client"${b.owner === "client" ? " selected" : ""}>${escapeHTML(clientName())}</option>
+              <option value="partner"${b.owner === "partner" ? " selected" : ""}>${escapeHTML(partnerName())}</option>
+              <option value="joint"${b.owner === "joint" ? " selected" : ""}>Joint</option>
+            </select>
+          </div>
+        ` : ""}
+        <div class="cf-cell">
+          <label>Balance ($)</label>
+          <input type="number" min="0" step="1000" value="${b.balance}" data-bdid="${b.id}" data-bdfield="balance" />
+        </div>
+        <div class="cf-cell">
+          <label>Start date ${tooltipHTML("When the ten-year rule's clock started — this can be well before the projection's own start date for a bond you already hold.")}</label>
+          <input type="date" value="${b.startDate}" data-bdid="${b.id}" data-bdfield="startDate" />
+        </div>
+        <div class="cf-cell">
+          <label>ICR (% p.a.)</label>
+          <input type="number" min="0" max="100" step="0.01" value="${b.icrPct}" data-bdid="${b.id}" data-bdfield="icrPct" />
+        </div>
+        ${b.type === "education" ? `
+          <div class="cf-cell">
+            <label>Beneficiary child ${tooltipHTML("Links this bond to one child's own Education funding rows (Children section) — withdrawals used for that child's education fees get the education-benefit treatment.")}</label>
+            <select data-bdid="${b.id}" data-bdfield="beneficiaryChildId">
+              <option value="">No child linked yet</option>
+              ${children.map((c) => `<option value="${c.id}"${b.beneficiaryChildId === c.id ? " selected" : ""}>${escapeHTML(c.name)}</option>`).join("")}
+            </select>
+            ${children.length === 0 ? `<p class="helper-text">Add a child (Children section) to link this bond to their education funding.</p>` : ""}
+          </div>
+        ` : ""}
+      </div>
+
+      ${bondAllocationSectionHTML(b)}
+      ${bondLiveInfoHTML(b)}
+    </div>
+  </div>`;
+}
+
+function bondsBlockHTML(bonds, cf) {
+  const cards = bonds.map(bondCardHTML).join("");
+  return `
+    <div class="ff-section">
+      <div class="ff-head"><h2 class="section-heading">Bonds</h2></div>
+      ${bonds.length === 0 ? "" : `<div class="portfolio-stack">${cards}</div>`}
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-bond-action="add">+ Add bond</button>
+      </div>
+      ${bonds.length > 0 ? `
+        <div class="cf-panel">
+          ${ffSubsectionHTML("Contributions", "bondContributions", "Add contribution", cfHeaders.bondContributions(),
+            (cf.bondContributions ?? []).map(bondContributionRowHTML).join(""))}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+// Applies a simple (non-structural) field edit to a bond. Returns true
+// when the change is structural (needs a full re-render — owner/type
+// switch changes select options elsewhere, education linkage appearing/
+// disappearing, etc.) — same true/false contract as
+// applySuperAccountEdit.
+function applyBondEdit(b, field, el, commit) {
+  switch (field) {
+    case "name":
+      b.name = commit ? (el.value.trim() || b.name) : el.value;
+      if (commit) el.value = b.name;
+      return false;
+    case "type":
+      if (BOND_TYPES.includes(el.value)) {
+        b.type = el.value;
+        if (b.type !== "education") b.beneficiaryChildId = null;
+      }
+      return true;
+    case "owner":
+      if (["client", "partner", "joint"].includes(el.value) && (el.value === "client" || state.plan.partner)) b.owner = el.value;
+      return false;
+    case "balance":
+      b.balance = clampNumber(el.value, 0);
+      if (commit) el.value = b.balance;
+      return false;
+    case "startDate":
+      if (el.value) b.startDate = el.value;
+      return false;
+    case "icrPct":
+      b.icrPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = b.icrPct;
+      return false;
+    case "beneficiaryChildId":
+      b.beneficiaryChildId = (state.plan.children ?? []).some((c) => c.id === el.value) ? el.value : null;
+      return false;
+    case "alloc.profile":
+      b.allocation = clampAllocation({ mode: "profile", profile: el.value }, PROFILES);
+      return false;
+    case "alloc.incomePct":
+      b.allocation.incomePct = clampNumber(el.value, 0, ALLOC_PCT_MAX);
+      if (commit) el.value = b.allocation.incomePct;
+      refreshBondAllocTotal(b.id);
+      return false;
+    case "alloc.growthPct":
+      b.allocation.growthPct = clampNumber(el.value, 0, ALLOC_PCT_MAX);
+      if (commit) el.value = b.allocation.growthPct;
+      refreshBondAllocTotal(b.id);
+      return false;
+    case "alloc.frankingPct":
+      b.allocation.frankingPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = b.allocation.frankingPct;
+      return false;
+    case "alloc.volBasis":
+      if (Object.keys(PROFILES).includes(el.value)) b.allocation.volBasis = el.value;
+      return false;
+    default:
+      return false;
+  }
+}
+
+function refreshBondAllocTotal(bdid) {
+  const b = findBond(bdid);
+  if (!b || b.allocation.mode !== "custom") return;
+  const el = document.querySelector(`[data-role="bondAllocTotal-${bdid}"]`);
+  if (el) el.textContent = `Total: ${(b.allocation.incomePct + b.allocation.growthPct).toFixed(2)}% p.a. nominal`;
+}
+
+els.investSection.addEventListener("input", (e) => {
+  const bdid = e.target.dataset.bdid;
+  const bdfield = e.target.dataset.bdfield;
+  if (!bdid || !bdfield) return;
+  const b = findBond(bdid);
+  if (!b) return;
+  applyBondEdit(b, bdfield, e.target, false);
+  saveState();
+  refreshOutputs();
+});
+
+els.investSection.addEventListener("change", (e) => {
+  const bdid = e.target.dataset.bdid;
+  const bdfield = e.target.dataset.bdfield;
+  if (!bdid || !bdfield) return;
+  const b = findBond(bdid);
+  if (!b) return;
+  const structural = applyBondEdit(b, bdfield, e.target, true);
+  saveState();
+  refreshOutputs();
+  if (structural) renderCashflows();
+});
+
+els.investSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-bond-action]");
+  if (!btn) return;
+  const action = btn.dataset.bondAction;
+  if (action === "add") {
+    const owner = isCouple() && (state.bonds ?? []).some((b) => b.owner === "client") ? "partner" : "client";
+    state.bonds = [...(state.bonds ?? []), { ...createBond(state.plan, state.bonds ?? [], PROFILES), owner }];
+    saveState();
+    refreshOutputs();
+    renderCashflows();
+    return;
+  }
+  const bdid = btn.dataset.bdid;
+  const b = findBond(bdid);
+  if (!b) return;
+  switch (action) {
+    case "toggle-collapse":
+      if (e.target.closest(".pcard-include") || e.target.closest(".pcard-remove")) return;
+      collapsed.set(bdid, !(collapsed.get(bdid) === true));
+      renderCashflows();
+      break;
+    case "toggle-include":
+      b.include = e.target.checked;
+      saveState();
+      els.investSection.querySelector(`.pcard[data-bdid="${bdid}"]`)?.classList.toggle("excluded", !b.include);
+      refreshOutputs();
+      break;
+    case "remove":
+      if (!window.confirm(`Remove "${b.name}"? Its contribution rows will be deleted too.`)) return;
+      state.bonds = state.bonds.filter((x) => x.id !== bdid);
+      state.cashflows.bondContributions = (state.cashflows.bondContributions ?? []).filter((c) => c.bondId !== bdid);
+      collapsed.delete(bdid);
+      saveState();
+      refreshOutputs();
+      renderCashflows();
+      break;
+    case "alloc-mode":
+      switchAllocMode(b, btn.dataset.mode === "custom" ? "custom" : "profile");
+      saveState();
+      renderCashflows();
+      refreshOutputs();
+      break;
+  }
+});
 
 // --- settings section ------------------------------------------------------
 
@@ -4271,6 +4648,9 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "assetId":
       if (findAsset(el.value)) row.assetId = el.value;
       break;
+    case "bondId":
+      if ((state.bonds ?? []).some((b) => b.id === el.value)) row.bondId = el.value;
+      break;
     case "accountId":
       if ((state.plan.superAccounts ?? []).some((s) => s.id === el.value)) row.accountId = el.value;
       break;
@@ -4452,6 +4832,7 @@ function rowHTMLFor(kind, row) {
   if (kind === "superContributions") return superContributionRowHTML(row);
   if (kind === "superWithdrawals") return superWithdrawalRowHTML(row);
   if (kind === "superRollovers") return superRolloverRowHTML(row);
+  if (kind === "bondContributions") return bondContributionRowHTML(row);
   return contributionRowHTML(kind, row);
 }
 
@@ -4743,6 +5124,8 @@ function onCashflowSectionClick(e) {
     } else if (kind === "superRollovers") {
       const owner = isCouple() && (cf.superRollovers ?? []).some((r) => findSuperAccount(r.fromAccountId)?.owner === "client") ? "partner" : "client";
       cf.superRollovers = [...(cf.superRollovers ?? []), createSuperRollover(state.plan, state.plan.superAccounts ?? [], owner)];
+    } else if (kind === "bondContributions") {
+      cf.bondContributions = [...(cf.bondContributions ?? []), createBondContribution(state.plan, state.bonds ?? [])];
     }
     saveState();
     if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
