@@ -1586,6 +1586,43 @@ spec (the FY-final-month super-drawdown ordering bug; the bring-
 forward-nil-tier NCC rejection) were already fixed in earlier work;
 this pass found no third instance of the class.
 
+### Employers UI (spec 23 Commit 1, gap closed)
+`2f119bd` input UI and per-income-row assignment.
+
+Closes the gap disclosed above and by spec 27 Commit 5's reachability
+test (an `it.fails`): `plan.employers` existed in `planState.js`
+(`createEmployer`, `resolveEmployerAssignment`, per-employer FBT caps)
+with zero reachable UI, so per-employer SG, the maximum contribution
+base, and salary packaging by employer type all computed correctly and
+could not be configured. Added: a per-person Employers block in Tax
+details (name, FBT type, and — when exempt/rebatable — cap fields,
+with "Cap not set — enter your employer's current cap" replacing a
+silent zero); an employer select on employment income rows defaulting
+to the owner's first employer, with a live derived note ("SG 12% on
+$X, capped at the maximum contribution base for this employer");
+migration handled by the pre-existing `resolveEmployerAssignment`, plus
+eager resolution at three live-edit sites (add-row, category change,
+employerId edit) so a mid-session edit never sees a stale assignment; a
+derived, read-only employer note on `percentOfIncome` salary sacrifice
+rows (via `incomeRowId → employerId`, since sacrifice rows carry no
+employerId of their own); an employer suffix on the Cashflow table's
+income rows, shown only when a person has more than one employer.
+`reachability.test.js`'s `it.fails` replaced with a real registry
+entry. `createEmployer`/`clampEmployer` gained `nameIsDefault`/
+`fbtTypeIsDefault` provenance flags (pure UI flags, never read by the
+engine).
+
+Not fixed, disclosed: salary packaging deduction rows have zero UI
+(spec 23 Commit 3); bonus/overtime/allowance income categories have no
+UI for their own special fields (spec 23 Commit 2).
+
+Regression: new fields are pure provenance flags never read by
+`schedule.js`/`annual.js`, so single-employer scenarios are
+bit-identical. Browser-verified: one employer at $300k salary → SG
+$32,500 (`min($300k, $270,830) × 12%`); a second employer at the same
+salary → SG $64,999 (~double, each employer's contribution base capped
+independently).
+
 ---
 
 ## WHERE WE'RE GOING
