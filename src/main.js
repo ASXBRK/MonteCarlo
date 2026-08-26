@@ -44,6 +44,10 @@ import {
   DEBT_ORDER_MODES, REMAINDER_TARGETS, DEFICIT_SELL_RULES,
   PENSION_TYPES, PENSION_DRAWDOWN_OPTIONS, COMMUTATION_DESTINATIONS,
   createPension, createCommutation,
+  createDefinedBenefit,
+  createSuperRollover,
+  createBond, BOND_TYPES, createBondContribution,
+  createGift,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -3261,6 +3265,11 @@ const cfHeaders = {
   // has too many columns to fit it on the same line at 1280px.
   superContributions: () => `<th>Label</th><th>Type</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Account</th><th>Basis</th><th>Amount / detail</th><th>Freq</th><th>From</th><th>To</th><th>FHSSS</th>`,
   superWithdrawals: () => `<th>Label</th>${isCouple() ? "<th>Owner</th>" : ""}<th>Account</th><th>Amount ($)</th><th>Freq</th><th>From</th><th>To</th><th>Indexation</th>`,
+  // Super rollovers (spec 26, Commit 1; UI: spec 27 Commit 1) — a
+  // same-person, account-to-account move; no Owner column of its own
+  // (the FROM account already implies it — see superRolloverRowHTML's
+  // own from-account-drives-owner behaviour).
+  superRollovers: () => `<th>Label</th><th>From account</th><th>To account</th><th>Amount ($, blank = whole balance)</th><th>At</th><th>Est. rollover tax</th>`,
 };
 
 function pageEmptyHTML(sentence, actionsHTML) {
@@ -4024,6 +4033,30 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "accountId":
       if ((state.plan.superAccounts ?? []).some((s) => s.id === el.value)) row.accountId = el.value;
       break;
+    // Super rollovers (spec 26, Commit 1; UI: spec 27 Commit 1) — TWO
+    // account fields, not one, so neither reuses the singular
+    // "accountId" case above. Changing the FROM account can leave the
+    // TO account belonging to a different owner (rollovers are same-
+    // person only) or pointing at the SAME account — both dropped
+    // rather than silently kept, the same "unknown/invalid reference
+    // dropped, row survives" convention clampSuperRollover itself uses.
+    case "fromAccountId": {
+      if (!(state.plan.superAccounts ?? []).some((s) => s.id === el.value)) break;
+      row.fromAccountId = el.value;
+      const fromOwner = findSuperAccount(row.fromAccountId)?.owner;
+      const toOwner = findSuperAccount(row.toAccountId)?.owner;
+      if (row.toAccountId === row.fromAccountId || (toOwner && toOwner !== fromOwner)) row.toAccountId = null;
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); }
+      break;
+    }
+    case "toAccountId":
+      if ((state.plan.superAccounts ?? []).some((s) => s.id === el.value) && el.value !== row.fromAccountId) row.toAccountId = el.value;
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // live rollover-tax estimate depends on the pair
+      break;
+    case "rolloverAmount":
+      row.amount = el.value === "" ? null : clampNumber(el.value, 0);
+      if (commit) { el.value = row.amount ?? ""; const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // live tax estimate
+      break;
     case "type": {
       if (SUPER_CONTRIBUTION_TYPES.includes(el.value)) row.type = el.value;
       if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // cap-headroom note depends on type
@@ -4177,6 +4210,7 @@ function rowHTMLFor(kind, row) {
   if (kind === "lumpSums") return lumpSumRowHTML(row);
   if (kind === "superContributions") return superContributionRowHTML(row);
   if (kind === "superWithdrawals") return superWithdrawalRowHTML(row);
+  if (kind === "superRollovers") return superRolloverRowHTML(row);
   return contributionRowHTML(kind, row);
 }
 
@@ -4444,7 +4478,7 @@ function switchAllocMode(a, mode) {
   allocMemory.set(a.id, mem);
 }
 
-const SUPER_ROW_KINDS = ["superContributions", "superWithdrawals"];
+const SUPER_ROW_KINDS = ["superContributions", "superWithdrawals", "superRollovers"];
 
 function onCashflowSectionClick(e) {
   const target = e.target.closest("[data-action]");
@@ -4465,6 +4499,9 @@ function onCashflowSectionClick(e) {
       cf.superContributions.push(createSuperContribution(state.plan, state.plan.superAccounts ?? []));
     } else if (kind === "superWithdrawals") {
       cf.superWithdrawals.push(createSuperWithdrawal(state.plan, state.plan.superAccounts ?? []));
+    } else if (kind === "superRollovers") {
+      const owner = isCouple() && (cf.superRollovers ?? []).some((r) => findSuperAccount(r.fromAccountId)?.owner === "client") ? "partner" : "client";
+      cf.superRollovers = [...(cf.superRollovers ?? []), createSuperRollover(state.plan, state.plan.superAccounts ?? [], owner)];
     }
     saveState();
     if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
@@ -5252,6 +5289,53 @@ function superContributionRowHTML(sc) {
   `;
 }
 
+// Super rollovers (spec 26, Commit 1; UI: spec 27 Commit 1) — moves
+// balance and components between two of the SAME owner's own accounts
+// (never cross-spouse — the FROM account's own owner IS the row's
+// owner, so there's no separate owner select to show or edit). Where
+// the source is untaxed and destination taxed, 15% tax applies on the
+// untaxed element AT ROLLOVER — surfaced live here ("should I roll West
+// State into an accumulation fund" is the live question and the tax is
+// the answer, per the spec's own words), a plain estimate BEFORE any
+// lifetime cap (the untaxed plan cap's 47%-above-cap branch is not
+// replicated here — see the helper note).
+function superRolloverEstimatedTax(sr) {
+  const from = findSuperAccount(sr.fromAccountId);
+  if (!from || from.taxedStatus !== "untaxed" || !(from.balance > 0)) return 0;
+  const untaxedFraction = Math.max(0, from.balance - (from.taxFreeComponent ?? 0)) / from.balance;
+  const amount = sr.amount == null ? from.balance : Math.min(sr.amount, from.balance);
+  return amount * untaxedFraction * 0.15;
+}
+
+function superRolloverRowHTML(sr) {
+  const from = findSuperAccount(sr.fromAccountId);
+  const tax = superRolloverEstimatedTax(sr);
+  return `
+    <tr class="cf-tr" data-cfid="${sr.id}">
+      <td class="cf-td-label">
+        <input type="text" value="${escapeHTML(sr.label)}" maxlength="60"
+               data-kind="superRollovers" data-cfid="${sr.id}" data-field="label" />
+      </td>
+      <td class="cf-td-account">
+        <select data-kind="superRollovers" data-cfid="${sr.id}" data-field="fromAccountId">${superAccountOptions(sr.fromAccountId, null)}</select>
+      </td>
+      <td class="cf-td-account">
+        <select data-kind="superRollovers" data-cfid="${sr.id}" data-field="toAccountId">${superAccountOptions(sr.toAccountId, from?.owner ?? null)}</select>
+      </td>
+      <td class="cf-td-amount">
+        <input type="number" min="0" step="1000" value="${sr.amount ?? ""}" placeholder="Whole balance"
+               data-kind="superRollovers" data-cfid="${sr.id}" data-field="rolloverAmount" />
+      </td>
+      <td class="cf-td-date">${dateRefControlHTML(sr.at, "client", `data-kind="superRollovers" data-cfid="${sr.id}" data-field="at"`, 18, 120)}</td>
+      <td class="cf-td-detail">${tax > 0 ? fmtMoney(tax) : "—"}</td>
+      <td class="cf-td-remove">
+        <button class="cf-remove" type="button" aria-label="Remove row"
+                data-action="remove-row" data-kind="superRollovers" data-cfid="${sr.id}">×</button>
+      </td>
+    </tr>
+  `;
+}
+
 function superWithdrawalRowHTML(sw) {
   return `
     <tr class="cf-tr" data-cfid="${sw.id}">
@@ -5295,6 +5379,8 @@ function renderSuper() {
         (cf.superContributions ?? []).map(superContributionRowHTML).join(""))}
       ${ffSubsectionHTML("Withdrawals", "superWithdrawals", "Add withdrawal", cfHeaders.superWithdrawals(),
         (cf.superWithdrawals ?? []).map(superWithdrawalRowHTML).join(""))}
+      ${ffSubsectionHTML("Rollovers", "superRollovers", "Add rollover", cfHeaders.superRollovers(),
+        (cf.superRollovers ?? []).map(superRolloverRowHTML).join(""))}
     </div>
   `;
   // Division 293/296 election (Input Usability spec, Commit 1) — moved
@@ -5754,21 +5840,41 @@ function pensionCardHTML(pn) {
 function renderPensions() {
   const pensions = state.plan.pensions ?? [];
   const cards = pensions.map(pensionCardHTML).join("");
-  els.pensionSection.innerHTML = cards === ""
-    ? `
-      <h2 class="section-heading">Pension</h2>
-      ${pageEmptyHTML(
+  const pensionBlock = cards === ""
+    ? pageEmptyHTML(
         "Commence an account-based pension or transition-to-retirement income stream from an existing super account.",
         `<button class="add-row-btn" type="button" data-pension-action="add">+ Add pension</button>`
-      )}
-    `
+      )
     : `
-      <h2 class="section-heading">Pension</h2>
       <div id="pensions" class="portfolio-stack">${cards}</div>
       <div class="portfolio-actions">
         <button class="btn-text" type="button" data-pension-action="add">+ Add pension</button>
       </div>
     `;
+  // Defined benefit pensions (spec 26; UI: spec 27 Commit 1) — a kind
+  // of pension, not a separate sidebar entry (spec's own words), shown
+  // as its own subsection beneath ABP/TTR cards so its very different
+  // shape (no source account, no allocation/drawdown) doesn't get
+  // squeezed into that card's fields.
+  const definedBenefits = state.plan.definedBenefits ?? [];
+  const dbCards = definedBenefits.map(definedBenefitCardHTML).join("");
+  const dbBlock = dbCards === ""
+    ? pageEmptyHTML(
+        "Add a defined benefit pension — a WA state-scheme pension (GESB Gold State Super and similar) the client's own annual statement states, not something derived from a modelled account.",
+        `<button class="add-row-btn" type="button" data-defined-benefit-action="add">+ Add defined benefit pension</button>`
+      )
+    : `
+      <div id="definedBenefits" class="portfolio-stack">${dbCards}</div>
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-defined-benefit-action="add">+ Add defined benefit pension</button>
+      </div>
+    `;
+  els.pensionSection.innerHTML = `
+    <h2 class="section-heading">Pension</h2>
+    ${pensionBlock}
+    <div class="cf-section-title" style="margin-top:24px">Defined benefit</div>
+    ${dbBlock}
+  `;
 }
 
 // Applies a simple (non-structural) field edit to a pension. Returns
@@ -5862,7 +5968,165 @@ function refreshPensionAllocTotal(pid) {
   if (elTotal) elTotal.textContent = `Total: ${(pn.allocation.incomePct + pn.allocation.growthPct).toFixed(2)}% p.a. nominal`;
 }
 
+// --- defined benefit pensions (spec 27, Commit 1) ---------------------------
+//
+// A kind of pension (spec's own words) — lives in the SAME Pensions
+// section as ABP/TTR cards, not a separate sidebar entry, but as its
+// own card shape (no source account, no allocation/drawdown — a
+// promised pension the client's own statement states, per spec 26's
+// own scoping principle) sharing the section's direct-mutate-then-
+// saveState convention via data-dbid/data-dbfield instead of
+// data-pid/data-pfield.
+function findDefinedBenefit(dbid) {
+  return (state.plan.definedBenefits ?? []).find((d) => d.id === dbid) || null;
+}
+
+function definedBenefitHeadMeta(db) {
+  const ownerLabel = db.owner === "partner" ? partnerName() : clientName();
+  return `${ownerLabel} · ${fmtMoney(db.annualPension)} p.a.`;
+}
+
+// The 16× transfer balance credit, visible at the point of entry — "an
+// adviser needs to see it before they are surprised by it in a table"
+// (spec's own words). Mirrors deterministic.js's own creditTransferBalance
+// call at commencement (annualPension × 16, the pension's special
+// value) exactly — never the pension amount itself.
+function definedBenefitTbaNoteHTML(db) {
+  const special = db.annualPension * 16;
+  return `<p class="helper-text">${fmtMoney(db.annualPension)} pa uses ${fmtMoney(special)} of the transfer balance cap — a defined benefit pension credits at 16× the annual pension (its "special value"), not the pension amount itself.</p>`;
+}
+
+function definedBenefitCardHTML(db) {
+  const taxFreeHeadroom = 100 - db.taxFreeProportion;
+  return `
+    <div class="pcard" data-dbid="${db.id}">
+      <div class="pcard-head">
+        <span class="pcard-name">${escapeHTML(db.name)}</span>
+        <span class="pcard-meta">${definedBenefitHeadMeta(db)}</span>
+        <button class="pcard-remove" type="button" data-defined-benefit-action="remove" data-dbid="${db.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Name</label>
+            <input type="text" maxlength="60" value="${escapeHTML(db.name)}" data-dbid="${db.id}" data-dbfield="name" />
+          </div>
+          ${isCouple() ? `
+            <div class="cf-cell">
+              <label>Owner</label>
+              <select data-dbid="${db.id}" data-dbfield="owner">${superOwnerOptions(db.owner)}</select>
+            </div>
+          ` : ""}
+          <div class="cf-cell">
+            <label>Commencement</label>
+            ${dateRefControlHTML(db.commenceAt, "client", `data-dbid="${db.id}" data-dbfield="commenceAt"`, state.plan.client.currentAge, state.plan.endAge)}
+          </div>
+          <div class="cf-cell">
+            <label>Annual pension ($/yr, today's)</label>
+            <input type="number" min="0" step="1000" value="${db.annualPension}" data-dbid="${db.id}" data-dbfield="annualPension" />
+          </div>
+          <div class="cf-cell">
+            <label>Index basis</label>
+            <select data-dbid="${db.id}" data-dbfield="indexBasis">
+              <option value="none"${db.indexBasis === "none" ? " selected" : ""}>None</option>
+              <option value="cpi"${db.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
+              <option value="awote"${db.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+            </select>
+          </div>
+          <div class="cf-cell">
+            <label>+ extra % p.a.</label>
+            <input type="number" min="-10" max="10" step="0.1" value="${db.indexExtraPct}" data-dbid="${db.id}" data-dbfield="indexExtraPct" />
+          </div>
+        </div>
+        ${definedBenefitTbaNoteHTML(db)}
+        <div class="cf-section">
+          <div class="cf-section-title">Tax components</div>
+          <div class="alloc-grid alloc-grid-profile">
+            <div class="cf-cell">
+              <label>Tax-free proportion (%)</label>
+              <input type="number" min="0" max="100" step="0.1" value="${db.taxFreeProportion}" data-dbid="${db.id}" data-dbfield="taxFreeProportion" />
+            </div>
+            <div class="cf-cell">
+              <label>Untaxed proportion (%, ≤ ${taxFreeHeadroom} remaining)</label>
+              <input type="number" min="0" max="${taxFreeHeadroom}" step="0.1" value="${db.untaxedProportion}" data-dbid="${db.id}" data-dbfield="untaxedProportion" />
+            </div>
+          </div>
+          <p class="helper-text">The remainder (${(100 - db.taxFreeProportion - db.untaxedProportion).toFixed(1)}%) is the taxed element — tax-free from age 60. The untaxed proportion is assessable at the marginal rate with a 10% offset — a different rate from an untaxed lump sum's 15%.</p>
+        </div>
+        <div class="cf-section">
+          <div class="cf-section-title">Other</div>
+          <div class="alloc-grid alloc-grid-profile">
+            ${isCouple() ? `
+              <div class="cf-cell">
+                <label>Reversionary (%, to spouse on death)</label>
+                <input type="number" min="0" max="100" step="1" value="${db.reversionaryPct}" data-dbid="${db.id}" data-dbfield="reversionaryPct" />
+              </div>
+            ` : ""}
+            <div class="cf-cell">
+              <label>Notional taxed contributions ($/yr)</label>
+              <input type="number" min="0" step="500" value="${db.notionalTaxedContributions}" data-dbid="${db.id}" data-dbfield="notionalTaxedContributions" />
+            </div>
+          </div>
+          <p class="helper-text">Notional taxed contributions count toward the concessional cap while still an accruing member (before this pension's own commencement) — from the member's own annual statement.</p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Applies a simple (non-structural) field edit to a defined benefit
+// pension. Returns true when the change needs a full card re-render
+// (owner switch changes select options; the two proportions each
+// constrain the other's live max).
+function applyDefinedBenefitEdit(db, field, el, commit) {
+  switch (field) {
+    case "name":
+      db.name = commit ? (el.value.trim() || db.name) : el.value;
+      if (commit) el.value = db.name;
+      return false;
+    case "owner":
+      if (["client", "partner"].includes(el.value)) db.owner = el.value;
+      return true;
+    case "annualPension":
+      db.annualPension = clampNumber(el.value, 0);
+      if (commit) el.value = db.annualPension;
+      return true; // the visible 16× TBA note depends on this
+    case "indexBasis":
+      if (INDEX_BASES.includes(el.value)) db.indexBasis = el.value;
+      return false;
+    case "indexExtraPct":
+      db.indexExtraPct = clampNumber(el.value, -10, 10);
+      if (commit) el.value = db.indexExtraPct;
+      return false;
+    case "taxFreeProportion":
+      db.taxFreeProportion = clampNumber(el.value, 0, 100);
+      db.untaxedProportion = Math.min(db.untaxedProportion, 100 - db.taxFreeProportion);
+      return true; // untaxed's own max headroom label needs a refresh
+    case "untaxedProportion":
+      db.untaxedProportion = clampNumber(el.value, 0, 100 - db.taxFreeProportion);
+      if (commit) el.value = db.untaxedProportion;
+      return false;
+    case "reversionaryPct":
+      db.reversionaryPct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = db.reversionaryPct;
+      return false;
+    case "notionalTaxedContributions":
+      db.notionalTaxedContributions = clampNumber(el.value, 0);
+      if (commit) el.value = db.notionalTaxedContributions;
+      return false;
+    default:
+      return false;
+  }
+}
+
 els.pensionSection.addEventListener("input", (e) => {
+  const dbid = e.target.dataset.dbid;
+  const dbfield = e.target.dataset.dbfield;
+  if (dbid && dbfield && !e.target.dataset.drRole) {
+    const db = findDefinedBenefit(dbid);
+    if (db) { applyDefinedBenefitEdit(db, dbfield, e.target, false); saveState(); refreshOutputs(); }
+    return;
+  }
   const pid = e.target.dataset.pid;
   const field = e.target.dataset.pfield;
   if (!pid || !field || e.target.dataset.drRole) return; // DateRef control handled on "change" only
@@ -5874,6 +6138,32 @@ els.pensionSection.addEventListener("input", (e) => {
 });
 
 els.pensionSection.addEventListener("change", (e) => {
+  const dbid = e.target.dataset.dbid;
+  const dbfield = e.target.dataset.dbfield;
+  if (dbid && dbfield === "commenceAt" && e.target.dataset.drRole) {
+    const db = findDefinedBenefit(dbid);
+    if (!db) return;
+    if (e.target.dataset.drRole === "anchor") {
+      db.commenceAt = e.target.value === "__age__"
+        ? { kind: "age", age: resolveRef(db.commenceAt, state.plan, projection.schedule, "client").age }
+        : { kind: "anchor", anchorId: e.target.value };
+    } else {
+      db.commenceAt = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
+    }
+    saveState();
+    refreshOutputs();
+    renderPensions();
+    return;
+  }
+  if (dbid && dbfield) {
+    const db = findDefinedBenefit(dbid);
+    if (!db) return;
+    const structural = applyDefinedBenefitEdit(db, dbfield, e.target, true);
+    saveState();
+    refreshOutputs();
+    if (structural) renderPensions();
+    return;
+  }
   const pid = e.target.dataset.pid;
   const field = e.target.dataset.pfield;
   if (pid && field === "commenceAt" && e.target.dataset.drRole) {
@@ -5917,6 +6207,24 @@ els.pensionSection.addEventListener("change", (e) => {
 });
 
 els.pensionSection.addEventListener("click", (e) => {
+  const dbBtn = e.target.closest("[data-defined-benefit-action]");
+  if (dbBtn) {
+    const dbAction = dbBtn.dataset.definedBenefitAction;
+    if (dbAction === "add") {
+      const owner = isCouple() && (state.plan.definedBenefits ?? []).some((d) => d.owner === "client") ? "partner" : "client";
+      state.plan.definedBenefits = [...(state.plan.definedBenefits ?? []), createDefinedBenefit(state.plan, state.plan.definedBenefits ?? [], owner)];
+    } else if (dbAction === "remove") {
+      const db = findDefinedBenefit(dbBtn.dataset.dbid);
+      if (!db || !window.confirm(`Remove "${db.name}"?`)) return;
+      state.plan.definedBenefits = state.plan.definedBenefits.filter((x) => x.id !== db.id);
+    } else {
+      return;
+    }
+    saveState();
+    refreshOutputs();
+    renderPensions();
+    return;
+  }
   const btn = e.target.closest("[data-pension-action]");
   if (!btn) return;
   const action = btn.dataset.pensionAction;

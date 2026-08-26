@@ -28,13 +28,23 @@ export const DEFAULT_INPUT_SECTION = "setup";
 // "money-decomposition" fold into Projection's and Net worth's own
 // chart selector (Commit 4) rather than staying separate subjects.
 export const OUTPUT_VIEWS = [
-  "projection", "cashflow", "assets", "liabilities", "super", "pension", "age-pension", "death-benefits", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
+  "projection", "cashflow", "assets", "liabilities", "bonds", "super", "pension", "age-pension", "death-benefits", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
   "focus-equity", "focus-transfer-schedule",                                                                                                                  // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
   "focus-surplus-allocation",                                                                                                                                 // Focus (docs/specs/16-surplus-allocation.md, Commit 3)
   "focus-ppr-exemption",                                                                                                                                      // Focus (docs/specs/19-engine-completion.md, Commit 5's own Focus view)
   "focus-age-pension",                                                                                                                                        // Focus (docs/specs/21a-age-pension-core.md, Commit 4)
   "focus-death-benefits",                                                                                                                                     // Focus (docs/specs/22-death-benefits.md, Commit 3)
+  // Reachability bug found by spec 27's own pre-Commit-1 audit: bonds
+  // (spec 25) and both these Focus views (specs 24/25) were already
+  // fully BUILT (a complete Bonds table; complete Focus views) but
+  // never routable — resolveRoute() silently redirected every visit
+  // back to Setup, and router.test.js's own coverage list had been
+  // asserting the WRONG (missing-these-three) set as correct. Fixed
+  // here rather than deferred, since it unblocks already-finished work
+  // with zero new UI/engine code.
+  "focus-debt-recycling",                                                                                                                                     // Focus (docs/specs/24-drawdowns-debt-recycling.md, Commit 3)
+  "focus-education-funding",                                                                                                                                   // Focus (docs/specs/25-investment-education-bonds.md, Commit 3)
   // "focus-compare-scenarios" relocated to its own client-level Compare
   // page (#/clients/<cid>/compare) — no longer a workspace output view.
   // What if (docs/specs/14-what-if.md) — "what if the world is different"
@@ -57,6 +67,7 @@ export const OUTPUT_SUBJECT_FORMS = {
   cashflow: ["chart", "table"],
   assets: ["chart", "table"],
   liabilities: ["chart", "table"],
+  bonds: ["table"],
   super: ["chart", "table"],
   pension: ["table"],
   "age-pension": ["chart", "table"],
