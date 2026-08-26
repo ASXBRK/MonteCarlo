@@ -79,7 +79,7 @@ import {
 } from "./costBasePool.js";
 import {
   bondEffectiveTaxRate, bondStartMonthIndex, bondContributionCapCheck, bondHasMatured, bondWithdrawalTax,
-  bondMaturityMonth,
+  bondMaturityMonth, bondWithdrawalSplit, bondEducationBenefit,
 } from "./bonds.js";
 
 const toMonthlyReal = (netNominal, cpi) =>
@@ -437,6 +437,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       shares: ownerShares(b, couple),
       startMonth: bondStartMonthIndex(b.startDate, state.plan.start),
     };
+  }
+  // Linked withdrawals (spec 25, Commit 3) — resolved once, per bond,
+  // from the child's own pre-built fee schedule (schedule.js's
+  // childEducationFlows). Any bond with a real beneficiary gets one,
+  // regardless of type (education vs investment) — the a-bonds block
+  // below branches the WITHDRAWAL'S TAX TREATMENT on b.type, not
+  // whether the withdrawal happens at all; every bond with no
+  // beneficiary simply has no entry here at all.
+  const bondEducationFlow = {};
+  for (const b of bonds) {
+    if (b.beneficiaryChildId) {
+      bondEducationFlow[b.id] = schedule.childEducationFlows?.[b.beneficiaryChildId] ?? null;
+    }
   }
   const bondBal = {};
   const bondSeries = {};
@@ -1640,6 +1653,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // Bonds table, resolved once at year-end below.
     bondDetail: Object.fromEntries(bonds.map((b) => [b.id, {
       opening: 0, contributions: 0, earnings: 0, internalTax: 0, withdrawals: 0, assessableWithdrawal: 0,
+      // Education withdrawals (spec 25, Commit 3) — a SEPARATE pair
+      // from withdrawals/assessableWithdrawal above (an ordinary
+      // deficit-funded sale): educationWithdrawal is what this bond
+      // paid its OWN linked child's fees this FY; educationBenefit is
+      // the provider's own recovered-tax top-up on top of it — see
+      // bonds.js's bondEducationBenefit for the verified mechanic.
+      educationWithdrawal: 0, educationBenefit: 0,
       closing: 0, costBase: 0, yearsToMaturity: null, contributionHeadroom: null,
     }])),
     bondsClosing: 0,
@@ -1756,13 +1776,32 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // for genuine spec correctness and direct unit-testability —
         // see Tax/annual.test.js.
         ttrPensionTaxable: 0,
-        // Investment/education bonds (spec 25, Commit 2): the assessable
-        // earnings component of any pre-ten-year bond withdrawal this FY
-        // (deficit funding, below) — same "add to income, credit back a
-        // flat offset" shape as fhsssTaxableRelease/ttrPensionTaxable
-        // above. A MATURED bond's withdrawal never adds here at all
-        // (sellBond only computes a nonzero assessableEarnings when
-        // unmatured — see bonds.js's bondWithdrawalTax).
+        // Investment/education bonds (spec 25, Commit 2) — a DEFICIT-
+        // FUNDED bond withdrawal's assessable earnings. Kept OUT of the
+        // "pre"/"a" assessPerson calls (assessed instead via the
+        // separate, one-year-lagged pendingBondTax mechanism, using
+        // real[p] — see the a2 block for why): a deficit-funded sale's
+        // exact size is pass-dependent (the measurement pass simulates
+        // zero tax cash outflow that month, so it can genuinely draw a
+        // different amount than the real pass), so using measured[p]'s
+        // own figure to size THIS FY's tax would silently mismatch what
+        // was actually sold — the same reason CGT is assessed from
+        // real[p].netCapitalGain, never measured[p].
+        bondDeficitAssessableWithdrawal: 0,
+        // Investment/education bonds (spec 25, Commit 3) — a PLANNED,
+        // schedule-driven withdrawal linked to a child's own fee
+        // schedule (an investment-type bond's own "beneficiaryChildId"
+        // withdrawal — an education-type bond's own linked withdrawal
+        // gets the benefit-and-no-tax treatment instead and never adds
+        // here at all). UNLIKE the deficit-funded case above, this
+        // amount is pass-INDEPENDENT (sized purely by the pre-resolved
+        // fee schedule and the bond's own live balance, neither of
+        // which depends on this month's tax/shortfall), so it's safe to
+        // assess immediately, same-year, via measured[p] — the SAME
+        // "add to income, credit back a flat offset" shape as
+        // fhsssTaxableRelease/ttrPensionTaxable. A MATURED bond's
+        // withdrawal never adds here at all (bondWithdrawalTax only
+        // computes a nonzero assessableEarnings when unmatured).
         bondAssessableWithdrawal: 0,
       };
     }
@@ -1801,12 +1840,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       return paid;
     };
 
-    // A sale of `want` real dollars from a bond (spec 25, Commit 2):
-    // proportional cost-base reduction (bonds.js's bondWithdrawalTax —
-    // no CGT pool, no discount, unlike sell() above), with the earnings
-    // component of an UNMATURED bond's withdrawal assessable at the
-    // owner's marginal rate (acc[p].bondAssessableWithdrawal — see
-    // assessPerson's own param of the same name). A MATURED bond's
+    // A sale of `want` real dollars from a bond — DEFICIT FUNDING only
+    // (spec 25, Commit 2): proportional cost-base reduction (bonds.js's
+    // bondWithdrawalTax — no CGT pool, no discount, unlike sell()
+    // above), with the earnings component of an UNMATURED bond's
+    // withdrawal assessable at the owner's marginal rate
+    // (acc[p].bondDeficitAssessableWithdrawal — assessed with a
+    // one-year lag via pendingBondTax, see the a2 block's own header
+    // for why THIS specific case needs one and the schedule-driven
+    // education-linked withdrawal below does not). A MATURED bond's
     // withdrawal is entirely tax-free — bondWithdrawalTax already
     // returns 0 assessable for one. Returns paid.
     const sellBond = (id, want, m) => {
@@ -1819,7 +1861,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       });
       const bm = bondMeta[id];
       for (const p of persons) {
-        if (bm.shares[p]) acc[p].bondAssessableWithdrawal += assessableEarnings * bm.shares[p];
+        if (bm.shares[p]) acc[p].bondDeficitAssessableWithdrawal += assessableEarnings * bm.shares[p];
       }
       // markIncome, same as every other income source in this engine —
       // without it, a person whose ONLY assessable income this FY is an
@@ -1931,6 +1973,76 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           if (row) {
             row.bondDetail[b.id].contributions += contrib;
             bondThisFyContribution[b.id] += contrib;
+          }
+        }
+        // Linked withdrawals (spec 25, Commit 3) — a bond with a
+        // beneficiary (beneficiaryChildId) funds THAT child's own
+        // modelled school fees automatically, in the SAME month the
+        // fee itself fires (schedule.childEducationFlows), rather than
+        // the fee being met from cashflow. The FIELD applies to either
+        // bond type (see planState.js's own header on why); the TAX
+        // TREATMENT branches on it: an education bond gets the benefit-
+        // and-no-personal-tax mechanism (bonds.js's own verification
+        // note), a plain investment bond gets the ordinary assessable-
+        // if-unmatured treatment via bondWithdrawalTax instead — this
+        // is what lets Focus → Education funding (Commit 3) run its
+        // investment-bond arm through the SAME real engine mechanism as
+        // its education-bond arm, per the Focus governing principle.
+        // Pass-independent by construction either way (sized purely by
+        // the pre-resolved fee schedule and this bond's own live
+        // balance, neither of which depends on this month's tax/
+        // shortfall the way a deficit-funded sale does), so — unlike
+        // sellBond's own deficit-funding path — this needs no
+        // measurement/real split: both passes compute the identical
+        // amount, safe to assess immediately via acc[p].
+        const educationFlow = bondEducationFlow[b.id];
+        const feeDue = educationFlow ? educationFlow[m] : 0;
+        if (feeDue > 0 && bondBal[b.id] > 0) {
+          const withdrawAmount = Math.min(feeDue, bondBal[b.id]);
+          const priorBalance = bondBal[b.id];
+          if (b.type === "education") {
+            const { earningsWithdrawn } = bondWithdrawalSplit({
+              withdrawalAmount: withdrawAmount, balance: priorBalance, costBase: bondCostBase[b.id],
+            });
+            const benefit = bondEducationBenefit(earningsWithdrawn);
+            bondCostBase[b.id] -= bondCostBase[b.id] * (withdrawAmount / priorBalance);
+            bondBal[b.id] -= withdrawAmount;
+            // A transfer (bond down, WCA up by the withdrawal itself —
+            // no conservation term needed) PLUS a genuine external
+            // inflow (the benefit — the provider's own recovered tax,
+            // no offsetting outflow anywhere, the same "sgInflow"
+            // shape), credited directly rather than through `inc`
+            // (folding the WITHDRAWAL portion into `inc` would double-
+            // count the bond's own balance reduction — see
+            // conservationCheck.js's own educationBenefit term for why
+            // only the benefit gets one).
+            wcaBal += withdrawAmount + benefit;
+            if (row) {
+              row.bondDetail[b.id].educationWithdrawal += withdrawAmount;
+              row.bondDetail[b.id].educationBenefit += benefit;
+            }
+          } else {
+            // Plain investment bond: the ordinary ten-year-rule
+            // treatment, assessed immediately (acc[p].bondAssessableWithdrawal
+            // — the schedule-driven, pass-independent case; see that
+            // field's own header) rather than through the deficit-
+            // funding lag mechanism, since this withdrawal isn't
+            // deficit-driven at all.
+            const matured = bondHasMatured(bondEffectiveStartMonth[b.id], m);
+            const { assessableEarnings } = bondWithdrawalTax({
+              withdrawalAmount: withdrawAmount, balance: priorBalance, costBase: bondCostBase[b.id], matured,
+            });
+            bondCostBase[b.id] -= bondCostBase[b.id] * (withdrawAmount / priorBalance);
+            bondBal[b.id] -= withdrawAmount;
+            for (const p of persons) {
+              if (bm.shares[p]) acc[p].bondAssessableWithdrawal += assessableEarnings * bm.shares[p];
+            }
+            if (assessableEarnings > 0) markIncome(bm.shares, m);
+            wcaBal += withdrawAmount; // a transfer only — no benefit, no separate term needed
+            if (row) {
+              row.bondDetail[b.id].withdrawals += withdrawAmount;
+              row.bondDetail[b.id].assessableWithdrawal += assessableEarnings;
+            }
           }
         }
         bondSeries[b.id][m + 1] = bondBal[b.id];
@@ -4630,12 +4742,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
         fhsssTaxableRelease: measured[p].fhsssTaxableRelease ?? 0,
         ttrPensionTaxable: measured[p].ttrPensionTaxable ?? 0,
+        // The schedule-driven, education-linked withdrawal (spec 25,
+        // Commit 3) is safe here — see acc[p]'s own init comment.
+        bondAssessableWithdrawal: measured[p].bondAssessableWithdrawal ?? 0,
       });
       // Disclosed simplification: excludes this FY's own realised
-      // capital gain AND bond assessable withdrawal (spec 25, Commit 2)
-      // — both are deficit-funding-driven, so their exact SIZE is only
-      // known once the real pass actually runs (the measurement pass's
-      // own shortfall differs, since it simulates zero tax cash outflow
+      // capital gain AND the DEFICIT-FUNDED bond assessable withdrawal
+      // (spec 25, Commit 2) — both are deficit-funding-driven, so their
+      // exact SIZE is only known once the real pass actually runs (the
+      // measurement pass's own shortfall differs, since it simulates
+      // zero tax cash outflow
       // that month — see the a2 block below for why this MUST be
       // assessed from real[p], not measured[p], the same reason CGT
       // already is), which this engine only ever assesses in a later,
@@ -4795,9 +4911,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
         fhsssTaxableRelease: measured[p].fhsssTaxableRelease ?? 0,
         ttrPensionTaxable: measured[p].ttrPensionTaxable ?? 0,
-        // bondAssessableWithdrawal deliberately excluded — see the "pre"
-        // call above and the a2 block below for why it must be assessed
-        // from real[p], not measured[p].
+        // The schedule-driven, education-linked withdrawal only (spec
+        // 25, Commit 3) — pass-independent, safe to assess immediately.
+        // The DEFICIT-FUNDED case is deliberately excluded here — see
+        // the "pre" call above and the a2 block below for why THAT one
+        // must be assessed from real[p], not measured[p].
+        bondAssessableWithdrawal: measured[p].bondAssessableWithdrawal ?? 0,
       });
       assessed[p] = a;
 
@@ -5131,8 +5250,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // stacked on the same measured income base.
     const newPending = { client: 0, partner: 0 };
     // Investment/education bonds (spec 25, Commit 2): the incremental
-    // tax cost of THIS FY's pre-ten-year bond withdrawal(s) — assessed
-    // here, from real[p].bondAssessableWithdrawal (the REAL pass's own
+    // tax cost of THIS FY's pre-ten-year DEFICIT-FUNDED bond
+    // withdrawal(s) — assessed here, from
+    // real[p].bondDeficitAssessableWithdrawal (the REAL pass's own
     // actual withdrawal amount), the SAME reason CGT is assessed from
     // real[p].netCapitalGain rather than measured[p]: a deficit-funded
     // sale's exact size depends on this month's ACTUAL tax cash outflow,
@@ -5142,8 +5262,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // what was actually sold. Isolated by differencing (the same
     // technique the bonus-PAYG withholding block above already uses),
     // stacked on top of BOTH ordinary income and this FY's own gain —
-    // bondAssessableWithdrawal is passed into a2 itself for this reason
-    // (so cgtTax's own gain-stacking base already reflects it).
+    // passed into a2 itself for this reason (so cgtTax's own gain-
+    // stacking base already reflects it). The SCHEDULE-DRIVEN,
+    // education-linked case (Commit 3) is a DIFFERENT acc field,
+    // assessed immediately via measured[p] in the "pre"/"a" calls
+    // instead — see acc[p]'s own init comment for why that one doesn't
+    // need this lag.
     const newPendingBondTax = { client: 0, partner: 0 };
     for (const p of persons) {
       // Remaining quarantined carry offsets this year's realised gains.
@@ -5152,7 +5276,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         real[p].netCapitalGain -= useGain;
         quarantineCarry[p] -= useGain;
       }
-      const bondAssessableWithdrawal = real[p].bondAssessableWithdrawal ?? 0;
+      const bondDeficitAssessableWithdrawal = real[p].bondDeficitAssessableWithdrawal ?? 0;
       const a2 = assessPerson({
         fyStartYear: fyStart,
         bracketMode,
@@ -5164,11 +5288,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         capitalLossCarryFwd: lossCarryFwd[p],
         taxProfile: state.plan[p]?.taxProfile ?? null,
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
-        bondAssessableWithdrawal,
+        bondAssessableWithdrawal: bondDeficitAssessableWithdrawal,
       });
       lossCarryFwd[p] = a2.lossCarryFwd;
       newPending[p] = a2.cgtTax;
-      if (bondAssessableWithdrawal > 0) {
+      if (bondDeficitAssessableWithdrawal > 0) {
         const withoutBond = assessPerson({
           fyStartYear: fyStart, bracketMode, cpi,
           ordinaryIncome: measured[p].ordinary,

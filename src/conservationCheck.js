@@ -370,6 +370,15 @@ export function computeYearFlows(out, y) {
   // same reasoning already applied to pension commencement/contribution
   // splitting/land tax/the PPR exemption elsewhere in this file.
   const bondEarningsNet = sumVals(row.bondDetail ?? {}, "earnings") - sumVals(row.bondDetail ?? {}, "internalTax");
+  // Education bonds (spec 25, Commit 3) — the education benefit is a
+  // genuine external inflow, the SAME shape as sgInflow/govSuperInflow:
+  // the provider recovers its OWN already-paid internal tax and passes
+  // it through, with no offsetting household outflow anywhere. The
+  // WITHDRAWAL itself (educationWithdrawal) needs no term — it's a
+  // transfer (bond down, WCA up by the identical amount), the same
+  // "same-total move between two already-counted pockets" reasoning
+  // bondEarningsNet's own header already applies.
+  const educationBenefit = sumVals(row.bondDetail ?? {}, "educationBenefit");
   // Pension phase (spec 20, Commit 1) — a genuine leak, same shape as
   // superEarningsNet just above (the 15%/10% fund-tax haircut, a
   // Commit 1 placeholder — Commit 3 zero-rates an ABP in retirement
@@ -574,6 +583,7 @@ export function computeYearFlows(out, y) {
     heasDrawn, heasInterest,
     helpRepayment,
     adviserFeeFromSuper, adviserFeeCash,
+    educationBenefit,
   };
 }
 
@@ -602,7 +612,8 @@ export function checkYearConservation(out, y, ctx) {
     - f.surplusSpent + f.unfundedCashflow - f.divReleaseFromSuper
     + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
     - f.propertySaleCosts - f.superInsurancePremium
-    - f.goalSpend - f.giftsPaid - f.heasDrawn - f.heasInterest + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash;
+    - f.goalSpend - f.giftsPaid - f.heasDrawn - f.heasInterest + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash
+    + f.educationBenefit;
 
   const gap = f.delta - expected;
   const tol = Math.max(0.05, Math.abs(f.closingN) * 1e-6);
@@ -662,7 +673,7 @@ export function decomposeNetWorthChange(out, y) {
     // capitalised interest, unlike the drawdown, has no offsetting
     // pocket anywhere — a real, cash-free cost — folded into the
     // interest bucket alongside liability interest.
-    income: f.income + f.sgInflow + f.govSuperInflow - f.heasDrawn,
+    income: f.income + f.sgInflow + f.govSuperInflow + f.educationBenefit - f.heasDrawn,
     growth: f.growth + f.propertyGrowth + f.helpRepayment,
     tax: f.tax + f.contributionsTax + f.divReleaseFromSuper,
     expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,

@@ -1592,6 +1592,12 @@ export function createBond(plan, existing = [], profiles = {}) {
     startDate: isoDateOf(plan.start),
     allocation: { mode: "profile", profile: middleProfile },
     icrPct: 0,
+    // Education bonds (spec 25, Commit 3) only — null for an
+    // investment bond, and forced null below even for an education one
+    // until it names a real child (input integrity: a beneficiary
+    // reference to nothing would be a state the engine can't act on
+    // faithfully).
+    beneficiaryChildId: null,
   };
 }
 
@@ -1603,6 +1609,7 @@ export function clampBond(b, plan, profiles = {}) {
   const type = BOND_TYPES.includes(b?.type) ? b.type : "investment";
   const startDate = typeof b?.startDate === "string" && !Number.isNaN(new Date(b.startDate).getTime())
     ? b.startDate : isoDateOf(plan.start);
+  const childIds = new Set((plan.children ?? []).map((c) => c.id));
   return {
     id: typeof b?.id === "string" && b.id ? b.id : uid("bd"),
     name: typeof b?.name === "string" && b.name.trim() ? b.name : "Bond",
@@ -1613,6 +1620,20 @@ export function clampBond(b, plan, profiles = {}) {
     startDate,
     allocation: clampAllocation(b?.allocation, profiles),
     icrPct: clampNumber(b?.icrPct, 0, 100),
+    // A beneficiary link (spec 25, Commit 3) — the bond auto-funds
+    // THAT child's own modelled fees regardless of bond type: an
+    // education bond gets the benefit-and-no-personal-tax treatment on
+    // that withdrawal, a plain investment bond gets the ordinary
+    // assessable-if-unmatured treatment instead (see deterministic.js's
+    // own a-bonds block) — the field itself isn't education-only, only
+    // the WITHDRAWAL TREATMENT is type-dependent, deliberately, so the
+    // Focus → Education funding comparison (Commit 3) can run an
+    // investment-bond arm through the SAME real mechanism rather than a
+    // hand-rolled one. A stale/dangling id drops to null rather than
+    // being coerced to a different child (same "never silently
+    // reattribute" rule clampSuperContribution's own accountId already
+    // follows).
+    beneficiaryChildId: childIds.has(b?.beneficiaryChildId) ? b.beneficiaryChildId : null,
   };
 }
 

@@ -75,6 +75,7 @@ import { buildAgePensionStrategyFocus } from "./focusAgePensionStrategy.js";
 import { alternativeNominations, buildRecontributionFocus } from "./focusDeathBenefits.js";
 import { eligibleDebtPayoffLoans, buildDebtPayoffFocus, solveExtraRepaymentForPayoffDate } from "./focusDebtPayoff.js";
 import { eligibleDebtRecyclingLoans, buildDebtRecyclingFocus } from "./focusDebtRecycling.js";
+import { eligibleEducationFundingChildren, buildEducationFundingFocus } from "./focusEducationFunding.js";
 import {
   computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
   STAMP_DUTY_META, LMI_META, FHBG_META,
@@ -275,6 +276,7 @@ const els = {
   viewFocusSalarySacrifice: $("viewFocusSalarySacrifice"),
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
   viewFocusDebtRecycling: $("viewFocusDebtRecycling"),
+  viewFocusEducationFunding: $("viewFocusEducationFunding"),
   viewFocusSurplusAllocation: $("viewFocusSurplusAllocation"),
   viewFocusPprExemption: $("viewFocusPprExemption"),
   viewFocusAgePension: $("viewFocusAgePension"),
@@ -525,6 +527,7 @@ const OUTPUT_NAV = {
     { id: "focus-salary-sacrifice", label: "Salary sacrifice" },
     { id: "focus-debt-payoff", label: "Debt payoff" },
     { id: "focus-debt-recycling", label: "Debt recycling" },
+    { id: "focus-education-funding", label: "Education funding" },
     { id: "focus-surplus-allocation", label: "Surplus allocation" },
     { id: "focus-ppr-exemption", label: "Main residence exemption" },
     { id: "focus-age-pension", label: "Age pension" },
@@ -6686,6 +6689,7 @@ const VIEW_MOUNTS = {
   "focus-salary-sacrifice": () => els.viewFocusSalarySacrifice,
   "focus-debt-payoff": () => els.viewFocusDebtPayoff,
   "focus-debt-recycling": () => els.viewFocusDebtRecycling,
+  "focus-education-funding": () => els.viewFocusEducationFunding,
   "focus-surplus-allocation": () => els.viewFocusSurplusAllocation,
   "focus-ppr-exemption": () => els.viewFocusPprExemption,
   "focus-age-pension": () => els.viewFocusAgePension,
@@ -6760,6 +6764,7 @@ function renderActiveView() {
   else if (activeView === "focus-salary-sacrifice") renderFocusSalarySacrificeView();
   else if (activeView === "focus-debt-payoff") renderFocusDebtPayoffView();
   else if (activeView === "focus-debt-recycling") renderFocusDebtRecyclingView();
+  else if (activeView === "focus-education-funding") renderFocusEducationFundingView();
   else if (activeView === "focus-surplus-allocation") renderFocusSurplusAllocationView();
   else if (activeView === "focus-ppr-exemption") renderFocusPprExemptionView();
   else if (activeView === "focus-age-pension") renderFocusAgePensionView();
@@ -11371,6 +11376,170 @@ function exportFocusDebtRecyclingCSV() {
   downloadCSV("focus-debt-recycling", lines);
 }
 
+// --- Education funding (spec 25, Commit 3) ----------------------------------
+//
+// "The same dollars, three ways" — every figure below is read straight
+// off THREE real projectPlan() runs (buildEducationFundingFocus, on
+// clones per the Focus governing principle): the same seed lump sum
+// and the same already-modelled fee schedule, held in an ordinary
+// asset, a plain investment bond, and an education bond respectively.
+// This file only renders it. The risk disclosure (ten-year rule,
+// 125% rule, the bond's own flat internal rate) is shown prominently,
+// not buried — and the worse-than-alternative flags are surfaced
+// exactly as computed, never softened or hidden, per the spec's own
+// "the tool exists to reveal that, not to sell the product."
+
+let focusEducationFundingChildId = null;
+
+function focusEducationFundingFlagsHTML(f) {
+  const lines = [];
+  if (f.flags.investmentWorseThanBaseline) {
+    lines.push(`<p class="helper-warning">For this client, a plain investment bond ends up WORSE than simply saving the same amount outside one.</p>`);
+  }
+  if (f.flags.educationWorseThanBaseline) {
+    lines.push(`<p class="helper-warning">For this client, the education bond — even with its own benefit — ends up WORSE than simply saving the same amount outside one.</p>`);
+  }
+  return lines.join("");
+}
+
+function renderFocusEducationFundingView() {
+  const children = eligibleEducationFundingChildren(state);
+  const emptyMsg = "The same dollars, three ways — saved outside a bond, in a plain investment bond, or in an education bond with its own benefit — the net cost of funding the same school fees under each, with the tax paid along the way. Add a child with a school fee schedule to see it.";
+  if (children.length === 0) {
+    els.viewFocusEducationFunding.innerHTML = focusEmptyStateHTML(emptyMsg, "children");
+    return;
+  }
+  if (!children.some((c) => c.id === focusEducationFundingChildId)) {
+    focusEducationFundingChildId = children[0].id;
+  }
+  const f = buildEducationFundingFocus({ out: projection, state, childId: focusEducationFundingChildId });
+  if (!f) {
+    els.viewFocusEducationFunding.innerHTML = focusEmptyStateHTML(emptyMsg, "children");
+    return;
+  }
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const last = f.series[f.series.length - 1];
+
+  els.viewFocusEducationFunding.innerHTML = `
+    <h2 class="section-heading">Education funding</h2>
+    ${children.length > 1 ? `<div id="focusEducationFundingEntity" class="seg-toggle entity-select" role="tablist" aria-label="Child"></div>` : ""}
+    <div class="focus-panel">
+      <div class="focus-section">
+        <p class="helper-warning">${escapeHTML(f.disclosure)}</p>
+      </div>
+      ${focusEducationFundingFlagsHTML(f)}
+      <div class="focus-section">
+        <h3>${escapeHTML(f.child.name)} — same seed, three vehicles</h3>
+        <div class="summary-strip">
+          <div class="stat stat-headline"><div class="stat-label">Seed (same in all three)</div><div class="stat-value">${fmtMoney(f.seed)}</div></div>
+          <div class="stat"><div class="stat-label">Ending net worth — outside a bond</div><div class="stat-value">${fmtMoney(last.netAssetsBaseline * factor(last.year))}</div></div>
+          <div class="stat"><div class="stat-label">Ending net worth — investment bond</div><div class="stat-value">${fmtMoney(last.netAssetsInvestment * factor(last.year))}</div></div>
+          <div class="stat"><div class="stat-label">Ending net worth — education bond</div><div class="stat-value">${fmtMoney(last.netAssetsEducation * factor(last.year))}</div></div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Net worth over time, by vehicle</h3>
+        <div id="focusEducationFundingChart"></div>
+      </div>
+      <div class="focus-section">
+        <h3>Tax paid along the way (cumulative)</h3>
+        <div id="focusEducationFundingTaxChart"></div>
+      </div>
+    </div>
+  `;
+  if (children.length > 1) {
+    renderEntitySelector(
+      $("focusEducationFundingEntity"),
+      children.map((c) => ({ id: c.id, label: c.name })),
+      focusEducationFundingChildId,
+      (id) => { focusEducationFundingChildId = id; renderFocusEducationFundingView(); }
+    );
+  }
+  renderFocusEducationFundingCharts(f, factor);
+}
+
+function focusEducationFundingChartLayout(ages, yTitle) {
+  return {
+    margin: { l: 70, r: 20, t: 24, b: 40 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `${yTitle} (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  };
+}
+
+function renderFocusEducationFundingCharts(f, factor) {
+  const netEl = $("focusEducationFundingChart");
+  const taxEl = $("focusEducationFundingTaxChart");
+  if (typeof Plotly === "undefined") {
+    if (netEl) netEl.innerHTML = chartUnavailableHTML();
+    if (taxEl) taxEl.innerHTML = chartUnavailableHTML();
+    return;
+  }
+  const ages = f.series.map((r) => r.age);
+  const palette = { baseline: "rgb(28, 90, 180)", investment: "rgb(217, 90, 40)", education: "rgb(46, 138, 138)" };
+  if (netEl) {
+    Plotly.react(netEl, [
+      { x: ages, y: f.series.map((r) => r.netAssetsBaseline * factor(r.year)), name: "Outside a bond",
+        type: "scatter", mode: "lines", line: { color: palette.baseline, width: 2 },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Outside a bond</extra>" },
+      { x: ages, y: f.series.map((r) => r.netAssetsInvestment * factor(r.year)), name: "Investment bond",
+        type: "scatter", mode: "lines", line: { color: palette.investment, width: 2, dash: "dash" },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Investment bond</extra>" },
+      { x: ages, y: f.series.map((r) => r.netAssetsEducation * factor(r.year)), name: "Education bond",
+        type: "scatter", mode: "lines", line: { color: palette.education, width: 2, dash: "dot" },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Education bond</extra>" },
+    ], focusEducationFundingChartLayout(ages, "Net worth"), { displayModeBar: false, responsive: true });
+  }
+  if (taxEl) {
+    Plotly.react(taxEl, [
+      { x: ages, y: f.series.map((r) => r.cumTaxBaseline * factor(r.year)), name: "Outside a bond",
+        type: "scatter", mode: "lines", line: { color: palette.baseline, width: 2 },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Outside a bond</extra>" },
+      { x: ages, y: f.series.map((r) => r.cumTaxInvestment * factor(r.year)), name: "Investment bond",
+        type: "scatter", mode: "lines", line: { color: palette.investment, width: 2, dash: "dash" },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Investment bond</extra>" },
+      { x: ages, y: f.series.map((r) => r.cumTaxEducation * factor(r.year)), name: "Education bond",
+        type: "scatter", mode: "lines", line: { color: palette.education, width: 2, dash: "dot" },
+        hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Education bond</extra>" },
+    ], focusEducationFundingChartLayout(ages, "Cumulative household tax paid"), { displayModeBar: false, responsive: true });
+  }
+}
+
+function exportFocusEducationFundingCSV() {
+  const f = buildEducationFundingFocus({ out: projection, state, childId: focusEducationFundingChildId });
+  if (!f) return;
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const lines = [
+    ["Section", "Item", "Value"].map(csvEsc).join(","),
+    [csvEsc(f.child.name), csvEsc("Seed (same in all three)"), f.seed.toFixed(2)].join(","),
+  ];
+  if (f.flags.investmentWorseThanBaseline) lines.push(["", csvEsc("Flag"), csvEsc("Investment bond ends up worse than saving outside one")].join(","));
+  if (f.flags.educationWorseThanBaseline) lines.push(["", csvEsc("Flag"), csvEsc("Education bond ends up worse than saving outside one")].join(","));
+  lines.push("", [
+    "Year", "Age", "FY",
+    "Net worth (outside a bond)", "Net worth (investment bond)", "Net worth (education bond)",
+    "Cumulative tax (outside a bond)", "Cumulative tax (investment bond)", "Cumulative tax (education bond)",
+    "Education benefit this year",
+  ].map(csvEsc).join(","));
+  for (const r of f.series) {
+    const fac = factor(r.year);
+    lines.push([
+      r.year, r.age, csvEsc(r.fyLabel),
+      (r.netAssetsBaseline * fac).toFixed(2), (r.netAssetsInvestment * fac).toFixed(2), (r.netAssetsEducation * fac).toFixed(2),
+      (r.cumTaxBaseline * fac).toFixed(2), (r.cumTaxInvestment * fac).toFixed(2), (r.cumTaxEducation * fac).toFixed(2),
+      (r.educationBenefit * fac).toFixed(2),
+    ].join(","));
+  }
+  lines.push("", csvEsc(f.disclosure));
+  downloadCSV("focus-education-funding", lines);
+}
+
 // --- Surplus and deficit allocation, Focus view (spec 16, Commit 3) --------
 //
 // "Where did the surplus actually go, year by year" (buildSurplusAllocationFocus)
@@ -13131,6 +13300,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "focus-salary-sacrifice") exportFocusSalarySacrificeCSV();
   else if (activeView === "focus-debt-payoff") exportFocusDebtPayoffCSV();
   else if (activeView === "focus-debt-recycling") exportFocusDebtRecyclingCSV();
+  else if (activeView === "focus-education-funding") exportFocusEducationFundingCSV();
   else if (activeView === "focus-surplus-allocation") exportFocusSurplusAllocationCSV();
   else if (activeView === "focus-ppr-exemption") exportFocusPprExemptionCSV();
   else if (activeView === "focus-lookups") exportFocusLookupsCSV();

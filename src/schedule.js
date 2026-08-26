@@ -340,6 +340,15 @@ export function buildSchedules(state) {
   // in July like every other annual row (convention 5); a not-yet-born
   // child's window simply lands later, with no special-case clamp.
   rowTotals.education = {};
+  // Per-child monthly fee schedule (spec 25, Commit 3) — the SAME
+  // dollars already folded into `expenses` above, just also kept
+  // per-child so an education bond (linked to exactly one child via
+  // beneficiaryChildId) can fund THAT child's own fees rather than
+  // them being met from cashflow. Summed across all of a child's own
+  // education blocks (a child may have more than one — e.g. school
+  // then a separate tertiary block).
+  const childEducationFlows = {};
+  for (const child of state.plan.children ?? []) childEducationFlows[child.id] = new Float64Array(months);
   for (const child of state.plan.children ?? []) {
     for (const block of child.education ?? []) {
       rowTotals.education[block.id] = new Float64Array(planYears);
@@ -356,6 +365,7 @@ export function buildSchedules(state) {
         if (jm == null) continue;
         const v = realAmountAt(asRow, jm, cpi, awote);
         expenses[jm] += v;
+        childEducationFlows[child.id][jm] += v;
         rowTotals.education[block.id][y] += v;
       }
     }
@@ -1069,5 +1079,6 @@ export function buildSchedules(state) {
     liabilityExtraFlows,
     liabilityDrawdownEvents,
     bondFlows,
+    childEducationFlows,
   };
 }

@@ -100,3 +100,41 @@ export function bondWithdrawalTax({ withdrawalAmount, balance, costBase, matured
     assessableEarnings: matured ? 0 : earningsWithdrawn,
   };
 }
+
+// The earnings/capital split alone (bondWithdrawalTax's own first two
+// fields), reused by the education benefit calc below — pulled out so
+// the split logic exists in exactly one place.
+export function bondWithdrawalSplit({ withdrawalAmount, balance, costBase }) {
+  if (!(withdrawalAmount > 0) || !(balance > 0)) {
+    return { earningsWithdrawn: 0, capitalWithdrawn: Math.max(0, withdrawalAmount || 0) };
+  }
+  const earningsFraction = Math.max(0, Math.min(1, 1 - Math.max(0, costBase) / balance));
+  const earningsWithdrawn = withdrawalAmount * earningsFraction;
+  return { earningsWithdrawn, capitalWithdrawn: withdrawalAmount - earningsWithdrawn };
+}
+
+// The education bond benefit (spec 25, Commit 3) — VERIFICATION NOTE:
+// direct PDS/ATO fetches were blocked by this environment's network
+// policy; the mechanic below is corroborated instead from two
+// independent web searches that both surfaced the SAME specific,
+// numeric mechanic quoted from a named provider's own education-bond
+// materials (Australian Unity's Lifeplan Education Bond): a "scholarship
+// plan" structure lets the provider recover the 30% tax it already paid
+// on the earnings component of a withdrawal used for eligible education
+// expenses, and that recovered amount is added to the withdrawal as the
+// "education benefit" — described consistently as "$30 for every $70
+// withdrawn from the earnings". This is claimed to apply on an
+// education-purpose withdrawal REGARDLESS of the ten-year mark (it
+// recovers tax the bond already paid internally every year, a
+// mechanism distinct from the personal ten-year assessability rule —
+// consistent with sources describing education withdrawals as not
+// needing to be included in the investor's own tax return at all).
+// NOT independently modelled here (no source found, so not asserted):
+// any annual or lifetime cap on the benefit, or a graduated withdrawal
+// schedule. Flagged in the UI as an unmodelled limit, not silently
+// assumed uncapped.
+export const EDUCATION_BENEFIT_RATIO = 30 / 70;
+
+export function bondEducationBenefit(earningsWithdrawn) {
+  return Math.max(0, earningsWithdrawn) * EDUCATION_BENEFIT_RATIO;
+}

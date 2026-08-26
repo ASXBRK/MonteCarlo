@@ -2856,3 +2856,47 @@ describe("Investment and education bonds (spec 25, Commit 1): plan model", () =>
     expect(reclamped.cashflows.bondContributions[0].bondId).toBeNull();
   });
 });
+
+describe("Education bonds and the funding comparison (spec 25, Commit 3): plan model", () => {
+  it("createBond defaults beneficiaryChildId to null", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(createBond(plan, [], PROFILES).beneficiaryChildId).toBeNull();
+  });
+
+  it("clampBond: a beneficiary is accepted for EITHER bond type, as long as it resolves to a real child", () => {
+    const plan = { ...clampPlan(couplePlan(), PROFILES), children: [createChild([], couplePlan())] };
+    const childId = plan.children[0].id;
+    expect(clampBond({ type: "education", beneficiaryChildId: childId }, plan, PROFILES).beneficiaryChildId).toBe(childId);
+    expect(clampBond({ type: "investment", beneficiaryChildId: childId }, plan, PROFILES).beneficiaryChildId).toBe(childId);
+  });
+
+  it("clampBond: a dangling beneficiaryChildId drops to null (never coerced to a different child)", () => {
+    const plan = { ...clampPlan(couplePlan(), PROFILES), children: [createChild([], couplePlan())] };
+    expect(clampBond({ type: "education", beneficiaryChildId: "nonexistent" }, plan, PROFILES).beneficiaryChildId).toBeNull();
+  });
+
+  it("clampBond: with no children at all, any beneficiaryChildId drops to null", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(clampBond({ type: "education", beneficiaryChildId: "ch1" }, plan, PROFILES).beneficiaryChildId).toBeNull();
+  });
+
+  it("hydrate round-trips a bond's beneficiaryChildId", () => {
+    const s = defaultState(PROFILES, NOW);
+    const child = createChild([], s.plan);
+    s.plan = { ...s.plan, children: [child] };
+    const bond = { ...createBond(s.plan, [], PROFILES), type: "education", beneficiaryChildId: child.id };
+    s.bonds = [bond];
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.bonds[0].beneficiaryChildId).toBe(child.id);
+  });
+
+  it("hydrate drops a bond's beneficiaryChildId when the child is removed", () => {
+    const s = defaultState(PROFILES, NOW);
+    const child = createChild([], s.plan);
+    s.plan = { ...s.plan, children: [child] };
+    s.bonds = [{ ...createBond(s.plan, [], PROFILES), type: "education", beneficiaryChildId: child.id }];
+    s.plan.children = []; // the child was removed
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.bonds[0].beneficiaryChildId).toBeNull();
+  });
+});

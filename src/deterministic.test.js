@@ -3260,12 +3260,23 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const bondContributions = [];
     for (let i = 0; i < randInt(0, 2); i++) {
       const id = `bd${i}`;
+      // Education bonds (spec 25, Commit 3) — a beneficiary link applies
+      // to EITHER bond type (planState.js's own header on why); when
+      // there's a real child to link to, both an education-type and an
+      // investment-type bond sometimes name one (exercising the
+      // benefit-and-no-tax path and the ordinary assessable-if-
+      // unmatured path respectively — see the a-bonds block's own
+      // type branch), and sometimes NEITHER has a beneficiary at all
+      // (the "never auto-funds anything" path), across enough runs.
+      const type = children.length && Math.random() < 0.4 ? "education" : "investment";
+      const beneficiaryChildId = children.length && Math.random() < 0.5 ? pick(children).id : null;
       bonds.push({
-        id, name: `Bond ${i}`, type: "investment",
+        id, name: `Bond ${i}`, type,
         owner: couple ? pick(["client", "partner", "joint"]) : "client",
         include: true, balance: rand(0, 150000),
         startDate: pick(["2012-03-01", "2020-11-01", "2026-07-01", "2027-01-01"]),
         allocation: randomAllocation(), icrPct: 0,
+        beneficiaryChildId,
       });
       // Sometimes no contribution stream at all (a bond just sitting
       // there, growing); when present, amounts span from a compliant
@@ -9134,5 +9145,72 @@ describe("Investment and education bonds (spec 25, Commit 2): deficit funding", 
     });
     const out = projectPlan(withoutBonds);
     expect(out.yearly[0].perAssetDetail.a1.deficitFunding).toBeGreaterThan(0);
+  });
+});
+
+describe("Investment and education bonds (spec 25, Commit 3): education withdrawals", () => {
+  const child = (over = {}) => ({
+    id: "ch1", name: "Child 1", dateOfBirth: synthDob(10, { year: 2026, month: 7 }), education: [
+      { id: "ed1", fromAge: 10, toAge: 17, annualAmount: 20000, indexBasis: "none", indexExtraPct: 0 },
+    ],
+    ...over,
+  });
+  const educationBond = (over = {}) => ({
+    id: "bd1", name: "Ed Bond", type: "education", owner: "client", include: true,
+    balance: 100000, startDate: "2020-07-01", beneficiaryChildId: "ch1",
+    allocation: { mode: "custom", incomePct: 6, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+    icrPct: 0,
+    ...over,
+  });
+  const withEducationBond = (b, over = {}) => mkState({
+    endAge: 44, bonds: [b],
+    plan: { children: [child()] },
+    cashflows: { income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [], bondContributions: [] },
+    ...over,
+  });
+
+  it("an education withdrawal reduces the modelled fee's net cost — the household's own expense is offset by the bond's credit", () => {
+    const withBond = projectPlan(withEducationBond(educationBond()));
+    const withoutBond = projectPlan(mkState({ endAge: 44, plan: { children: [child()] } }));
+    // Same fee schedule either way (unaffected — see the spec's own
+    // "met from cashflow" framing: the EXPENSE itself doesn't change,
+    // only what funds it) — the bond-funded plan's net worth should be
+    // HIGHER by year-end, since the bond pays the fee AND adds its own
+    // education benefit on top.
+    expect(withBond.yearly[0].expenses).toBeCloseTo(withoutBond.yearly[0].expenses, 2);
+    expect(withBond.yearly[0].bondDetail.bd1.educationWithdrawal).toBeGreaterThan(0);
+    expect(withBond.yearly[0].bondDetail.bd1.educationBenefit).toBeGreaterThan(0);
+    expect(withBond.yearly[0].netAssets).toBeGreaterThan(withoutBond.yearly[0].netAssets);
+  });
+
+  it("the education withdrawal is capped at the bond's own balance — a fee bigger than what's left simply isn't fully covered", () => {
+    const out = projectPlan(withEducationBond(educationBond({ balance: 5000 })));
+    expect(out.yearly[0].bondDetail.bd1.educationWithdrawal).toBeLessThanOrEqual(5000 * 1.05); // ≤ balance + this year's own growth
+    expect(out.yearly[0].bondDetail.bd1.closing).toBeCloseTo(0, 0);
+  });
+
+  it("an education withdrawal never touches the investor's own tax — no assessable component regardless of the ten-year mark", () => {
+    const unmatured = projectPlan(withEducationBond(educationBond({ startDate: "2025-07-01" })));
+    const matured = projectPlan(withEducationBond(educationBond({ startDate: "2005-07-01" })));
+    expect(unmatured.yearly[0].bondDetail.bd1.assessableWithdrawal).toBe(0);
+    expect(matured.yearly[0].bondDetail.bd1.assessableWithdrawal).toBe(0);
+  });
+
+  it("a bond with no beneficiary (or an investment-type bond) never auto-funds any child's fees", () => {
+    const out = projectPlan(withEducationBond(educationBond({ beneficiaryChildId: null })));
+    expect(out.yearly[0].bondDetail.bd1.educationWithdrawal).toBe(0);
+  });
+
+  it("conservation holds across an education-funded fee schedule, fully and partially covered", () => {
+    for (const balance of [100000, 5000]) {
+      const out = projectPlan(withEducationBond(educationBond({ balance })));
+      for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `education bond (balance ${balance}), year ${y}`);
+    }
+  });
+
+  it("regression gate: an investment bond with the field present but unset behaves identically to one where it's absent", () => {
+    const withField = projectPlan(withEducationBond({ ...educationBond(), type: "investment", beneficiaryChildId: null }));
+    const withoutField = projectPlan(withEducationBond({ ...educationBond(), type: "investment", beneficiaryChildId: undefined }));
+    expect(withField.yearly[2].netAssets).toBeCloseTo(withoutField.yearly[2].netAssets, 6);
   });
 });

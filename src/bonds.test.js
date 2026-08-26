@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   BOND_TAX_RATE, bondEffectiveTaxRate, bondMaturityMonth, bondHasMatured,
   bondStartMonthIndex, bondContributionCapCheck, bondWithdrawalTax,
+  bondWithdrawalSplit, bondEducationBenefit, EDUCATION_BENEFIT_RATIO,
 } from "./bonds.js";
 
 describe("bondEffectiveTaxRate", () => {
@@ -91,5 +92,28 @@ describe("bondWithdrawalTax", () => {
     expect(bondWithdrawalTax({ withdrawalAmount: 5000, balance: 0, costBase: 0, matured: false })).toEqual({
       earningsWithdrawn: 0, capitalWithdrawn: 5000, assessableEarnings: 0,
     });
+  });
+});
+
+describe("bondWithdrawalSplit (the same earnings/capital split, reused by the education benefit)", () => {
+  it("matches bondWithdrawalTax's own split exactly", () => {
+    const full = bondWithdrawalTax({ withdrawalAmount: 10000, balance: 100000, costBase: 60000, matured: false });
+    const split = bondWithdrawalSplit({ withdrawalAmount: 10000, balance: 100000, costBase: 60000 });
+    expect(split.earningsWithdrawn).toBeCloseTo(full.earningsWithdrawn, 6);
+    expect(split.capitalWithdrawn).toBeCloseTo(full.capitalWithdrawn, 6);
+  });
+});
+
+describe("bondEducationBenefit (spec 25, Commit 3 — verified via provider-sourced content, see bonds.js's own header)", () => {
+  it("is $30 for every $70 of earnings withdrawn — the verified provider mechanic", () => {
+    expect(EDUCATION_BENEFIT_RATIO).toBeCloseTo(30 / 70, 10);
+    expect(bondEducationBenefit(70)).toBeCloseTo(30, 6);
+    expect(bondEducationBenefit(700)).toBeCloseTo(300, 6);
+  });
+  it("zero earnings withdrawn gives zero benefit", () => {
+    expect(bondEducationBenefit(0)).toBe(0);
+  });
+  it("a negative input (should never occur) clamps to zero rather than going negative", () => {
+    expect(bondEducationBenefit(-100)).toBe(0);
   });
 });
