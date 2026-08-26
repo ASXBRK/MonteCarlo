@@ -10349,6 +10349,17 @@ function superDetailRows(get) {
     // it's not a benefit payment (not assessable, not preservation-
     // gated) — see the Division 293/296 release-from-super feature.
     { label: "Releases (Division 293/296)", cell: (y) => -get(y).release },
+    // Super rollovers (spec 26, Commit 1; UI: spec 27 Commit 1) — a
+    // balance MOVE between two super accounts, already computed
+    // (deterministic.js's own row.superDetail[id].rolloverIn/Out/Tax)
+    // but never displayed until now, found by spec 27 Commit 5's own
+    // reachability sweep: without these rows, opening + contributions +
+    // earnings − withdrawals didn't reconcile to closing for an account
+    // that had rolled money in or out — the same class of gap this
+    // whole spec exists to close.
+    { label: "Rollovers in", cell: (y) => get(y).rolloverIn },
+    { label: "Rollovers out", cell: (y) => -get(y).rolloverOut },
+    { label: "Rollover tax (untaxed → taxed)", cell: (y) => -get(y).rolloverTax },
   ];
 }
 
@@ -10395,7 +10406,7 @@ function buildSuperGroups(entity) {
   const partnerGroup = couple ? superPersonGroup("partner", partnerName()) : null;
   const personGroups = [clientGroup, ...(partnerGroup ? [partnerGroup] : [])];
 
-  const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, release: 0, closing: 0 };
+  const zero = { opening: 0, sg: 0, salarySacrifice: 0, personalDeductible: 0, nonConcessional: 0, contributionsTax: 0, earnings: 0, earningsTax: 0, withdrawals: 0, release: 0, rolloverIn: 0, rolloverOut: 0, rolloverTax: 0, closing: 0 };
   const combinedGroupsFor = (accounts, title) => {
     const combined = superDetailRows((y) => accounts.reduce((s, a) => {
       const d = yl[y].superDetail[a.id] ?? zero;
