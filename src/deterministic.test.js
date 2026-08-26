@@ -7,6 +7,7 @@ import { lmiPremium } from "./data/lmiRates.js";
 import { levelPayment } from "./liabilities.js";
 import { agePensionRatesFor, cshcThresholdsFor } from "./data/agePension.js";
 import { heasEffectiveAnnualRate, heasMaxLoanAmount } from "./data/heas.js";
+import { assessPerson } from "./Tax/annual.js"; // only for the marginal-withholding hand-calc below
 
 // Minimal v3-shaped state factory. Custom allocations pin exact
 // returns without depending on profile values.
@@ -2796,6 +2797,61 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       liabilities.push(liab);
     }
 
+    // Bonus/allowance/overtime (spec 23, Commit 2) — a bonus with a
+    // destination is a genuine new money flow (its after-tax amount
+    // bypasses ordinary surplus and lands directly against a liability/
+    // super account/asset — see conservationCheck.js's own header note
+    // on why this needed checking, not assuming, and turned out to need
+    // no new term). Built AFTER liabilities/superAccounts/assets so a
+    // destination can target any of them; sometimes none (falls through
+    // to ordinary income), sometimes each of the three real types.
+    // Overtime deliberately sets sgApplies:true (the OPPOSITE of what
+    // should happen) — the engine must force it off regardless,
+    // exercising the belt-and-braces filter, not just the default.
+    const bonusRows = [];
+    for (const p of persons) {
+      if (Math.random() < 0.5) {
+        const ownAccount = superAccounts.find((sa) => sa.owner === p);
+        const destinationPool = [
+          null,
+          liabilities.length > 0 ? { type: "loanRepayment", targetId: pick(liabilities).id } : null,
+          ownAccount ? { type: "superContribution", targetId: ownAccount.id } : null,
+          { type: "asset", targetId: pick(assets).id },
+        ].filter((d) => d !== null);
+        bonusRows.push({
+          ...employmentRow({
+            id: `bonus_${p}`, owner: p, amount: rand(1000, 30000), frequency: "annual",
+            from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
+            sgApplies: Math.random() < 0.5,
+          }),
+          category: "bonus", taxable: true, bonusMonth: randInt(1, 12),
+          bonusDestination: pick(destinationPool) ?? { type: null, targetId: null },
+        });
+      }
+      if (Math.random() < 0.4) {
+        const taxable = Math.random() < 0.5;
+        bonusRows.push({
+          ...employmentRow({
+            id: `allow_${p}`, owner: p, amount: rand(500, 8000), frequency: pick(["monthly", "annual"]),
+            from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
+            sgApplies: false,
+          }),
+          category: "allowance", taxable,
+          incomeType: taxable ? "employment" : "nonTaxable", // this raw state bypasses clampIncomeRow's own derivation
+        });
+      }
+      if (Math.random() < 0.4) {
+        bonusRows.push({
+          ...employmentRow({
+            id: `ot_${p}`, owner: p, amount: rand(500, 15000), frequency: pick(["monthly", "annual"]),
+            from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
+            sgApplies: true,
+          }),
+          category: "overtime",
+        });
+      }
+    }
+
     // Goals (Document Set Commit 6) — funded from an asset (naturally
     // capped at its balance) or from surplus (capped at what's
     // actually left each month); target amounts range from trivially
@@ -3100,7 +3156,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           superAccounts, pensions, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments,
         },
-        cashflows: { income, expenses, superContributions },
+        cashflows: { income: [...income, ...bonusRows], expenses, superContributions },
         surplus,
         deficit,
         fundingOrder: assets.map((a) => a.id),
@@ -8078,5 +8134,181 @@ describe("Employers (spec 23, Commit 1): per-employer SG and contribution base",
     const d = out.yearly[0].superDetail.su1;
     // 10% of employer 1's $100,000 = $10,000 — not 10% of the combined $150,000.
     expect(d.salarySacrifice).toBeCloseTo(10000, 2);
+  });
+});
+
+// --- Spec 23, Commit 2: bonus, allowance, overtime income types -----------
+
+describe("Bonus, allowance and overtime income (spec 23, Commit 2)", () => {
+  const loan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 200000, interestRatePct: 6, termYears: 10, repayment: "pi",
+    ioYears: 0, deductible: false, linkedAssetId: null, offsetAssetId: null,
+    extraRepayments: [], oneOffRepayments: [],
+    ...over,
+  });
+
+  it("a bonus's full annual amount lands in household income for the FY it fires in, regardless of the nominated month", () => {
+    const s = mkState({
+      endAge: 41,
+      cashflows: {
+        income: [{
+          ...employmentRow({ id: "b1", amount: 30000, frequency: "annual", to: { kind: "age", age: 40 } }),
+          category: "bonus", bonusMonth: 3, sgApplies: false,
+        }],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].income).toBeCloseTo(30000, 2);
+  });
+
+  it("overtime generates no SG even when sgApplies is left true on the row — the forced, belt-and-braces gate", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: {
+        income: [{ ...employmentRow({ amount: 100000, sgApplies: true }), category: "overtime" }],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBe(0);
+  });
+
+  it("allowance: the taxable variant is assessed like ordinary employment income; the non-taxable variant carries zero tax", () => {
+    const taxableState = mkState({
+      endAge: 41,
+      cashflows: {
+        income: [{ ...employmentRow({ amount: 80000, sgApplies: false }), category: "allowance", taxable: true, incomeType: "employment" }],
+      },
+    });
+    const nonTaxableState = mkState({
+      endAge: 41,
+      cashflows: {
+        income: [{ ...employmentRow({ amount: 80000, sgApplies: false }), category: "allowance", taxable: false, incomeType: "nonTaxable" }],
+      },
+    });
+    const taxable = projectPlan(taxableState);
+    const nonTaxable = projectPlan(nonTaxableState);
+    // Same real household cash either way...
+    expect(taxable.yearly[0].income).toBeCloseTo(80000, 2);
+    expect(nonTaxable.yearly[0].income).toBeCloseTo(80000, 2);
+    // ...but only the taxable variant generates any tax at all.
+    expect(taxable.yearly[0].tax).toBeGreaterThan(0);
+    expect(nonTaxable.yearly[0].tax).toBe(0);
+  });
+
+  it("a bonus directed to a loan reduces its balance from the firing year onward, not before — falls through to ordinary cash when the target doesn't exist", () => {
+    const bonusRow = (destination) => ({
+      ...employmentRow({
+        id: "b1", amount: 30000, frequency: "annual",
+        from: { kind: "age", age: 41 }, to: { kind: "age", age: 41 },
+      }),
+      category: "bonus", bonusMonth: 6, sgApplies: false, bonusDestination: destination,
+    });
+    const build = (income) => ({
+      ...mkState({ endAge: 42, assets: [mkAsset({ allocation: zeroRealAlloc(), balance: 300000 })], cashflows: { income: [income] } }),
+      liabilities: [loan()],
+    });
+    const withDestination = projectPlan(build(bonusRow({ type: "loanRepayment", targetId: "lb1" })));
+    const noDestination = projectPlan(build(bonusRow({ type: null, targetId: null })));
+    const dangling = projectPlan(build(bonusRow({ type: "loanRepayment", targetId: "doesNotExist" })));
+    // Before the firing year: identical (the row starts at age 41 = year 1).
+    expect(withDestination.yearly[0].liabilities.lb1.closing).toBeCloseTo(noDestination.yearly[0].liabilities.lb1.closing, 2);
+    // The firing year: the destination scenario pays down materially more.
+    expect(withDestination.yearly[1].liabilities.lb1.closing).toBeLessThan(noDestination.yearly[1].liabilities.lb1.closing - 15000);
+    // A structurally dangling target falls through to ordinary cash —
+    // identical to having no destination at all.
+    expect(dangling.yearly[1].liabilities.lb1.closing).toBeCloseTo(noDestination.yearly[1].liabilities.lb1.closing, 2);
+  });
+
+  it("a bonus directed to a super account credits it as a non-concessional (post-tax) contribution", () => {
+    const bonusRow = {
+      ...employmentRow({ id: "b1", amount: 30000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+      category: "bonus", bonusMonth: 6, sgApplies: false,
+      bonusDestination: { type: "superContribution", targetId: "su1" },
+    };
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [bonusRow] },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    expect(d.contributions).toBeGreaterThan(0);
+    // Non-concessional — no fund-tax skim, unlike SG/salary sacrifice.
+    expect(d.contributionsTax).toBe(0);
+  });
+
+  it("a bonus directed to an asset credits it, funded from household cash (not conjured — see conservationCheck.js)", () => {
+    const bonusRow = {
+      ...employmentRow({ id: "b1", amount: 30000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+      category: "bonus", bonusMonth: 6, sgApplies: false,
+      bonusDestination: { type: "asset", targetId: "a1" },
+    };
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ allocation: zeroRealAlloc(), balance: 0 })],
+      cashflows: { income: [bonusRow] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].perAssetDetail.a1.oneOffs).toBeGreaterThan(0);
+  });
+
+  it("known-value: the redirected amount matches marginal-method withholding — differencing the isolated-employment assessment with and without the bonus's own gross", () => {
+    const salary = 80000;
+    const bonusGross = 30000;
+    const bonusRow = {
+      ...employmentRow({
+        id: "b1", amount: bonusGross, frequency: "annual",
+        from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+      }),
+      category: "bonus", bonusMonth: 6, sgApplies: false,
+      bonusDestination: { type: "loanRepayment", targetId: "lb1" },
+    };
+    const salaryRow = employmentRow({ id: "s1", amount: salary, sgApplies: false, to: { kind: "age", age: 40 } });
+    const s = {
+      ...mkState({
+        endAge: 41,
+        assets: [mkAsset({ allocation: zeroRealAlloc(), balance: 300000 })],
+        cashflows: { income: [salaryRow, bonusRow] },
+      }),
+      liabilities: [loan({ balance: 200000 })],
+    };
+    const withBonus = assessPerson({
+      fyStartYear: 2026, bracketMode: "indexed", cpi: 0.025,
+      ordinaryIncome: salary + bonusGross, deductions: 0,
+      distributions: { franked: 0, unfranked: 0 },
+      netCapitalGain: 0, capitalLossCarryFwd: 0, taxProfile: null, excessConcessionalContributions: 0,
+    });
+    const withoutBonus = assessPerson({
+      fyStartYear: 2026, bracketMode: "indexed", cpi: 0.025,
+      ordinaryIncome: salary, deductions: 0,
+      distributions: { franked: 0, unfranked: 0 },
+      netCapitalGain: 0, capitalLossCarryFwd: 0, taxProfile: null, excessConcessionalContributions: 0,
+    });
+    const expectedAfterTax = bonusGross - (withBonus.netIncomeTax - withoutBonus.netIncomeTax);
+    const out = projectPlan(s);
+    const withoutBonusOut = projectPlan({ ...s, cashflows: { ...s.cashflows, income: [salaryRow] } });
+    const actualRedirected = withoutBonusOut.yearly[0].liabilities.lb1.closing - out.yearly[0].liabilities.lb1.closing;
+    // Within a few percent, not to the cent: the credit converts its
+    // real dollar amount to nominal at ITS OWN firing month (11, one
+    // month before FY-end), while the closing balance it lands in is
+    // deflated at FY-end (month 12) — one month's CPI drift between the
+    // two, the same reason the one-off-repayment test above uses a
+    // loose bound rather than exact equality for a mid-year real-dollar
+    // event.
+    expect(actualRedirected).toBeGreaterThan(expectedAfterTax * 0.95);
+    expect(actualRedirected).toBeLessThan(expectedAfterTax * 1.05);
+  });
+
+  it("regression gate: a salary row (category absent, pre-Commit-2 shape) is completely unaffected", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [employmentRow({ amount: 100000 })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBeCloseTo(100000 * 0.12, 2);
+    expect(out.yearly[0].income).toBeCloseTo(100000, 2);
   });
 });

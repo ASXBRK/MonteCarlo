@@ -623,6 +623,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // spreadTax accrual entirely (see the assessment loop below).
   let pendingRefund = { client: 0, partner: 0 };
   const superWarnings = [...schedule.superWarnings]; // age/work-test rejections, resolved in schedule.js
+  // Bonus destinations (spec 23, Commit 2) — grouped by owner+year for
+  // O(1) lookup in the per-person tax loop below, where the after-tax
+  // amount is resolved (see that loop's own comment for why).
+  const bonusEventsByOwnerYear = new Map();
+  for (const ev of schedule.bonusDestinationEvents ?? []) {
+    const key = `${ev.owner}::${ev.year}`;
+    if (!bonusEventsByOwnerYear.has(key)) bonusEventsByOwnerYear.set(key, []);
+    bonusEventsByOwnerYear.get(key).push(ev);
+  }
   // Document Set Commit 4 — flagged (never blocking, since price caps
   // change) when a First Home Guarantee purchase's price exceeds the
   // embedded state cap at settlement time.
@@ -1518,6 +1527,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     ongoingFromSuperRequested = 0, ongoingFromSuperShortfall = 0, upfrontFromSuperShortfall = 0,
     agePensionMonthly = 0,
     heasMonthly = 0,
+    bonusCredits = {},
   }) {
     const fyStart = fy0 + y;
     // Condition of release (Tier 1.2, Commit 3): static for the whole
@@ -2788,6 +2798,68 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         if (m === first) row.adviserFeesOngoing.requestedFromSuper += ongoingFromSuperRequested;
         row.surplusOrDeficit += net;
         row.wcaDetail.netFlow += net;
+      }
+
+      // Bonus destinations (spec 23, Commit 2) — a bonus can redirect
+      // its own AFTER-TAX amount straight to a loan/super/asset instead
+      // of remaining ordinary household cash. Real-pass only, no
+      // measurement-pass snapshot needed: this has no tax consequence
+      // of its own (the bonus's GROSS amount already flowed through
+      // ordinary income/incomeByOwner above, via schedule.js's
+      // applyBonus, and is what actually gets taxed). bonusCredits is
+      // resolved once per FY, before this real pass, in the per-person
+      // tax loop below — the after-tax amount depends on that FY's own
+      // marginal tax on the bonus, found by differencing two isolated-
+      // employment assessments; this block only APPLIES the already-
+      // known dollar amount. Capped at whatever surplus THIS month's
+      // cash actually has above the WCA minimum — the same floor the
+      // FY-end surplus sweep protects — exactly the "falls through to
+      // the normal surplus treatment if unavailable" the spec calls
+      // for: a month without enough spare cash just leaves the
+      // after-tax bonus sitting in the WCA as ordinary cash instead.
+      if (row) {
+        // loanBal is tracked in NOMINAL dollars (D3 — nominal
+        // amortisation, deflated only at the ledger), unlike bal/
+        // superBal, which are real throughout (CLAUDE.md's "real terms
+        // everywhere" convention) — credit.amount is real (it came out
+        // of assessPerson's own real-dollar differencing), so the loan
+        // branch alone needs the SAME real→nominal conversion the
+        // ordinary extra-repayment code above it already applies
+        // (extraNominal = extraReal * infl).
+        const inflNow = inflAt(m);
+        for (const credit of bonusCredits[m] ?? []) {
+          const available = Math.max(0, wcaBal - wca.minimumBalance);
+          if (available <= 0) break;
+          if (credit.type === "loanRepayment") {
+            const loanBalReal = Math.max(0, (loanBal[credit.targetId] ?? 0) / inflNow);
+            const consumed = Math.min(available, credit.amount, loanBalReal);
+            if (consumed > 0) {
+              loanBal[credit.targetId] -= consumed * inflNow;
+              wcaBal -= consumed;
+              row.liabilities[credit.targetId].extraRepayment += consumed;
+            }
+          } else if (credit.type === "superContribution") {
+            const consumed = Math.min(available, credit.amount);
+            if (consumed > 0) {
+              // Non-concessional (post-tax) credit — the amount is
+              // already net of the bonus's own income tax, so no
+              // further 15% fund tax applies; the whole amount joins
+              // the tax-free component, same as any other NCC.
+              superBal[credit.targetId] += consumed;
+              superTaxFree[credit.targetId] += consumed;
+              wcaBal -= consumed;
+              row.superDetail[credit.targetId].contributions += consumed;
+            }
+          } else if (credit.type === "asset") {
+            const consumed = Math.min(available, credit.amount);
+            if (consumed > 0) {
+              bal[credit.targetId] += consumed;
+              if (meta[credit.targetId].cgt) pools[credit.targetId] = poolAdd(pools[credit.targetId], consumed);
+              wcaBal -= consumed;
+              row.perAssetDetail[credit.targetId].oneOffs += consumed;
+            }
+          }
+        }
       }
 
       // d. Top the WCA back up to its minimum from fundingOrder (then
@@ -4119,6 +4191,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
 
     taxOutArr.fill(0, yearStart(y), yearEnd(y));
+    // Bonus destinations (spec 23, Commit 2) — {[month]: [{type,
+    // targetId, amount}]}, resolved fresh each FY (see the loop below)
+    // and passed to THIS year's real pass only; the measured pass
+    // above already ran and rolled back, so it can never see this —
+    // exactly the ordering every other "resolved once per FY, before
+    // the real pass" figure in this file already relies on.
+    const bonusCredits = {};
     for (const p of persons) {
       const a = assessPerson({
         fyStartYear: fyStart,
@@ -4174,6 +4253,58 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           excessConcessionalContributions: 0,
         });
         paygWithheld[p] = payg.netIncomeTax + withheldAdjustmentTotal[p];
+        // Bonus destinations (spec 23, Commit 2) — "PAYG withholding on
+        // a bonus uses the marginal method... withheld at the
+        // recipient's marginal rate on the bonus amount" (the spec's
+        // own words). Found by differencing this SAME isolated-
+        // employment assessment against a counterfactual with the
+        // bonus's own gross removed — the standard differencing
+        // technique this codebase already uses elsewhere (see
+        // medicareOnGain in Tax/engine.js) to isolate one component's
+        // own incremental tax, correctly capturing bracket-climbing
+        // rather than an average/blended rate. Only computed when this
+        // person actually has a bonus destination event this FY — free
+        // for every other person/year.
+        const bonusEvents = bonusEventsByOwnerYear.get(`${p}::${y}`);
+        if (bonusEvents?.length) {
+          const grossFy = bonusEvents.reduce((s, ev) => s + ev.grossAmount, 0);
+          const withoutBonus = assessPerson({
+            fyStartYear: fyStart, bracketMode, cpi,
+            ordinaryIncome: Math.max(0, employmentIncomeFy - grossFy), deductions: 0,
+            distributions: { franked: 0, unfranked: 0 },
+            netCapitalGain: 0, capitalLossCarryFwd: 0,
+            taxProfile: state.plan[p]?.taxProfile ?? null,
+            excessConcessionalContributions: 0,
+          });
+          const bonusMarginalTax = Math.max(0, payg.netIncomeTax - withoutBonus.netIncomeTax);
+          const afterTaxTotal = Math.max(0, grossFy - bonusMarginalTax);
+          for (const ev of bonusEvents) {
+            const share = grossFy > 0 ? ev.grossAmount / grossFy : 0;
+            const amount = afterTaxTotal * share;
+            if (amount <= 0) continue;
+            const dest = ev.destination;
+            if (dest.type === "superContribution") {
+              // Age/work-test gate (Tier 1.2's own superContributionAllowed)
+              // — this credit bypasses schedule.js's own superFlows
+              // array (the amount isn't known until this differencing
+              // runs), so it needs the SAME gate applied inline. Not
+              // hooked into the NCC annual cap/bring-forward ledger — a
+              // disclosed gap, not a silent one (this is a targeted
+              // redirect of a specific bonus, not a user-entered
+              // recurring contribution row).
+              const age = p === "partner" ? schedule.partnerAges?.[y] : schedule.clientAges[y];
+              const workTestMet = (p === "partner" ? state.plan.partner?.super?.workTestMet : state.plan.client?.super?.workTestMet) !== false;
+              const gateResult = superContributionAllowed("personalNonDeductible", age, workTestMet, superRatesFor(fyStart, bracketMode, cpi));
+              if (!gateResult.ok) {
+                superWarnings.push({
+                  fyLabel: schedule.fyLabels[y], owner: p, type: "bonusSuperContribution", reason: gateResult.reason,
+                });
+                continue; // falls through — stays as ordinary household cash
+              }
+            }
+            (bonusCredits[ev.month] ??= []).push({ type: dest.type, targetId: dest.targetId, amount });
+          }
+        }
         // Employer HELP withholding (also PAYG, same mechanism as
         // income tax): estimated on employment income alone — a real
         // payroll system has no visibility into the super/investment-
@@ -4292,7 +4423,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
-      agePensionMonthly, heasMonthly,
+      agePensionMonthly, heasMonthly, bonusCredits,
     });
     row.closingBalance = combined[yearEnd(y)];
     row.wcaDetail.closing = wcaSeries[yearEnd(y)];

@@ -37,6 +37,7 @@ import {
   DEATH_BENEFIT_RELATIONSHIPS, isDeathBenefitTaxDependant,
   createDeathBenefitBeneficiary, clampDeathBenefitBeneficiary, clampDeathBenefit,
   createEmployer, clampEmployer, normaliseEmployers, resolveEmployerAssignment,
+  INCOME_CATEGORIES, BONUS_DESTINATION_TYPES, clampBonusDestination, incomeCategoryTaxTreatment,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2380,5 +2381,108 @@ describe("Employers (spec 23, Commit 1): plan model", () => {
     const income = [{ id: "i1", owner: "client", incomeType: "employment", employerId: "emp1" }];
     const { income: resolved } = resolveEmployerAssignment(employers, income, plan);
     expect(resolved[0].employerId).toBe("emp1");
+  });
+});
+
+describe("Bonus, allowance and overtime income (spec 23, Commit 2): plan model", () => {
+  it("INCOME_CATEGORIES gains the three new categories; createIncomeRow defaults taxable/bonusMonth/bonusDestination", () => {
+    expect(INCOME_CATEGORIES).toEqual(expect.arrayContaining(["bonus", "allowance", "overtime"]));
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const row = createIncomeRow(plan, []);
+    expect(row.taxable).toBe(true);
+    expect(row.bonusMonth).toBe(6); // June — last month of the FY
+    expect(row.bonusDestination).toEqual({ type: null, targetId: null });
+  });
+
+  it("incomeCategoryTaxTreatment: allowance follows the taxable flag; every other category is fixed", () => {
+    expect(incomeCategoryTaxTreatment("allowance", true)).toBe("employment");
+    expect(incomeCategoryTaxTreatment("allowance", false)).toBe("nonTaxable");
+    expect(incomeCategoryTaxTreatment("bonus")).toBe("employment");
+    expect(incomeCategoryTaxTreatment("overtime")).toBe("employment");
+  });
+
+  it("clampIncomeRow: a bonus row is forced to annual frequency and its bonusMonth clamps into [1, 12]", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const row = { ...createIncomeRow(plan, []), category: "bonus", frequency: "monthly", bonusMonth: 15 };
+    const clamped = clampIncomeRow(row, plan);
+    expect(clamped.frequency).toBe("annual");
+    expect(clamped.bonusMonth).toBe(12);
+  });
+
+  it("clampIncomeRow: overtime forces sgApplies false even when the stored row says true — the belt-and-braces gate", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const row = { ...createIncomeRow(plan, []), category: "overtime", sgApplies: true };
+    const clamped = clampIncomeRow(row, plan);
+    expect(clamped.incomeType).toBe("employment"); // still assessable
+    expect(clamped.sgApplies).toBe(false); // just never contributes SG
+  });
+
+  it("clampIncomeRow: allowance's incomeType tracks its own taxable flag, not a fixed per-category answer", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const taxable = clampIncomeRow({ ...createIncomeRow(plan, []), category: "allowance", taxable: true }, plan);
+    const nonTaxable = clampIncomeRow({ ...createIncomeRow(plan, []), category: "allowance", taxable: false }, plan);
+    expect(taxable.incomeType).toBe("employment");
+    expect(nonTaxable.incomeType).toBe("nonTaxable");
+  });
+
+  it("BONUS_DESTINATION_TYPES lists the three real destinations", () => {
+    expect(BONUS_DESTINATION_TYPES).toEqual(["loanRepayment", "superContribution", "asset"]);
+  });
+
+  it("clampBonusDestination keeps a valid destination of each type and drops an invalid one — never a fallback target", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const ctx = {
+      liabilities: [{ id: "lb1" }],
+      assets: [{ id: "a1", include: true, class: "financial" }],
+    };
+    plan.superAccounts = [{ id: "su1", owner: "client", include: true }];
+    const row = { owner: "client" };
+
+    expect(clampBonusDestination({ type: "loanRepayment", targetId: "lb1" }, row, plan, ctx))
+      .toEqual({ type: "loanRepayment", targetId: "lb1" });
+    expect(clampBonusDestination({ type: "superContribution", targetId: "su1" }, row, plan, ctx))
+      .toEqual({ type: "superContribution", targetId: "su1" });
+    expect(clampBonusDestination({ type: "asset", targetId: "a1" }, row, plan, ctx))
+      .toEqual({ type: "asset", targetId: "a1" });
+    // Unknown type, dangling target, and null all drop to "no destination".
+    expect(clampBonusDestination({ type: "bogus", targetId: "lb1" }, row, plan, ctx))
+      .toEqual({ type: null, targetId: null });
+    expect(clampBonusDestination({ type: "loanRepayment", targetId: "nonexistent" }, row, plan, ctx))
+      .toEqual({ type: null, targetId: null });
+    expect(clampBonusDestination(null, row, plan, ctx)).toEqual({ type: null, targetId: null });
+  });
+
+  it("clampBonusDestination scopes a super account destination to the ROW'S OWN owner — a spouse's account never qualifies", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    plan.superAccounts = [{ id: "su_partner", owner: "partner", include: true }];
+    const clientRow = { owner: "client" };
+    expect(clampBonusDestination({ type: "superContribution", targetId: "su_partner" }, clientRow, plan, {}))
+      .toEqual({ type: null, targetId: null });
+  });
+
+  it("clampAllToPlan second stage: a bonus row's destination resolves against real liabilities, dropping a dangling target", () => {
+    const s = defaultState(PROFILES, NOW);
+    const liability = createLiability(s.plan, []);
+    s.liabilities = [liability];
+    const validRow = { ...createIncomeRow(s.plan, []), category: "bonus", bonusDestination: { type: "loanRepayment", targetId: liability.id } };
+    const danglingRow = { ...createIncomeRow(s.plan, []), category: "bonus", bonusDestination: { type: "loanRepayment", targetId: "nonexistent" } };
+    s.cashflows.income = [validRow, danglingRow];
+    const out = clampAllToPlan(s, PROFILES);
+    expect(out.cashflows.income[0].bonusDestination).toEqual({ type: "loanRepayment", targetId: liability.id });
+    expect(out.cashflows.income[1].bonusDestination).toEqual({ type: null, targetId: null });
+  });
+
+  it("hydrate round-trips a bonus row's destination the same way clampAllToPlan does", () => {
+    const s = defaultState(PROFILES, NOW);
+    const liability = createLiability(s.plan, []);
+    s.liabilities = [liability];
+    s.cashflows.income = [{
+      ...createIncomeRow(s.plan, []), category: "bonus", bonusMonth: 3,
+      bonusDestination: { type: "loanRepayment", targetId: liability.id },
+    }];
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.cashflows.income[0].category).toBe("bonus");
+    expect(back.cashflows.income[0].bonusMonth).toBe(3);
+    expect(back.cashflows.income[0].bonusDestination).toEqual({ type: "loanRepayment", targetId: liability.id });
   });
 });

@@ -594,25 +594,36 @@ export const INCOME_TYPES = ["employment", "rental", "otherTaxable", "nonTaxable
 // change — incomeType is still populated, just derived from category
 // now instead of being the row's own stored field.
 export const INCOME_CATEGORIES = [
-  "salary", "otherIncome", "interestIncome", "dividendIncome", "otherTaxFreeIncome", "afterTaxBonus",
+  "salary", "bonus", "allowance", "overtime",
+  "otherIncome", "interestIncome", "dividendIncome", "otherTaxFreeIncome", "afterTaxBonus",
 ];
 export const INCOME_CATEGORY_LABELS = {
   salary: "Salary",
+  bonus: "Bonus",
+  allowance: "Allowance",
+  overtime: "Overtime",
   otherIncome: "Other Income",
   interestIncome: "Interest Income",
   dividendIncome: "Dividend Income",
   otherTaxFreeIncome: "Other tax-free income",
   afterTaxBonus: "After tax bonus",
 };
+// "allowance" is deliberately absent from this map — some allowances
+// are assessable and some are not (site/travel allowances commonly
+// aren't), so its treatment is driven by the row's own `taxable` flag
+// rather than a fixed-per-category answer (see incomeCategoryTaxTreatment).
 const INCOME_CATEGORY_TAX_TREATMENT = {
   salary: "employment",
+  bonus: "employment",
+  overtime: "employment", // assessable, but see clampIncomeRow: never SG (not ordinary time earnings)
   otherIncome: "otherTaxable",
   interestIncome: "otherTaxable",
   dividendIncome: "otherTaxable",
   otherTaxFreeIncome: "nonTaxable",
   afterTaxBonus: "nonTaxable",
 };
-export function incomeCategoryTaxTreatment(category) {
+export function incomeCategoryTaxTreatment(category, taxable = true) {
+  if (category === "allowance") return taxable ? "employment" : "nonTaxable";
   return INCOME_CATEGORY_TAX_TREATMENT[category] ?? "otherTaxable";
 }
 // A pre-Commit-2 row has no category, only incomeType — including the
@@ -666,10 +677,57 @@ export function createIncomeRow(plan, existing = []) {
     // (resolveEmployerAssignment); null is a safe starting value, never
     // trusted directly downstream.
     employerId: null,
+    // Bonus/allowance/overtime (spec 23, Commit 2). `taxable` only ever
+    // varies a row's tax treatment for the "allowance" category (every
+    // other category's treatment is fixed), but is carried on every
+    // row rather than just that one, same convention as `termination`
+    // existing-but-inert on every row that isn't using it.
+    // `bonusMonth` is a calendar month (1–12); default 6 = June, the
+    // last month of the FY, per the spec's own default. Only meaningful
+    // for category "bonus" — clampIncomeRow forces "annual" firing in
+    // that one nominated month regardless of the row's own frequency.
+    taxable: true,
+    bonusMonth: 6,
+    // A bonus can redirect itself past ordinary household cash straight
+    // to a destination ("the bonus goes to the mortgage"); null/null is
+    // "no destination", the normal-income case. See clampBonusDestination
+    // for the second-stage existence check (siblings of plan — a
+    // liability/super account/asset — that clampIncomeRow can't see).
+    bonusDestination: { type: null, targetId: null },
     // Redundancy and ETP (spec 19 Commit 3) — disabled by default; see
     // clampIncomeRow's own header for the field-by-field rationale.
     termination: { enabled: false, at: null, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 },
   };
+}
+
+export const BONUS_DESTINATION_TYPES = ["loanRepayment", "superContribution", "asset"];
+
+// A bonus destination's target is a sibling of plan (a liability, a
+// super account, or a financial asset) — clampIncomeRow can't validate
+// it (same two-stage reason resolveEmployerAssignment needs a second
+// pass); this only shapes/nulls the TYPE, called again once ctx exists.
+// Dropped entirely (never coerced to a fallback target) when it doesn't
+// resolve — exactly clampAllocationEntry's own rule, and for the same
+// reason: a destination pointing at nothing would silently misdirect
+// real money. A dropped destination isn't an error — the spec's own
+// words are "falls through to the normal surplus treatment".
+export function clampBonusDestination(dest, row, plan, ctx) {
+  const type = BONUS_DESTINATION_TYPES.includes(dest?.type) ? dest.type : null;
+  if (!type) return { type: null, targetId: null };
+  let targetId = null;
+  if (type === "loanRepayment") {
+    targetId = (ctx.liabilities ?? []).some((l) => l.id === dest.targetId) ? dest.targetId : null;
+  } else if (type === "superContribution") {
+    // Scoped to the ROW'S OWN owner's accounts — a bonus is this
+    // person's own after-tax money; directing it into a spouse's fund
+    // is a distinct thing (spouse contribution) this field doesn't model.
+    targetId = (plan.superAccounts ?? []).some((s) => s.include && s.owner === row.owner && s.id === dest.targetId)
+      ? dest.targetId : null;
+  } else if (type === "asset") {
+    targetId = (ctx.assets ?? []).some((a) => a.include && isFinancial(a) && a.id === dest.targetId) ? dest.targetId : null;
+  }
+  if (!targetId) return { type: null, targetId: null };
+  return { type, targetId };
 }
 
 export const TERMINATION_TYPES = ["genuineRedundancy", "resignation"];
@@ -2395,8 +2453,34 @@ export function clampIncomeRow(row, plan) {
   const category = INCOME_CATEGORIES.includes(row.category)
     ? row.category
     : (LEGACY_INCOME_TYPE_TO_CATEGORY[row.incomeType] ?? "salary");
-  const incomeType = incomeCategoryTaxTreatment(category);
-  const sgApplies = incomeType === "employment" && row.sgApplies !== false;
+  const taxable = row.taxable !== false;
+  const incomeType = incomeCategoryTaxTreatment(category, taxable);
+  // Overtime is assessable but not ordinary time earnings — no SG ever
+  // applies to it, FORCED rather than just defaulted: getting this
+  // wrong (SG on all employment income) overstates super for shift
+  // workers, the exact bug this category exists to fix. Every other
+  // employment-taxed category keeps the existing user-toggle,
+  // default-on behaviour.
+  const sgApplies = category === "overtime" ? false : (incomeType === "employment" && row.sgApplies !== false);
+  // Bonus: paid once, in its own nominated month, never smeared across
+  // the year the way a "monthly" row would be — frequency is forced so
+  // a stray/legacy stored value (or a category just switched TO bonus)
+  // can't silently reintroduce monthly crediting; see schedule.js's
+  // applyBonus/bonusMonthIndex. bonusMonth is a calendar month (1–12),
+  // carried on every row (inert unless category is "bonus") same as
+  // `taxable`/`bonusDestination` below; 6 (June, the FY's last month)
+  // is the spec's own default.
+  const frequency = category === "bonus" ? "annual" : row.frequency;
+  const bonusMonth = Number.isFinite(Number(row.bonusMonth)) ? clampNumber(row.bonusMonth, 1, 12) : 6;
+  // Structural shape only here (a valid type enum, a string-or-null
+  // target) — the target's actual EXISTENCE (a real liability/super
+  // account/asset) is a sibling of plan clampIncomeRow can't see;
+  // resolved as a second stage by clampBonusDestination, same two-stage
+  // reason resolveEmployerAssignment needs one.
+  const rawDestination = row.bonusDestination;
+  const bonusDestination = BONUS_DESTINATION_TYPES.includes(rawDestination?.type)
+    ? { type: rawDestination.type, targetId: typeof rawDestination.targetId === "string" ? rawDestination.targetId : null }
+    : { type: null, targetId: null };
   // Redundancy and ETP (spec 19 Commit 3) — "the income row ends at the
   // termination date" (the spec's own words) is satisfied by forcing
   // `to` to equal termination.at whenever a termination is active,
@@ -2406,7 +2490,10 @@ export function clampIncomeRow(row, plan) {
   const termination = clampTermination(row.termination, win, plan);
   const to = termination.enabled ? termination.at : clampedTo;
   const { label, labelIsDefault } = clampDerivedLabel(row, INCOME_CATEGORY_LABELS, category);
-  return { ...rest, owner, from, to, category, incomeType, sgApplies, termination, label, labelIsDefault, ...clampIndexation(row) };
+  return {
+    ...rest, owner, from, to, category, incomeType, sgApplies, taxable, frequency, bonusMonth, bonusDestination,
+    termination, label, labelIsDefault, ...clampIndexation(row),
+  };
 }
 
 export function clampExpenseRow(row, plan) {
@@ -2478,6 +2565,15 @@ export function clampAllToPlan(state, profiles = {}) {
   // allocations may target either, and settings needs the final,
   // already-clamped id sets to validate against, not the raw ones.
   const liabilities = normaliseLiabilities(state.liabilities, plan, assets, state.properties);
+  // Bonus destinations (spec 23, Commit 2), second stage — a
+  // destination targets a liability/super account/asset, none of which
+  // clampIncomeRow can see (siblings of plan, not children of it) —
+  // same two-stage reason resolveEmployerAssignment needs one.
+  cashflows.income = cashflows.income.map((r) =>
+    r.category === "bonus" && r.bonusDestination?.type
+      ? { ...r, bonusDestination: clampBonusDestination(r.bonusDestination, r, plan, { liabilities, assets }) }
+      : r
+  );
   const properties = normaliseProperties(state.properties, plan, assets);
   const goals = normaliseGoals(state.goals, plan, assets);
   const settings = normaliseSettings(state.settings, assets, plan, {
@@ -3068,6 +3164,14 @@ export function hydrate(json, profiles = {}) {
     const goalsForImplementation = normaliseGoals(raw.goals, plan, assets);
     const hydratedSuperContributions = hydrateSuperContributions(cf.superContributions, plan, superAccountOwnerById, incomeRowIds);
     const hydratedLiabilities = normaliseLiabilities(raw.liabilities, plan, assets, raw.properties);
+    // Bonus destinations (spec 23, Commit 2), second stage — see
+    // clampAllToPlan's own comment for why this can't happen inside
+    // hydrateIncomeRows/clampIncomeRow.
+    const incomeWithBonusDestinations = income.map((r) =>
+      r.category === "bonus" && r.bonusDestination?.type
+        ? { ...r, bonusDestination: clampBonusDestination(r.bonusDestination, r, plan, { liabilities: hydratedLiabilities, assets }) }
+        : r
+    );
     const properties = normaliseProperties(raw.properties, plan, assets);
     const state = {
       schemaVersion: SCHEMA_VERSION,
@@ -3084,7 +3188,7 @@ export function hydrate(json, profiles = {}) {
       },
       assets,
       cashflows: {
-        income,
+        income: incomeWithBonusDestinations,
         expenses: hydrateExpenseRows(cf.expenses, plan),
         deductions: hydrateDeductionRows(cf.deductions, plan),
         contributions: hydrateCashflows(cf.contributions, plan, assetIds),
@@ -3254,6 +3358,9 @@ function hydrateIncomeRows(arr, plan) {
     sgApplies: r.sgApplies,
     category: r.category,
     employerId: typeof r.employerId === "string" ? r.employerId : null,
+    taxable: r.taxable,
+    bonusMonth: r.bonusMonth,
+    bonusDestination: r.bonusDestination,
   }, plan));
 }
 

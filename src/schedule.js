@@ -129,6 +129,21 @@ function julyMonthIndex(plan, y) {
   return monthsInFirstYear(plan.start) + 12 * (y - 1);
 }
 
+// A bonus's own nominated month (spec 23, Commit 2) — same convention 5
+// null-return as julyMonthIndex (a partial first year without a firing
+// July skips the bonus entirely too, not just ordinary annual rows;
+// every full plan year is 12 months starting in July, so July + any
+// 0–11 offset always lands inside the SAME plan year, never overflows
+// into the next one). bonusMonth is a calendar month (1–12); July (7)
+// is offset 0, June (6) — the FY's last month, the spec's own default
+// — is offset 11.
+function bonusMonthIndex(plan, y, bonusMonth) {
+  const jm = julyMonthIndex(plan, y);
+  if (jm == null) return null;
+  const offset = ((bonusMonth - 7) % 12 + 12) % 12;
+  return jm + offset;
+}
+
 // --- schedule builder ------------------------------------------------------
 
 // buildSchedules(state) → {
@@ -255,9 +270,34 @@ export function buildSchedules(state) {
     }
   };
 
+  // Bonus (spec 23, Commit 2): fires ONCE a year, in its own nominated
+  // month, never spread across every month of the row's window the way
+  // a "monthly" row would be — clampIncomeRow already forces
+  // frequency:"annual" for a bonus row, but this row-shaped helper
+  // (bonusMonthIndex instead of julyMonthIndex) is what actually
+  // relocates the firing month; kept separate from applyRegular's own
+  // annual branch rather than parameterising it, since nothing else
+  // ever fires anywhere but July.
+  const applyBonus = (row, owner, target, totals = null) => {
+    if (row.amount <= 0) return;
+    const bounds = {
+      from: resolveRef(row.from, plan, dateSchedule, owner).planYear,
+      to: resolveRef(row.to, plan, dateSchedule, owner).planYear,
+    };
+    for (let y = 0; y < planYears; y++) {
+      if (!activeInPlanYear(bounds, y)) continue;
+      const bm = bonusMonthIndex(plan, y, row.bonusMonth ?? 6);
+      if (bm == null) continue; // partial first year without a firing July — convention 5
+      const v = realAmountAt(row, bm, cpi, awote);
+      target[bm] += v;
+      if (totals) totals[y] += v;
+    }
+  };
+
   for (const row of state.cashflows.income) {
     rowTotals.income[row.id] = new Float64Array(planYears);
-    applyRegular(row, row.owner, income, rowTotals.income[row.id]);
+    const apply = row.category === "bonus" ? applyBonus : applyRegular;
+    apply(row, row.owner, income, rowTotals.income[row.id]);
     // Non-taxable income (Tier 1.2) is real household cashflow (still
     // counted in `income`/`rowTotals`) but bypasses tax assessment
     // entirely — incomeByOwner feeds ONLY the tax layer, so it's the
@@ -266,13 +306,13 @@ export function buildSchedules(state) {
       const ownerArr = row.owner === "partner" && incomeByOwner.partner
         ? incomeByOwner.partner
         : incomeByOwner.client;
-      applyRegular(row, row.owner, ownerArr);
+      apply(row, row.owner, ownerArr);
     }
     if (row.incomeType === "employment") {
       const empArr = row.owner === "partner" && employmentIncomeByOwner.partner
         ? employmentIncomeByOwner.partner
         : employmentIncomeByOwner.client;
-      applyRegular(row, row.owner, empArr);
+      apply(row, row.owner, empArr);
     }
   }
   for (const row of state.cashflows.expenses) {
@@ -475,7 +515,15 @@ export function buildSchedules(state) {
   // group per FY, then the capped total is distributed back across the
   // group's own rows in proportion to each row's own uncapped share,
   // preserving each row's own monthly-vs-annual crediting timing.
-  const employmentRows = state.cashflows.income.filter((row) => row.incomeType === "employment" && row.sgApplies !== false);
+  // "&& row.category !== "overtime"" is belt-and-braces, not the
+  // primary gate — clampIncomeRow already forces sgApplies:false for
+  // overtime — but a raw/unclamped state (a test fixture, an
+  // in-progress edit) must never be able to generate SG on overtime by
+  // just setting sgApplies:true directly; overtime is assessable but
+  // not ordinary time earnings, so no SG ever applies to it, full stop.
+  const employmentRows = state.cashflows.income.filter(
+    (row) => row.incomeType === "employment" && row.sgApplies !== false && row.category !== "overtime"
+  );
   const sgGroups = new Map();
   for (const row of employmentRows) {
     const key = `${row.owner}::${row.employerId ?? row.id}`;
@@ -517,7 +565,10 @@ export function buildSchedules(state) {
             for (let m = s; m < e; m++) flows.sg[m] += per;
           }
         } else {
-          const jm = julyMonthIndex(plan, y);
+          // A bonus fires in its OWN nominated month, not always July
+          // (see applyBonus/bonusMonthIndex above) — SG on it follows
+          // the same month, not the row's frequency-implied default.
+          const jm = row.category === "bonus" ? bonusMonthIndex(plan, y, row.bonusMonth ?? 6) : julyMonthIndex(plan, y);
           if (jm != null) flows.sg[jm] += sgFy;
         }
       });
@@ -760,6 +811,45 @@ export function buildSchedules(state) {
     })
     .filter((e) => e.month != null);
 
+  // Bonus destinations (spec 23, Commit 2) — a bonus can nominate a
+  // destination (extra loan repayment / super contribution / asset)
+  // instead of landing as ordinary household cash. This module only
+  // resolves the STATIC parts (bounds, firing month, gross real-dollar
+  // amount, and whether the target structurally exists) — the actual
+  // AFTER-TAX amount depends on that FY's own tax assessment, which
+  // only deterministic.js can compute; it applies the credit directly
+  // against the live balance at this exact month, real-pass only,
+  // exactly like a pension commutation already does. "Falls through to
+  // the normal surplus treatment if unavailable" (the spec's own
+  // words) covers both a structurally-invalid destination (dropped
+  // here — never coerced to a fallback, same rule clampBonusDestination
+  // itself already applies) and an insufficient-cash month
+  // (deterministic.js's own concern, at apply time) — either way the
+  // bonus's gross amount still lands in ordinary income regardless.
+  const bonusDestinationEvents = [];
+  for (const row of state.cashflows.income) {
+    if (row.category !== "bonus" || !(row.amount > 0)) continue;
+    const dest = row.bonusDestination;
+    if (!dest?.type || !dest.targetId) continue;
+    const targetExists =
+      (dest.type === "loanRepayment" && (state.liabilities ?? []).some((l) => l.id === dest.targetId)) ||
+      (dest.type === "superContribution" && (plan.superAccounts ?? []).some((s) => s.include && s.id === dest.targetId)) ||
+      (dest.type === "asset" && includedIds.has(dest.targetId));
+    if (!targetExists) continue;
+    const bounds = {
+      from: resolveRef(row.from, plan, dateSchedule, row.owner).planYear,
+      to: resolveRef(row.to, plan, dateSchedule, row.owner).planYear,
+    };
+    for (let y = 0; y < planYears; y++) {
+      if (!activeInPlanYear(bounds, y)) continue;
+      const month = bonusMonthIndex(plan, y, row.bonusMonth ?? 6);
+      if (month == null) continue;
+      const grossAmount = realAmountAt(row, month, cpi, awote);
+      if (grossAmount <= 0) continue;
+      bonusDestinationEvents.push({ rowId: row.id, owner: row.owner, year: y, month, grossAmount, destination: dest });
+    }
+  }
+
   return {
     months,
     planYears,
@@ -780,6 +870,7 @@ export function buildSchedules(state) {
     surplusPeriods,
     adjustments,
     terminationEvents,
+    bonusDestinationEvents,
     spouseContributionsByOwner,
     personalNccByOwner,
     superInsurancePremiums,

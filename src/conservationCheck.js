@@ -216,6 +216,31 @@
 // exercised the age pension path at all, the exact "guard that doesn't
 // grow with the engine" failure this file's header warns about.
 //
+// Bonus destinations (spec 23, Commit 2) — a bonus can redirect its own
+// after-tax amount straight to a loan/super/asset instead of ordinary
+// household cash. Checked, per this file's own header instruction, and
+// the answer is again: no new formula term. The bonus's GROSS amount
+// always flows through row.income exactly like any other employment
+// dollar (schedule.js's applyBonus never excludes it), so it's already
+// inside the `income` term above regardless of destination. The
+// redirect itself deliberately reuses THREE ALREADY-neutral mechanisms
+// rather than inventing a fourth pocket: a loan credit adds to
+// row.liabilities[*].extraRepayment (already pulled out of
+// liabilityRevaluation, same as an ordinary extra repayment); a super
+// credit adds to row.superDetail[*].contributions with no
+// contributionsTax (a non-concessional/post-tax credit, exactly like an
+// ordinary personalNonDeductible "amount" contribution, which also
+// needs no term); an asset credit adds to row.perAssetDetail[*].oneOffs
+// with a matching wcaBal debit (unlike a genuine lump sum, which has
+// none — see "deliberately out of scope" above — this one takes real
+// cash FROM the WCA, a pocket already inside netAssets, so it's a
+// transfer between two already-counted pockets, not an external
+// inflow). All three are WCA-funded, capped at whatever surplus that
+// month's cash actually has — verified across hundreds of randomised
+// runs (randomScenario() generates a bonus per person 50% of the time,
+// with a destination drawn from all three types plus "none", after
+// liabilities/superAccounts/assets are known) with NO new named term.
+//
 // Monte Carlo's random return shocks (Session B) touch none of the
 // terms above except `row.growth`/superDetail's earnings figures
 // themselves — those are accumulated from whatever return was actually
