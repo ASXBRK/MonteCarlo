@@ -241,6 +241,22 @@
 // with a destination drawn from all three types plus "none", after
 // liabilities/superAccounts/assets are known) with NO new named term.
 //
+// Salary packaging (spec 23, Commit 3) — FBT is a genuinely NEW leak
+// (real household cash, nothing coming back), unlike bonus destinations
+// above. Checked, and it needs no new term either: FBT is folded
+// directly into taxOutArr/row.tax (deterministic.js, the same "fires
+// once, added at the FY's first month" pattern cgtDue already uses,
+// deliberately OUTSIDE the paygWithheld/pendingRefund reconciliation so
+// it can never be trued-up/refunded away next year) — and `tax:
+// row.tax` is ALREADY a named term above, the same reason HELP/MLS
+// (also folded into row.tax) need no term of their own. The packaged
+// amount itself is an ordinary deduction (reduces assessable income,
+// no cash movement of its own — ordinary deduction-row behaviour,
+// unchanged). Verified across hundreds of randomised runs
+// (randomScenario() generates an employer per person with a randomised
+// fbtType/caps, plus 0-2 packaging deduction rows spanning all four
+// packagingTypes) with NO new named term.
+//
 // Monte Carlo's random return shocks (Session B) touch none of the
 // terms above except `row.growth`/superDetail's earnings figures
 // themselves — those are accumulated from whatever return was actually

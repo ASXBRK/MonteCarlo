@@ -38,6 +38,7 @@ import {
   createDeathBenefitBeneficiary, clampDeathBenefitBeneficiary, clampDeathBenefit,
   createEmployer, clampEmployer, normaliseEmployers, resolveEmployerAssignment,
   INCOME_CATEGORIES, BONUS_DESTINATION_TYPES, clampBonusDestination, incomeCategoryTaxTreatment,
+  FBT_TYPES, PACKAGING_TYPES,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2484,5 +2485,70 @@ describe("Bonus, allowance and overtime income (spec 23, Commit 2): plan model",
     expect(back.cashflows.income[0].category).toBe("bonus");
     expect(back.cashflows.income[0].bonusMonth).toBe(3);
     expect(back.cashflows.income[0].bonusDestination).toEqual({ type: "loanRepayment", targetId: liability.id });
+  });
+});
+
+describe("Salary packaging by employer type (spec 23, Commit 3): plan model", () => {
+  it("createEmployer defaults to standard fbtType with zeroed caps", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const e = createEmployer(plan, []);
+    expect(e.fbtType).toBe("standard");
+    expect(e.fbtCaps).toEqual({ livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 });
+  });
+
+  it("clampEmployer clamps an unknown fbtType to standard and keeps a valid one", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(clampEmployer({ fbtType: "bogus" }, plan).fbtType).toBe("standard");
+    expect(clampEmployer({ fbtType: "fbtExempt" }, plan).fbtType).toBe("fbtExempt");
+    expect(FBT_TYPES).toEqual(["standard", "fbtExempt", "fbtRebatable"]);
+  });
+
+  it("clampEmployer only carries a rebatePct for fbtRebatable — forced to 0 for every other type", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const exempt = clampEmployer({ fbtType: "fbtExempt", fbtCaps: { rebatePct: 40 } }, plan);
+    expect(exempt.fbtCaps.rebatePct).toBe(0);
+    const rebatable = clampEmployer({ fbtType: "fbtRebatable", fbtCaps: { rebatePct: 40 } }, plan);
+    expect(rebatable.fbtCaps.rebatePct).toBe(40);
+  });
+
+  it("clampEmployer clamps rebatePct into [0, 100] and caps to non-negative", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const e = clampEmployer({ fbtType: "fbtRebatable", fbtCaps: { livingExpenseCap: -500, mealEntertainmentCap: -1, rebatePct: 150 } }, plan);
+    expect(e.fbtCaps.livingExpenseCap).toBe(0);
+    expect(e.fbtCaps.mealEntertainmentCap).toBe(0);
+    expect(e.fbtCaps.rebatePct).toBe(100);
+  });
+
+  it("createDeductionRow defaults packagingType to livingExpense with no employer linked", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const row = createDeductionRow(plan, []);
+    expect(row.employerId).toBeNull();
+    expect(row.packagingType).toBe("livingExpense");
+    expect(PACKAGING_TYPES).toEqual(["livingExpense", "mealEntertainment", "car", "exemptItem"]);
+  });
+
+  it("clampDeductionRow clamps an unknown packagingType to livingExpense and passes through a valid employerId", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const row = { ...createDeductionRow(plan, []), category: "salaryPackaging", packagingType: "bogus", employerId: "emp1" };
+    const clamped = clampDeductionRow(row, plan);
+    expect(clamped.packagingType).toBe("livingExpense");
+    expect(clamped.employerId).toBe("emp1");
+    const carRow = clampDeductionRow({ ...row, packagingType: "car" }, plan);
+    expect(carRow.packagingType).toBe("car");
+  });
+
+  it("hydrate round-trips an employer's fbtType/fbtCaps and a deduction row's employerId/packagingType", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.plan.employers = [{ id: "emp1", name: "Charity Co", ownerId: "client", fbtType: "fbtExempt", fbtCaps: { livingExpenseCap: 9010, mealEntertainmentCap: 2650, rebatePct: 0 } }];
+    s.cashflows.deductions = [{
+      ...createDeductionRow(s.plan, []), category: "salaryPackaging", employerId: "emp1", packagingType: "mealEntertainment", amount: 2000,
+    }];
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.plan.employers[0]).toEqual({
+      id: "emp1", name: "Charity Co", ownerId: "client", fbtType: "fbtExempt",
+      fbtCaps: { livingExpenseCap: 9010, mealEntertainmentCap: 2650, rebatePct: 0 },
+    });
+    expect(back.cashflows.deductions[0].employerId).toBe("emp1");
+    expect(back.cashflows.deductions[0].packagingType).toBe("mealEntertainment");
   });
 });

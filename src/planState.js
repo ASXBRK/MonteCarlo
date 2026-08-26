@@ -789,6 +789,17 @@ export const DEDUCTION_CATEGORY_LABELS = {
   other: "Other",
 };
 
+// Salary packaging (spec 23, Commit 3) — only meaningful on a
+// "salaryPackaging" row, but carried on every row (inert otherwise),
+// same convention as termination on an income row. "exemptItem" is a
+// benefit that's FBT-exempt under the general Act regardless of
+// employer type (a work-related laptop, protective clothing — the
+// thing "packaging only helps for FBT-exempt items" means for a
+// standard employer); "car" is NEVER exempt/capped, any employer type
+// (novated leases — Commit 4 — are the dedicated car vehicle; a plain
+// "car" packagingType row here is the general case).
+export const PACKAGING_TYPES = ["livingExpense", "mealEntertainment", "car", "exemptItem"];
+
 export function createDeductionRow(plan, existing = []) {
   return {
     id: uid("ded"),
@@ -802,6 +813,13 @@ export function createDeductionRow(plan, existing = []) {
     to: anchorRef("end"),
     indexBasis: "cpi",
     indexExtraPct: 0,
+    // Employer this packaging is arranged through — null until a
+    // "salaryPackaging" row is linked to one; unresolved/dangling
+    // employerId is treated as "no employer type known" (schedule.js's
+    // packaging resolution), the same conservative "standard" (no cap
+    // benefit) reading as a genuinely standard employer.
+    employerId: null,
+    packagingType: "livingExpense",
   };
 }
 
@@ -1396,15 +1414,42 @@ export function normaliseSuperAccounts(accounts, plan, profiles = {}) {
 // materially more than SG on $400,000 capped once. Deliberately
 // minimal (id/name/ownerId only) — this tool doesn't model anything
 // employer-specific beyond that until fbtType (Commit 3).
+// Salary packaging (spec 23, Commit 3) — three employer types, each
+// with a different FBT consequence for packaged benefits. "standard"
+// (the default) has no cap benefit at all; "fbtExempt"/"fbtRebatable"
+// each carry TWO independent per-FY caps (living expenses, meal
+// entertainment — "both operate independently", the spec's own words).
+// The ATO's own published cap figures are NOT in the firm reference —
+// per CLAUDE.md, an unconfirmed figure must never be silently asserted
+// as if verified, so there is deliberately NO built-in default here
+// (unlike LMI/duty, which DO carry an indicative one) — both caps start
+// at 0 (nothing exempt) until the adviser sets them, the safe/
+// conservative reading rather than a silently wrong one. rebatePct is
+// only ever applied for "fbtRebatable" (a rebate on the FBT payable
+// within the cap, not a full exemption — see schedule.js's packaging
+// resolution). See build-log.md's Open Items.
+export const FBT_TYPES = ["standard", "fbtExempt", "fbtRebatable"];
+
 export function createEmployer(plan, existing = [], owner = "client") {
-  return { id: uid("emp"), name: `Employer ${existing.filter((e) => e.ownerId === owner).length + 1}`, ownerId: owner };
+  return {
+    id: uid("emp"), name: `Employer ${existing.filter((e) => e.ownerId === owner).length + 1}`, ownerId: owner,
+    fbtType: "standard",
+    fbtCaps: { livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 },
+  };
 }
 
 export function clampEmployer(e, plan) {
+  const fbtType = FBT_TYPES.includes(e?.fbtType) ? e.fbtType : "standard";
   return {
     id: typeof e?.id === "string" && e.id ? e.id : uid("emp"),
     name: typeof e?.name === "string" && e.name.trim() ? e.name.trim() : "Employer",
     ownerId: e?.ownerId === "partner" && plan.partner ? "partner" : "client",
+    fbtType,
+    fbtCaps: {
+      livingExpenseCap: clampNumber(e?.fbtCaps?.livingExpenseCap, 0),
+      mealEntertainmentCap: clampNumber(e?.fbtCaps?.mealEntertainmentCap, 0),
+      rebatePct: fbtType === "fbtRebatable" ? clampNumber(e?.fbtCaps?.rebatePct, 0, 100) : 0,
+    },
   };
 }
 
@@ -2513,7 +2558,15 @@ export function clampDeductionRow(row, plan) {
   const { indexed, fromAge, toAge, from: _f, to: _t, ...rest } = row;
   const category = DEDUCTION_CATEGORIES.includes(row.category) ? row.category : "other";
   const { label, labelIsDefault } = clampDerivedLabel(row, DEDUCTION_CATEGORY_LABELS, category);
-  return { ...rest, owner, from, to, category, label, labelIsDefault, ...clampIndexation(row) };
+  // Salary packaging (spec 23, Commit 3) — structural shape only;
+  // employerId's actual EXISTENCE is a sibling-of-plan concern this
+  // function can't see, resolved by schedule.js's packaging resolution
+  // at engine time rather than a second plan-state stage (a dangling
+  // id there just falls back to "no employer type known", never a
+  // thrown error or a coerced fallback id).
+  const employerId = typeof row.employerId === "string" ? row.employerId : null;
+  const packagingType = PACKAGING_TYPES.includes(row.packagingType) ? row.packagingType : "livingExpense";
+  return { ...rest, owner, from, to, category, employerId, packagingType, label, labelIsDefault, ...clampIndexation(row) };
 }
 
 // fundingOrder invariant: exactly the INCLUDED FINANCIAL assets, in
@@ -3394,6 +3447,8 @@ function hydrateDeductionRows(arr, plan) {
     indexBasis: r.indexBasis,
     indexExtraPct: r.indexExtraPct,
     indexed: r.indexed,
+    employerId: r.employerId,
+    packagingType: r.packagingType,
   }, plan));
 }
 

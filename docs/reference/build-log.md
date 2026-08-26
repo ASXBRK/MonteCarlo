@@ -1378,6 +1378,16 @@ has the identical gap; both are candidates for a future input-UI pass.
   of CPI and AWOTE (AWOTE proxying WPI, the post-1 June 2023 "lesser of"
   legislative basis) — confirm against the firm reference before relying
   on this for advice.
+- **FBT caps for salary packaging** (`employer.fbtCaps` — living-expense
+  cap, meal-entertainment cap, and the rebate percentage for an
+  FBT-rebatable employer) — NOT in the firm reference at all, unlike
+  every other item on this list, so there is deliberately NO built-in
+  default figure (not even an "indicative" one) — the fields start at 0
+  (nothing exempt) until the adviser enters the real, current cap.
+  Confirm the ATO's published FBT-exempt/rebatable caps before relying
+  on this for advice. The gross-up rate (1.8868) and the FBT rate (47%)
+  are the ATO's own long-standing statutory constants, not caps, and are
+  built in.
 
 ### Deferred — do not build
 

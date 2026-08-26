@@ -130,10 +130,13 @@ export function processNonConcessionalCap({ requestedNCC, baseCap, tsbPriorJune,
 // --- Division 293 -------------------------------------------------------
 
 // div293Income = taxableIncome + reportableSuperContributions +
-// lowTaxContributions, per the tool's simplified formula (see header —
-// reportable FBT and net investment losses are not captured).
-export function div293Tax({ taxableIncome, reportableSuperContributions, lowTaxContributions, threshold, rate }) {
-  const div293Income = taxableIncome + reportableSuperContributions + lowTaxContributions;
+// lowTaxContributions + reportableFringeBenefits (spec 23, Commit 3 —
+// packaging that reduces income tax can increase Division 293 income;
+// net investment losses are still not captured). reportableFringeBenefits
+// defaults to 0 so every existing call site (none of which packages
+// benefits) is unaffected.
+export function div293Tax({ taxableIncome, reportableSuperContributions, lowTaxContributions, reportableFringeBenefits = 0, threshold, rate }) {
+  const div293Income = taxableIncome + reportableSuperContributions + lowTaxContributions + reportableFringeBenefits;
   const overThreshold = Math.max(0, div293Income - threshold);
   const base = Math.max(0, Math.min(lowTaxContributions, overThreshold));
   return { div293Income, tax: rate * base };

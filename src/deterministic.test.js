@@ -2701,6 +2701,40 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       });
     });
 
+    // Salary packaging (spec 23, Commit 3) — a genuine new leak (FBT is
+    // a real household cash cost with nothing coming back — see
+    // conservationCheck.js's own header on why this needed checking,
+    // not assuming, and turned out to need no new term, same as bonus
+    // destinations). One employer per person, fbtType/caps randomised
+    // (caps sometimes 0 — the "no cap confirmed yet" default — sometimes
+    // generous, sometimes tight, so both the within-cap and cap-breach
+    // paths get exercised); 0-2 packaging deduction rows per person,
+    // packagingType spanning all four (car and exemptItem included so
+    // their "always taxable"/"never taxable" special cases sweep too).
+    const employers = persons.map((p) => {
+      const fbtType = pick(["standard", "standard", "fbtExempt", "fbtRebatable"]); // biased toward the common case
+      return {
+        id: `emp_${p}`, name: `Employer ${p}`, ownerId: p, fbtType,
+        fbtCaps: {
+          livingExpenseCap: fbtType === "standard" ? 0 : pick([0, rand(2000, 5000), rand(8000, 12000)]),
+          mealEntertainmentCap: fbtType === "standard" ? 0 : pick([0, rand(500, 1500), rand(2000, 4000)]),
+          rebatePct: fbtType === "fbtRebatable" ? rand(20, 60) : 0,
+        },
+      };
+    });
+    const packagingRows = [];
+    for (const p of persons) {
+      for (let i = 0; i < randInt(0, 2); i++) {
+        packagingRows.push({
+          id: `pkg_${p}_${i}`, owner: p, category: "salaryPackaging",
+          employerId: `emp_${p}`, packagingType: pick(["livingExpense", "mealEntertainment", "car", "exemptItem"]),
+          amount: rand(500, 15000), frequency: "annual",
+          from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
+          indexBasis: "none", indexExtraPct: 0,
+        });
+      }
+    }
+
     const expenses = [cf({
       id: "exp1", assetId: null, amount: rand(20000, 60000) / 12, frequency: "monthly",
       from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
@@ -3154,9 +3188,9 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           household: couple ? "couple" : "single",
           client, partner, children,
           superAccounts, pensions, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
-          adviserFees, adjustments,
+          adviserFees, adjustments, employers,
         },
-        cashflows: { income: [...income, ...bonusRows], expenses, superContributions },
+        cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows },
         surplus,
         deficit,
         fundingOrder: assets.map((a) => a.id),
@@ -8310,5 +8344,148 @@ describe("Bonus, allowance and overtime income (spec 23, Commit 2)", () => {
     const out = projectPlan(s);
     expect(out.yearly[0].superDetail.su1.contributions).toBeCloseTo(100000 * 0.12, 2);
     expect(out.yearly[0].income).toBeCloseTo(100000, 2);
+  });
+});
+
+// --- Spec 23, Commit 3: salary packaging by employer type ------------------
+
+describe("Salary packaging by employer type (spec 23, Commit 3)", () => {
+  const FBT_GROSSUP_RATE = 1.8868;
+  const FBT_RATE = 0.47;
+  const packagingRow = (over = {}) => ({
+    id: "pkg1", owner: "client", category: "salaryPackaging",
+    employerId: "emp1", packagingType: "livingExpense",
+    amount: 5000, frequency: "annual",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+    indexBasis: "none", indexExtraPct: 0,
+    ...over,
+  });
+  const stateWith = (employer, deductions) => mkState({
+    endAge: 41,
+    plan: { employers: [employer] },
+    cashflows: { income: [employmentRow({ amount: 100000, sgApplies: false, to: { kind: "age", age: 40 } })], deductions },
+  });
+
+  it("standard employer: no cap benefit at all — the WHOLE packaged amount attracts FBT at 47% grossed-up", () => {
+    const employer = { id: "emp1", name: "E", ownerId: "client", fbtType: "standard", fbtCaps: { livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 } };
+    const out = projectPlan(stateWith(employer, [packagingRow()]));
+    const expectedFbt = 5000 * FBT_GROSSUP_RATE * FBT_RATE;
+    expect(out.yearly[0].taxDetail.fbtPayable).toBeCloseTo(expectedFbt, 0);
+    expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBeCloseTo(5000 * FBT_GROSSUP_RATE, 0);
+  });
+
+  it("fbtExempt employer: the within-cap portion is completely FBT-free; only the excess is taxed at 47% grossed-up", () => {
+    const employer = { id: "emp1", name: "E", ownerId: "client", fbtType: "fbtExempt", fbtCaps: { livingExpenseCap: 3000, mealEntertainmentCap: 0, rebatePct: 0 } };
+    const out = projectPlan(stateWith(employer, [packagingRow({ amount: 5000 })]));
+    const excess = 5000 - 3000;
+    const expectedFbt = excess * FBT_GROSSUP_RATE * FBT_RATE;
+    expect(out.yearly[0].taxDetail.fbtPayable).toBeCloseTo(expectedFbt, 0);
+    expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBeCloseTo(excess * FBT_GROSSUP_RATE, 0);
+  });
+
+  it("fbtExempt employer, fully within cap: zero FBT and zero reportable fringe benefits", () => {
+    const employer = { id: "emp1", name: "E", ownerId: "client", fbtType: "fbtExempt", fbtCaps: { livingExpenseCap: 9000, mealEntertainmentCap: 0, rebatePct: 0 } };
+    const out = projectPlan(stateWith(employer, [packagingRow({ amount: 5000 })]));
+    expect(out.yearly[0].taxDetail.fbtPayable).toBe(0);
+    expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBe(0);
+  });
+
+  it("living-expense and meal-entertainment caps operate independently", () => {
+    const employer = { id: "emp1", name: "E", ownerId: "client", fbtType: "fbtExempt", fbtCaps: { livingExpenseCap: 5000, mealEntertainmentCap: 1000, rebatePct: 0 } };
+    const rows = [
+      packagingRow({ id: "pkg1", packagingType: "livingExpense", amount: 5000 }), // exactly at cap
+      packagingRow({ id: "pkg2", packagingType: "mealEntertainment", amount: 2000 }), // $1,000 over its OWN cap
+    ];
+    const out = projectPlan(stateWith(employer, rows));
+    const expectedExcess = 1000; // only the meal entertainment excess
+    expect(out.yearly[0].taxDetail.fbtPayable).toBeCloseTo(expectedExcess * FBT_GROSSUP_RATE * FBT_RATE, 0);
+  });
+
+  it("fbtRebatable employer: the within-cap portion pays a REDUCED (rebated) FBT, not zero — less than the standard-employer rate", () => {
+    const employer = { id: "emp1", name: "E", ownerId: "client", fbtType: "fbtRebatable", fbtCaps: { livingExpenseCap: 9000, mealEntertainmentCap: 0, rebatePct: 50 } };
+    const out = projectPlan(stateWith(employer, [packagingRow({ amount: 5000 })]));
+    const fullRateFbt = 5000 * FBT_GROSSUP_RATE * FBT_RATE;
+    expect(out.yearly[0].taxDetail.fbtPayable).toBeGreaterThan(0);
+    expect(out.yearly[0].taxDetail.fbtPayable).toBeLessThan(fullRateFbt);
+    expect(out.yearly[0].taxDetail.fbtPayable).toBeCloseTo(fullRateFbt * 0.5, 0); // 50% rebate
+  });
+
+  it("a car is always fully taxable at 47% grossed-up, regardless of employer type or any cap", () => {
+    const employer = {
+      id: "emp1", name: "E", ownerId: "client", fbtType: "fbtExempt",
+      fbtCaps: { livingExpenseCap: 999999, mealEntertainmentCap: 999999, rebatePct: 0 }, // generous enough to exempt anything else
+    };
+    const out = projectPlan(stateWith(employer, [packagingRow({ packagingType: "car", amount: 5000 })]));
+    expect(out.yearly[0].taxDetail.fbtPayable).toBeCloseTo(5000 * FBT_GROSSUP_RATE * FBT_RATE, 0);
+  });
+
+  it("an exempt item (e.g. a work laptop) is fully deductible with no FBT/RFB consequence at all, any employer type", () => {
+    const employer = { id: "emp1", name: "E", ownerId: "client", fbtType: "standard", fbtCaps: { livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 } };
+    const out = projectPlan(stateWith(employer, [packagingRow({ packagingType: "exemptItem", amount: 5000 })]));
+    expect(out.yearly[0].taxDetail.fbtPayable).toBe(0);
+    expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBe(0);
+  });
+
+  it("reportable fringe benefits flow into HELP repayment income and Division 293 income — isolated against an identical ordinary deduction that carries neither", () => {
+    const employer = { id: "emp1", name: "E", ownerId: "client", fbtType: "standard", fbtCaps: { livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 } };
+    // $225,000 salary is calibrated (by hand, against the engine's own
+    // Division 293 threshold — $250,000 — and this income's own SG-only
+    // concessional contribution) so the ORDINARY-deduction baseline
+    // sits just UNDER the Division 293 threshold (div293 = 0) while
+    // packaging's reportable-fringe-benefits add-back tips it just
+    // over — the only way to actually exercise Division 293's own
+    // marginal effect rather than a saturated (already-over, unchanged)
+    // reading. Division 293 is assessed FY t, paid/reported FY t+1 (the
+    // same lag CGT uses) — checked on yearly[1], not [0].
+    const highIncomeState = (deductions) => mkState({
+      endAge: 42,
+      plan: {
+        employers: [employer],
+        superAccounts: [superAcct()],
+        client: { currentAge: 40, helpBalance: 50000, privateHospitalCover: false },
+      },
+      cashflows: { income: [employmentRow({ amount: 225000, sgApplies: true, to: { kind: "age", age: 42 } })], deductions },
+    });
+    const withPackaging = projectPlan(highIncomeState([packagingRow({ amount: 10000, to: { kind: "age", age: 42 } })]));
+    // Same income-tax effect (a $10,000 deduction), but an ordinary
+    // category — no FBT, no reportable fringe benefits at all.
+    const withOrdinaryDeduction = projectPlan(highIncomeState([{ ...packagingRow({ amount: 10000, to: { kind: "age", age: 42 } }), category: "workingExpense" }]));
+    expect(withPackaging.yearly[0].taxDetail.reportableFringeBenefits).toBeGreaterThan(0);
+    expect(withOrdinaryDeduction.yearly[0].taxDetail.reportableFringeBenefits).toBe(0);
+    // The SAME underlying income tax reduction either way...
+    expect(withPackaging.yearly[0].taxDetail.incomeTax).toBeCloseTo(withOrdinaryDeduction.yearly[0].taxDetail.incomeTax, 0);
+    // ...but packaging's reportable fringe benefits push HELP (same FY)
+    // and Division 293 (next FY) higher — "the sting" the spec calls
+    // out by name.
+    expect(withPackaging.yearly[0].taxDetail.helpRepayment).toBeGreaterThan(withOrdinaryDeduction.yearly[0].taxDetail.helpRepayment);
+    expect(withPackaging.yearly[1].taxDetail.div293).toBeGreaterThan(withOrdinaryDeduction.yearly[1].taxDetail.div293);
+    // MLS uses the SAME repaymentIncome figure (no private cover, set
+    // above), so the RFB add-back lifts it too — same FY as HELP.
+    expect(withPackaging.yearly[0].taxDetail.medicareLevySurcharge).toBeGreaterThan(withOrdinaryDeduction.yearly[0].taxDetail.medicareLevySurcharge);
+  });
+
+  it("net position: FBT plus the extra HELP/Division 293 can outweigh the income-tax saving — all four figures are independently surfaced, not netted away silently", () => {
+    const employer = { id: "emp1", name: "E", ownerId: "client", fbtType: "standard", fbtCaps: { livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 } };
+    const s = mkState({
+      endAge: 41,
+      plan: { employers: [employer], client: { currentAge: 40, helpBalance: 50000, privateHospitalCover: false } },
+      cashflows: { income: [employmentRow({ amount: 300000, sgApplies: false, to: { kind: "age", age: 40 } })], deductions: [packagingRow({ amount: 10000 })] },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].taxDetail;
+    const netCost = d.fbtPayable; // the direct cost; HELP/Div293/MLS deltas are separately visible on the same row
+    expect(netCost).toBeGreaterThan(0);
+    expect(d.reportableFringeBenefits).toBeGreaterThan(0);
+    expect(d.helpRepayment).toBeGreaterThan(0);
+  });
+
+  it("regression gate: a scenario with no employers/packaging at all is completely unaffected", () => {
+    const s = mkState({
+      endAge: 41,
+      cashflows: { income: [employmentRow({ amount: 100000 })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].taxDetail.fbtPayable).toBe(0);
+    expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBe(0);
   });
 });

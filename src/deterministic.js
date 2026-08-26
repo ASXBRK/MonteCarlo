@@ -4049,6 +4049,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // at a time, can't see ahead of itself. assessPerson is pure and
     // cheap; calling it here duplicates none of its side effects (there
     // are none), just this one lightweight number.
+    //
+    // Salary packaging (spec 23, Commit 3) — reportableFringeBenefits
+    // and fbtPayable are STATIC per FY (schedule.js's own packaging
+    // resolution already grouped by employer/cap and needs no per-year
+    // tax context), so read once here rather than recomputed per
+    // person below. "The sting": packaging that reduces income tax can
+    // increase HELP/Div293/MLS via this exact add-back.
+    const reportableFringeBenefits = {
+      client: schedule.packagingByOwnerYear.client.reportableFringeBenefits[y],
+      partner: schedule.packagingByOwnerYear.partner ? schedule.packagingByOwnerYear.partner.reportableFringeBenefits[y] : 0,
+    };
+    const fbtDue = {
+      client: schedule.packagingByOwnerYear.client.fbtPayable[y],
+      partner: schedule.packagingByOwnerYear.partner ? schedule.packagingByOwnerYear.partner.fbtPayable[y] : 0,
+    };
     const repaymentIncome = { client: 0, partner: 0 };
     for (const p of persons) {
       const pre = assessPerson({
@@ -4068,7 +4083,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // separately-timed block.
       repaymentIncome[p] = pre.taxableIncome
         + (superOutcome[p]?.reportableSuperContributions ?? 0)
-        + netInvestmentLoss[p];
+        + netInvestmentLoss[p]
+        + reportableFringeBenefits[p];
     }
 
     // Commonwealth Seniors Health Card (spec 21b, Commit 4) — income-
@@ -4191,6 +4207,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
 
     taxOutArr.fill(0, yearStart(y), yearEnd(y));
+    // Salary packaging (spec 23, Commit 3) — FBT is a genuine one-time
+    // annual liability, not a smoothly-accruing PAYG-style withholding,
+    // so it's added directly here (once, the FY's first month) exactly
+    // like cgtDue's own "fires once, added at m===first" pattern —
+    // deliberately OUTSIDE the paygWithheld/pendingRefund reconciliation
+    // below (which only reconciles income tax/HELP/MLS), so it can
+    // never be silently trued-up/refunded away the following year.
+    taxOutArr[yearStart(y)] += fbtDue.client + fbtDue.partner;
     // Bonus destinations (spec 23, Commit 2) — {[month]: [{type,
     // targetId, amount}]}, resolved fresh each FY (see the loop below)
     // and passed to THIS year's real pass only; the measured pass
@@ -4378,6 +4402,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         taxableIncome: assessed[p].taxableIncome,
         reportableSuperContributions: outcome.reportableSuperContributions,
         lowTaxContributions: outcome.lowTaxContributions,
+        reportableFringeBenefits: reportableFringeBenefits[p],
         threshold: superRatesY.div293Threshold,
         rate: superRatesY.div293Rate,
       });
@@ -4669,6 +4694,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       helpRepayment: helpDue.client + helpDue.partner,
       medicareLevySurcharge: mlsDue.client + mlsDue.partner,
       fhsssRelease: (fhsssRelease.client?.grossRelease ?? 0) + (fhsssRelease.partner?.grossRelease ?? 0),
+      // Salary packaging (spec 23, Commit 3) — the household's FBT
+      // liability (already inside row.tax above, via taxOutArr) and the
+      // reportable fringe benefits amount added back for HELP/Div293/
+      // MLS purposes (repaymentIncome above), surfaced for the net-
+      // position view (Focus/output tables).
+      fbtPayable: fbtDue.client + fbtDue.partner,
+      reportableFringeBenefits: reportableFringeBenefits.client + reportableFringeBenefits.partner,
     };
     yearly.push(row);
     pendingCgt = newPending;

@@ -850,6 +850,86 @@ export function buildSchedules(state) {
     }
   }
 
+  // Salary packaging (spec 23, Commit 3) — three employer types, each
+  // with a different FBT consequence. The packaged amount itself
+  // already reduces the owner's assessable income for free (it's an
+  // ordinary "salaryPackaging"-category deduction row, flowing through
+  // deductionsByOwner above like any other); this resolves the SEPARATE
+  // FBT/reportable-fringe-benefits consequence, per employer per FY —
+  // living-expense and meal-entertainment packaging each have their OWN
+  // running cap ("both operate independently", the spec's own words); a
+  // car (packagingType "car") is NEVER capped/exempt, any employer
+  // type; "exemptItem" (a work-related item that's FBT-exempt under the
+  // general Act, not the PBI/charity cap) never generates FBT/RFB
+  // either, any employer type — the standard-employer "packaging only
+  // helps for FBT-exempt items" case.
+  //
+  // FBT_GROSSUP_RATE/FBT_RATE are the ATO's own long-standing STATUTORY
+  // conversion factors (the type-2/lower gross-up rate, and the FBT
+  // rate itself) — spec-given constants, unlike the dollar CAPS
+  // (employer.fbtCaps), which genuinely need firm confirmation and so
+  // carry no built-in figure at all (see clampEmployer's own header).
+  // Disclosed simplification: a genuinely FBT-exempt employer's WITHIN-
+  // cap benefits can still become reportable once total benefits exceed
+  // $2,000 in a real FBT year — not modelled; only the FBT-liable
+  // (excess) portion is ever reportable here.
+  const FBT_GROSSUP_RATE = 1.8868;
+  const FBT_RATE = 0.47;
+  const employersById = new Map((plan.employers ?? []).map((e) => [e.id, e]));
+  const packagingByOwnerYear = {
+    client: { reportableFringeBenefits: new Float64Array(planYears), fbtPayable: new Float64Array(planYears) },
+    partner: plan.partner
+      ? { reportableFringeBenefits: new Float64Array(planYears), fbtPayable: new Float64Array(planYears) }
+      : null,
+  };
+  const packagingRows = (state.cashflows.deductions ?? []).filter((r) => r.category === "salaryPackaging");
+  // Grouped by owner+employerId, same shape as the SG grouping above —
+  // a dangling/missing employerId groups on its own (never merged into
+  // a real employer's rows), falling back to the "standard" (no cap
+  // benefit) reading, same treatment a genuinely standard employer gets.
+  const packagingGroups = new Map();
+  for (const row of packagingRows) {
+    const key = `${row.owner}::${row.employerId ?? row.id}`;
+    if (!packagingGroups.has(key)) packagingGroups.set(key, []);
+    packagingGroups.get(key).push(row);
+  }
+  for (const rows of packagingGroups.values()) {
+    const owner = rows[0].owner;
+    const target = owner === "partner" && packagingByOwnerYear.partner ? packagingByOwnerYear.partner : packagingByOwnerYear.client;
+    const employer = employersById.get(rows[0].employerId);
+    const fbtType = employer?.fbtType ?? "standard";
+    const caps = employer?.fbtCaps ?? { livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 };
+    for (let y = 0; y < planYears; y++) {
+      let livingTotal = 0, mealTotal = 0, carTotal = 0;
+      for (const row of rows) {
+        const v = rowTotals.deductions[row.id]?.[y] ?? 0;
+        if (v <= 0) continue;
+        if (row.packagingType === "livingExpense") livingTotal += v;
+        else if (row.packagingType === "mealEntertainment") mealTotal += v;
+        else if (row.packagingType === "car") carTotal += v;
+        // "exemptItem" contributes to neither total — no FBT/RFB ever.
+      }
+      if (livingTotal <= 0 && mealTotal <= 0 && carTotal <= 0) continue;
+      // "standard" has no cap benefit at all — the WHOLE amount is
+      // excess; fbtExempt/fbtRebatable apply their own two caps.
+      let livingExcess = livingTotal, mealExcess = mealTotal;
+      if (fbtType === "fbtExempt" || fbtType === "fbtRebatable") {
+        livingExcess = Math.max(0, livingTotal - caps.livingExpenseCap);
+        mealExcess = Math.max(0, mealTotal - caps.mealEntertainmentCap);
+      }
+      const excessTotal = livingExcess + mealExcess + carTotal;
+      // Only "fbtRebatable" has a within-cap rebated base — a rebate
+      // reduces FBT payable, unlike "fbtExempt", where the within-cap
+      // portion has NO FBT and no RFB consequence at all.
+      const rebatedBase = fbtType === "fbtRebatable" ? (livingTotal - livingExcess) + (mealTotal - mealExcess) : 0;
+      const grossedUpExcess = excessTotal * FBT_GROSSUP_RATE;
+      const grossedUpRebated = rebatedBase * FBT_GROSSUP_RATE;
+      const fbt = grossedUpExcess * FBT_RATE + grossedUpRebated * FBT_RATE * (1 - caps.rebatePct / 100);
+      target.reportableFringeBenefits[y] += grossedUpExcess + grossedUpRebated;
+      target.fbtPayable[y] += fbt;
+    }
+  }
+
   return {
     months,
     planYears,
@@ -871,6 +951,7 @@ export function buildSchedules(state) {
     adjustments,
     terminationEvents,
     bonusDestinationEvents,
+    packagingByOwnerYear,
     spouseContributionsByOwner,
     personalNccByOwner,
     superInsurancePremiums,
