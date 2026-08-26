@@ -930,6 +930,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   }
   const liabMeta = {};
   const loanBal = {}; // nominal
+  // Drawdowns and dynamic deductibility (spec 24, Commit 1) — investBal/
+  // privateBal (nominal, like loanBal) track a mixed loan's own two
+  // purpose buckets; ALWAYS sum to loanBal[l.id]. Only populated for a
+  // liability that actually uses them (a drawdown, or repaymentAllocation
+  // "privateFirst" — the only two things that can move the deductible
+  // proportion away from its opening value; see currentDeductibleFraction's
+  // own header) — every OTHER liability keeps reading the static
+  // liabMeta[l.id].deductibleFraction exactly as before Commit 1, which
+  // is what makes "liabilities without drawdowns bit-identical" a real
+  // guarantee rather than a hopeful floating-point coincidence.
+  const investBal = {};
+  const privateBal = {};
+  // Credit-limit binding and an aggressive privateFirst-on-a-single-loan
+  // assumption are both flagged, never silently allowed or refused —
+  // the spec's own words for the latter.
+  const drawdownWarnings = [];
   // Real-dollar balance over time (Liabilities table/chart, Commit 5) —
   // same convention as series/superSeries/wcaSeries: only the real
   // pass ever writes into it, deflating loanBal at the point of write.
@@ -983,6 +999,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       rolloverYear = resolveRef(l.fixedUntil, state.plan, schedule, "client").planYear;
       rolloverMonth = julyOf(rolloverYear);
     }
+    const openingDeductibleFraction = deductibleFraction(l);
+    // Drawdowns and dynamic deductibility (spec 24, Commit 1) — buckets
+    // only matter (diverge from the static opening fraction) when a
+    // drawdown can move them, or repaymentAllocation is "privateFirst"
+    // (the only other thing that can shift the split, on a part-
+    // deductible loan, with no drawdown at all). Every other liability
+    // — the entire pre-Commit-1 universe — never allocates these,
+    // guaranteeing the regression gate exactly, not approximately.
+    const usesDynamicDeductibility = (l.drawdowns?.length ?? 0) > 0 || l.repaymentAllocation === "privateFirst";
     liabMeta[l.id] = {
       i,
       termM,
@@ -990,7 +1015,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       startMonth: l.startMonth ?? 0, // purchase loans (D4) start at settlement
       pmtPI: levelPayment(l.balance, i, termM - ioM),
       offsetId,
-      deductibleFraction: deductibleFraction(l),
+      deductibleFraction: openingDeductibleFraction,
+      usesDynamicDeductibility,
+      repaymentAllocation: l.repaymentAllocation === "privateFirst" ? "privateFirst" : "proportional",
+      creditLimit: l.creditLimit ?? null,
       shares: ownerShares(l, couple),
       propertyId: l.propertyId ?? null, // interest joins that property's gearing calc
       rateType, revertRate, rolloverMonth, rolloverYear,
@@ -1002,10 +1030,72 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     };
     // Purchase loans hold zero until the settlement month sets them.
     loanBal[l.id] = (l.startMonth ?? 0) > 0 ? 0 : l.balance;
+    if (usesDynamicDeductibility) {
+      investBal[l.id] = loanBal[l.id] * openingDeductibleFraction;
+      privateBal[l.id] = loanBal[l.id] * (1 - openingDeductibleFraction);
+      // "privateFirst" on a SINGLE loan (no distinct split-facility
+      // second loan) is the legally aggressive reading — permitted,
+      // flagged, never silently allowed or refused (the spec's own words).
+      if (l.repaymentAllocation === "privateFirst") {
+        drawdownWarnings.push({
+          liabilityId: l.id, type: "privateFirstAggressive",
+          reason: `${l.name ?? "This loan"}: directing repayments at the private portion of a single mixed loan is an aggressive assumption the ATO would not accept — model a genuine split facility as a second loan instead if this needs to withstand scrutiny`,
+        });
+      }
+    }
     liabSeries[l.id] = new Float64Array(months + 1);
     liabSeries[l.id][0] = loanBal[l.id]; // real == nominal at month 0
     if (offsetId) (offsetLoansByAsset[offsetId] ??= []).push(l.id);
   }
+  // Dynamic deductibility (spec 24, Commit 1) — the fraction to use for
+  // THIS month's interest deduction: the static opening value for every
+  // liability that never diverges from it (guaranteeing bit-identical
+  // output there), or the LIVE investBal/privateBal ratio for one that
+  // can. Guards 0/0 (a fully drawn-down-to-zero loan) at 0, matching
+  // deductibleFraction's own "nothing left to deduct" reading.
+  const currentDeductibleFraction = (id) => {
+    const md = liabMeta[id];
+    if (!md.usesDynamicDeductibility) return md.deductibleFraction;
+    const total = investBal[id] + privateBal[id];
+    // Clamped defensively into [0, 1] — every mutation site is written
+    // to keep the ratio there by construction, but this is the ONE
+    // read every downstream consumer (interest deduction, the "pay
+    // non-deductible debt first" ranking) shares, so a bound here
+    // protects the whole engine from ever amplifying a stray desync
+    // into an out-of-range deduction or an overpayment beyond the
+    // loan's own balance.
+    return total > 0 ? Math.max(0, Math.min(1, investBal[id] / total)) : 0;
+  };
+  // Every mechanism that reduces a liability's balance via an ACTUAL
+  // REPAYMENT (as opposed to a drawdown, which only ever increases it)
+  // must keep investBal/privateBal in lockstep with loanBal, or the two
+  // would silently drift apart and the deductible fraction would
+  // corrupt from that point on. Shared by the ordinary contractual/
+  // extra-repayment reduction inline in the liability loop below, a
+  // bonus redirected to this loan, and a property sale's proceeds
+  // discharging it — one split calculation, not independent copies.
+  // `nominalAmount` is nominal, same units as loanBal itself. A no-op
+  // for a liability that never uses dynamic deductibility.
+  const reduceBucketsForRepayment = (id, nominalAmount) => {
+    const md = liabMeta[id];
+    if (!md?.usesDynamicDeductibility || nominalAmount <= 0) return;
+    if (md.repaymentAllocation === "privateFirst") {
+      const fromPrivate = Math.min(privateBal[id], nominalAmount);
+      privateBal[id] -= fromPrivate;
+      investBal[id] -= (nominalAmount - fromPrivate);
+    } else {
+      const total = investBal[id] + privateBal[id];
+      const investShare = total > 0 ? investBal[id] / total : 0;
+      investBal[id] -= nominalAmount * investShare;
+      privateBal[id] -= nominalAmount * (1 - investShare);
+    }
+    investBal[id] = Math.max(0, investBal[id]);
+    privateBal[id] = Math.max(0, privateBal[id]);
+  };
+  const reduceLoanBalanceForRepayment = (id, nominalAmount) => {
+    loanBal[id] = Math.max(0, loanBal[id] - nominalAmount);
+    reduceBucketsForRepayment(id, nominalAmount);
+  };
 
   // --- goals (Document Set Commit 6) ------------------------------------
   //
@@ -1280,9 +1370,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     liabilities: Object.fromEntries([
       ...liabs.map((l) => [l.id, {
         opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, surplusRepayment: 0, indexation: 0, ratePct: 0,
+        // Drawdowns and dynamic deductibility (spec 24, Commit 1) — a
+        // year-end snapshot (not a sum), same convention as closing/
+        // offsetApplied; both 0 unless the liability actually uses
+        // dynamic deductibility (see currentDeductibleFraction's own
+        // header) — a plain deductiblePct loan never populates these,
+        // same as it never used investBal/privateBal at all.
+        investmentBalance: 0, privateBalance: 0,
       }]),
       ...helpLiabPersons.map((p) => [`help_${p}`, {
         opening: 0, interest: 0, principal: 0, drawdown: 0, offsetApplied: 0, closing: 0, extraRepayment: 0, surplusRepayment: 0, indexation: 0, ratePct: 0,
+        // Drawdowns and dynamic deductibility (spec 24, Commit 1) — a
+        // year-end snapshot (not a sum), same convention as closing/
+        // offsetApplied; both 0 unless the liability actually uses
+        // dynamic deductibility (see currentDeductibleFraction's own
+        // header) — a plain deductiblePct loan never populates these,
+        // same as it never used investBal/privateBal at all.
+        investmentBalance: 0, privateBalance: 0,
       }]),
     ]),
     liabilitiesClosing: 0,
@@ -1595,6 +1699,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const first = yearStart(y);
     const last = yearEnd(y);
     for (let m = first; m < last; m++) {
+      // Drawdowns (spec 24, Commit 1) — reset each month. The credited
+      // amount flows through `inc` below (drawdownIncomeThisMonth),
+      // exactly like HEAS's own drawdown ("a drawdown credits household
+      // cash... folded into inc the same way the age pension's own
+      // entitlement is" — see heasDrawn's header in conservationCheck.js):
+      // the loan's own increase is already conservation-neutral via
+      // liabilityRevaluation's "+drawdown" term, but that term only
+      // explains the LIABILITY side — the CASH/ASSET side crediting
+      // somewhere needs its own named channel, or it reads as money
+      // created from nothing. An asset-destined drawdown flows through
+      // `inc` too, then transfers OUT of the WCA into the asset
+      // (drawdownAssetCredits) right after wcaBal += net below — a
+      // received-then-invested shape, not a separate untracked credit.
+      let drawdownIncomeThisMonth = 0;
+      const drawdownAssetCredits = [];
       // Deemed reacquisition happens at the top of 1 July 2027.
       if (m === resetMonth) {
         for (const id of ids) {
@@ -2182,6 +2301,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         if (pm.sale.proceedsDestination === "repayLoanThenAsset" && loanId && loanBal[loanId] > 0) {
           const payoff = Math.min(toDestination, loanBal[loanId]);
           loanBal[loanId] -= payoff;
+          // Dynamic deductibility (spec 24, Commit 1) — real-pass only,
+          // same convention as every other bucket mutation (see
+          // reduceBucketsForRepayment's own header); a no-op for the
+          // auto-generated D4 purchase loan (autoLoanId), which never
+          // uses dynamic deductibility, and for any liability that doesn't.
+          if (row) reduceBucketsForRepayment(loanId, payoff);
           toDestination -= payoff;
           // Reported as `principal` — conservationCheck.js's
           // liabilityRevaluation formula already subtracts this field
@@ -2470,6 +2595,62 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       let loanPayReal = 0;
       for (const l of liabs) {
         const md = liabMeta[l.id];
+        // Drawdowns (spec 24, Commit 1) — applied at the TOP of this
+        // liability's own month, before b0 is read, so a drawdown on a
+        // currently-fully-repaid loan (loanBal 0) still takes effect
+        // this month rather than being skipped by the b0<=0 guard
+        // below. Real-pass only (the measured pass never sees it,
+        // exactly like a bonus-destination credit — see that block's
+        // own header; the measured pass's own interest-deduction figure
+        // for THIS specific FY is a disclosed, bounded approximation as
+        // a result, corrected from next FY onward once the real pass's
+        // mutation persists). Credit-limit binding draws only the
+        // available headroom — never silently over the facility, never
+        // silently refused — with a flagged warning.
+        if (row) {
+          for (const ev of schedule.liabilityDrawdownEvents?.[l.id] ?? []) {
+            if (ev.month !== m) continue;
+            const inflNow = inflAt(m);
+            const requestedNominal = ev.amount * inflNow;
+            const limit = md.creditLimit;
+            const headroomNominal = limit == null ? Infinity : Math.max(0, limit * inflNow - loanBal[l.id]);
+            const actualNominal = Math.min(requestedNominal, headroomNominal);
+            if (actualNominal <= 0) continue;
+            loanBal[l.id] += actualNominal;
+            if (md.usesDynamicDeductibility) {
+              if (ev.purpose === "private") privateBal[l.id] += actualNominal;
+              else investBal[l.id] += actualNominal;
+            }
+            const actualReal = actualNominal / inflNow;
+            if (actualReal < ev.amount - 1e-6) {
+              drawdownWarnings.push({
+                liabilityId: l.id, type: "creditLimitBound",
+                reason: `${l.name ?? "This loan"}: a $${Math.round(ev.amount).toLocaleString()} drawdown exceeds the facility limit — only $${Math.round(actualReal).toLocaleString()} drawn`,
+              });
+            }
+            row.liabilities[l.id].drawdown += actualReal;
+            // The money arrives at its destination — cash (the WCA) or
+            // an asset. Routed through drawdownIncomeThisMonth (folded
+            // into `inc` below), the SAME "credits household cash,
+            // already inside income" shape HEAS's own drawdown uses
+            // (conservationCheck.js's heasDrawn header) — the loan's
+            // own increase is already conservation-neutral via
+            // liabilityRevaluation's "+drawdown" term, but that only
+            // explains the LIABILITY side; the cash/asset side crediting
+            // somewhere needs its own named channel (income), or it
+            // reads as money created from nothing. An asset destination
+            // is a received-then-invested shape: the cash still lands
+            // in income this month, then transfers OUT of the WCA into
+            // the asset right after wcaBal += net (drawdownAssetCredits).
+            // A property destination is modelled as cash too (this tool
+            // has no generic "property improvement cost" to credit
+            // instead — disclosed in clampDrawdown's own header).
+            drawdownIncomeThisMonth += actualReal;
+            if (ev.destination !== "cash" && ev.destination in bal) {
+              drawdownAssetCredits.push({ destination: ev.destination, amount: actualReal });
+            }
+          }
+        }
         const b0 = loanBal[l.id];
         if (b0 <= 0 || m < md.startMonth) continue;
         const mRel = m - md.startMonth;
@@ -2538,15 +2719,30 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         let b1 = b0 + interest - payment - extraApplied;
         if (b1 < 1e-9) b1 = 0;
         loanBal[l.id] = b1;
+        // Dynamic deductibility (spec 24, Commit 1): the fraction to
+        // use for THIS month's interest is read BEFORE the repayment
+        // below reduces the buckets — "this month's interest deducts
+        // at whatever proportion was true going into it", the same
+        // opening-balance convention b0 itself already follows.
+        const monthDeductibleFraction = currentDeductibleFraction(l.id);
+        // Real-pass only: buckets only ever move in the real pass (see
+        // the drawdown block's own header above for why). Principal
+        // actually repaid this month (contractual + extra), nominal —
+        // b0 - b1 net of interest accruing/being repaid — split per
+        // repaymentAllocation by the SAME shared reducer every other
+        // repayment-shaped mutation site uses.
+        if (row) reduceBucketsForRepayment(l.id, Math.max(0, b0 - b1));
         const defl = 1 / infl;
         loanPayReal += (payment + extraApplied) * defl;
         const interestReal = interest * defl;
         // Surplus/deficit allocation spec, Commit 1: deductibleFraction
         // replaces the old all-or-nothing boolean — a part-deductible
         // loan deducts that proportion of its interest, same as before
-        // when the fraction is exactly 0 or 1.
-        if (md.deductibleFraction > 0 && interestReal > 0) {
-          const deductibleInterestReal = interestReal * md.deductibleFraction;
+        // when the fraction is exactly 0 or 1. Dynamic deductibility
+        // (spec 24, Commit 1) makes that proportion live for a liability
+        // that actually uses it (see currentDeductibleFraction's header).
+        if (monthDeductibleFraction > 0 && interestReal > 0) {
+          const deductibleInterestReal = interestReal * monthDeductibleFraction;
           for (const p of persons) {
             if (md.shares[p]) {
               acc[p].deductions += deductibleInterestReal * md.shares[p];
@@ -2565,6 +2761,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           // Snapshot, not a sum — overwritten every month so it holds
           // the year-end value, same convention as closing.
           row.liabilities[l.id].offsetApplied = offsetNom * defl;
+          // Drawdowns and dynamic deductibility (spec 24, Commit 1) —
+          // same snapshot convention; 0/0 for a liability that never
+          // uses dynamic deductibility (investBal/privateBal don't
+          // exist for it at all).
+          if (md.usesDynamicDeductibility) {
+            row.liabilities[l.id].investmentBalance = investBal[l.id] * defl;
+            row.liabilities[l.id].privateBalance = privateBal[l.id] * defl;
+          }
           // Nominal annual rate applying THIS month (Commit 1) —
           // rollover always lands on a plan-year boundary (July), so a
           // full plan year only ever sees one rate; this snapshot holds
@@ -2716,7 +2920,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // assessable — Commit 3's own tax-treatment decision) — see the
       // per-year setup above for the FY-level assessment this monthly
       // figure divides out of.
-      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut + agePensionMonthly + heasMonthly;
+      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut + agePensionMonthly + heasMonthly + drawdownIncomeThisMonth;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
         if (own && own[m] > 0) {
@@ -2777,6 +2981,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         if (row) { row.goals[g.id].contribution += contributed; goalAccruedTotal[g.id] += contributed; }
       }
       wcaBal += net;
+      // Drawdowns directed to an asset (spec 24, Commit 1) — the cash
+      // already landed in the WCA above (via drawdownIncomeThisMonth,
+      // folded into inc/net); this transfers it straight back out into
+      // the destination asset, a received-then-invested shape, the
+      // same WCA-passthrough transfer surplus-allocation's own "asset"
+      // target already uses. Real-pass only — bal/pools have no
+      // measurement-pass snapshot/restore for this kind of credit.
+      if (row) {
+        for (const credit of drawdownAssetCredits) {
+          wcaBal -= credit.amount;
+          bal[credit.destination] += credit.amount;
+          if (meta[credit.destination]?.cgt) pools[credit.destination] = poolAdd(pools[credit.destination], credit.amount);
+          if (row.perAssetDetail[credit.destination]) row.perAssetDetail[credit.destination].oneOffs += credit.amount;
+        }
+      }
       if (row) {
         row.income += inc;
         row.cashDistributions += cashDist;
@@ -2835,6 +3054,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             const consumed = Math.min(available, credit.amount, loanBalReal);
             if (consumed > 0) {
               loanBal[credit.targetId] -= consumed * inflNow;
+              // Dynamic deductibility (spec 24, Commit 1) — already
+              // real-pass only (this whole block is), same convention.
+              reduceBucketsForRepayment(credit.targetId, consumed * inflNow);
               wcaBal -= consumed;
               row.liabilities[credit.targetId].extraRepayment += consumed;
             }
@@ -3034,16 +3256,30 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               const md = liabMeta[l.id];
               return md.rolloverMonth != null && julyOf(y) >= md.rolloverMonth ? md.revertRate : md.i;
             };
-            const candidates = liabs.filter((l) => loanBal[l.id] > 0 && liabMeta[l.id].deductibleFraction < 1);
+            const candidates = liabs.filter((l) => loanBal[l.id] > 0 && currentDeductibleFraction(l.id) < 1);
             const ordered = surplusPeriod.debtOrder === "interestRate"
               ? [...candidates].sort((a, b) => rateAt(b) - rateAt(a))
               : candidates; // "manual" — the order liabilities are entered in the Liabilities section
             for (const l of ordered) {
               if (remaining <= 0) break;
-              const nonDeductibleBalance = loanBal[l.id] * (1 - liabMeta[l.id].deductibleFraction);
+              const nonDeductibleBalance = loanBal[l.id] * (1 - currentDeductibleFraction(l.id));
               const pay = Math.min(remaining, nonDeductibleBalance);
               if (pay <= 0) continue;
               loanBal[l.id] -= pay;
+              // Dynamic deductibility (spec 24, Commit 1) — this payment
+              // targets the NON-deductible balance by definition, so it
+              // reduces the private bucket specifically, keeping the
+              // investment bucket (and hence the deductible interest it
+              // still generates) untouched. Real-pass only — this whole
+              // "d." surplus-sweep block runs in BOTH passes (unlike
+              // the drawdown/repayment bucket code, which is entirely
+              // inside a real-pass-only region), and investBal/privateBal
+              // have no measurement-pass snapshot/restore; gating here
+              // is what stops the measured pass's own touch from
+              // persisting (uncorrected) into the real pass.
+              if (row && liabMeta[l.id].usesDynamicDeductibility) {
+                privateBal[l.id] = Math.max(0, privateBal[l.id] - pay);
+              }
               wcaBal -= pay;
               remaining -= pay;
               if (row) row.liabilities[l.id].surplusRepayment += pay;
@@ -3080,6 +3316,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               consumed = Math.min(share, loanBal[a.targetId]);
               if (consumed > 0) {
                 loanBal[a.targetId] -= consumed;
+                // Dynamic deductibility (spec 24, Commit 1) — real-pass
+                // only, same convention as every other bucket mutation.
+                if (row) reduceBucketsForRepayment(a.targetId, consumed);
                 wcaBal -= consumed;
                 if (row) row.liabilities[a.targetId].surplusRepayment += consumed;
               }
@@ -4935,6 +5174,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     accruedRefundAtEnd: pendingRefund.client + pendingRefund.partner,
     superWarnings,
     propertyWarnings,
+    drawdownWarnings,
     liabilityRepaymentStats,
     liabilityRollovers,
     goalStats,

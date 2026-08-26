@@ -1233,6 +1233,16 @@ export function createLiability(plan, existing = []) {
     // legacy data).
     commencementIsDefault: true,
     deductiblePctIsDefault: true,
+    // Drawdowns and dynamic deductibility (spec 24, Commit 1) —
+    // creditLimit is null ("no facility limit modelled") until the
+    // adviser sets a real figure; deductiblePct above becomes the
+    // OPENING investment/private split once any drawdown exists (or
+    // repaymentAllocation is "privateFirst" — see deterministic.js's
+    // own header on why that's the only OTHER thing that can move the
+    // split without a drawdown), engine-derived from there.
+    creditLimit: null,
+    drawdowns: [],
+    repaymentAllocation: "proportional",
   };
 }
 
@@ -1277,6 +1287,37 @@ export function clampOneOffRepayment(or, plan) {
     label: typeof or.label === "string" && or.label.trim() ? or.label : "Lump-sum repayment",
     amount: clampNumber(or.amount, 0),
     at: clampDateRef(or.at ?? anchorRef("start"), plan.client.currentAge, plan.endAge, plan),
+  };
+}
+
+// --- drawdowns (spec 24, Commit 1) ------------------------------------------
+//
+// Client-anchored like a one-off repayment (same reason: a facility
+// event, not owner-scoped income). "Deductibility follows the USE of
+// the borrowed funds, not the security" — purpose drives which bucket
+// (investment/private) the drawn amount joins; destination is where
+// the money actually lands (an asset, cash into the WCA, or a
+// property — modelled as cash, since this tool has no generic
+// "property improvement cost" concept to credit instead; disclosed).
+export const DRAWDOWN_PURPOSES = ["investment", "private"];
+export const REPAYMENT_ALLOCATIONS = ["proportional", "privateFirst"];
+
+export function createDrawdown(plan, existing = []) {
+  return {
+    id: uid("dd"), label: `Drawdown ${existing.length + 1}`, amount: 0,
+    at: anchorRef("start"), purpose: "investment", destination: "cash",
+  };
+}
+
+export function clampDrawdown(d, plan, destinationIds) {
+  const destination = d?.destination === "cash" || destinationIds.has(d?.destination) ? d.destination : "cash";
+  return {
+    id: typeof d?.id === "string" && d.id ? d.id : uid("dd"),
+    label: typeof d?.label === "string" && d.label.trim() ? d.label : "Drawdown",
+    amount: clampNumber(d?.amount, 0),
+    at: clampDateRef(d?.at ?? anchorRef("start"), plan.client.currentAge, plan.endAge, plan),
+    purpose: DRAWDOWN_PURPOSES.includes(d?.purpose) ? d.purpose : "investment",
+    destination,
   };
 }
 
@@ -1334,6 +1375,20 @@ export function clampLiability(l, plan, assets, properties = []) {
       ? l.commencedOn : null,
     commencementIsDefault: l.commencementIsDefault === true,
     deductiblePctIsDefault: l.deductiblePctIsDefault === true,
+    // Drawdowns and dynamic deductibility (spec 24, Commit 1) —
+    // creditLimit null = no facility limit modelled (never silently
+    // caps an existing loan that never asked for one); a real number
+    // is the facility the balance may not exceed (deterministic.js's
+    // own drawdown mechanics enforce it, with a flagged warning, not a
+    // silent refusal or a silent overdraw). destinationIds spans
+    // financial assets AND properties (a drawdown can fund either).
+    creditLimit: l.creditLimit == null ? null : clampNumber(l.creditLimit, 0),
+    drawdowns: Array.isArray(l.drawdowns) ? l.drawdowns.map((d) => clampDrawdown(d, plan, allIds)) : [],
+    // "privateFirst" on a single mixed loan is the legally aggressive
+    // reading the spec explicitly asks to PERMIT with a flag, never
+    // silently allow or silently forbid — deterministic.js surfaces the
+    // warning; this only stores the choice.
+    repaymentAllocation: l.repaymentAllocation === "privateFirst" ? "privateFirst" : "proportional",
   };
 }
 

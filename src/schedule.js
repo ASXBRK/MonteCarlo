@@ -750,6 +750,35 @@ export function buildSchedules(state) {
     liabilityExtraFlows[l.id] = target;
   }
 
+  // Drawdowns (spec 24, Commit 1) — this module only resolves WHEN
+  // (bounds → the July it fires, convention 5, same as an ordinary
+  // one-off repayment) and structural destination validity;
+  // deterministic.js resolves the credit-limit cap (needs the LIVE
+  // balance), which bucket (investment/private) grows, and the
+  // destination credit, none of which exist here. A destination that
+  // doesn't resolve (a deleted asset/property) falls back to "cash" —
+  // the loan still draws down regardless of where the money was meant
+  // to land (a bank funds the drawdown; it doesn't refuse it because
+  // the borrower's own spending plan changed), never silently dropped.
+  const liabilityDrawdownEvents = {};
+  for (const l of state.liabilities ?? []) {
+    const events = [];
+    for (const d of l.drawdowns ?? []) {
+      if (!(d.amount > 0)) continue;
+      const y = resolveRef(d.at, plan, dateSchedule, "client").planYear;
+      const jm = julyMonthIndex(plan, y);
+      if (jm == null) continue; // partial first year without a firing July — convention 5
+      const destinationValid = d.destination === "cash"
+        || includedIds.has(d.destination)
+        || (state.properties ?? []).some((p) => p.id === d.destination);
+      events.push({
+        id: d.id, month: jm, amount: d.amount, purpose: d.purpose,
+        destination: destinationValid ? d.destination : "cash",
+      });
+    }
+    liabilityDrawdownEvents[l.id] = events;
+  }
+
   // Surplus allocation periods (Surplus and Deficit Allocation spec,
   // Commit 1) — bounds only, same split as toConcessionalCapRows above:
   // this module resolves WHEN a period applies (its from/to DateRefs
@@ -1022,5 +1051,6 @@ export function buildSchedules(state) {
     rowTotals,
     oneOffsByAssetYear,
     liabilityExtraFlows,
+    liabilityDrawdownEvents,
   };
 }

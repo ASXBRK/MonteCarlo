@@ -273,6 +273,33 @@
 // termYears spanning both sides of the one-third base-value reduction,
 // both residualDestinations) with NO new named term.
 //
+// Loan drawdowns and dynamic deductibility (spec 24, Commit 1) — a
+// drawdown moves money, it does not create it, but this needed a real
+// fix, not just a check: the FIRST attempt credited the destination
+// (cash/an asset) DIRECTLY (a raw wcaBal/bal mutation), reasoning
+// "loan up, cash up, cancels via closingN, like a bonus-to-asset
+// redirect" — WRONG, and the randomised sweep caught it immediately
+// (a gap exactly equal to the drawdown amount, every run touching a
+// drawdown). The two cases aren't the same shape: a bonus redirect
+// moves money BETWEEN two pockets ALREADY inside closingN (WCA and the
+// target), so debiting one and crediting the other cancels with no
+// term. A drawdown's cash side has no such debit anywhere — the loan
+// side alone is already made neutral by liabilityRevaluation's own
+// "+drawdown" term (there specifically so the balance increase isn't
+// misread as a free CPI gain), but that term explains ONLY the
+// liability; crediting the cash/asset side with nothing debited is a
+// genuine unexplained gain unless it's actually named. Fixed the same
+// way HEAS's own drawdown already is (see heasDrawn's header above):
+// routed through `inc` (drawdownIncomeThisMonth, deterministic.js),
+// which is non-assessable (never touches acc[p].ordinary, the same
+// reason the age pension's entitlement doesn't) but IS already inside
+// the `income` term — an asset destination is a received-then-invested
+// shape (the same cash transfers OUT of the WCA into the asset right
+// after wcaBal += net, mirroring surplus-allocation's own "asset"
+// target transfer). No new named term, once routed correctly — but
+// this one was found by running the sweep, not by inspection, exactly
+// the point of extending randomScenario() BEFORE trusting the reasoning.
+//
 // Monte Carlo's random return shocks (Session B) touch none of the
 // terms above except `row.growth`/superDetail's earnings figures
 // themselves — those are accumulated from whatever return was actually

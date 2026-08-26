@@ -40,6 +40,7 @@ import {
   INCOME_CATEGORIES, BONUS_DESTINATION_TYPES, clampBonusDestination, incomeCategoryTaxTreatment,
   FBT_TYPES, PACKAGING_TYPES,
   createNovatedLease, clampNovatedLease, normaliseNovatedLeases, RESIDUAL_DESTINATIONS,
+  createDrawdown, clampDrawdown, DRAWDOWN_PURPOSES, REPAYMENT_ALLOCATIONS,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2612,5 +2613,86 @@ describe("Novated leases (spec 23, Commit 4): plan model", () => {
     expect(nl.postTaxAnnual).toBe(2000);
     expect(nl.runningCostsPackaged).toBe(false);
     expect(nl.residualValue).toBe(12000);
+  });
+});
+
+describe("Loan drawdowns and dynamic deductibility (spec 24, Commit 1): plan model", () => {
+  it("createLiability defaults to no credit limit, no drawdowns, proportional repayment allocation", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const l = createLiability(plan, []);
+    expect(l.creditLimit).toBeNull();
+    expect(l.drawdowns).toEqual([]);
+    expect(l.repaymentAllocation).toBe("proportional");
+  });
+
+  it("clampLiability: creditLimit null stays null (no facility modelled); a negative figure clamps to 0", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const assets = [];
+    expect(clampLiability({ creditLimit: null }, plan, assets).creditLimit).toBeNull();
+    expect(clampLiability({}, plan, assets).creditLimit).toBeNull(); // absent reads as null, not 0
+    expect(clampLiability({ creditLimit: -500 }, plan, assets).creditLimit).toBe(0);
+    expect(clampLiability({ creditLimit: 300000 }, plan, assets).creditLimit).toBe(300000);
+  });
+
+  it("clampLiability: an unknown repaymentAllocation clamps to proportional; privateFirst passes through", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(clampLiability({ repaymentAllocation: "bogus" }, plan, []).repaymentAllocation).toBe("proportional");
+    expect(clampLiability({ repaymentAllocation: "privateFirst" }, plan, []).repaymentAllocation).toBe("privateFirst");
+    expect(REPAYMENT_ALLOCATIONS).toEqual(["proportional", "privateFirst"]);
+  });
+
+  it("createDrawdown defaults to investment purpose, destination cash", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const d = createDrawdown(plan, []);
+    expect(d.purpose).toBe("investment");
+    expect(d.destination).toBe("cash");
+    expect(DRAWDOWN_PURPOSES).toEqual(["investment", "private"]);
+  });
+
+  it("clampDrawdown: an unknown purpose clamps to investment; a dangling destination falls back to cash", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const destinationIds = new Set(["a1"]);
+    const d = clampDrawdown({ purpose: "bogus", destination: "nonexistent" }, plan, destinationIds);
+    expect(d.purpose).toBe("investment");
+    expect(d.destination).toBe("cash");
+    const valid = clampDrawdown({ purpose: "private", destination: "a1" }, plan, destinationIds);
+    expect(valid.purpose).toBe("private");
+    expect(valid.destination).toBe("a1");
+    // "cash" is always a valid destination, independent of destinationIds.
+    const cash = clampDrawdown({ destination: "cash" }, plan, new Set());
+    expect(cash.destination).toBe("cash");
+  });
+
+  it("clampLiability clamps every drawdown in the array, validating destination against assets AND properties", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const assets = [{ id: "a1", class: "financial", include: true }];
+    const properties = [{ id: "p1" }];
+    const l = clampLiability({
+      drawdowns: [
+        { id: "dd1", amount: 10000, at: { kind: "age", age: 45 }, purpose: "investment", destination: "a1" },
+        { id: "dd2", amount: 5000, at: { kind: "age", age: 46 }, purpose: "private", destination: "p1" },
+        { id: "dd3", amount: 2000, at: { kind: "age", age: 47 }, purpose: "investment", destination: "nonexistent" },
+      ],
+    }, plan, assets, properties);
+    expect(l.drawdowns).toHaveLength(3);
+    expect(l.drawdowns[0].destination).toBe("a1");
+    expect(l.drawdowns[1].destination).toBe("p1");
+    expect(l.drawdowns[2].destination).toBe("cash"); // dangling — falls back, never dropped
+  });
+
+  it("hydrate round-trips a liability's creditLimit, drawdowns and repaymentAllocation", () => {
+    const s = defaultState(PROFILES, NOW);
+    const liability = createLiability(s.plan, []);
+    s.liabilities = [{
+      ...liability, balance: 200000, creditLimit: 250000, repaymentAllocation: "privateFirst",
+      drawdowns: [{ id: "dd1", label: "Investment drawdown", amount: 40000, at: { kind: "age", age: 45 }, purpose: "investment", destination: "cash" }],
+    }];
+    const back = hydrate(serialize(s), PROFILES);
+    const l = back.liabilities[0];
+    expect(l.creditLimit).toBe(250000);
+    expect(l.repaymentAllocation).toBe("privateFirst");
+    expect(l.drawdowns).toHaveLength(1);
+    expect(l.drawdowns[0].amount).toBe(40000);
+    expect(l.drawdowns[0].purpose).toBe("investment");
   });
 });

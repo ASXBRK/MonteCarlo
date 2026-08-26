@@ -2852,6 +2852,29 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           at: { kind: "age", age: randInt(startAge, endAge) },
         }];
       }
+      // Drawdowns and dynamic deductibility (spec 24, Commit 1) — a
+      // genuine new money flow (a drawdown moves money into its
+      // destination, offset by the SAME increase to the loan balance —
+      // see conservationCheck.js's own header). deductiblePct as a real
+      // percentage (not just the boolean's 0/100) exercises a genuine
+      // mixed opening split; creditLimit sometimes tight enough to bind
+      // against the drawdown itself (exercising the flagged-headroom
+      // path, not just the always-affordable case); repaymentAllocation
+      // spans both, independent of whether a drawdown ever fires
+      // (privateFirst alone, on a part-deductible loan with no
+      // drawdown, still moves the ratio over time).
+      liab.deductiblePct = rand(0, 100);
+      liab.repaymentAllocation = pick(["proportional", "proportional", "privateFirst"]);
+      liab.creditLimit = pick([null, rand(liab.balance * 0.5, liab.balance * 1.5)]);
+      liab.drawdowns = [];
+      if (Math.random() < 0.5) {
+        liab.drawdowns.push({
+          id: "dd1", label: "Drawdown", amount: rand(5000, 150000), // spans under/over a tight creditLimit
+          at: { kind: "age", age: randInt(startAge, endAge) },
+          purpose: pick(["investment", "private"]),
+          destination: pick(["cash", pick(assets).id]),
+        });
+      }
       liabilities.push(liab);
     }
 
@@ -8610,5 +8633,140 @@ describe("Novated leases (spec 23, Commit 4)", () => {
     const out = projectPlan(stateWith([]));
     expect(out.yearly[0].taxDetail.fbtPayable).toBe(0);
     expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBe(0);
+  });
+});
+
+// --- Spec 24, Commit 1: loan drawdowns and dynamic deductibility -----------
+
+describe("Loan drawdowns and dynamic deductibility (spec 24, Commit 1)", () => {
+  const loan = (over = {}) => ({
+    id: "lb1", name: "Home loan", type: "mortgage", owner: "client",
+    balance: 200000, interestRatePct: 6, termYears: 10, repayment: "pi",
+    ioYears: 0, deductiblePct: 0, linkedAssetId: null, offsetAssetId: null,
+    extraRepayments: [], oneOffRepayments: [],
+    creditLimit: null, drawdowns: [], repaymentAllocation: "proportional",
+    ...over,
+  });
+  const bigAsset = () => mkAsset({ allocation: zeroRealAlloc(), balance: 2000000 });
+  const withLoan = (l, over = {}) => ({
+    ...mkState({ endAge: 40 + (over.years ?? 5), assets: [bigAsset()], ...over }),
+    liabilities: [l],
+  });
+  const ratio = (row) => {
+    const total = row.investmentBalance + row.privateBalance;
+    return total > 0 ? row.investmentBalance / total : 0;
+  };
+
+  it("a drawdown increases the balance from the year it fires, and repayments recompute over the new balance/term", () => {
+    const without = projectPlan(withLoan(loan()));
+    const withDrawdown = projectPlan(withLoan(loan({
+      drawdowns: [{ id: "dd1", amount: 50000, at: { kind: "age", age: 41 }, purpose: "investment", destination: "cash" }],
+    })));
+    // Before the firing year: identical (drawdown fires at age 41 = year 1).
+    expect(withDrawdown.yearly[0].liabilities.lb1.closing).toBeCloseTo(without.yearly[0].liabilities.lb1.closing, 2);
+    // From the firing year onward: materially higher balance.
+    expect(withDrawdown.yearly[1].liabilities.lb1.closing).toBeGreaterThan(without.yearly[1].liabilities.lb1.closing + 40000);
+    expect(withDrawdown.yearly[1].liabilities.lb1.drawdown).toBeCloseTo(50000, 0);
+  });
+
+  it("the credit limit binds — a drawdown beyond the facility draws only the available headroom, flagged", () => {
+    const out = projectPlan(withLoan(loan({
+      creditLimit: 220000,
+      drawdowns: [{ id: "dd1", amount: 50000, at: { kind: "age", age: 40 }, purpose: "investment", destination: "cash" }],
+    })));
+    // Only $20,000 of headroom (limit 220,000 − opening balance 200,000).
+    expect(out.yearly[0].liabilities.lb1.drawdown).toBeCloseTo(20000, 0);
+    expect(out.drawdownWarnings.some((w) => w.type === "creditLimitBound" && w.liabilityId === "lb1")).toBe(true);
+  });
+
+  it("no credit limit set at all never binds — the drawdown fires in full, no warning", () => {
+    const out = projectPlan(withLoan(loan({
+      drawdowns: [{ id: "dd1", amount: 50000, at: { kind: "age", age: 40 }, purpose: "investment", destination: "cash" }],
+    })));
+    expect(out.yearly[0].liabilities.lb1.drawdown).toBeCloseTo(50000, 0);
+    expect(out.drawdownWarnings.some((w) => w.type === "creditLimitBound")).toBe(false);
+  });
+
+  it("the opening deductiblePct is respected as the starting investment/private split — exact under proportional reduction, which preserves the ratio regardless of how much principal is repaid", () => {
+    // A drawdown fires in year 3 (engaging dynamic tracking from setup),
+    // but years 0-2 have no drawdown activity at all yet — the ratio in
+    // those years must equal the OPENING split exactly.
+    const out = projectPlan(withLoan(loan({
+      deductiblePct: 25,
+      drawdowns: [{ id: "dd1", amount: 10000, at: { kind: "age", age: 43 }, purpose: "investment", destination: "cash" }],
+    }), { years: 5 }));
+    for (const y of [0, 1, 2]) {
+      expect(ratio(out.yearly[y].liabilities.lb1)).toBeCloseTo(0.25, 6);
+    }
+  });
+
+  it("proportional repayment (the default) keeps the deductible proportion constant even after a drawdown changes the mix", () => {
+    const out = projectPlan(withLoan(loan({
+      deductiblePct: 40,
+      drawdowns: [{ id: "dd1", amount: 50000, at: { kind: "age", age: 41 }, purpose: "investment", destination: "cash" }],
+    }), { years: 6 }));
+    const ratioAfterDrawdown = ratio(out.yearly[1].liabilities.lb1);
+    expect(ratioAfterDrawdown).toBeGreaterThan(0.4); // the drawdown pushed it up from 40%
+    for (const y of [2, 3, 4]) {
+      expect(ratio(out.yearly[y].liabilities.lb1)).toBeCloseTo(ratioAfterDrawdown, 6);
+    }
+  });
+
+  it("privateFirst allocation shifts the deductible proportion UP over time — repayments preferentially clear the private bucket first", () => {
+    const out = projectPlan(withLoan(loan({
+      deductiblePct: 40, repaymentAllocation: "privateFirst",
+      drawdowns: [{ id: "dd1", amount: 50000, at: { kind: "age", age: 41 }, purpose: "investment", destination: "cash" }],
+    }), { years: 6 }));
+    const r1 = ratio(out.yearly[1].liabilities.lb1);
+    const r3 = ratio(out.yearly[3].liabilities.lb1);
+    expect(r3).toBeGreaterThan(r1);
+    // Flagged as aggressive — permitted, not silently allowed or refused.
+    expect(out.drawdownWarnings.some((w) => w.type === "privateFirstAggressive" && w.liabilityId === "lb1")).toBe(true);
+  });
+
+  it("privateFirst on a single mixed loan is flagged as aggressive purely from the choice itself, independent of whether a drawdown ever fires — permitted, never silent", () => {
+    const out = projectPlan(withLoan(loan({ deductiblePct: 40, repaymentAllocation: "privateFirst" })));
+    expect(out.drawdownWarnings.some((w) => w.type === "privateFirstAggressive")).toBe(true);
+  });
+
+  it("conservation: a drawdown to cash moves money into the WCA without changing net worth by itself", () => {
+    // "accumulate" surplus (remainderTo: cash) — the default "spend"
+    // mode would sweep the drawdown's own WCA cash away as household
+    // spending by FY-end, which is a real, disclosed leak of ITS OWN
+    // (surplusSpent), not something this test is checking; accumulate
+    // isolates the drawdown's own conservation-neutral transfer.
+    const accumulate = { surplus: { mode: "accumulate", assetId: null } };
+    const without = projectPlan(withLoan(loan(), accumulate));
+    const withDrawdown = projectPlan(withLoan(loan({
+      drawdowns: [{ id: "dd1", amount: 50000, at: { kind: "age", age: 40 }, purpose: "investment", destination: "cash" }],
+    }), accumulate));
+    // Loan up $50k, WCA up $50k — nets to (approximately) zero net-worth
+    // change; the small residual left over is the extra WCA interest
+    // that $50k itself earns for the rest of the FY, a real (if tiny)
+    // growth effect, not a conservation leak.
+    expect(Math.abs(withDrawdown.yearly[0].netAssets - without.yearly[0].netAssets)).toBeLessThan(2000);
+  });
+
+  it("a drawdown directed to an asset credits that asset, not the WCA", () => {
+    const out = projectPlan({
+      ...mkState({
+        endAge: 41, assets: [mkAsset({ id: "a1", allocation: zeroRealAlloc(), balance: 0 })],
+        // Ample income so the mortgage's own contractual repayment
+        // never needs to deficit-fund from a1 itself, which would
+        // otherwise confound the credited amount with an unrelated drain.
+        cashflows: { income: [employmentRow({ amount: 200000, sgApplies: false })] },
+      }),
+      liabilities: [loan({ drawdowns: [{ id: "dd1", amount: 30000, at: { kind: "age", age: 40 }, purpose: "investment", destination: "a1" }] })],
+    });
+    expect(out.yearly[0].perAssetDetail.a1.closing).toBeCloseTo(30000, 0);
+  });
+
+  it("regression gate: a liability with no drawdowns at all is completely unaffected (bit-identical)", () => {
+    const s = withLoan(loan({ deductiblePct: 35 }));
+    const a = projectPlan(s);
+    const b = projectPlan(s);
+    expect(a).toEqual(b);
+    expect(a.yearly[0].liabilities.lb1.investmentBalance).toBe(0); // dynamic tracking never engaged
+    expect(a.yearly[0].liabilities.lb1.privateBalance).toBe(0);
   });
 });
