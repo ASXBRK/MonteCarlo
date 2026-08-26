@@ -4182,6 +4182,44 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     expect(missing, `unexercised strata: ${missing.join(", ")}`).toEqual([]);
   });
 
+  // Spec 28, Commit 2 — "after a sweep, emit a summary of which
+  // thresholds were exercised in which strata... committed as a test
+  // that FAILS if any registered threshold went unexercised. Without
+  // this the registry silently rots as the engine changes." Distinct
+  // from Commit 1's own "produces every stratum" test above (which
+  // only proves the STRATIFY MECHANISM works, in isolation): this one
+  // runs the SAME sweep size as the conservation gate itself (300 runs
+  // + every degenerate state) and prints the actual per-threshold,
+  // per-stratum hit table any reader (or CI log) can eyeball — so a
+  // future commit that adds a threshold to the registry but never
+  // wires a real stratify() call for it fails LOUDLY and readably,
+  // not just as an opaque array-diff.
+  it("coverage report: every registered threshold is exercised in every stratum across a real sweep", () => {
+    resetThresholdCoverage();
+    // 2,000 — the same N Commit 1's own "produces every stratum" test
+    // uses. The rarest combination in the registry (the boundary-age
+    // cohort, itself gated at 25%, landing on one specific age
+    // threshold out of eleven, in one specific stratum out of five) is
+    // roughly 1-in-220 per run; 300 runs (this file's original sweep
+    // size) would make that specific cell flaky, occasionally reading
+    // zero by chance rather than by an actual regression.
+    const failures = runConservationSweep(2000, "coverage-report sweep");
+    expect(failures, `conservation failures during the coverage sweep:\n${failures.join("\n")}`).toEqual([]);
+
+    const STRATA = ["wellBelow", "justBelow", "at", "justAbove", "wellAbove"];
+    const lines = ["Threshold coverage report (2,000-scenario sweep + every degenerate state):"];
+    const unexercised = [];
+    for (const name of THRESHOLD_REGISTRY) {
+      const strata = thresholdCoverage[name] ?? {};
+      const counts = STRATA.map((s) => `${s}=${strata[s] ?? 0}`).join(" ");
+      lines.push(`  ${name}: ${counts}`);
+      for (const s of STRATA) if (!strata[s]) unexercised.push(`${name}.${s}`);
+    }
+    // eslint-disable-next-line no-console -- the report IS the point of this test
+    console.log(lines.join("\n"));
+    expect(unexercised, `threshold(s) with an unexercised stratum: ${unexercised.join(", ")}`).toEqual([]);
+  });
+
   // Input Usability spec, Commit 2 — state.meta.touched records which
   // fields a user has reviewed, purely for display (muted styling, the
   // review panel, sidebar badges). It must never reach the engine: a

@@ -40,6 +40,16 @@ spec wins and says so explicitly.**
   generated goals, FHSSS, extra/one-off loan repayments, LMI, or
   HELP/MLS-triggering incomes — a guard that doesn't grow with the
   engine silently stops guarding.
+- Any commit that introduces a new **threshold** — a value the engine
+  branches on — must register it in `randomScenario()`'s threshold
+  registry (`THRESHOLD_REGISTRY`, `src/deterministic.test.js`) in the
+  same commit, with a real `stratify()`/`stratifyInt()` call that draws
+  values at, just below, and just above it. Thresholds are where
+  defects concentrate; a threshold the generator cannot reach is
+  unguarded. Two real conservation bugs (a super-drawn-down-in-the-FY's-
+  final-month ordering bug; an NCC rejected near the bring-forward nil
+  tier, ~$2.1m) hid for months in ranges the generator never reached —
+  see docs/specs/28-generator-boundary-coverage.md.
 
 ## Architecture map
 - `src/planState.js` — schema (v5+), migrations, factories. localStorage via
