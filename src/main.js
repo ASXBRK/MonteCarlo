@@ -48,6 +48,7 @@ import {
   createSuperRollover,
   createBond, BOND_TYPES, createBondContribution,
   createGift,
+  createEmployer, FBT_TYPES,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { resolveGiftDeprivation, GIFT_ANNUAL_LIMIT, GIFT_FIVE_YEAR_LIMIT } from "./gifting.js";
@@ -1951,9 +1952,159 @@ function personTaxDetailsHTML(prefix, person, title) {
         </div>
       </div>
       ${deathBenefitBlockHTML(prefix, person)}
+      ${employersBlockHTML(prefix)}
     </div>
   `;
 }
+
+// --- Employers (spec 23, Commit 1 engine; UI closing the reachability -------
+// gap the spec 27 Commit 5 reachability test disclosed, a1ab5a9) ------------
+//
+// A first-class concept solely because SG and the maximum contribution
+// base apply PER EMPLOYER, not to a person's pooled income (planState
+// .js's own header) — lives in Tax details, per person, alongside the
+// other employment-tax settings rather than identity. `prefix` doubles
+// as the owner key ("client"/"partner"), the same convention every
+// other field in this block already uses.
+function findEmployer(id) {
+  return (state.plan.employers ?? []).find((e) => e.id === id) ?? null;
+}
+
+function employerRowHTML(prefix, e) {
+  const showCaps = e.fbtType !== "standard";
+  return `
+    <div class="employer-row" data-empprefix="${prefix}" data-empid="${e.id}">
+      <div class="person-grid">
+        <div class="cf-cell">
+          <label>Name ${e.nameIsDefault ? tooltipHTML(describeDefault("employer.name", { value: e.name })) : ""}</label>
+          <input type="text" maxlength="60" value="${escapeHTML(e.name)}" data-empprefix="${prefix}" data-empid="${e.id}" data-empfield="name" />
+        </div>
+        <div class="cf-cell">
+          <label>FBT type ${e.fbtTypeIsDefault ? tooltipHTML(describeDefault("employer.fbtType")) : ""}</label>
+          <select data-empprefix="${prefix}" data-empid="${e.id}" data-empfield="fbtType">
+            <option value="standard"${e.fbtType === "standard" ? " selected" : ""}>Standard</option>
+            <option value="fbtExempt"${e.fbtType === "fbtExempt" ? " selected" : ""}>FBT-exempt</option>
+            <option value="fbtRebatable"${e.fbtType === "fbtRebatable" ? " selected" : ""}>FBT-rebatable</option>
+          </select>
+        </div>
+        <button class="pcard-remove" type="button" data-empprefix="${prefix}" data-employer-action="remove" data-empid="${e.id}">Remove</button>
+      </div>
+      ${showCaps ? `
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Living expense cap ($/yr)</label>
+            <input type="number" min="0" step="100" value="${e.fbtCaps.livingExpenseCap}"
+                   data-empprefix="${prefix}" data-empid="${e.id}" data-empfield="fbtCaps.livingExpenseCap" />
+            ${e.fbtCaps.livingExpenseCap === 0 ? `<p class="helper-warning">Cap not set — enter your employer's current cap. A zero cap silently disables packaging rather than flagging it: the ATO's published figures aren't in the firm reference, so nothing is assumed on your behalf.</p>` : ""}
+          </div>
+          <div class="cf-cell">
+            <label>Meal entertainment cap ($/yr)</label>
+            <input type="number" min="0" step="100" value="${e.fbtCaps.mealEntertainmentCap}"
+                   data-empprefix="${prefix}" data-empid="${e.id}" data-empfield="fbtCaps.mealEntertainmentCap" />
+            ${e.fbtCaps.mealEntertainmentCap === 0 ? `<p class="helper-warning">Cap not set — enter your employer's current cap.</p>` : ""}
+          </div>
+          ${e.fbtType === "fbtRebatable" ? `
+            <div class="cf-cell">
+              <label>Rebate % ${tooltipHTML("A rebate on the FBT payable within the cap, not a full exemption.")}</label>
+              <input type="number" min="0" max="100" step="1" value="${e.fbtCaps.rebatePct}"
+                     data-empprefix="${prefix}" data-empid="${e.id}" data-empfield="fbtCaps.rebatePct" />
+            </div>
+          ` : ""}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function employersBlockHTML(prefix) {
+  const employers = (state.plan.employers ?? []).filter((e) => e.ownerId === prefix);
+  return `
+    <div class="cf-subsection">
+      <div class="cf-section-title">Employers ${tooltipHTML("SG and the maximum contribution base apply PER employer, not to this person's pooled income — two jobs each generate SG up to the cap independently. An employment income row (Money In) links to one of these; Salary Packaging deduction rows (Money Out) do too, and its FBT type/caps determine the packaging benefit.")}</div>
+      ${employers.length
+        ? `<div class="employer-list">${employers.map((e) => employerRowHTML(prefix, e)).join("")}</div>`
+        : `<p class="helper-text">No employers yet — an employment income row will get a default one automatically.</p>`}
+      <button class="btn-text" type="button" data-empprefix="${prefix}" data-employer-action="add">+ Add employer</button>
+    </div>
+  `;
+}
+
+// Applies a simple (non-structural) field edit to an employer. Returns
+// true when the change is structural (the caps section/rebate field
+// appearing or disappearing, the "cap not set" warning) — same true/
+// false contract as applySuperAccountEdit/applyBondEdit.
+function applyEmployerEdit(e, field, el, commit) {
+  switch (field) {
+    case "name":
+      e.name = commit ? (el.value.trim() || e.name) : el.value;
+      if (commit) { e.nameIsDefault = false; el.value = e.name; }
+      return false;
+    case "fbtType":
+      if (FBT_TYPES.includes(el.value)) { e.fbtType = el.value; e.fbtTypeIsDefault = false; }
+      return true;
+    case "fbtCaps.livingExpenseCap":
+      e.fbtCaps.livingExpenseCap = clampNumber(el.value, 0);
+      if (commit) el.value = e.fbtCaps.livingExpenseCap;
+      return true; // the "cap not set" warning depends on this
+    case "fbtCaps.mealEntertainmentCap":
+      e.fbtCaps.mealEntertainmentCap = clampNumber(el.value, 0);
+      if (commit) el.value = e.fbtCaps.mealEntertainmentCap;
+      return true;
+    case "fbtCaps.rebatePct":
+      e.fbtCaps.rebatePct = clampNumber(el.value, 0, 100);
+      if (commit) el.value = e.fbtCaps.rebatePct;
+      return false;
+    default:
+      return false;
+  }
+}
+
+els.taxDetailsSection.addEventListener("input", (e) => {
+  const empid = e.target.dataset.empid;
+  const empfield = e.target.dataset.empfield;
+  if (!empid || !empfield) return;
+  const emp = findEmployer(empid);
+  if (!emp) return;
+  applyEmployerEdit(emp, empfield, e.target, false);
+  saveState();
+  refreshOutputs();
+});
+
+els.taxDetailsSection.addEventListener("change", (e) => {
+  const empid = e.target.dataset.empid;
+  const empfield = e.target.dataset.empfield;
+  if (!empid || !empfield) return;
+  const emp = findEmployer(empid);
+  if (!emp) return;
+  const structural = applyEmployerEdit(emp, empfield, e.target, true);
+  saveState();
+  refreshOutputs();
+  if (structural) renderTaxDetails();
+});
+
+els.taxDetailsSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-employer-action]");
+  if (!btn) return;
+  const prefix = btn.dataset.empprefix;
+  const action = btn.dataset.employerAction;
+  if (action === "add") {
+    state.plan.employers = [...(state.plan.employers ?? []), createEmployer(state.plan, state.plan.employers ?? [], prefix)];
+  } else if (action === "remove") {
+    const emp = findEmployer(btn.dataset.empid);
+    if (!emp) return;
+    // Income/packaging rows pointing at this employer fall back to that
+    // owner's next remaining employer (or null, if none is left) via
+    // resolveEmployerAssignment's own second-stage migration — never
+    // orphaned, never silently reattributed to a DIFFERENT owner.
+    if (!window.confirm(`Remove "${emp.name}"? Income and packaging rows linked to it will reassign to this person's next employer, if any.`)) return;
+    state.plan.employers = state.plan.employers.filter((x) => x.id !== emp.id);
+  } else {
+    return;
+  }
+  saveState();
+  refreshOutputs();
+  renderTaxDetails();
+});
 
 // --- Death benefit nominations (spec 22 engine; spec 27 Commit 2 UI) --------
 //
@@ -3100,6 +3251,42 @@ function labelTdHTML(kind, r) {
   `;
 }
 
+// Employers on income rows (spec 23, Commit 1; UI closing the
+// reachability gap a1ab5a9 disclosed) — scoped to the row's OWN owner
+// (an employer belongs to one person, never joint).
+function employerOptions(owner, selected) {
+  const employers = (state.plan.employers ?? []).filter((e) => e.ownerId === owner);
+  if (employers.length === 0) return `<option value="">No employer yet</option>`;
+  return employers.map((e) => `<option value="${e.id}"${e.id === selected ? " selected" : ""}>${escapeHTML(e.name)}</option>`).join("");
+}
+
+// The derived consequence beside the select — per-employer SG is the
+// whole point of the model (planState.js's own header on why employers
+// are first-class) and otherwise invisible. Reads this row's own
+// already-computed FY0 income total (projection.schedule.rowTotals
+// .income), summed across every OTHER row sharing this row's owner and
+// employer — the SAME grouping schedule.js's own SG computation uses —
+// against the FY0 maximum contribution base. A live estimate, not the
+// engine's own multi-year figure: reads year 0 only, the same
+// established pattern superCapHeadroomHTML already uses for a live
+// per-row cap readout.
+function sgNoteHTML(r) {
+  if (r.incomeType !== "employment" || r.sgApplies === false || r.category === "overtime") return "";
+  if (!projection?.schedule?.rowTotals?.income) return "";
+  const key = (row) => `${row.owner}::${row.employerId ?? row.id}`;
+  const siblings = state.cashflows.income.filter((row) =>
+    row.incomeType === "employment" && row.sgApplies !== false && row.category !== "overtime" && key(row) === key(r)
+  );
+  const rt = projection.schedule.rowTotals.income;
+  const totalFy = siblings.reduce((s, row) => s + (rt[row.id]?.[0] ?? 0), 0);
+  if (!(totalFy > 0)) return "";
+  const f0 = firstFyStartYear(state.plan.start);
+  const mode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
+  const rates = superRatesFor(f0, mode, state.assumptions.cpi, state.assumptions.awote ?? 0.035);
+  const sg = Math.min(totalFy, rates.sgMaximumSalary) * rates.sgRate;
+  return `<p class="helper-inline">SG ${(rates.sgRate * 100).toFixed(0)}% on ${fmtMoney(totalFy)}, capped at the maximum contribution base for this employer ≈ ${fmtMoney(sg)}/yr.</p>`;
+}
+
 function incomeRowHTML(r) {
   return `
     <tr class="cf-tr" data-cfid="${r.id}">
@@ -3107,6 +3294,12 @@ function incomeRowHTML(r) {
         <select data-kind="income" data-cfid="${r.id}" data-field="category">
           ${INCOME_CATEGORIES.map((c) => `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(INCOME_CATEGORY_LABELS[c])}</option>`).join("")}
         </select>
+        ${r.incomeType === "employment" ? `
+          <select data-kind="income" data-cfid="${r.id}" data-field="employerId" aria-label="Employer">
+            ${employerOptions(r.owner, r.employerId)}
+          </select>
+          <span class="cf-sg-note" data-cfid="${r.id}">${sgNoteHTML(r)}</span>
+        ` : ""}
         ${r.category === "salary" ? `
           <label class="ptg-check cf-sg-check">
             <input type="checkbox"${r.sgApplies !== false ? " checked" : ""}
@@ -4485,6 +4678,18 @@ for (const container of [els.assets, els.lifestyleSection, ...CF_MOUNTS]) {
   });
 }
 
+// Employers (spec 23, Commit 1) — a surgical update of sgNoteHTML's own
+// output, not a full row re-render (which would drop focus mid-edit).
+// See applyFieldEdit's own call site comment for why this is needed at
+// all: sgNoteHTML reads the live projection, which only becomes fresh
+// once refreshOutputs() (called just before this) has run.
+function refreshIncomeSgNote(cfid) {
+  const row = findRow("income", cfid);
+  if (!row) return;
+  const el = document.querySelector(`.cf-sg-note[data-cfid="${cfid}"]`);
+  if (el) el.innerHTML = sgNoteHTML(row);
+}
+
 function applyFieldEdit(el, commit) {
   const field = el.dataset.field;
   if (!field) return;
@@ -4495,6 +4700,16 @@ function applyFieldEdit(el, commit) {
     applyRowEdit(el.dataset.kind, row, field, el, commit);
     saveState();
     refreshOutputs();
+    // Employers (spec 23, Commit 1) — sgNoteHTML reads the live
+    // projection, which only becomes fresh AFTER refreshOutputs() just
+    // above; "amount"/"frequency"/"sgApplies" aren't structural (no
+    // outerHTML replace elsewhere in applyRowEdit), so without this the
+    // note would freeze at whatever it read the moment the row was
+    // added and never reflect a since-typed salary. A surgical update,
+    // not a full row re-render, so typing never loses focus.
+    if (commit && el.dataset.kind === "income" && (field === "amount" || field === "frequency" || field === "sgApplies")) {
+      refreshIncomeSgNote(el.dataset.cfid);
+    }
     return;
   }
 
@@ -4648,6 +4863,18 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "assetId":
       if (findAsset(el.value)) row.assetId = el.value;
       break;
+    // Employers (spec 23, Commit 1; UI closing the reachability gap
+    // a1ab5a9 disclosed) — an income row's own employer, scoped to the
+    // ROW'S OWN owner (an employer belongs to one person). A cross-
+    // owner selection can't reach here (employerOptions only lists
+    // this row's own owner's employers), but is re-validated anyway,
+    // same defensive belt-and-braces every other reference field here
+    // already applies.
+    case "employerId":
+      if ((state.plan.employers ?? []).some((e) => e.id === el.value && e.ownerId === row.owner)) row.employerId = el.value;
+      else row.employerId = null;
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // the SG note depends on the new employer's siblings
+      break;
     case "bondId":
       if ((state.bonds ?? []).some((b) => b.id === el.value)) row.bondId = el.value;
       break;
@@ -4745,6 +4972,28 @@ function applyRowEdit(kind, row, field, el, commit) {
         // SG only ever applies to salary (planState's clampIncomeRow
         // convention) — force it off here too.
         if (row.incomeType !== "employment") row.sgApplies = false;
+        // Employers (spec 23, Commit 1) — this row's employerId is only
+        // ever auto-resolved to the owner's default employer by a FULL
+        // clampAllToPlan() pass (resolveEmployerAssignment, planState.js
+        // — a sibling-of-plan concern this direct field-edit path can't
+        // run), which doesn't happen on every keystroke. Switching INTO
+        // an employment category here would otherwise leave the new
+        // select showing "No employer yet" even when the owner already
+        // has one (the common case — hydrate() already provisioned it
+        // the moment ANY employment income existed) until some UNRELATED
+        // edit happens to trigger a full clamp; resolved eagerly here so
+        // the select is never misleadingly behind what the engine itself
+        // will actually use.
+        if (row.incomeType === "employment" && !(state.plan.employers ?? []).some((emp) => emp.id === row.employerId && emp.ownerId === row.owner)) {
+          // No existing employer belongs to this owner at all yet
+          // (e.g. their only prior income was non-employment) — auto-
+          // provision one, same reason/convention as the "add-row"
+          // case just above.
+          if (!(state.plan.employers ?? []).some((emp) => emp.ownerId === row.owner)) {
+            state.plan.employers = [...(state.plan.employers ?? []), createEmployer(state.plan, state.plan.employers ?? [], row.owner)];
+          }
+          row.employerId = (state.plan.employers ?? []).find((emp) => emp.ownerId === row.owner)?.id ?? null;
+        }
         // Input behaviour fix — label as a derived default: follows the
         // category until the user types their own (see labelTdHTML's
         // own header comment), mirroring planState.js's clampDerivedLabel
@@ -5111,7 +5360,24 @@ function onCashflowSectionClick(e) {
 
   if (action === "add-row") {
     const firstAsset = state.assets.find((a) => a.class !== "lifestyle")?.id ?? null;
-    if (kind === "income") cf.income.push(createIncomeRow(state.plan, cf.income));
+    if (kind === "income") {
+      const row = createIncomeRow(state.plan, cf.income);
+      // Employers (spec 23, Commit 1) — a new row defaults to "salary"
+      // (employment). If this is the FIRST employment income this
+      // owner has ever had, there is no employer yet at all to select
+      // — auto-provision one now (mirrors resolveEmployerAssignment's
+      // own "auto-provisions a default employer for any owner who has
+      // employment income but no employer of their own yet" rule,
+      // planState.js) rather than leaving the select showing "No
+      // employer yet" until an unrelated edit triggers the next full
+      // clampAllToPlan() pass — the FIRST income row added to a fresh
+      // client is exactly this case, not an edge one.
+      if (row.incomeType === "employment" && !(state.plan.employers ?? []).some((e) => e.ownerId === row.owner)) {
+        state.plan.employers = [...(state.plan.employers ?? []), createEmployer(state.plan, state.plan.employers ?? [], row.owner)];
+      }
+      row.employerId = (state.plan.employers ?? []).find((emp) => emp.ownerId === row.owner)?.id ?? null;
+      cf.income.push(row);
+    }
     else if (kind === "deductions") cf.deductions.push(createDeductionRow(state.plan, cf.deductions));
     else if (kind === "expenses") cf.expenses.push(createExpenseRow(state.plan, cf.expenses));
     else if (kind === "contributions") cf.contributions.push(createCashflow("contribution", state.plan, firstAsset));
@@ -5129,10 +5395,19 @@ function onCashflowSectionClick(e) {
     }
     saveState();
     if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
+    // Employers (spec 23, Commit 1) — the SG note (sgNoteHTML) reads
+    // the live projection, which is still ONE STEP STALE at the
+    // renderCashflows() call just above (refreshOutputs() — and the
+    // fresh projection it produces — runs AFTER it, for every kind but
+    // super's own). A second, cheap re-render with the now-current
+    // projection is the simplest fix that doesn't touch the shared
+    // render/refresh order every other kind already relies on.
+    if (kind === "income") renderCashflows();
   } else if (action === "remove-row") {
     if (cf[kind]) cf[kind] = cf[kind].filter((r) => r.id !== cfid);
     saveState();
     if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
+    if (kind === "income") renderCashflows(); // see the "add-row" branch's own comment
   } else if (action === "edit-termination") {
     openTerminationEditor(cfid);
   }
@@ -5831,6 +6106,19 @@ function superAccountCardHTML(sa) {
   </div>`;
 }
 
+// Salary sacrifice's employer (spec 23, Commit 1; UI closing the
+// reachability gap a1ab5a9 disclosed) — a superContributions row has
+// no employerId field of its own; a percentOfIncome-basis salary
+// sacrifice row already "attaches" to an employer TRANSITIVELY, via
+// the income row its % is taken from (that link IS the mechanism, not
+// a second field to add). Surfaced here rather than duplicated.
+function salarySacrificeEmployerNoteHTML(sc) {
+  if (sc.basis !== "percentOfIncome") return "";
+  const incomeRow = (state.cashflows.income ?? []).find((r) => r.id === sc.incomeRowId);
+  const emp = incomeRow ? findEmployer(incomeRow.employerId) : null;
+  return `<span class="helper-inline">${emp ? `reduces salary via ${escapeHTML(emp.name)}` : "no income row linked yet — pick one above"}</span>`;
+}
+
 function superContributionRowHTML(sc) {
   const showAmount = sc.basis === "amount";
   const showPercent = sc.basis === "percentOfIncome";
@@ -5853,7 +6141,8 @@ function superContributionRowHTML(sc) {
         <input type="number" min="0" max="100" step="1" value="${sc.percent}" aria-label="% of income"
                data-kind="superContributions" data-cfid="${sc.id}" data-field="percent" />
         <select data-kind="superContributions" data-cfid="${sc.id}" data-field="incomeRowId" aria-label="Income row">${incomeRowOptions(sc.incomeRowId)}</select>
-       </div>`
+       </div>
+       ${sc.type === "salarySacrifice" ? salarySacrificeEmployerNoteHTML(sc) : ""}`
     : showFillNote
     ? `<span class="cf-detail-note">Fills remaining concessional cap</span>`
     : "";
@@ -9852,7 +10141,20 @@ function buildCashflowGroups(forOwner = null) {
 
   // The per-owner suffix is redundant (and confusing) once the whole
   // view is already filtered to one person.
-  const ownerLabel = (r) => (couple && forOwner == null) ? `${r.label} (${r.owner === "partner" ? partnerName() : clientName()})` : r.label;
+  // Employers (spec 23, Commit 1; UI closing the reachability gap
+  // a1ab5a9 disclosed) — an employment row's employer, shown ONLY when
+  // this owner has more than one (suppressed entirely for a single
+  // employer, which is most clients — the spec's own words) since a
+  // single employer's name adds nothing "Salary" itself doesn't already
+  // say. Only ever visible with individual rows shown; the aggregate
+  // "Salary" category row above sums across every employer regardless.
+  const employerSuffix = (r) => {
+    if (r.incomeType !== "employment") return "";
+    if ((state.plan.employers ?? []).filter((e) => e.ownerId === r.owner).length <= 1) return "";
+    const emp = findEmployer(r.employerId);
+    return emp ? ` — ${emp.name}` : "";
+  };
+  const ownerLabel = (r) => `${(couple && forOwner == null) ? `${r.label} (${r.owner === "partner" ? partnerName() : clientName()})` : r.label}${employerSuffix(r)}`;
   // One row per category (collapsed default), or one row per
   // individually entered row of that category — same total either way.
   // Income/expense/deduction rows are never joint (planState.js), so a

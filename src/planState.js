@@ -1719,7 +1719,17 @@ export const FBT_TYPES = ["standard", "fbtExempt", "fbtRebatable"];
 export function createEmployer(plan, existing = [], owner = "client") {
   return {
     id: uid("emp"), name: `Employer ${existing.filter((e) => e.ownerId === owner).length + 1}`, ownerId: owner,
+    // Smart defaults (spec 19 registry) — same one-way-flip convention
+    // as income/expense/deduction rows' own labelIsDefault: true until
+    // the user types their own name/picks an FBT type, then stays false
+    // permanently. Unlike a label, the auto-numbered name is NOT re-
+    // derived from sibling position on every clamp (a disclosed
+    // simplification — removing an earlier employer never renumbers a
+    // later one's still-default name), since clampEmployer has no
+    // access to this employer's own position among its siblings.
+    nameIsDefault: true,
     fbtType: "standard",
+    fbtTypeIsDefault: true,
     fbtCaps: { livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 },
   };
 }
@@ -1729,8 +1739,10 @@ export function clampEmployer(e, plan) {
   return {
     id: typeof e?.id === "string" && e.id ? e.id : uid("emp"),
     name: typeof e?.name === "string" && e.name.trim() ? e.name.trim() : "Employer",
+    nameIsDefault: e?.nameIsDefault !== false,
     ownerId: e?.ownerId === "partner" && plan.partner ? "partner" : "client",
     fbtType,
+    fbtTypeIsDefault: e?.fbtTypeIsDefault !== false,
     fbtCaps: {
       livingExpenseCap: clampNumber(e?.fbtCaps?.livingExpenseCap, 0),
       mealEntertainmentCap: clampNumber(e?.fbtCaps?.mealEntertainmentCap, 0),

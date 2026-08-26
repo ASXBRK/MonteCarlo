@@ -72,6 +72,17 @@ const REGISTRY = [
   // section claim.
   { name: "adjustments", inputSection: null, outputView: "cashflow",
     reads: ["state.plan.adjustments"], writes: ["adjustmentsAddBtn.addEventListener"] },
+  // Employers (spec 23, Commit 1) — was a KNOWN, disclosed gap here
+  // (an it.fails, see git history): plan.employers existed in
+  // planState.js (createEmployer, resolveEmployerAssignment, per-
+  // employer FBT caps) with zero reachable UI. Closed: a per-person
+  // block in Tax details (name/FBT type/caps), an employer select +
+  // derived SG note on employment income rows, a derived employer
+  // note on percentOfIncome salary sacrifice rows, and an employer
+  // suffix in the Cashflow table's individual-rows view (suppressed
+  // for a single employer, the common case).
+  { name: "employers", inputSection: "tax-details", outputView: "cashflow",
+    reads: ["state.plan.employers", "employerSuffix"], writes: ['data-employer-action="add"'] },
 ];
 
 describe("UI reachability sweep (spec 27 Commit 5)", () => {
@@ -92,21 +103,4 @@ describe("UI reachability sweep (spec 27 Commit 5)", () => {
       });
     });
   }
-
-  // Employers (spec 23, Commit 1) — a KNOWN, currently-real gap this
-  // exact sweep surfaced: plan.employers exists in planState.js
-  // (createEmployer, resolveEmployerAssignment, per-employer FBT caps)
-  // but has ZERO reachable UI anywhere in main.js — no input section
-  // renders it, no output view reads it, no income row exposes an
-  // employerId control to attach one. This pre-dates spec 27 (spec 23)
-  // and sits outside both its audit window (specs 21b-26) and its own
-  // five-commit scope, so it is disclosed here rather than silently
-  // fixed mid-"test infrastructure" commit. it.fails keeps this
-  // documented and the suite green until it's actually built: if a
-  // future commit adds the missing UI, this assertion starts PASSING,
-  // which makes it.fails itself fail — forcing this line to be updated
-  // to a real assertion instead of silently going stale.
-  it.fails("employers: currently has NO reachable input or output UI (spec 23 gap, out of scope here)", () => {
-    expect(mainSrc).toContain("createEmployer");
-  });
 });

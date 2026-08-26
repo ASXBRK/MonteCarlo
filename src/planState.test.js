@@ -2512,6 +2512,26 @@ describe("Salary packaging by employer type (spec 23, Commit 3): plan model", ()
     expect(e.fbtCaps).toEqual({ livingExpenseCap: 0, mealEntertainmentCap: 0, rebatePct: 0 });
   });
 
+  // Smart defaults (spec 19 registry; UI closing the reachability gap
+  // a1ab5a9 disclosed) — same one-way-flip convention as income/
+  // expense/deduction rows' own labelIsDefault.
+  it("createEmployer marks the auto-numbered name and standard fbtType as defaults", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const e = createEmployer(plan, []);
+    expect(e.nameIsDefault).toBe(true);
+    expect(e.fbtTypeIsDefault).toBe(true);
+  });
+
+  it("clampEmployer preserves nameIsDefault/fbtTypeIsDefault as false once explicitly set, but not otherwise", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const untouched = clampEmployer({ name: "Employer 1", fbtType: "standard" }, plan);
+    expect(untouched.nameIsDefault).toBe(true);
+    expect(untouched.fbtTypeIsDefault).toBe(true);
+    const touched = clampEmployer({ name: "Acme Pty Ltd", nameIsDefault: false, fbtType: "fbtExempt", fbtTypeIsDefault: false }, plan);
+    expect(touched.nameIsDefault).toBe(false);
+    expect(touched.fbtTypeIsDefault).toBe(false);
+  });
+
   it("clampEmployer clamps an unknown fbtType to standard and keeps a valid one", () => {
     const plan = clampPlan(couplePlan(), PROFILES);
     expect(clampEmployer({ fbtType: "bogus" }, plan).fbtType).toBe("standard");
@@ -2561,7 +2581,8 @@ describe("Salary packaging by employer type (spec 23, Commit 3): plan model", ()
     }];
     const back = hydrate(serialize(s), PROFILES);
     expect(back.plan.employers[0]).toEqual({
-      id: "emp1", name: "Charity Co", ownerId: "client", fbtType: "fbtExempt",
+      id: "emp1", name: "Charity Co", nameIsDefault: true, ownerId: "client",
+      fbtType: "fbtExempt", fbtTypeIsDefault: true,
       fbtCaps: { livingExpenseCap: 9010, mealEntertainmentCap: 2650, rebatePct: 0 },
     });
     expect(back.cashflows.deductions[0].employerId).toBe("emp1");

@@ -101,6 +101,21 @@ export const SMART_DEFAULTS = {
     kind: DEFAULT_KIND.DERIVED,
     describe: (ctx) => `Default: ${ctx.value ? "eligible" : "not eligible"} — derived (reaches age pension age within the projection); recomputes as the projection end changes until you set this yourself`,
   },
+  // Employers (spec 23, Commit 1; UI closing the reachability gap) —
+  // the auto-numbered "Employer N" name, same one-way-flip convention
+  // as income/expense/deduction labels.
+  "employer.name": {
+    kind: DEFAULT_KIND.DERIVED,
+    describe: (ctx) => `Default: "${ctx.value}" — derived (numbered per owner); stays until you type your own name`,
+  },
+  // "standard" has no cap benefit at all — a real, common, deliberate
+  // choice, but also the silent starting point for every new employer,
+  // so it's worth naming as a default rather than looking like a
+  // considered selection nobody made.
+  "employer.fbtType": {
+    kind: DEFAULT_KIND.HOUSE,
+    describe: () => `Default: Standard — house view (no packaging cap benefit unless you confirm your employer is FBT-exempt or FBT-rebatable)`,
+  },
 };
 
 function fmtPct(n) {
