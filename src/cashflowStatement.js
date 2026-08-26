@@ -95,7 +95,7 @@ function isHelpLiability(lid) {
 }
 
 export function assessableIncome(row, ctx, forOwner = null) {
-  const { incomeRows = [], rowTotalsIncome = {}, properties = [], y = 0 } = ctx;
+  const { incomeRows = [], rowTotalsIncome = {}, properties = [], definedBenefits = [], y = 0 } = ctx;
   const byCat = (cat) => sumByCategory(incomeRows, rowTotalsIncome, cat, y, forOwner);
   const investmentProps = properties.filter((p) => p.propertyType === "investment");
   const salary = byCat("salary");
@@ -121,6 +121,26 @@ export function assessableIncome(row, ctx, forOwner = null) {
   const governmentPayments = forOwner == null
     ? (row.agePensionDetail?.entitlement ?? 0)
     : (row.agePensionDetail?.[forOwner]?.paid ?? 0);
+  // Defined benefit pensions (spec 26, Commit 2/3; UI: spec 27 Commit 4)
+  // — UNLIKE the age pension row just above, a DB pension is genuinely
+  // PARTLY assessable (deterministic.js's definedBenefitDetail; the
+  // untaxed element plus any income-cap excess — see Tax/annual.js's
+  // own header on dbUntaxedPensionTaxable/dbIncomeCapExcess for exactly
+  // why the taxed-within-cap element is tax-free instead and excluded
+  // here). Filtered to this owner's own DB pensions (owner is
+  // client/partner only — no "joint" DB pension, planState.js's
+  // createDefinedBenefit). The assessable portion IS folded into
+  // computedTotal below — omitting it would understate Taxable Income
+  // against what Tax on Taxable Income was actually calculated on,
+  // a visible internal inconsistency this report can't afford, unlike
+  // the age pension's cleanly-100%-excluded case.
+  const ownDbs = definedBenefits.filter((db) => forOwner == null || db.owner === forOwner);
+  const definedBenefitGross = ownDbs.reduce((s, db) => s + (row.definedBenefitDetail?.[db.id]?.grossPension ?? 0), 0);
+  const definedBenefitDeductible = ownDbs.reduce((s, db) => s + (row.definedBenefitDetail?.[db.id]?.taxFreeAmount ?? 0), 0);
+  const definedBenefitAssessable = ownDbs.reduce((s, db) => {
+    const d = row.definedBenefitDetail?.[db.id];
+    return s + (d?.untaxedAssessable ?? 0) + (d?.dbIncomeCapExcess ?? 0);
+  }, 0);
   const interestIncome = row.wcaDetail.interest * shareOf("joint", forOwner) + byCat("interestIncome");
   const dividendIncome = row.cashDistributions * shareOf("joint", forOwner) + byCat("dividendIncome");
   const frankingCredits = forOwner == null
@@ -134,8 +154,10 @@ export function assessableIncome(row, ctx, forOwner = null) {
     ? (row.taxDetail?.netCapitalGain ?? 0)
     : (row.taxDetail?.[forOwner]?.netCapitalGain ?? 0);
   // governmentPayments deliberately excluded — see its own comment above.
+  // definedBenefitAssessable IS included — see its own comment above.
   const computedTotal = salary + taxablePensionComponent + otherIncome + interestIncome
-    + dividendIncome + frankingCredits + propertyIncomeGross + trustDistribution + foreignIncome + netTaxableCapitalGains;
+    + dividendIncome + frankingCredits + propertyIncomeGross + trustDistribution + foreignIncome + netTaxableCapitalGains
+    + definedBenefitAssessable;
   // Adjustment rows (spec 18) — an "income.assessable" adjustment is a
   // leak-free income term (the registry's own description), so it folds
   // straight into the section total; `computedTotal` (pre-adjustment) is
@@ -145,7 +167,9 @@ export function assessableIncome(row, ctx, forOwner = null) {
   const adjAssessable = adjustmentSum(row, "income.assessable", forOwner);
   const total = computedTotal + adjAssessable;
   return {
-    salary, taxablePensionComponent, otherIncome, governmentPayments, interestIncome, dividendIncome,
+    salary, taxablePensionComponent, otherIncome, governmentPayments,
+    definedBenefitGross, definedBenefitDeductible, definedBenefitAssessable,
+    interestIncome, dividendIncome,
     frankingCredits, propertyIncomeGross, trustDistribution, foreignIncome, netTaxableCapitalGains,
     computedTotal, adjAssessable, total,
   };
@@ -354,8 +378,18 @@ export function expenseSums(row, ctx, forOwner = null) {
   const nonPprProps = properties.filter((p) => p.propertyType !== "ppr");
   const landTax = nonPprProps.reduce((s, p) =>
     s + (row.properties?.[p.id]?.landTax ?? 0) * shareOf(p.owner, forOwner), 0);
+  // Gifts (spec 21b, Commit 2; UI: spec 27 Commit 4) — a real household
+  // cash outflow (the full gift amount leaves cash regardless of the
+  // allowable/deprived split — gifting.js's own header, "the gifted
+  // amount leaves the client's assets regardless"), read straight off
+  // row.giftsPaid (deterministic.js's own already-resolved FY total —
+  // no per-gift owner attribution survives to the yearly row, so this
+  // is split 50/50 for a per-person view the same disclosed way
+  // Working Cash Account interest/education already are, rather than
+  // guessing an owner).
+  const gifts = (row.giftsPaid ?? 0) * shareOf("joint", forOwner);
   const computedTotal = mortgageRepayments + otherLoanRepayments + nonDiscretionary + discretionary + groceryFuel
-    + holidays + insurance + investmentPropertyExpenses + homeMaintenance + other + education + landTax;
+    + holidays + insurance + investmentPropertyExpenses + homeMaintenance + other + education + landTax + gifts;
   // Adjustment rows (spec 18) — "expenses" is household-owned (a joint
   // leak, per the registry), so it's split the same 50/50 way as
   // education above for a per-person view, in full for the household.
@@ -365,7 +399,7 @@ export function expenseSums(row, ctx, forOwner = null) {
   const total = computedTotal + adjExpenses;
   return {
     mortgageRepayments, otherLoanRepayments, nonDiscretionary, discretionary, groceryFuel, holidays,
-    insurance, investmentPropertyExpenses, homeMaintenance, other, education, landTax, computedTotal, adjExpenses, total,
+    insurance, investmentPropertyExpenses, homeMaintenance, other, education, landTax, gifts, computedTotal, adjExpenses, total,
   };
 }
 

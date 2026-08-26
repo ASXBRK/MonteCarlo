@@ -9100,7 +9100,7 @@ function renderAgePensionChart() {
 // eligibility flag.
 function buildAgePensionGroups(entity) {
   const yl = projection.yearly;
-  const zero = { assessableAssets: 0, deprivedAssets: 0, assetsTestResult: 0, deemedIncome: 0, otherIncome: 0, incomeTestResult: 0, bindingTest: null, entitlement: 0 };
+  const zero = { assessableAssets: 0, deprivedAssets: 0, assetsTestResult: 0, deemedIncome: 0, otherIncome: 0, dbAssessableIncome: 0, incomeTestResult: 0, bindingTest: null, entitlement: 0 };
   const get = (y) => yl[y].agePensionDetail ?? zero;
   const entitlementFor = (y) => {
     const d = get(y);
@@ -9125,6 +9125,12 @@ function buildAgePensionGroups(entity) {
     { label: "Assets test result", cell: (y) => get(y).assetsTestResult },
     { label: "Deemed income", cell: (y) => get(y).deemedIncome },
     { label: "Other assessable income", cell: (y) => get(y).otherIncome },
+    // Defined benefit pensions (spec 26, Commit 3; UI: spec 27 Commit 4)
+    // — income-test only (no account balance to asset-test, deterministic
+    // .js's own point), already folded into "Other assessable income"
+    // above; reported separately here since that's precisely the
+    // "invisible unless modelled" advantage the spec exists to surface.
+    { label: "Defined benefit income (income-test only)", cell: (y) => get(y).dbAssessableIncome },
     { label: "Work Bonus applied", cell: workBonusFor("workBonusExempt") },
     { label: "Work Bonus bank", cell: workBonusFor("workBonusBank") },
     { label: "Income test result", cell: (y) => get(y).incomeTestResult },
@@ -9724,12 +9730,25 @@ function buildKeyFiguresGroups(ctx = { state, projection }, entity = "all") {
   const superBalance = (y) => forOwner == null
     ? yl[y].superClosing
     : (s.plan.superAccounts ?? []).filter((sa) => sa.owner === forOwner).reduce((sum, sa) => sum + (yl[y].superDetail[sa.id]?.closing ?? 0), 0);
+  // Defined benefit pensions (UI: spec 27 Commit 4) — an income line,
+  // not a balance: there is no account to appear in Total assets/NET
+  // ASSETS above (deterministic.js's own point — the spec exists
+  // precisely because that asset-test exemption is otherwise
+  // invisible). Filtered to this owner's own DB pensions the same way
+  // superBalance just above filters super accounts.
+  const definedBenefits = s.plan.definedBenefits ?? [];
+  const definedBenefitIncome = (y) => definedBenefits
+    .filter((db) => forOwner == null || db.owner === forOwner)
+    .reduce((sum, db) => sum + (yl[y].definedBenefitDetail?.[db.id]?.grossPension ?? 0), 0);
   const householdSuffix = forOwner == null ? "" : " (household)";
   const rows = [
     { label: "Total assets", cell: totalAssets, always: true },
     { label: "Total liabilities", cell: (y) => -totalLiabilities(y), always: true },
     { label: forOwner == null ? "NET ASSETS" : "NET ASSETS (excl. working cash)", cell: netAssets, always: true, cls: "tl-total" },
     { label: `Total income${householdSuffix}`, cell: totalIncome, always: true },
+    // Not `always: true` (HELP balance's own convention below) — a
+    // household with no defined benefit pension never sees this row.
+    { label: "Defined benefit pension income", cell: definedBenefitIncome },
     { label: `Total expenses${householdSuffix}`, cell: (y) => -totalExpenses(y), always: true },
     { label: `Total tax${householdSuffix}`, cell: (y) => -yl[y].tax, always: true },
     { label: `Surplus / (deficit)${householdSuffix}`, cell: (y) => yl[y].surplusOrDeficit, always: true, cls: "tl-total" },
@@ -9828,6 +9847,7 @@ function buildCashflowGroups(forOwner = null) {
     deductionRows, rowTotalsDeductions: rt.deductions,
     properties, liabilities, superAccounts, y,
     educationBlocks: flatEducationBlocks(state.plan), rowTotalsEducation: rt.education,
+    definedBenefits: state.plan.definedBenefits ?? [],
   }, forOwner);
 
   // The per-owner suffix is redundant (and confusing) once the whole
@@ -9849,6 +9869,11 @@ function buildCashflowGroups(forOwner = null) {
     { label: "Taxable Pension Component", cell: (y) => stmt(y).assessable.taxablePensionComponent },
     ...catRow(incomeRows, rt.income, "otherIncome", "Other Income", (y) => stmt(y).assessable.otherIncome),
     { label: "Government/Centrelink payments", cell: (y) => stmt(y).assessable.governmentPayments },
+    // Defined benefit pensions (UI: spec 27 Commit 4) — gross shown for
+    // visibility (matching the row above), the genuinely-assessable
+    // portion (untaxed element + any income-cap excess) already folded
+    // into Assessable Income's own total (cashflowStatement.js).
+    { label: "Defined benefit pension income (gross)", cell: (y) => stmt(y).assessable.definedBenefitGross },
     { label: "Interest Income", cell: (y) => stmt(y).assessable.interestIncome },
     { label: "Dividend Income", cell: (y) => stmt(y).assessable.dividendIncome },
     { label: "Franking Credits", cell: (y) => stmt(y).assessable.frankingCredits },
@@ -9952,6 +9977,10 @@ function buildCashflowGroups(forOwner = null) {
     ...catRow(expenseRows, rt.expenses, "homeMaintenance", "Home Maintenance expenses", (y) => stmt(y).expenses.homeMaintenance).map(negate),
     ...catRow(expenseRows, rt.expenses, "other", "Other", (y) => stmt(y).expenses.other).map(negate),
     { label: "Education Fees", cell: (y) => -stmt(y).expenses.education },
+    // Gifts (UI: spec 27 Commit 4) — the full gift amount leaves cash
+    // regardless of the allowable/deprived split (gifting.js's own
+    // header), read straight off row.giftsPaid.
+    { label: "Gifts", cell: (y) => -stmt(y).expenses.gifts },
   ];
   // Adjustment rows (spec 18 Commit 2) — "expenses" adjusts this
   // section's own total.
@@ -10438,11 +10467,42 @@ function pensionDetailRows(get) {
   ];
 }
 
-// entity: "all" | a specific pension id.
+// Defined benefit pensions (spec 26, Commit 2/3; UI: spec 27 Commit 4)
+// — no balance rows (no account exists to hold one, deterministic.js's
+// own point): gross pension, the deductible (tax-free) amount, and the
+// assessable portion (the untaxed element plus any income-cap excess —
+// see cashflowStatement.js's own comment on why the taxed-within-cap
+// element is excluded here). "Tax" is deliberately NOT a row: the
+// engine assesses tax at the whole-of-person level across every income
+// source together (Tax/annual.js's own marginal-rate `base`), so no
+// per-DB-pension tax figure exists to show — showing one would mean
+// fabricating a number projectPlan() never computes, which spec 27's
+// own principle (every figure already exists in its output) rules out.
+function dbDetailRows(get) {
+  return [
+    { label: "Gross pension", cell: (y) => get(y).grossPension, always: true },
+    { label: "Deductible amount (tax-free)", cell: (y) => -get(y).taxFreeAmount },
+    { label: "Assessable portion", cell: (y) => get(y).untaxedAssessable + get(y).dbIncomeCapExcess },
+  ];
+}
+
+// The 16x TBA credit (deterministic.js's own "the factor of ten") —
+// today's-dollars, the same figure Commit 1's input card already shows
+// at entry ("$80,000 pa uses $1,280,000 of your transfer balance
+// cap"), shown DISTINCTLY here too so it's never mistaken for the
+// pension's own gross amount in the same TBA display an ordinary
+// pension's dollar-for-dollar commencement credit appears in.
+function dbTbaCreditNote(db) {
+  return `<p class="helper-text">Transfer balance cap credited at commencement: ${fmtMoney(db.annualPension * 16)} (16 × ${fmtMoney(db.annualPension)} annual pension) — NOT the pension amount itself.</p>`;
+}
+
+// entity: "all" | a specific pension id | a specific definedBenefit id.
 function buildPensionGroups(entity) {
   const yl = projection.yearly;
   const pensions = state.plan.pensions ?? [];
+  const dbRows = state.plan.definedBenefits ?? [];
   const zero = { opening: 0, commencementAmount: 0, earnings: 0, earningsTax: 0, payments: 0, paymentsTaxFree: 0, paymentsTaxable: 0, commutations: 0, closing: 0, taxFreeClosing: 0 };
+  const dbZero = { grossPension: 0, taxFreeAmount: 0, untaxedAssessable: 0, dbIncomeCapExcess: 0 };
 
   if (entity === "all") {
     const combined = pensionDetailRows((y) => pensions.reduce((s, pn) => {
@@ -10459,10 +10519,25 @@ function buildPensionGroups(entity) {
       label: "Total", always: true, cls: "tl-total",
       cell: (y) => pensions.reduce((s, pn) => s + (yl[y].pensionDetail?.[pn.id]?.closing ?? 0), 0),
     });
-    return [
+    const groups = [
       { title: "Combined", rows: combined },
       { title: "Closing balance by pension", rows: byPension },
     ];
+    if (dbRows.length > 0) {
+      const dbCombined = dbDetailRows((y) => dbRows.reduce((s, db) => {
+        const d = yl[y].definedBenefitDetail?.[db.id] ?? dbZero;
+        for (const k in s) s[k] += d[k] ?? 0;
+        return s;
+      }, { ...dbZero }));
+      groups.push({ title: "Defined benefit — combined", rows: dbCombined });
+    }
+    return groups;
+  }
+
+  const db = dbRows.find((x) => x.id === entity);
+  if (db) {
+    const rows = dbDetailRows((y) => yl[y].definedBenefitDetail?.[entity] ?? dbZero);
+    return [{ title: db.name, rows }];
   }
 
   const pn = pensions.find((x) => x.id === entity);
@@ -10475,15 +10550,26 @@ function buildPensionGroups(entity) {
 
 function renderPensionTableView() {
   const pensions = state.plan.pensions ?? [];
-  const validEntities = ["all", ...pensions.map((pn) => pn.id)];
+  const dbRows = state.plan.definedBenefits ?? [];
+  const validEntities = ["all", ...pensions.map((pn) => pn.id), ...dbRows.map((db) => db.id)];
   if (!validEntities.includes(pensionEntity)) pensionEntity = "all"; // entity removed
   renderEntitySelector(
     els.pensionEntity,
-    [{ id: "all", label: "Consolidated" }, ...pensions.map((pn) => ({ id: pn.id, label: pn.name }))],
+    [
+      { id: "all", label: "Consolidated" },
+      ...pensions.map((pn) => ({ id: pn.id, label: pn.name })),
+      ...dbRows.map((db) => ({ id: db.id, label: `${db.name} (DB)` })),
+    ],
     pensionEntity,
     (id) => { pensionEntity = id; renderPensionTableView(); }
   );
-  renderTransposed(els.pensionTable, buildPensionGroups(pensionEntity));
+  // TBA-credit footnotes render outside renderTransposed's own
+  // per-group rows (a distinct, always-visible note, never a ledger
+  // figure a period selector could hide) — every DB pension's own note
+  // when consolidated, just the selected one's when drilled into.
+  const relevantDbs = pensionEntity === "all" ? dbRows : dbRows.filter((db) => db.id === pensionEntity);
+  const footerHTML = relevantDbs.map(dbTbaCreditNote).join("");
+  renderTransposed(els.pensionTable, buildPensionGroups(pensionEntity), footerHTML);
 }
 
 // --- View: Death benefits (spec 22, Commit 3) -------------------------------
@@ -13126,6 +13212,7 @@ function snapshotCtxForScenario(s, p, y) {
     properties: s.properties ?? [], liabilities: s.liabilities ?? [],
     superAccounts: s.plan.superAccounts ?? [], y,
     educationBlocks: flatEducationBlocks(s.plan), rowTotalsEducation: rt.education,
+    definedBenefits: s.plan.definedBenefits ?? [],
   };
 }
 
