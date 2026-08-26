@@ -1512,6 +1512,13 @@ export function createSuperAccount(plan, existing = [], profiles = {}, owner = "
     // automatic). Legal ceiling is 85% (the ATO's own cap, chosen
     // because ~15% stays behind as the contributions tax already paid).
     contributionSplitPct: 0,
+    // Untaxed superannuation elements (spec 26, Commit 1) — public-
+    // sector schemes (e.g. WA's West State Super) with no 15%
+    // contributions/earnings tax inside the fund, taxed instead on the
+    // member at benefit time. Default "taxed" (every account this tool
+    // has ever modelled) — see clampSuperAccount for the enum-membership
+    // clamp, the same shape clampPension's own `type` uses.
+    taxedStatus: "taxed",
   };
 }
 
@@ -1523,6 +1530,7 @@ export function clampSuperAccount(sa, plan, profiles = {}) {
     name: typeof sa.name === "string" && sa.name.trim() ? sa.name : "Super account",
     owner,
     balance,
+    taxedStatus: sa.taxedStatus === "untaxed" ? "untaxed" : "taxed",
     // Taxable component = balance − taxFreeComponent; never negative.
     taxFreeComponent: clampNumber(sa.taxFreeComponent, 0, balance),
     allocation: clampAllocation(sa.allocation, profiles),
@@ -1881,6 +1889,61 @@ export function normaliseSuperWithdrawals(rows, plan, superAccountOwnerById) {
   return rows.map((sw) => clampSuperWithdrawal(sw, plan, superAccountOwnerById));
 }
 
+// --- superannuation rollovers (spec 26, Commit 1) ---------------------------
+//
+// A one-off event, DateRef-anchored like a commutation (amount:null =
+// the whole balance), moving a benefit from one of the OWNER's OWN
+// super accounts to another — real rollovers are always within the one
+// member, never between spouses. Modelled specifically because "should
+// I roll West State into an accumulation fund" is a live question for
+// this cohort (spec's own words): rolling an UNTAXED account's benefit
+// into a taxed fund crystallises 15% tax on the untaxed element at the
+// point of rollover (deterministic.js), capped at the untaxed plan cap.
+// A same-status rollover (taxed→taxed, or untaxed→untaxed) triggers no
+// tax at all — the engine computes that from the two accounts' own
+// taxedStatus, so no extra field is needed here to distinguish the case.
+export function createSuperRollover(plan, superAccounts = [], owner = "client") {
+  const ownerAccounts = superAccounts.filter((s) => s.owner === owner);
+  // Smart default: from the owner's untaxed account (if any) into their
+  // first other account — the scenario this row exists to model.
+  const from = ownerAccounts.find((s) => s.taxedStatus === "untaxed") ?? ownerAccounts[0] ?? null;
+  const to = ownerAccounts.find((s) => s.id !== from?.id) ?? null;
+  return {
+    id: uid("sr"),
+    label: "Rollover",
+    owner,
+    fromAccountId: from ? from.id : null,
+    toAccountId: to ? to.id : null,
+    amount: null, // null = whole balance, same convention as a commutation
+    at: anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"),
+  };
+}
+
+export function clampSuperRollover(sr, plan, superAccountOwnerById) {
+  const owner = sr.owner === "partner" && plan.partner ? "partner" : "client";
+  const fromAccountId = superAccountOwnerById.get(sr.fromAccountId) === owner ? sr.fromAccountId : null;
+  // Input integrity: rolling an account into itself is not a real
+  // transaction this tool can model — rejected rather than silently
+  // accepted as a same-account no-op that would still (wrongly) attempt
+  // to apply rollover tax to itself.
+  const toAccountId = superAccountOwnerById.get(sr.toAccountId) === owner && sr.toAccountId !== fromAccountId ? sr.toAccountId : null;
+  const at = clampDateRef(sr.at ?? anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"), plan.client.currentAge, plan.endAge, plan);
+  return {
+    id: typeof sr.id === "string" && sr.id ? sr.id : uid("sr"),
+    label: typeof sr.label === "string" && sr.label.trim() ? sr.label : "Rollover",
+    owner,
+    fromAccountId,
+    toAccountId,
+    amount: sr.amount == null ? null : clampNumber(sr.amount, 0),
+    at,
+  };
+}
+
+export function normaliseSuperRollovers(rows, plan, superAccountOwnerById) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((sr) => clampSuperRollover(sr, plan, superAccountOwnerById));
+}
+
 // --- pension phase (spec 20, Commit 1) --------------------------------------
 //
 // Live on plan.pensions, alongside plan.superAccounts — same reasoning
@@ -2187,6 +2250,7 @@ export function defaultState(profiles = {}, now = new Date()) {
       lumpSums: [],
       superContributions: [],
       superWithdrawals: [],
+      superRollovers: [],
       bondContributions: [],
     },
     liabilities: [],
@@ -2894,6 +2958,7 @@ export function clampAllToPlan(state, profiles = {}) {
       state.cashflows.superContributions, plan, superAccountOwnerById, incomeRowIds
     ),
     superWithdrawals: normaliseSuperWithdrawals(state.cashflows.superWithdrawals, plan, superAccountOwnerById),
+    superRollovers: normaliseSuperRollovers(state.cashflows.superRollovers, plan, superAccountOwnerById),
   };
   const bonds = normaliseBonds(state.bonds, plan, profiles);
   const bondIds = new Set(bonds.map((b) => b.id));
@@ -3537,6 +3602,7 @@ export function hydrate(json, profiles = {}) {
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
         superContributions: hydratedSuperContributions,
         superWithdrawals: hydrateSuperWithdrawals(cf.superWithdrawals, plan, superAccountOwnerById),
+        superRollovers: normaliseSuperRollovers(cf.superRollovers, plan, superAccountOwnerById),
         bondContributions: normaliseBondContributions(cf.bondContributions, plan, bondIds),
       },
       liabilities: hydratedLiabilities,

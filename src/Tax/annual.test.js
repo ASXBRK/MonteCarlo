@@ -351,3 +351,64 @@ describe("Investment/education bonds (spec 25, Commit 1) — pre-ten-year withdr
     expect(explicit).toEqual(base);
   });
 });
+
+// Untaxed superannuation elements (spec 26, Commit 1): a benefit from an
+// UNTAXED-status account (West State Super and similar) is assessable at
+// the marginal rate with a 15% offset, up to the (caller-resolved) lifetime
+// untaxed plan cap; the excess over that cap is a FLAT 47% tax — outside
+// the progressive scale entirely, unlike every other offset-shaped amount
+// this file assesses (see untaxedSuperExcess's own header in annual.js).
+describe("Untaxed superannuation elements (spec 26, Commit 1) — 15% offset within cap, flat 47% above it", () => {
+  it("the within-cap amount is taxed at the marginal rate, offset by 15%", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    const withBenefit = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, untaxedSuperTaxable: 10000 });
+    expect(withBenefit.taxableIncome).toBeCloseTo(base.taxableIncome + 10000, 6);
+    expect(withBenefit.untaxedSuperOffset).toBeCloseTo(1500, 6); // 15% of 10,000
+    const marginalOnBenefit = withBenefit.incomeTax - base.incomeTax;
+    const medicareOnBenefit = withBenefit.medicare - base.medicare;
+    expect(withBenefit.netIncomeTax - base.netIncomeTax).toBeCloseTo(marginalOnBenefit + medicareOnBenefit - 1500, 2);
+  });
+
+  it("the offset is non-refundable — capped at the tax payable, applied after LITO/excess-CC/FHSSS/TTR/bond offsets", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 0, untaxedSuperTaxable: 5000 });
+    expect(a.untaxedSuperOffset).toBeLessThanOrEqual(a.incomeTax);
+  });
+
+  it("stacks last, after the other four offsets, in the same year", () => {
+    const a = assessPerson({
+      fyStartYear: 2027, ordinaryIncome: 100000,
+      excessConcessionalContributions: 5000, fhsssTaxableRelease: 10000, ttrPensionTaxable: 8000,
+      bondAssessableWithdrawal: 6000, untaxedSuperTaxable: 4000,
+    });
+    expect(a.excessCcOffset).toBeCloseTo(750, 6);
+    expect(a.fhsssOffset).toBeCloseTo(3000, 6);
+    expect(a.ttrPensionOffset).toBeCloseTo(1200, 6);
+    expect(a.bondOffset).toBeCloseTo(1800, 6);
+    expect(a.untaxedSuperOffset).toBeCloseTo(600, 6); // 15% of 4,000 — plenty of tax remains
+  });
+
+  // The untaxed plan cap boundary (spec's own explicit test): above the
+  // cap, the excess is taxed at a FLAT 47% — NOT the marginal rate, and
+  // NOT folded into taxableIncome at all (see untaxedSuperExcess's own
+  // header on why it must bypass `base`).
+  it("the excess-over-cap amount is taxed flat at 47%, entirely separate from the marginal scale", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 50000 });
+    const withExcess = assessPerson({ fyStartYear: 2027, ordinaryIncome: 50000, untaxedSuperExcess: 20000 });
+    // taxableIncome is UNCHANGED — the excess never enters the progressive base.
+    expect(withExcess.taxableIncome).toBeCloseTo(base.taxableIncome, 6);
+    expect(withExcess.untaxedSuperExcessTax).toBeCloseTo(20000 * 0.47, 6); // $9,400
+    expect(withExcess.netIncomeTax - base.netIncomeTax).toBeCloseTo(9400, 6);
+  });
+
+  it("within-cap and excess amounts combine correctly in the same assessment", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 40000, untaxedSuperTaxable: 15000, untaxedSuperExcess: 5000 });
+    expect(a.untaxedSuperOffset).toBeCloseTo(2250, 6); // 15% of 15,000
+    expect(a.untaxedSuperExcessTax).toBeCloseTo(2350, 6); // 47% of 5,000
+  });
+
+  it("zero (the default) leaves every figure unchanged — a taxed account never populates these params", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000 });
+    const explicit = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000, untaxedSuperTaxable: 0, untaxedSuperExcess: 0 });
+    expect(explicit).toEqual(base);
+  });
+});

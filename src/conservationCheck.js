@@ -401,6 +401,20 @@ export function computeYearFlows(out, y) {
   // a transfer to another pocket the way a withdrawal or a release
   // authority payment is already accounted for elsewhere).
   const superInsurancePremium = sumVals(row.superDetail, "insurancePremium");
+  // Untaxed superannuation elements (spec 26, Commit 1) — a rollover's
+  // OWN 15%/47% tax on the untaxed element, a genuine leak (money paid
+  // to the ATO at the point of rollover, gone from the system
+  // entirely) — the SAME shape as superInsurancePremium just above.
+  // The rollover TRANSFER itself (rolloverOut/rolloverIn) needs no term
+  // of its own: both sides are already inside superClosing, and
+  // rolloverOut − rolloverIn ≡ rolloverTax by construction (both fields
+  // are written from the SAME event loop, so they can't drift the way
+  // FHSSS's own two-sided transfer can). A withdrawal's (as opposed to a
+  // rollover's) untaxed-element tax needs NO term either — it's a
+  // personal income-tax liability, already inside the EXISTING row.tax/
+  // cgtDue channel via pendingUntaxedSuperTax, the same one-year-lag
+  // mechanism bond withdrawal tax already uses.
+  const untaxedRolloverTax = sumVals(row.superDetail, "rolloverTax");
   // Surplus/deficit allocation spec, Commit 1: a surplus allocation that
   // tops up an existing salary-sacrifice row writes into the SAME
   // `salarySacrifice` field as a genuine payroll-reduced contribution
@@ -570,7 +584,7 @@ export function computeYearFlows(out, y) {
 
   return {
     openingN, closingN, delta: closingN - openingN,
-    income, growth, sgInflow, govSuperInflow, superInsurancePremium,
+    income, growth, sgInflow, govSuperInflow, superInsurancePremium, untaxedRolloverTax,
     expenses: row.expenses, tax: row.tax, contributionsTax, liabilityInterest,
     surplusSpent: row.surplusSpent, unfundedCashflow: row.unfundedCashflow,
     divReleaseFromSuper,
@@ -611,7 +625,7 @@ export function checkYearConservation(out, y, ctx) {
     - f.expenses - f.tax - f.contributionsTax - f.liabilityInterest
     - f.surplusSpent + f.unfundedCashflow - f.divReleaseFromSuper
     + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
-    - f.propertySaleCosts - f.superInsurancePremium
+    - f.propertySaleCosts - f.superInsurancePremium - f.untaxedRolloverTax
     - f.goalSpend - f.giftsPaid - f.heasDrawn - f.heasInterest + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash
     + f.educationBenefit;
 
@@ -678,7 +692,7 @@ export function decomposeNetWorthChange(out, y) {
     tax: f.tax + f.contributionsTax + f.divReleaseFromSuper,
     expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,
     interest: f.liabilityInterest + f.heasInterest,
-    fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash + f.superInsurancePremium,
+    fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash + f.superInsurancePremium + f.untaxedRolloverTax,
     oneOffs: f.propertyOneOffCost - f.propertySaleCosts - f.goalSpend - f.giftsPaid + f.fhsssRelease - f.fhsssSuperDebit,
   };
 }

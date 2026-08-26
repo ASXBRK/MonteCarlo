@@ -1613,6 +1613,169 @@ describe("Tier 1.2 — Super (Commit 1): accounts, contributions, SG derivation,
   });
 });
 
+// --- Spec 26, Commit 1: untaxed superannuation elements ---------------------
+
+describe("Spec 26 Commit 1 — untaxed superannuation elements", () => {
+  it("contributions enter an untaxed account in full — no 15% contributions tax", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct({ taxedStatus: "untaxed" })] },
+      cashflows: { income: [employmentRow({ amount: 100000 })] },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    expect(d.contributionsTax).toBe(0);
+    // Full SG (12% of 100,000) lands with nothing deducted.
+    expect(d.sg).toBeCloseTo(12000, 2);
+    expect(d.concessionalNet).toBeCloseTo(d.sg, 2); // net === gross, no tax haircut
+  });
+
+  it("earnings accrue untaxed inside — the net rate equals the gross rate, so earningsTax is 0", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: {
+        superAccounts: [superAcct({
+          taxedStatus: "untaxed", balance: 100000,
+          allocation: { mode: "custom", incomePct: 3, growthPct: 4, frankingPct: 0, volBasis: "Balanced" },
+        })],
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    expect(d.earningsTax).toBeCloseTo(0, 6);
+    expect(d.earnings).toBeGreaterThan(0);
+  });
+
+  it("regression gate: a taxed account is bit-identical whether or not taxedStatus is explicitly stamped", () => {
+    // A single base state, cloned and varied ONLY in taxedStatus — mkState's
+    // own legacySurplusPeriod() stamps a fresh random id per call, which
+    // would otherwise show up as a spurious diff unrelated to this test.
+    const base = mkState({
+      endAge: 44,
+      plan: { superAccounts: [superAcct({ taxedStatus: "taxed", balance: 120000, allocation: { mode: "custom", incomePct: 3, growthPct: 3, frankingPct: 30, volBasis: "Balanced" } })] },
+      cashflows: { income: [employmentRow({ amount: 150000 })] },
+    });
+    const untouched = { ...base, plan: { ...base.plan, superAccounts: [{ ...base.plan.superAccounts[0], taxedStatus: undefined }] } };
+    expect(projectPlan(untouched)).toEqual(projectPlan(base));
+  });
+
+  it("a deficit-funded post-release withdrawal from an untaxed account is assessed with the 15% offset, settled with the same one-year lag as bond/CGT tax", () => {
+    // Client already past preservation age (retirementAge 60, currentAge
+    // 60) — deficit funding may draw on super from month 1. No other
+    // assets, no other income: the untaxed element withdrawn each FY is
+    // the entire assessable base for that FY's lagged tax.
+    // A single-year projection: the withdrawal's lagged tax has no
+    // FOLLOWING year within the projection to actually settle in (the
+    // same reason accruedBondTaxAtEnd/accruedCgtAtEnd tests use a short
+    // window — otherwise the very next year's cgtDue would pay it,
+    // leaving nothing "accrued" to observe at the end).
+    const s = mkState({
+      endAge: 60,
+      assets: [],
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ taxedStatus: "untaxed", balance: 200000, allocation: { mode: "custom", incomePct: 0, growthPct: 0, frankingPct: 0, volBasis: "Balanced" } })],
+      },
+      cashflows: { expenses: [{ id: "e1", label: "Living", owner: "client", amount: 40000, frequency: "annual", from: { kind: "age", age: 60 }, to: { kind: "age", age: 60 }, indexBasis: "none", indexExtraPct: 0 }] },
+      settings: { surplus: { mode: "accumulate", assetId: null }, fundingOrder: [] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.withdrawals).toBeGreaterThan(0);
+    // Nothing settles same-year (the lag) — but by the projection's end
+    // there's an accrued, unpaid balance recording the liability, the
+    // same convention accruedBondTaxAtEnd/accruedCgtAtEnd already use.
+    expect(out.accruedUntaxedSuperTaxAtEnd).toBeGreaterThan(0);
+  });
+
+  it("regression gate: with every account taxed, accruedUntaxedSuperTaxAtEnd is always 0", () => {
+    const s = mkState({
+      endAge: 62,
+      assets: [],
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ taxedStatus: "taxed", balance: 200000 })],
+      },
+      cashflows: { expenses: [{ id: "e1", label: "Living", owner: "client", amount: 40000, frequency: "annual", from: { kind: "age", age: 60 }, to: { kind: "age", age: 61 }, indexBasis: "none", indexExtraPct: 0 }] },
+      settings: { surplus: { mode: "accumulate", assetId: null }, fundingOrder: [] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.withdrawals).toBeGreaterThan(0);
+    expect(out.accruedUntaxedSuperTaxAtEnd).toBe(0);
+  });
+
+  it("a rollover from an untaxed account to a taxed one crystallises 15% tax on the untaxed element, at the point of rollover", () => {
+    const s = mkState({
+      endAge: 42,
+      plan: {
+        superAccounts: [
+          superAcct({ id: "su1", taxedStatus: "untaxed", balance: 100000, allocation: zeroRealAlloc() }),
+          superAcct({ id: "su2", taxedStatus: "taxed", balance: 0, allocation: zeroRealSuperAlloc() }),
+        ],
+      },
+      cashflows: {
+        superRollovers: [{ id: "sr1", owner: "client", fromAccountId: "su1", toAccountId: "su2", amount: null, at: { kind: "age", age: 40 } }],
+      },
+    });
+    const out = projectPlan(s);
+    const from = out.yearly[0].superDetail.su1;
+    const to = out.yearly[0].superDetail.su2;
+    expect(from.rolloverOut).toBeCloseTo(100000, 1);
+    expect(from.rolloverTax).toBeCloseTo(15000, 1); // 15% of the fully-untaxed $100,000 element
+    expect(to.rolloverIn).toBeCloseTo(85000, 1); // net of the rollover tax
+    expect(from.closing).toBeCloseTo(0, 1);
+  });
+
+  it("a same-status rollover (taxed→taxed) triggers no tax at all", () => {
+    const s = mkState({
+      endAge: 42,
+      plan: {
+        superAccounts: [
+          superAcct({ id: "su1", taxedStatus: "taxed", balance: 100000, allocation: zeroRealSuperAlloc() }),
+          superAcct({ id: "su2", taxedStatus: "taxed", balance: 0, allocation: zeroRealSuperAlloc() }),
+        ],
+      },
+      cashflows: {
+        superRollovers: [{ id: "sr1", owner: "client", fromAccountId: "su1", toAccountId: "su2", amount: null, at: { kind: "age", age: 40 } }],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.rolloverTax).toBe(0);
+    expect(out.yearly[0].superDetail.su2.rolloverIn).toBeCloseTo(100000, 1);
+  });
+
+  it("the untaxed plan cap: a benefit beyond the lifetime cap is taxed at 47% for the excess, tracked cumulatively across events", () => {
+    // Two same-owner untaxed accounts, each rolled in the SAME year:
+    // the first consumes most of the cap, the second's rollover pushes
+    // past it — the excess on the SECOND event must reflect the
+    // ALREADY-consumed cap from the first, not reset to 0.
+    const s = mkState({
+      endAge: 42,
+      plan: {
+        superAccounts: [
+          superAcct({ id: "su1", taxedStatus: "untaxed", balance: 1900000, allocation: zeroRealAlloc() }),
+          superAcct({ id: "su2", taxedStatus: "untaxed", balance: 100000, allocation: zeroRealAlloc() }),
+          superAcct({ id: "su3", taxedStatus: "taxed", balance: 0, allocation: zeroRealSuperAlloc() }),
+        ],
+      },
+      cashflows: {
+        superRollovers: [
+          { id: "sr1", owner: "client", fromAccountId: "su1", toAccountId: "su3", amount: null, at: { kind: "age", age: 40 } },
+          { id: "sr2", owner: "client", fromAccountId: "su2", toAccountId: "su3", amount: null, at: { kind: "age", age: 40 } },
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    // su1's own $1.9m rollover fits entirely within the (~$1.935m FY26-27)
+    // cap, so it's taxed at the flat 15% throughout.
+    expect(out.yearly[0].superDetail.su1.rolloverTax).toBeCloseTo(1900000 * 0.15, 2);
+    // su2's $100k rollover lands almost entirely ABOVE the now-consumed
+    // cap — most of it taxed at 47%, not 15%.
+    const su2Tax = out.yearly[0].superDetail.su2.rolloverTax;
+    expect(su2Tax).toBeGreaterThan(100000 * 0.15); // more than if it were entirely within-cap
+    expect(su2Tax).toBeLessThan(100000 * 0.47); // less than if it were entirely excess
+  });
+});
+
 // --- Tier 1.2, Commit 2: caps, contributions tax, Division 293 --------------
 
 function scRow(over = {}) {
@@ -2604,7 +2767,41 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // clamping); 40% chance per account, at a random % up to the
       // legal 85% ceiling.
       contributionSplitPct: couple && Math.random() < 0.4 ? rand(1, 85) : 0,
+      // Untaxed superannuation elements (spec 26, Commit 1) — public-
+      // sector schemes (West State Super and similar): no contributions/
+      // earnings tax inside the fund, tax instead on benefit — a 30%
+      // chance per account so both the ordinary "taxed" path (the
+      // regression gate) and the new untaxed mechanics both get
+      // reliably exercised across the sweep.
+      taxedStatus: Math.random() < 0.3 ? "untaxed" : "taxed",
     }));
+    // Rollovers (spec 26, Commit 1) — a second account per person, 30%
+    // of the time, purely so there's somewhere for a same-person
+    // rollover to move BETWEEN — a real rollover is never cross-spouse.
+    // Exercises every combination the tax mechanic cares about: an
+    // untaxed→taxed rollover (crystallises 15%/47% tax), the reverse and
+    // same-status pairs (no tax at all), and the untaxed plan cap
+    // boundary itself (a deliberately LARGE untaxed balance, sometimes,
+    // so the sweep occasionally exercises the 47%-excess branch too).
+    const superRollovers = [];
+    for (const p of persons) {
+      if (Math.random() >= 0.3) continue;
+      const secondId = `su2_${p}`;
+      superAccounts.push(superAcct({
+        id: secondId, owner: p, balance: pick([0, rand(0, 200000), rand(1500000, 2200000)]),
+        allocation: randomAllocation(),
+        taxedStatus: Math.random() < 0.5 ? "untaxed" : "taxed",
+      }));
+      if (Math.random() < 0.5) {
+        const first = superAccounts.find((sa) => sa.owner === p && sa.id !== secondId);
+        const [fromAccountId, toAccountId] = Math.random() < 0.5 ? [first.id, secondId] : [secondId, first.id];
+        superRollovers.push({
+          id: `sr_${p}`, owner: p, fromAccountId, toAccountId,
+          amount: pick([null, rand(1000, 100000)]),
+          at: { kind: "age", age: randInt(startAge, endAge) },
+        });
+      }
+    }
 
     // Pension phase (spec 20, Commit 1) — only for the older cohort
     // (see startAge's own header: unreachable otherwise). Each person
@@ -3303,7 +3500,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           superAccounts, pensions, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments, employers, novatedLeases,
         },
-        cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows, bondContributions },
+        cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows, bondContributions, superRollovers },
         surplus,
         deficit,
         // Bonds (spec 25, Commit 2) are eligible for deficit funding,

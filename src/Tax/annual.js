@@ -151,6 +151,27 @@ export function assessPerson({
   // tax-free pension component never reaches ordinaryIncome.
   bondAssessableWithdrawal = 0,
   bondOffsetRate = 0.30,
+  // Untaxed superannuation elements (spec 26, Commit 1): a post-60
+  // benefit (withdrawal or rollover) from an UNTAXED-status account —
+  // West State Super and similar public-sector schemes — is assessable
+  // at the member's marginal rate with a 15% non-refundable offset, the
+  // SAME "add to income, credit back a flat offset" shape as
+  // ttrPensionTaxable/bondAssessableWithdrawal above, but ONLY up to the
+  // untaxed plan cap (src/data/superRates.js's untaxedPlanCap — a
+  // CONFIRMED, AWOTE-indexed firm-reference figure, resolved per FY by
+  // the caller, never hardcoded here). untaxedSuperExcess is deliberately
+  // a SEPARATE parameter, not folded into `base`: the amount above the
+  // cap is taxed at a flat 47% (45% top marginal + 2% Medicare, per the
+  // spec's own figure) OUTSIDE the progressive scale entirely — adding
+  // it to `base` would tax it at whatever bracket it happened to land
+  // in, not the flat top rate the law actually applies. Both amounts are
+  // computed by the CALLER from the account's own live untaxed-element
+  // proportion and a running lifetime cap-usage tracker (deterministic.js) —
+  // this function only applies the two rates.
+  untaxedSuperTaxable = 0,
+  untaxedSuperOffsetRate = 0.15,
+  untaxedSuperExcess = 0,
+  untaxedSuperExcessRate = 0.47,
 }) {
   const { key, k } = bracketSettings(fyStartYear, bracketMode, cpi);
   const nonResident = taxProfile?.residency === "nonResident";
@@ -172,7 +193,9 @@ export function assessPerson({
   const fhsssRelease = Math.max(0, fhsssTaxableRelease);
   const ttrPension = Math.max(0, ttrPensionTaxable);
   const bondAssessable = Math.max(0, bondAssessableWithdrawal);
-  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease + ttrPension + bondAssessable);
+  const untaxedSuper = Math.max(0, untaxedSuperTaxable);
+  const untaxedExcess = Math.max(0, untaxedSuperExcess); // NOT added to base — see param header
+  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease + ttrPension + bondAssessable + untaxedSuper);
 
   // Capital losses: a net loss year adds to the carry-forward; a gain
   // year consumes carried losses before any tax (losses never offset
@@ -206,7 +229,14 @@ export function assessPerson({
   // Bonds, Commit 1: applies last, same non-refundable "credited back"
   // shape as the other three offsets above.
   const bondOffset = Math.min(bondAssessable * bondOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset));
-  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset - bondOffset + medicare - frankingCredits;
+  // Untaxed super, Commit 1: applies last among the non-refundable
+  // offsets, same "credited back" shape as the others. The excess-over-
+  // cap tax is NOT an offset at all — it's an additional flat tax, added
+  // straight into netIncomeTax below (see untaxedSuperExcess's own
+  // header for why it bypasses `base`/the progressive scale entirely).
+  const untaxedSuperOffset = Math.min(untaxedSuper * untaxedSuperOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset - bondOffset));
+  const untaxedSuperExcessTax = untaxedExcess * untaxedSuperExcessRate;
+  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset - bondOffset - untaxedSuperOffset + untaxedSuperExcessTax + medicare - frankingCredits;
 
   // CGT: the gain stacks on top of the income base. Marginal tax and
   // Medicare on the gain by differencing; post-reform (FY2027-28
@@ -228,6 +258,8 @@ export function assessPerson({
     fhsssOffset,
     ttrPensionOffset,
     bondOffset,
+    untaxedSuperOffset,
+    untaxedSuperExcessTax,
     frankingCredits,
     netIncomeTax,
     cgtTax,

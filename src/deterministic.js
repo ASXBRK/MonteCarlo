@@ -366,13 +366,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const icr = s.icrPct / 100;
     const rates = superRatesFor(fy0, bracketMode, cpi); // flat rates — FY-invariant, safe to fix once
     const growthTaxRate = rates.earningsTaxRate * (2 / 3);
+    // Untaxed elements (spec 26, Commit 1) — an untaxed-status account
+    // (public-sector schemes like West State Super) pays NO 15%/10%
+    // earnings-tax haircut inside the fund at all: `rate` simply equals
+    // `grossRate`, the same "no wedge" shape retirement-phase pension
+    // growth already uses (pensionMeta's own inRetirementPhase branch).
+    // The reporting split (row.superDetail[id].earningsTax) falls out
+    // for free at the existing `grossGrowth - netGrowth` line below,
+    // since netGrowth already equals grossGrowth when rate === grossRate.
+    const untaxed = s.taxedStatus === "untaxed";
+    const grossRate = toMonthlyReal(incomeNominal + growthNominal - icr, cpi);
     superMeta[s.id] = {
       // Actual compounding rate: both components taxed, THEN combined
       // and Fisher-converted — same structure assetMonthlyRate uses.
-      rate: toMonthlyReal(incomeNominal * (1 - rates.earningsTaxRate) + growthNominal * (1 - growthTaxRate) - icr, cpi),
+      rate: untaxed ? grossRate : toMonthlyReal(incomeNominal * (1 - rates.earningsTaxRate) + growthNominal * (1 - growthTaxRate) - icr, cpi),
       // Pre-tax rate, for the earnings/earnings-tax reporting split only.
-      grossRate: toMonthlyReal(incomeNominal + growthNominal - icr, cpi),
+      grossRate,
       owner: s.owner,
+      taxedStatus: untaxed ? "untaxed" : "taxed",
     };
   }
   const superBal = {};
@@ -763,6 +774,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       return { id: c.id, month: julyOf(y), amount: c.amount, destination: c.destination };
     }).filter((e) => e.month != null);
   }
+
+  // Superannuation rollovers (spec 26, Commit 1) — resolved once per
+  // row, same "fires in July of its resolved plan year, or never"
+  // convention as a pension commutation just above. Processed in the
+  // monthly loop below, real-pass only (superBal/superTaxFree have no
+  // measurement-pass concept at all, the same reason every other super
+  // mutation in this engine is real-pass-gated).
+  const superRolloverEvents = (state.cashflows.superRollovers ?? []).map((sr) => {
+    const y = resolveRef(sr.at, state.plan, schedule, "client").planYear;
+    return { id: sr.id, month: julyOf(y), fromAccountId: sr.fromAccountId, toAccountId: sr.toAccountId, amount: sr.amount };
+  }).filter((e) => e.month != null && e.fromAccountId && e.toAccountId && superIds.includes(e.fromAccountId) && superIds.includes(e.toAccountId));
 
   // Deeming grandfathering (spec 21b, Commit 3) — grandfathering is
   // lost PERMANENTLY the moment a grandfathered pension is first
@@ -1350,6 +1372,27 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // a2 block for why), payable July t+1, exactly the same shape and
   // reason as pendingCgt above.
   let pendingBondTax = { client: 0, partner: 0 };
+  // Untaxed superannuation elements (spec 26, Commit 1) — same shape and
+  // reason as pendingBondTax above: a benefit from an untaxed-status
+  // account (withdrawal OR rollover) is only ever mutated inside the
+  // real pass (superBal/superTaxFree have no measurement-pass snapshot/
+  // restore at all — see withdrawFromSuper's own callers), so its tax
+  // consequence can never be known before the "a" assessPerson call
+  // (which runs BEFORE the real pass, to produce the taxOut array the
+  // real pass's own deficit funding depends on) — the same circular-
+  // dependency reason CGT and bond withdrawals both get a one-year lag.
+  let pendingUntaxedSuperTax = { client: 0, partner: 0 };
+  // Lifetime, per-person cumulative untaxed-element amount already
+  // assessed at the concessional 15%/10% rate (withdrawals AND
+  // rollovers both consume the SAME cap — the spec's own singular "the
+  // untaxed plan cap"). A running total, never reset, mutated only in
+  // the real pass (the only pass that ever touches an untaxed benefit at
+  // all) — the direct analogue of the transfer balance account's own
+  // lifetime, never-decremented `balance` for cap-consumption purposes
+  // (see pensionTba.js), but simpler: no high-water-mark/indexation
+  // concept, since the untaxed plan cap is a flat lifetime ceiling, not
+  // a personal cap that itself grows.
+  const untaxedCapUsed = { client: 0, partner: 0 };
   const quarantineCarry = { client: 0, partner: 0 }; // D4 quarantined rental losses
   // Document Set Commit 1 — HELP/HECS outstanding balance, real $.
   // Indexed annually and reduced by actual dollar repayments below (see
@@ -1633,6 +1676,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // bypass), so this exists purely so the Cashflow table's Funding
       // group and the Focus → Surplus allocation view can show it.
       surplusPersonalDeductible: 0,
+      // Untaxed superannuation elements (spec 26, Commit 1) — a
+      // same-person rollover between two of the owner's own accounts.
+      // rolloverOut/rolloverIn are the GROSS/NET amounts either side of
+      // the transfer (see the monthly loop's own header for why they
+      // can differ: an untaxed-status source pays 15%/47% tax on its
+      // untaxed element at the point of rollover); rolloverTax is that
+      // tax, a genuine leak (named in conservationCheck.js).
+      rolloverOut: 0, rolloverIn: 0, rolloverTax: 0,
       closing: 0, taxFreeClosing: 0,
     }])),
     superClosing: 0,
@@ -1803,6 +1854,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // withdrawal never adds here at all (bondWithdrawalTax only
         // computes a nonzero assessableEarnings when unmatured).
         bondAssessableWithdrawal: 0,
+        // Untaxed superannuation elements (spec 26, Commit 1) — same
+        // pass-dependence reason as bondDeficitAssessableWithdrawal
+        // above (superBal/superTaxFree only ever mutate in the real
+        // pass — see pendingUntaxedSuperTax's own header), so this is
+        // ALWAYS assessed via the one-year lag, for both the explicit
+        // scheduled withdrawal AND the deficit-funded case — unlike
+        // bonds, super has no ungated, both-pass-executed growth block
+        // to make a same-year assessment possible for either path.
+        // Split in two: untaxedSuperWithinCap gets the 15% offset,
+        // untaxedSuperExcess (over the lifetime untaxed plan cap) is
+        // taxed flat at 47% instead — see assessPerson's own params.
+        untaxedSuperWithinCap: 0,
+        untaxedSuperExcess: 0,
       };
     }
     // Per-property net-rental tracking for the gearing rules (D4).
@@ -1812,6 +1876,44 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const markIncome = (sharesObj, m) => {
       for (const p of persons) if (sharesObj[p]) acc[p].incomeMonths.add(m);
     };
+    // Untaxed superannuation elements (spec 26, Commit 1) — splits a
+    // just-crystallised untaxed-element amount into the within-cap
+    // (15%/10%-offset-eligible) and excess (flat 47%) portions against
+    // the OWNER's lifetime untaxedCapUsed running total, and advances
+    // that total. Shared by the explicit withdrawal, deficit-funded
+    // withdrawal, and rollover sites below — one place computing the
+    // cap boundary, so all three treat a client already near the cap
+    // identically.
+    const untaxedPlanCapY = superRatesFor(fyStart, bracketMode, cpi, awoteAssum).untaxedPlanCap;
+    const creditUntaxedCap = (owner, amount) => {
+      if (!(amount > 0)) return { withinCap: 0, excess: 0 };
+      const remaining = Math.max(0, untaxedPlanCapY - untaxedCapUsed[owner]);
+      const withinCap = Math.min(amount, remaining);
+      const excess = amount - withinCap;
+      untaxedCapUsed[owner] += amount;
+      return { withinCap, excess };
+    };
+    // Wraps withdrawFromSuper (outer scope) with the untaxed-element tax
+    // consequence: 100% of an untaxed account's TAXABLE component
+    // (balance minus taxFreeComponent) is untaxed element — this engine
+    // models taxedStatus as a whole-of-account attribute, not a per-
+    // contribution one (the spec's own scoping principle) — computed
+    // from the CURRENT ratio, same "recalculated at every payment"
+    // convention withdrawFromSuper's own tax-free split already uses. A
+    // no-op for a taxed account (untaxedFraction is 0). Used by BOTH the
+    // explicit and deficit-funded withdrawal sites below.
+    function withdrawFromSuperTaxed(id, want, owner) {
+      const balance = superBal[id];
+      const untaxedFraction = superMeta[id].taxedStatus === "untaxed" && balance > 0
+        ? Math.max(0, balance - superTaxFree[id]) / balance : 0;
+      const paid = withdrawFromSuper(id, want);
+      if (paid > 0 && untaxedFraction > 0) {
+        const { withinCap, excess } = creditUntaxedCap(owner, paid * untaxedFraction);
+        acc[owner].untaxedSuperWithinCap += withinCap;
+        acc[owner].untaxedSuperExcess += excess;
+      }
+      return paid;
+    }
     const recordUnfunded = (amount, m) => {
       if (amount <= 0) return;
       if (row) row.unfundedCashflow += amount;
@@ -2470,7 +2572,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           const outcome = superOutcome[superMeta[id].owner];
           const ccGross = flows.sg[m] + flows.salarySacrifice[m] + flows.personalDeductible[m];
           const nccGross = flows.nonConcessional[m];
-          const ccTax = ccGross * outcome.contributionsTaxRate;
+          // Untaxed elements (spec 26, Commit 1): concessional
+          // contributions to an untaxed-status account still count
+          // against the concessional cap (superOutcome's own
+          // contributionsTaxRate/nccAcceptRatio resolution is unaffected
+          // by taxedStatus — only the FUND-LEVEL tax charged here
+          // changes), but no 15% is actually deducted.
+          const ccTax = superMeta[id].taxedStatus === "untaxed" ? 0 : ccGross * outcome.contributionsTaxRate;
           const nccAccepted = nccGross * outcome.nccAcceptRatio;
           superBal[id] += (ccGross - ccTax) + nccAccepted;
           row.superDetail[id].concessionalNet += ccGross - ccTax;
@@ -2493,7 +2601,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         if (m === julyOf(y)) {
           for (const p of persons) {
             for (const fill of superOutcome[p].fills) {
-              const tax = fill.amount * superOutcome[p].contributionsTaxRate;
+              const tax = superMeta[fill.accountId]?.taxedStatus === "untaxed" ? 0 : fill.amount * superOutcome[p].contributionsTaxRate;
               superBal[fill.accountId] += fill.amount - tax; // concessional fill — taxable, no taxFree change
               row.superDetail[fill.accountId].contributions += fill.amount;
               row.superDetail[fill.accountId].contributionsTax += tax;
@@ -2522,7 +2630,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             // credits nothing rather than crediting the wrong place.
             const owner = superMeta[adj.superAccountId]?.owner;
             if (!owner) continue;
-            const tax = amt * superOutcome[owner].contributionsTaxRate;
+            const tax = superMeta[adj.superAccountId].taxedStatus === "untaxed" ? 0 : amt * superOutcome[owner].contributionsTaxRate;
             superBal[adj.superAccountId] += amt - tax;
             row.superDetail[adj.superAccountId].contributions += amt;
             row.superDetail[adj.superAccountId].contributionsTax += tax;
@@ -2540,7 +2648,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           const flows = schedule.superFlows[id];
           const want = flows ? flows.withdrawals[m] : 0;
           if (want > 0) {
-            const paid = withdrawFromSuper(id, want);
+            const paid = withdrawFromSuperTaxed(id, want, superMeta[id].owner);
             row.superDetail[id].withdrawals += paid;
             recordUnfunded(want - paid, m);
           }
@@ -3288,6 +3396,43 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
             }
           }
         }
+
+        // Superannuation rollovers (spec 26, Commit 1) — a same-person,
+        // account-to-account transfer, real-pass only (superBal/
+        // superTaxFree have no measurement-pass concept — see
+        // pendingUntaxedSuperTax's own header). Rolling an UNTAXED
+        // account's benefit triggers 15% tax on the untaxed element
+        // AT ROLLOVER, capped at the (same, lifetime) untaxed plan cap
+        // — a FUND-LEVEL flat tax, unlike a personal withdrawal's
+        // marginal-rate-plus-offset treatment, so it's a direct balance
+        // deduction here, not routed through assessPerson/the one-year
+        // lag at all (no personal income tax event occurs — the member
+        // never sees this amount as their own assessable income). A
+        // same-status rollover (taxed→taxed or untaxed→untaxed) has no
+        // untaxed element to tax, so untaxedFraction is simply 0 and the
+        // whole amount transfers net.
+        for (const ev of superRolloverEvents) {
+          if (ev.month !== m) continue;
+          const fromBal = superBal[ev.fromAccountId];
+          const amount = Math.min(ev.amount == null ? fromBal : ev.amount, Math.max(0, fromBal));
+          if (amount <= 0) continue;
+          const fromMeta = superMeta[ev.fromAccountId];
+          const untaxedFraction = fromMeta.taxedStatus === "untaxed"
+            ? Math.max(0, fromBal - superTaxFree[ev.fromAccountId]) / fromBal : 0;
+          const taxFreeFraction = superTaxFree[ev.fromAccountId] / fromBal;
+          const untaxedPortion = amount * untaxedFraction;
+          const { withinCap, excess } = creditUntaxedCap(fromMeta.owner, untaxedPortion);
+          const rolloverTax = withinCap * 0.15 + excess * 0.47;
+          const taxFreeAmount = amount * taxFreeFraction;
+          superBal[ev.fromAccountId] -= amount;
+          superTaxFree[ev.fromAccountId] -= taxFreeAmount;
+          const netAmount = amount - rolloverTax;
+          superBal[ev.toAccountId] += netAmount;
+          superTaxFree[ev.toAccountId] += taxFreeAmount;
+          row.superDetail[ev.fromAccountId].rolloverOut += amount;
+          row.superDetail[ev.toAccountId].rolloverIn += netAmount;
+          row.superDetail[ev.fromAccountId].rolloverTax += rolloverTax;
+        }
       }
 
       // c. Household net, including tax outflows (decision 14) —
@@ -3328,9 +3473,26 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // household — the original defect. fillCashDebit (a-super-fill
       // above) extends this to a personalDeductible toConcessionalCap
       // fill — same rule, same fallback if cash can't cover it.
+      // Non-concessional contributions specifically: household cash
+      // pays for only the ACCEPTED portion (flows.nonConcessional[m] ×
+      // nccAcceptRatio), not the full requested amount — a bug found
+      // via the conservation invariant once a client's TSB neared the
+      // bring-forward "nil" tier (superRatesFor's own
+      // bringForwardTsbThresholds) for the first time: a REJECTED NCC
+      // (superOutcome's own nccAcceptRatio < 1, see processNonConcessionalCap)
+      // was still debiting the FULL gross amount from cash while
+      // crediting nothing to super for the rejected slice — money
+      // genuinely vanishing, the same class of defect this block's own
+      // header describes for a personalDeductible contribution crediting
+      // super with no cash ever leaving. nccAcceptRatio is resolved ONCE
+      // per FY, before either pass (same "resolve before either pass"
+      // convention superOutcome itself already follows), so it's safe
+      // to read here directly — no snapshot/restore concern.
       const superContribCashOut = superIds.reduce((s, id) => {
         const flows = schedule.superFlows[id];
-        return s + (flows ? flows.personalDeductible[m] + flows.nonConcessional[m] : 0);
+        if (!flows) return s;
+        const nccRatio = superOutcome[superMeta[id].owner]?.nccAcceptRatio ?? 1;
+        return s + flows.personalDeductible[m] + flows.nonConcessional[m] * nccRatio;
       }, 0) + fillCashDebit + adjSuperCashOut;
       // Investment/education bonds (spec 25, Commit 1) — a contribution
       // is paid from household cash, exactly like a personal super
@@ -3586,7 +3748,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           for (const id of superIds) {
             if (shortfall <= 0) break;
             if (!superReleased[superMeta[id].owner]) continue;
-            const paid = withdrawFromSuper(id, shortfall);
+            const paid = withdrawFromSuperTaxed(id, shortfall, superMeta[id].owner);
             shortfall -= paid;
             wcaBal += paid;
             row.superDetail[id].withdrawals += paid;
@@ -3753,7 +3915,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               const headroom = Math.max(0, superOutcome[target.owner]?.concessionalHeadroomAfterFills ?? 0);
               consumed = Math.min(share, headroom);
               if (consumed > 0) {
-                const taxRate = superOutcome[target.owner].contributionsTaxRate;
+                const taxRate = superMeta[target.accountId]?.taxedStatus === "untaxed" ? 0 : superOutcome[target.owner].contributionsTaxRate;
                 const tax = consumed * taxRate;
                 superBal[target.accountId] += consumed - tax;
                 wcaBal -= consumed;
@@ -4006,8 +4168,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       }
     }
     const bondTaxDue = y > 0 ? pendingBondTax.client + pendingBondTax.partner : 0;
+    const untaxedSuperTaxDue = y > 0 ? pendingUntaxedSuperTax.client + pendingUntaxedSuperTax.partner : 0;
     const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0)
-      + divReleaseCash.client + divReleaseCash.partner - refundDue + bondTaxDue;
+      + divReleaseCash.client + divReleaseCash.partner - refundDue + bondTaxDue + untaxedSuperTaxDue;
     const cgtDueDetail = y > 0 ? pendingCgt : { client: 0, partner: 0 };
 
     // Pension drawdown (spec 20, Commit 2): resolved ONCE per FY, before
@@ -5269,6 +5432,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // instead — see acc[p]'s own init comment for why that one doesn't
     // need this lag.
     const newPendingBondTax = { client: 0, partner: 0 };
+    // Untaxed superannuation elements (spec 26, Commit 1) — same lag,
+    // same isolation-by-differencing technique, for the SAME structural
+    // reason (see pendingUntaxedSuperTax's own header): super mutations
+    // are entirely real-pass-gated, so this FY's untaxed-benefit amount
+    // is only known AFTER the real pass finishes, too late for the "a"
+    // call that already produced this FY's taxOut. Isolated independently
+    // of the bond delta above: "withoutBond" still carries the untaxed
+    // amounts (so it isolates ONLY bond's own effect), and the
+    // "withoutUntaxedSuper" call below still carries the bond amount (so
+    // it isolates ONLY the untaxed-super delta) — each lagged flow is
+    // differenced against a baseline that keeps every OTHER lagged flow
+    // in place, the general pattern for combining independent deltas.
+    const newPendingUntaxedSuperTax = { client: 0, partner: 0 };
     for (const p of persons) {
       // Remaining quarantined carry offsets this year's realised gains.
       if (quarantineCarry[p] > 0 && real[p].netCapitalGain > 0) {
@@ -5277,6 +5453,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         quarantineCarry[p] -= useGain;
       }
       const bondDeficitAssessableWithdrawal = real[p].bondDeficitAssessableWithdrawal ?? 0;
+      const untaxedSuperWithinCap = real[p].untaxedSuperWithinCap ?? 0;
+      const untaxedSuperExcess = real[p].untaxedSuperExcess ?? 0;
       const a2 = assessPerson({
         fyStartYear: fyStart,
         bracketMode,
@@ -5289,6 +5467,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         taxProfile: state.plan[p]?.taxProfile ?? null,
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
         bondAssessableWithdrawal: bondDeficitAssessableWithdrawal,
+        untaxedSuperTaxable: untaxedSuperWithinCap,
+        untaxedSuperExcess,
       });
       lossCarryFwd[p] = a2.lossCarryFwd;
       newPending[p] = a2.cgtTax;
@@ -5302,8 +5482,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           capitalLossCarryFwd: lossCarryFwd[p],
           taxProfile: state.plan[p]?.taxProfile ?? null,
           excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
+          untaxedSuperTaxable: untaxedSuperWithinCap,
+          untaxedSuperExcess,
         });
         newPendingBondTax[p] = a2.netIncomeTax - withoutBond.netIncomeTax;
+      }
+      if (untaxedSuperWithinCap > 0 || untaxedSuperExcess > 0) {
+        const withoutUntaxedSuper = assessPerson({
+          fyStartYear: fyStart, bracketMode, cpi,
+          ordinaryIncome: measured[p].ordinary,
+          deductions: measured[p].deductions,
+          distributions: { franked: measured[p].franked, unfranked: measured[p].unfranked },
+          netCapitalGain: real[p].netCapitalGain,
+          capitalLossCarryFwd: lossCarryFwd[p],
+          taxProfile: state.plan[p]?.taxProfile ?? null,
+          excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
+          bondAssessableWithdrawal: bondDeficitAssessableWithdrawal,
+        });
+        newPendingUntaxedSuperTax[p] = a2.netIncomeTax - withoutUntaxedSuper.netIncomeTax;
       }
     }
 
@@ -5435,6 +5631,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     yearly.push(row);
     pendingCgt = newPending;
     pendingBondTax = newPendingBondTax;
+    pendingUntaxedSuperTax = newPendingUntaxedSuperTax;
     pendingDiv293 = newPendingDiv293;
     pendingDiv296 = newPendingDiv296;
     pendingRefund = newPendingRefund;
@@ -5657,6 +5854,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // Commit 2): the final FY's own bond-withdrawal tax never settles
     // inside the projection either.
     accruedBondTaxAtEnd: pendingBondTax.client + pendingBondTax.partner,
+    // Same unpayable-final-FY convention (spec 26, Commit 1): the final
+    // FY's own untaxed-super-benefit tax never settles inside the
+    // projection either.
+    accruedUntaxedSuperTaxAtEnd: pendingUntaxedSuperTax.client + pendingUntaxedSuperTax.partner,
     // Tier 1.2: the final FY's Division 293 is unpayable inside the
     // projection, same as accruedCgtAtEnd; superWarnings collects every
     // rejected/gated contribution (age 75, work test, excess NCC)
