@@ -2735,6 +2735,30 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
     }
 
+    // Novated leases (spec 23, Commit 4) — a genuine new leak (the
+    // post-tax lease payment and the lease-end residual are both real
+    // household cash costs with nothing coming back — see
+    // conservationCheck.js's own header on why this needed checking,
+    // not assuming). 0-1 lease per person; termYears spans short (the
+    // one-third base-value reduction never fires) and long (it does);
+    // residualDestination both ways, so "refinance"'s own no-op path
+    // sweeps too.
+    const novatedLeases = [];
+    for (const p of persons) {
+      if (Math.random() < 0.4) {
+        const termYears = randInt(2, 6);
+        novatedLeases.push({
+          id: `nl_${p}`, name: `Lease ${p}`, owner: p,
+          baseValue: rand(20000, 80000),
+          startAt: { kind: "age", age: startAge }, termYears,
+          preTaxAnnual: rand(0, 8000), postTaxAnnual: rand(0, 5000),
+          runningCostsAnnual: rand(0, 4000), runningCostsPackaged: Math.random() < 0.5,
+          residualValue: rand(0, 20000),
+          residualDestination: pick(["payout", "refinance"]),
+        });
+      }
+    }
+
     const expenses = [cf({
       id: "exp1", assetId: null, amount: rand(20000, 60000) / 12, frequency: "monthly",
       from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
@@ -3188,7 +3212,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           household: couple ? "couple" : "single",
           client, partner, children,
           superAccounts, pensions, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
-          adviserFees, adjustments, employers,
+          adviserFees, adjustments, employers, novatedLeases,
         },
         cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows },
         surplus,
@@ -8485,6 +8509,105 @@ describe("Salary packaging by employer type (spec 23, Commit 3)", () => {
       cashflows: { income: [employmentRow({ amount: 100000 })] },
     });
     const out = projectPlan(s);
+    expect(out.yearly[0].taxDetail.fbtPayable).toBe(0);
+    expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBe(0);
+  });
+});
+
+// --- Spec 23, Commit 4: novated leases --------------------------------------
+
+describe("Novated leases (spec 23, Commit 4)", () => {
+  const FBT_GROSSUP_RATE = 1.8868;
+  const FBT_RATE = 0.47;
+  const nlRow = (over = {}) => ({
+    id: "nl1", name: "Lease", owner: "client",
+    baseValue: 50000, startAt: { kind: "age", age: 40 }, termYears: 3,
+    preTaxAnnual: 0, postTaxAnnual: 0, runningCostsAnnual: 0, runningCostsPackaged: true,
+    residualValue: 0, residualDestination: "payout",
+    ...over,
+  });
+  const stateWith = (leases, over = {}) => mkState({
+    endAge: 40 + (over.years ?? 4),
+    plan: { novatedLeases: leases },
+    cashflows: { income: [employmentRow({ amount: 150000, sgApplies: false })] },
+  });
+
+  it.each([[30000], [50000], [80000]])(
+    "known-value: statutory taxable value = base value × 20%%, no ECM (base=%d)",
+    (baseValue) => {
+      const out = projectPlan(stateWith([nlRow({ baseValue, termYears: 1 })]));
+      const expectedTaxableValue = baseValue * 0.20;
+      expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBeCloseTo(expectedTaxableValue * FBT_GROSSUP_RATE, 0);
+      expect(out.yearly[0].taxDetail.fbtPayable).toBeCloseTo(expectedTaxableValue * FBT_GROSSUP_RATE * FBT_RATE, 0);
+    }
+  );
+
+  it("the base value reduces by one-third once the car has been held for four COMPLETE FBT years", () => {
+    const out = projectPlan(stateWith([nlRow({ baseValue: 60000, termYears: 6 })], { years: 6 }));
+    const fullValue = 60000 * 0.20 * FBT_GROSSUP_RATE;
+    const reducedValue = 60000 * (2 / 3) * 0.20 * FBT_GROSSUP_RATE;
+    for (const y of [0, 1, 2, 3]) {
+      expect(out.yearly[y].taxDetail.reportableFringeBenefits).toBeCloseTo(fullValue, 0);
+    }
+    expect(out.yearly[4].taxDetail.reportableFringeBenefits).toBeCloseTo(reducedValue, 0);
+  });
+
+  it("Employee Contribution Method (ECM): a post-tax contribution reduces the taxable value dollar for dollar, down to zero if large enough", () => {
+    const statutoryValue = 50000 * 0.20; // 10,000
+    const partial = projectPlan(stateWith([nlRow({ termYears: 1, postTaxAnnual: 4000 })]));
+    expect(partial.yearly[0].taxDetail.reportableFringeBenefits).toBeCloseTo((statutoryValue - 4000) * FBT_GROSSUP_RATE, 0);
+    const full = projectPlan(stateWith([nlRow({ termYears: 1, postTaxAnnual: statutoryValue })]));
+    expect(full.yearly[0].taxDetail.fbtPayable).toBe(0);
+    expect(full.yearly[0].taxDetail.reportableFringeBenefits).toBe(0);
+    // Even MORE than the taxable value floors at zero, never negative.
+    const over = projectPlan(stateWith([nlRow({ termYears: 1, postTaxAnnual: statutoryValue + 5000 })]));
+    expect(over.yearly[0].taxDetail.fbtPayable).toBe(0);
+  });
+
+  it("pre-tax and post-tax lease payments reach the right places: pre-tax reduces taxable income only; post-tax reduces household cash", () => {
+    const withPreTax = projectPlan(stateWith([nlRow({ termYears: 1, preTaxAnnual: 8000 })]));
+    const withPostTax = projectPlan(stateWith([nlRow({ termYears: 1, postTaxAnnual: 8000 })]));
+    const noLeasePayments = projectPlan(stateWith([nlRow({ termYears: 1, baseValue: 0 })]));
+    // Pre-tax: taxable income drops, but household cash (`income`) is unaffected.
+    expect(withPreTax.yearly[0].taxDetail.client.taxableIncome).toBeLessThan(noLeasePayments.yearly[0].taxDetail.client.taxableIncome);
+    expect(withPreTax.yearly[0].income).toBeCloseTo(noLeasePayments.yearly[0].income, 2);
+    // Post-tax: an ordinary expense — household cash drops by the SAME amount. Taxable income
+    // is essentially untouched by the postTax payment itself (within a
+    // small margin — a lower WCA balance earns marginally less interest,
+    // itself assessable, a real second-order effect, not the postTax
+    // payment being treated as a deduction).
+    expect(withPostTax.yearly[0].expenses).toBeCloseTo(noLeasePayments.yearly[0].expenses + 8000, 2);
+    expect(withPostTax.yearly[0].taxDetail.client.taxableIncome).toBeGreaterThan(noLeasePayments.yearly[0].taxDetail.client.taxableIncome - 200);
+  });
+
+  it("running costs follow whichever side they're packaged onto", () => {
+    const packaged = projectPlan(stateWith([nlRow({ termYears: 1, baseValue: 0, runningCostsAnnual: 3000, runningCostsPackaged: true })]));
+    const notPackaged = projectPlan(stateWith([nlRow({ termYears: 1, baseValue: 0, runningCostsAnnual: 3000, runningCostsPackaged: false })]));
+    const none = projectPlan(stateWith([nlRow({ termYears: 1, baseValue: 0 })]));
+    expect(packaged.yearly[0].expenses).toBeCloseTo(none.yearly[0].expenses, 2); // no cash effect — packaged (pre-tax)
+    expect(notPackaged.yearly[0].expenses).toBeCloseTo(none.yearly[0].expenses + 3000, 2); // ordinary cash expense
+  });
+
+  it("the residual falls in the right month (year) — the July immediately after the lease's last active year, not before or after", () => {
+    const withResidual = projectPlan(stateWith([nlRow({ termYears: 2, baseValue: 0, residualValue: 15000 })], { years: 5 }));
+    const without = projectPlan(stateWith([nlRow({ termYears: 2, baseValue: 0 })], { years: 5 }));
+    // Active years 0–1: no residual yet.
+    expect(withResidual.yearly[0].expenses).toBeCloseTo(without.yearly[0].expenses, 2);
+    expect(withResidual.yearly[1].expenses).toBeCloseTo(without.yearly[1].expenses, 2);
+    // Year 2 (the July right after the lease ends): the residual fires.
+    expect(withResidual.yearly[2].expenses).toBeCloseTo(without.yearly[2].expenses + 15000, 2);
+    // Year 3 onward: gone, never repeats.
+    expect(withResidual.yearly[3].expenses).toBeCloseTo(without.yearly[3].expenses, 2);
+  });
+
+  it('"refinance" fires no residual outflow at all — a disclosed simplification', () => {
+    const out = projectPlan(stateWith([nlRow({ termYears: 1, baseValue: 0, residualValue: 15000, residualDestination: "refinance" })], { years: 4 }));
+    const without = projectPlan(stateWith([nlRow({ termYears: 1, baseValue: 0 })], { years: 4 }));
+    for (let y = 0; y < 4; y++) expect(out.yearly[y].expenses).toBeCloseTo(without.yearly[y].expenses, 2);
+  });
+
+  it("regression gate: a scenario with no novated leases at all is completely unaffected", () => {
+    const out = projectPlan(stateWith([]));
     expect(out.yearly[0].taxDetail.fbtPayable).toBe(0);
     expect(out.yearly[0].taxDetail.reportableFringeBenefits).toBe(0);
   });

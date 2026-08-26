@@ -257,6 +257,22 @@
 // fbtType/caps, plus 0-2 packaging deduction rows spanning all four
 // packagingTypes) with NO new named term.
 //
+// Novated leases (spec 23, Commit 4) — a genuine new leak (the post-tax
+// lease payment and the lease-end residual are both real household cash
+// costs with nothing coming back), unlike salary packaging's FBT above.
+// Checked, and it needs no new term either: both the post-tax payment
+// and the residual are added directly into schedule.js's ordinary
+// `expenses` array (the SAME household-wide pocket every other expense
+// row already uses), so they're already covered by the `expenses: row.
+// expenses` term above — no separate pocket, no separate leak name
+// required. The pre-tax portion is an ordinary deduction (no cash
+// movement of its own, unchanged); the FBT/reportable-fringe-benefits
+// consequence reuses the SAME packagingByOwnerYear mechanism Commit 3
+// already verified needs no term. Verified across hundreds of
+// randomised runs (randomScenario() generates 0-1 lease per person,
+// termYears spanning both sides of the one-third base-value reduction,
+// both residualDestinations) with NO new named term.
+//
 // Monte Carlo's random return shocks (Session B) touch none of the
 // terms above except `row.growth`/superDetail's earnings figures
 // themselves — those are accumulated from whatever return was actually

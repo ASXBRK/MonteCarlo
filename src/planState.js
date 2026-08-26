@@ -399,6 +399,7 @@ export function defaultPlan(now = new Date()) {
     keyDates: [],
     superAccounts: [],
     employers: [],
+    novatedLeases: [],
     pensions: [],
     gifts: [],
     heas: createHeas(),
@@ -821,6 +822,63 @@ export function createDeductionRow(plan, existing = []) {
     employerId: null,
     packagingType: "livingExpense",
   };
+}
+
+// Novated leases (spec 23, Commit 4) — a car packaged through a
+// novated lease, with its OWN statutory-formula FBT calculation rather
+// than a flat packaged amount: unlike a generic salaryPackaging
+// deduction row (Commit 3), a novated lease is ALWAYS subject to FBT
+// via the statutory formula regardless of employer type ("cars are
+// never covered by either cap" — Commit 3's own words), so it carries
+// no employerId/fbtType at all; schedule.js resolves its FBT/RFB
+// straight from baseValue/term/ECM.
+export const RESIDUAL_DESTINATIONS = ["payout", "refinance"];
+
+export function createNovatedLease(plan, existing = []) {
+  return {
+    id: uid("nl"),
+    name: `Novated lease ${existing.length + 1}`,
+    owner: "client",
+    baseValue: 0, // cost price incl. GST/warranties/delivery, excl. rego/stamp duty (the spec's own definition)
+    startAt: anchorRef("start"),
+    termYears: 3,
+    // Lease repayment split (the spec's own words: "model both pre-tax
+    // and post-tax components") — preTax reduces taxable income;
+    // postTax is an ordinary household cash expense AND doubles as the
+    // Employee Contribution Method (ECM) offset against the statutory
+    // taxable value (the spec's own words: "the usual structure").
+    preTaxAnnual: 0,
+    postTaxAnnual: 0,
+    runningCostsAnnual: 0,
+    runningCostsPackaged: true, // packaged (pre-tax) vs paid separately (ordinary expense)
+    residualValue: 0,
+    residualDestination: "payout", // "payout" = one-off cash outflow at lease end; "refinance" = no further outflow modelled
+  };
+}
+
+export function clampNovatedLease(nl, plan) {
+  const owner = nl?.owner === "partner" && plan.partner ? "partner" : "client";
+  const win = ownerWindow(plan, owner);
+  const startAt = clampDateRef(nl?.startAt ?? anchorRef("start"), win.from, win.to, plan);
+  return {
+    id: typeof nl?.id === "string" && nl.id ? nl.id : uid("nl"),
+    name: typeof nl?.name === "string" && nl.name.trim() ? nl.name.trim() : "Novated lease",
+    owner,
+    baseValue: clampNumber(nl?.baseValue, 0),
+    startAt,
+    termYears: clampNumber(nl?.termYears, 1, 10),
+    preTaxAnnual: clampNumber(nl?.preTaxAnnual, 0),
+    postTaxAnnual: clampNumber(nl?.postTaxAnnual, 0),
+    runningCostsAnnual: clampNumber(nl?.runningCostsAnnual, 0),
+    runningCostsPackaged: nl?.runningCostsPackaged !== false,
+    residualValue: clampNumber(nl?.residualValue, 0),
+    residualDestination: RESIDUAL_DESTINATIONS.includes(nl?.residualDestination) ? nl.residualDestination : "payout",
+  };
+}
+
+export function normaliseNovatedLeases(leases, plan) {
+  if (!Array.isArray(leases)) return [];
+  return leases.map((nl) => clampNovatedLease(nl, plan));
 }
 
 // Pick the firm profile whose total nominal return sits nearest to a
@@ -2266,6 +2324,10 @@ export function clampPlan(plan, profiles = {}) {
   // runs at the hydrate()/clampAllToPlan() level, once income rows are
   // known — see resolveEmployerAssignment's own header.
   const employers = normaliseEmployers(plan.employers, { client, partner });
+  // Novated leases (spec 23, Commit 4) — client-anchored like every
+  // other owner-scoped one-off/ongoing arrangement (pensions, gifts),
+  // so only needs client/partner/endAge/keyDates, already resolved above.
+  const novatedLeases = normaliseNovatedLeases(plan.novatedLeases, { client, partner, endAge, keyDates });
   // Pension phase (spec 20, Commit 1) — validated against superAccounts
   // and the now-final client/partner retirementAge (the condition-of-
   // release gate depends on it), same ordering reason as adviserFees
@@ -2302,7 +2364,7 @@ export function clampPlan(plan, profiles = {}) {
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
   const planSoFar = {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, pensions, gifts, heas, workingCash, children,
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, novatedLeases, pensions, gifts, heas, workingCash, children,
     adviserFees, implementation,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,

@@ -930,6 +930,69 @@ export function buildSchedules(state) {
     }
   }
 
+  // Novated leases (spec 23, Commit 4) — a car packaged through a
+  // novated lease is ALWAYS subject to FBT via the statutory formula
+  // method, regardless of employer type (no employerId/fbtType at all
+  // — see clampNovatedLease's own header), so it feeds the SAME
+  // packagingByOwnerYear accumulator directly rather than a parallel
+  // structure; deterministic.js needs no changes at all for this commit.
+  // Term bounds are whole plan years (this engine has no sub-year
+  // DateRef resolution anywhere — ages tick once at 1 July); "days
+  // provided/365" is therefore always 365 for an active year, a
+  // disclosed simplification at the SAME granularity every other
+  // annual event in this engine already carries.
+  for (const nl of plan.novatedLeases ?? []) {
+    if (!(nl.baseValue > 0 || nl.preTaxAnnual > 0 || nl.postTaxAnnual > 0 || nl.runningCostsAnnual > 0 || nl.residualValue > 0)) continue;
+    const target = nl.owner === "partner" && packagingByOwnerYear.partner ? packagingByOwnerYear.partner : packagingByOwnerYear.client;
+    const startYear = resolveRef(nl.startAt, plan, dateSchedule, nl.owner).planYear;
+    const endYear = startYear + nl.termYears - 1;
+    const ownerArr = nl.owner === "partner" && deductionsByOwner.partner ? deductionsByOwner.partner : deductionsByOwner.client;
+    for (let y = Math.max(0, startYear); y <= Math.min(planYears - 1, endYear); y++) {
+      const jm = julyMonthIndex(plan, y);
+      if (jm == null) continue; // partial first year without a firing July — convention 5
+      // Statutory formula method (the default; the operating cost
+      // method needs logbook data this tool doesn't collect —
+      // disclosed, not built): reduced by one-third once the car has
+      // been held for four COMPLETE FBT years (years 0–3 full value,
+      // year 4 onward reduced — "complete years", not the current one).
+      const yearsHeld = y - startYear;
+      const baseForYear = yearsHeld >= 4 ? nl.baseValue * (2 / 3) : nl.baseValue;
+      const statutoryValue = baseForYear * 0.20;
+      // Employee Contribution Method (ECM) — the post-tax lease
+      // payment doubles as the ECM offset, reducing the taxable value
+      // dollar for dollar ("the usual structure", the spec's own words).
+      const taxableValue = Math.max(0, statutoryValue - nl.postTaxAnnual);
+      const grossedUp = taxableValue * FBT_GROSSUP_RATE;
+      target.reportableFringeBenefits[y] += grossedUp;
+      target.fbtPayable[y] += grossedUp * FBT_RATE;
+      // Lease payments split pre-tax/post-tax (the spec's own words):
+      // pre-tax reduces taxable income; post-tax is an ordinary
+      // household cash expense. Running costs follow whichever side
+      // they're packaged onto.
+      const preTax = nl.preTaxAnnual + (nl.runningCostsPackaged ? nl.runningCostsAnnual : 0);
+      const postTax = nl.postTaxAnnual + (nl.runningCostsPackaged ? 0 : nl.runningCostsAnnual);
+      if (preTax > 0) {
+        ownerArr[jm] += preTax;
+        rowTotals.deductions[nl.id] ??= new Float64Array(planYears);
+        rowTotals.deductions[nl.id][y] += preTax;
+      }
+      if (postTax > 0) expenses[jm] += postTax;
+    }
+    // Residual (the spec's own words: "model it as a one-off outflow
+    // at the lease end date, with the option to refinance instead") —
+    // fires in July immediately after the lease's last active plan
+    // year, the same "fires in July" convention every other one-off
+    // event here already follows; "refinance" fires nothing at all —
+    // not modelled further (disclosed).
+    if (nl.residualValue > 0 && nl.residualDestination === "payout") {
+      const residualYear = endYear + 1;
+      if (residualYear >= 0 && residualYear < planYears) {
+        const jm = julyMonthIndex(plan, residualYear);
+        if (jm != null) expenses[jm] += nl.residualValue;
+      }
+    }
+  }
+
   return {
     months,
     planYears,

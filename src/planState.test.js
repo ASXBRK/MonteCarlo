@@ -39,6 +39,7 @@ import {
   createEmployer, clampEmployer, normaliseEmployers, resolveEmployerAssignment,
   INCOME_CATEGORIES, BONUS_DESTINATION_TYPES, clampBonusDestination, incomeCategoryTaxTreatment,
   FBT_TYPES, PACKAGING_TYPES,
+  createNovatedLease, clampNovatedLease, normaliseNovatedLeases, RESIDUAL_DESTINATIONS,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2550,5 +2551,66 @@ describe("Salary packaging by employer type (spec 23, Commit 3): plan model", ()
     });
     expect(back.cashflows.deductions[0].employerId).toBe("emp1");
     expect(back.cashflows.deductions[0].packagingType).toBe("mealEntertainment");
+  });
+});
+
+describe("Novated leases (spec 23, Commit 4): plan model", () => {
+  it("createNovatedLease defaults to a zero-cost, 3-year, payout-at-end lease with no employer linkage", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const nl = createNovatedLease(plan, []);
+    expect(nl.owner).toBe("client");
+    expect(nl.baseValue).toBe(0);
+    expect(nl.termYears).toBe(3);
+    expect(nl.runningCostsPackaged).toBe(true);
+    expect(nl.residualDestination).toBe("payout");
+    expect(RESIDUAL_DESTINATIONS).toEqual(["payout", "refinance"]);
+  });
+
+  it("clampNovatedLease clamps negative dollar figures to 0 and an unknown residualDestination to payout", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const nl = clampNovatedLease({
+      baseValue: -100, preTaxAnnual: -1, postTaxAnnual: -1, runningCostsAnnual: -1,
+      residualValue: -1, residualDestination: "bogus", termYears: 0,
+    }, plan);
+    expect(nl.baseValue).toBe(0);
+    expect(nl.preTaxAnnual).toBe(0);
+    expect(nl.postTaxAnnual).toBe(0);
+    expect(nl.runningCostsAnnual).toBe(0);
+    expect(nl.residualValue).toBe(0);
+    expect(nl.residualDestination).toBe("payout");
+    expect(nl.termYears).toBe(1); // clamped into [1, 10]
+  });
+
+  it("clampNovatedLease demotes an orphan partner's lease to client, same as every other owner-scoped row", () => {
+    const single = clampPlan({ household: "single", client: { currentAge: 40 } }, PROFILES);
+    const nl = clampNovatedLease({ owner: "partner" }, single);
+    expect(nl.owner).toBe("client");
+  });
+
+  it("normaliseNovatedLeases tolerates a non-array and clamps every entry", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(normaliseNovatedLeases(undefined, plan)).toEqual([]);
+    const out = normaliseNovatedLeases([{ baseValue: 40000 }], plan);
+    expect(out).toHaveLength(1);
+    expect(out[0].baseValue).toBe(40000);
+  });
+
+  it("hydrate round-trips a novated lease through plan.novatedLeases", () => {
+    const s = defaultState(PROFILES, NOW);
+    s.plan.novatedLeases = [{
+      id: "nl1", name: "Company car", owner: "client", baseValue: 45000,
+      startAt: { kind: "anchor", anchorId: "start" }, termYears: 4,
+      preTaxAnnual: 6000, postTaxAnnual: 2000, runningCostsAnnual: 1500, runningCostsPackaged: false,
+      residualValue: 12000, residualDestination: "payout",
+    }];
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.plan.novatedLeases).toHaveLength(1);
+    const nl = back.plan.novatedLeases[0];
+    expect(nl.baseValue).toBe(45000);
+    expect(nl.termYears).toBe(4);
+    expect(nl.preTaxAnnual).toBe(6000);
+    expect(nl.postTaxAnnual).toBe(2000);
+    expect(nl.runningCostsPackaged).toBe(false);
+    expect(nl.residualValue).toBe(12000);
   });
 });
