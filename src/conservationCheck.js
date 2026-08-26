@@ -415,6 +415,19 @@ export function computeYearFlows(out, y) {
   // cgtDue channel via pendingUntaxedSuperTax, the same one-year-lag
   // mechanism bond withdrawal tax already uses.
   const untaxedRolloverTax = sumVals(row.superDetail, "rolloverTax");
+  // Defined benefit pensions (spec 26, Commit 2) — UNLIKE sgInflow/
+  // govSuperInflow/educationBenefit, this needs NO conservation term at
+  // all: it is credited straight into the monthly `inc` variable in
+  // deterministic.js, the SAME way agePensionMonthly already is (see
+  // that variable's own header) — and `inc` accumulates directly into
+  // row.income every month, so it is ALREADY fully inside `f.income`
+  // below. Adding a separate term here would double-count it (found via
+  // the net-worth-decomposition reconciliation test, the exact same
+  // class of bug the age pension's own design already avoids by
+  // following this same convention). Reported anyway, for the Commit 3
+  // output work, but deliberately NOT summed into `expected`/the
+  // decomposition below.
+  const dbPensionInflow = sumVals(row.definedBenefitDetail ?? {}, "grossPension");
   // Surplus/deficit allocation spec, Commit 1: a surplus allocation that
   // tops up an existing salary-sacrifice row writes into the SAME
   // `salarySacrifice` field as a genuine payroll-reduced contribution
@@ -584,7 +597,7 @@ export function computeYearFlows(out, y) {
 
   return {
     openingN, closingN, delta: closingN - openingN,
-    income, growth, sgInflow, govSuperInflow, superInsurancePremium, untaxedRolloverTax,
+    income, growth, sgInflow, govSuperInflow, superInsurancePremium, untaxedRolloverTax, dbPensionInflow,
     expenses: row.expenses, tax: row.tax, contributionsTax, liabilityInterest,
     surplusSpent: row.surplusSpent, unfundedCashflow: row.unfundedCashflow,
     divReleaseFromSuper,

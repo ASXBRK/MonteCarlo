@@ -140,6 +140,18 @@ export function superRatesFor(fyStartYear, bracketMode = "indexed", cpi = 0.025,
     ...SUPER_RATES_BASE,
     concessionalCap: concessionalCapNom / deflate,
     generalTransferBalanceCap: gtbcNom / deflate,
+    // Defined benefit income cap (spec 26, Commit 2) — NOT an
+    // independently-set firm-reference figure (neither the spec's own
+    // $125,000 nor the au-fy-figures skill's $131,250 appear anywhere
+    // in docs/reference/): it is legislatively DERIVED as the general
+    // transfer balance cap ÷ 16 (ITAA97 s307-462(3); the au-fy-figures
+    // skill's own $131,250 = $2,100,000/16 confirms this exact
+    // derivation against the current GTBC). Computed fresh here so it
+    // moves automatically with the SAME CPI-indexation/$100,000-
+    // rounding the GTBC already gets, rather than being independently
+    // (and separately incorrectly) indexed. As at FY2026/27: $2,100,000
+    // ÷ 16 = $131,250.
+    dbIncomeCap: gtbcNom / 16 / deflate,
     untaxedPlanCap: untaxedPlanCapNom / deflate,
     nonConcessionalCap: nonConcessionalCapNom / deflate,
     bringForwardTsbThresholds: {

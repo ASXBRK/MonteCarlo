@@ -412,3 +412,49 @@ describe("Untaxed superannuation elements (spec 26, Commit 1) — 15% offset wit
     expect(explicit).toEqual(base);
   });
 });
+
+// Defined benefit pensions (spec 26, Commit 2): the untaxed element of a
+// DB pension gets its OWN 10% offset — deliberately distinct from the
+// 15% lump-sum offset above, "a distinction easily conflated" (spec's
+// own words) — and the income-cap excess is ordinary extra assessable
+// income with no offset at all.
+describe("Defined benefit pensions (spec 26, Commit 2) — 10% untaxed-element offset, income-cap excess", () => {
+  it("the untaxed element is taxed at the marginal rate, offset by 10% — NOT 15%", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    const withDb = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, dbUntaxedPensionTaxable: 10000 });
+    expect(withDb.taxableIncome).toBeCloseTo(base.taxableIncome + 10000, 6);
+    expect(withDb.dbUntaxedPensionOffset).toBeCloseTo(1000, 6); // 10% of 10,000 — not 1,500
+  });
+
+  it("stacks last, after every other offset including the untaxed-super one", () => {
+    const a = assessPerson({
+      fyStartYear: 2027, ordinaryIncome: 100000,
+      excessConcessionalContributions: 5000, fhsssTaxableRelease: 10000, ttrPensionTaxable: 8000,
+      bondAssessableWithdrawal: 6000, untaxedSuperTaxable: 4000, dbUntaxedPensionTaxable: 3000,
+    });
+    expect(a.untaxedSuperOffset).toBeCloseTo(600, 6);
+    expect(a.dbUntaxedPensionOffset).toBeCloseTo(300, 6); // 10% of 3,000 — plenty of tax remains
+  });
+
+  it("the offset is non-refundable — capped at the tax payable", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 0, dbUntaxedPensionTaxable: 5000 });
+    expect(a.dbUntaxedPensionOffset).toBeLessThanOrEqual(a.incomeTax);
+  });
+
+  it("the income-cap excess is ordinary assessable income at the marginal rate, with NO offset", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    const withExcess = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, dbIncomeCapExcess: 20000 });
+    expect(withExcess.taxableIncome).toBeCloseTo(base.taxableIncome + 20000, 6);
+    const marginalOnExcess = withExcess.incomeTax - base.incomeTax;
+    const medicareOnExcess = withExcess.medicare - base.medicare;
+    // No offset term at all — the FULL marginal + Medicare cost lands,
+    // unlike every offset-shaped param elsewhere in this file.
+    expect(withExcess.netIncomeTax - base.netIncomeTax).toBeCloseTo(marginalOnExcess + medicareOnExcess, 6);
+  });
+
+  it("zero (the default) leaves every figure unchanged", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000 });
+    const explicit = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000, dbUntaxedPensionTaxable: 0, dbIncomeCapExcess: 0 });
+    expect(explicit).toEqual(base);
+  });
+});

@@ -664,6 +664,37 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     pensionCommenced[pn.id] = false;
   }
 
+  // --- Defined benefit pensions (spec 26, Commit 2) --------------------------
+  //
+  // A promised pension the client's own annual statement states — no
+  // source super account, no balance to grow/draw (the spec's own
+  // scoping principle: "we do not compute what the fund's actuary
+  // computes"). Structurally simpler than an ABP/TTR pension: the
+  // payment amount is a pure per-FY formula (annualPension, indexed),
+  // never shortfall- or balance-dependent, so unlike EVERY other
+  // super/pension mutation in this engine it is safe to credit UNGATED
+  // (in both passes), the same way ordinary employment income is —
+  // no one-year settlement lag is needed for its tax consequences at
+  // all (contrast pendingUntaxedSuperTax's own header, which needs the
+  // lag specifically because super mutation is real-pass-gated; a DB
+  // pension has nothing to gate).
+  const dbRows = state.plan.definedBenefits ?? [];
+  const dbMeta = {};
+  for (const db of dbRows) {
+    dbMeta[db.id] = {
+      owner: db.owner,
+      annualPension: db.annualPension,
+      indexBasis: db.indexBasis,
+      indexExtraPct: db.indexExtraPct,
+      taxFreeProportion: (db.taxFreeProportion ?? 0) / 100,
+      untaxedProportion: (db.untaxedProportion ?? 0) / 100,
+      notionalTaxedContributions: db.notionalTaxedContributions ?? 0,
+    };
+  }
+  // Commencement (resolved further below, once julyOf exists — see the
+  // block right after pensionCommenceMonth's own resolution) and the
+  // TBA credit guard live in dbCommenceMonth/dbTbaCredited.
+
   // Concessional carry-forward (5-year FIFO) SEEDS from the plan's
   // opening ledger (a real client's already-accrued unused cap, same
   // convention as openingCapitalLosses) and evolves FY over FY.
@@ -762,6 +793,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     while (y < schedule.planYears && ownerAgeAt(meta.owner, y) < gateAge) y++;
     pensionCommenceMonth[pn.id] = y < schedule.planYears ? julyOf(y) : null; // null = never fires within the projection (convention 5's partial-first-year skip, or the gate never met)
   }
+
+  // Defined benefit pensions (spec 26, Commit 2) — same "fires in July
+  // of its resolved plan year, or never" convention as an ABP/TTR
+  // pension's own pensionCommenceMonth just above, but with NO
+  // condition-of-release gate to loop forward past — a DB pension has
+  // no such gate: the client's own statement already reflects when it
+  // starts.
+  const dbCommenceMonth = {};
+  for (const db of dbRows) {
+    const y = resolveRef(db.commenceAt, state.plan, schedule, "client").planYear;
+    dbCommenceMonth[db.id] = y < schedule.planYears ? julyOf(y) : null;
+  }
+  // Transfer balance account credit guard (spec 26, Commit 2) — same
+  // one-off shape as pensionTbaCredited above.
+  const dbTbaCredited = {};
+  for (const db of dbRows) dbTbaCredited[db.id] = false;
 
   // Commutation events (spec 20, Commit 5) — resolved once per
   // commutation row, same "fires in July of its resolved plan year, or
@@ -1735,6 +1782,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       grandfatheredDeductibleIncome: 0, grandfatheredDeemingExempt: 0,
     }])),
     pensionClosing: 0,
+    // Defined benefit pensions (spec 26, Commit 2) — no balance/opening/
+    // closing at all (the spec's own point: no account exists to
+    // assess). grossPension/taxFreeAmount/untaxedAssessable are set in
+    // the real pass only (below); dbIncomeCapExcess/tax are set in the
+    // per-FY tax-assessment block once the FY's totals are known
+    // (Commit 3 extends this further for the Centrelink/table outputs).
+    definedBenefitDetail: Object.fromEntries(dbRows.map((db) => [db.id, {
+      grossPension: 0, taxFreeAmount: 0, untaxedAssessable: 0, dbIncomeCapExcess: 0, tax: 0,
+    }])),
     // Transfer balance account (spec 20, Commit 4) — a snapshot of each
     // person's account at THIS FY's end: the running credited-minus-
     // debited balance, their own (proportionally-indexed) personal
@@ -1867,6 +1923,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // taxed flat at 47% instead — see assessPerson's own params.
         untaxedSuperWithinCap: 0,
         untaxedSuperExcess: 0,
+        // Defined benefit pensions (spec 26, Commit 2) — pass-INDEPENDENT
+        // (a pure per-FY formula, never shortfall-dependent), so unlike
+        // every other super/pension mechanism above these accumulate
+        // identically in both passes and are read directly from
+        // measured[p] for the SAME-year "pre"/"a" assessment — no lag.
+        // dbGrossPension is the running total this FY (both components
+        // combined) — needed to size the income-cap excess, which is
+        // assessed OUTSIDE this per-month accumulation (see the a2-
+        // adjacent block: it depends on the FY total, not a monthly
+        // slice).
+        dbUntaxedAssessable: 0,
+        dbGrossPension: 0,
       };
     }
     // Per-property net-rental tracking for the gearing rules (D4).
@@ -1913,6 +1981,20 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         acc[owner].untaxedSuperExcess += excess;
       }
       return paid;
+    }
+    // Defined benefit pensions (spec 26, Commit 2) — this FY's annual
+    // amount, indexed from the client's stated figure. A pure formula
+    // (fyStart/y only — no balance, no schedule dependency), so it is
+    // resolved here, directly, rather than in an outer per-year setup
+    // the way pensionAnnualAmount needs (that one depends on a LIVE 1
+    // July balance; this one doesn't). Same indexation shape as a fixed-
+    // drawdown pension (resolvePensionThisYear's own `requested` line).
+    const dbAnnualAmountThisYear = {};
+    for (const db of dbRows) {
+      const dm = dbMeta[db.id];
+      const basisRate = dm.indexBasis === "awote" ? awoteAssum : dm.indexBasis === "cpi" ? cpi : 0;
+      const g = basisRate + (dm.indexExtraPct ?? 0) / 100;
+      dbAnnualAmountThisYear[db.id] = dm.annualPension * Math.pow((1 + g) / (1 + cpi), yearStartIdx(y) / 12);
     }
     const recordUnfunded = (amount, m) => {
       if (amount <= 0) return;
@@ -2563,6 +2645,29 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
                 reason: `Transfer balance cap exceeded by $${Math.round(excess)} — the ${Math.round(excessTaxRate * 100)}% notional earnings tax would apply (disclosure only; the commutation-authority process is not modelled)`,
               });
             }
+          }
+        }
+
+        // Defined benefit pensions (spec 26, Commit 2) — "the factor of
+        // ten": the transfer balance account credits at the pension's
+        // OWN special value, annual pension × 16, NOT the pension
+        // amount itself — the canonical trap this spec exists to avoid
+        // ("getting this wrong... understates cap usage sixteenfold").
+        // Fires once, at commencement, real-pass only (matching the
+        // ABP/TTR commencement block just above) — no balance transfer
+        // occurs (there is no source account), only the TBA credit.
+        for (const db of dbRows) {
+          if (dbTbaCredited[db.id] || dbCommenceMonth[db.id] !== m) continue;
+          dbTbaCredited[db.id] = true;
+          const dm = dbMeta[db.id];
+          const specialValue = dbAnnualAmountThisYear[db.id] * 16;
+          const { tba: newTba, excess, excessTaxRate } = creditTransferBalance(tba[dm.owner], specialValue);
+          tba[dm.owner] = newTba;
+          if (excess != null) {
+            superWarnings.push({
+              fyLabel: schedule.fyLabels[y], owner: dm.owner, type: "tbaExcess",
+              reason: `Transfer balance cap exceeded by $${Math.round(excess)} — the ${Math.round(excessTaxRate * 100)}% notional earnings tax would apply (disclosure only; the commutation-authority process is not modelled)`,
+            });
           }
         }
 
@@ -3452,7 +3557,36 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // assessable — Commit 3's own tax-treatment decision) — see the
       // per-year setup above for the FY-level assessment this monthly
       // figure divides out of.
-      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut + agePensionMonthly + heasMonthly + drawdownIncomeThisMonth;
+      // Defined benefit pensions (spec 26, Commit 2) — a genuinely NEW
+      // money flow (no source account, nothing debited anywhere),
+      // credited into `inc` the SAME way agePensionMonthly is just
+      // above — which is why it needs NO conservation term of its own:
+      // `inc` accumulates straight into row.income every month, so it's
+      // already fully counted there (see conservationCheck.js's own
+      // header on dbPensionInflow for the double-count this avoids).
+      // UNLIKE the age pension it IS partly assessable (the untaxed
+      // element), so unlike agePensionMonthly it DOES feed acc[p], per
+      // owner. Pass-independent (a pure formula, resolved above), so
+      // this can run ungated in both passes and be read same-year via
+      // measured[p] — no settlement lag, unlike every super/pension
+      // mechanism above.
+      const dbMonthlyByOwner = { client: 0, partner: 0 };
+      const dbUntaxedMonthlyByOwner = { client: 0, partner: 0 };
+      for (const db of dbRows) {
+        if (dbCommenceMonth[db.id] == null || dbCommenceMonth[db.id] > m) continue;
+        const dm = dbMeta[db.id];
+        const monthly = dbAnnualAmountThisYear[db.id] / 12;
+        const untaxedMonthly = monthly * dm.untaxedProportion;
+        const taxFreeMonthly = monthly * dm.taxFreeProportion;
+        dbMonthlyByOwner[dm.owner] += monthly;
+        dbUntaxedMonthlyByOwner[dm.owner] += untaxedMonthly;
+        if (row) {
+          row.definedBenefitDetail[db.id].grossPension += monthly;
+          row.definedBenefitDetail[db.id].taxFreeAmount += taxFreeMonthly;
+          row.definedBenefitDetail[db.id].untaxedAssessable += untaxedMonthly;
+        }
+      }
+      const inc = schedule.income[m] + cashDist + rentIncome - fillSalarySacrifice.client - fillSalarySacrifice.partner + adjIncomeCash + terminationCashOut + agePensionMonthly + heasMonthly + drawdownIncomeThisMonth + dbMonthlyByOwner.client + dbMonthlyByOwner.partner;
       for (const p of persons) {
         const own = p === "partner" ? schedule.incomeByOwner.partner : schedule.incomeByOwner.client;
         if (own && own[m] > 0) {
@@ -3460,6 +3594,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           acc[p].incomeMonths.add(m);
         }
         if (fillSalarySacrifice[p] > 0) acc[p].ordinary -= fillSalarySacrifice[p];
+        if (dbMonthlyByOwner[p] > 0) {
+          acc[p].dbGrossPension += dbMonthlyByOwner[p];
+          acc[p].dbUntaxedAssessable += dbUntaxedMonthlyByOwner[p];
+          acc[p].incomeMonths.add(m);
+        }
       }
       const exp = schedule.expenses[m] + adjExpenseCash;
       const tax = (taxOut ? taxOut[m] : 0) + (m === first ? cgtDue : 0);
@@ -4520,7 +4659,28 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           grossNCC += flows.nonConcessional[m];
         }
       }
-      const otherConcessional = grossSG + grossSS + grossPD;
+      // Defined benefit pensions (spec 26, Commit 2) — notional taxed
+      // contributions count toward the concessional cap, the same as
+      // any other concessional flow, but consume headroom ONLY (no
+      // super account is credited — see the acc[p] header on the
+      // structural reason this counts nowhere else). Modelled while the
+      // member is still an ACCRUING one — before their own pension
+      // commences (the real-world shape: notional contributions accrue
+      // during working life, not after retirement); disclosed
+      // simplification: grandfathered schemes cap notional
+      // contributions AT the concessional cap so a member can't
+      // involuntarily exceed it (spec's own words) — that grandfathering
+      // itself is NOT modelled, so a grandfathered member's notional
+      // contributions can show as excess here when in reality they
+      // would not.
+      let grossNotionalDB = 0;
+      for (const db of dbRows) {
+        if (dbMeta[db.id].owner !== p) continue;
+        const commenceMonth = dbCommenceMonth[db.id];
+        if (commenceMonth != null && commenceMonth <= yearStart(y)) continue; // already commenced — no longer accruing
+        grossNotionalDB += dbMeta[db.id].notionalTaxedContributions;
+      }
+      const otherConcessional = grossSG + grossSS + grossPD + grossNotionalDB;
       const carryForwardAvailable = availableCarryForward(
         superCarryForward[p], tsbPriorJune, superRatesY.carryForwardTsbGate
       );
@@ -4908,6 +5068,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // The schedule-driven, education-linked withdrawal (spec 25,
         // Commit 3) is safe here — see acc[p]'s own init comment.
         bondAssessableWithdrawal: measured[p].bondAssessableWithdrawal ?? 0,
+        // Defined benefit pensions (spec 26, Commit 2) — pass-independent
+        // (see dbGrossPension's own header), safe to assess same-year
+        // via measured[p] here, same as ttrPensionTaxable/bondAssessableWithdrawal
+        // above.
+        dbUntaxedPensionTaxable: measured[p].dbUntaxedAssessable ?? 0,
+        dbIncomeCapExcess: Math.max(0, (measured[p].dbGrossPension ?? 0) - superRatesY.dbIncomeCap) * 0.5,
       });
       // Disclosed simplification: excludes this FY's own realised
       // capital gain AND the DEFICIT-FUNDED bond assessable withdrawal
@@ -5080,6 +5246,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // the "pre" call above and the a2 block below for why THAT one
         // must be assessed from real[p], not measured[p].
         bondAssessableWithdrawal: measured[p].bondAssessableWithdrawal ?? 0,
+        dbUntaxedPensionTaxable: measured[p].dbUntaxedAssessable ?? 0,
+        dbIncomeCapExcess: Math.max(0, (measured[p].dbGrossPension ?? 0) - superRatesY.dbIncomeCap) * 0.5,
       });
       assessed[p] = a;
 
@@ -5295,6 +5463,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
       agePensionMonthly, heasMonthly, bonusCredits,
     });
+    // Defined benefit pensions (spec 26, Commit 2) — report the FY's
+    // income-cap excess on every one of this owner's DB rows,
+    // proportioned by each row's own share of the person's total gross
+    // DB pension (a person can hold more than one) — purely for the
+    // Commit 3 table breakout; the tax consequence itself is already
+    // correctly assessed via the person-level total (the "a" call
+    // above). row.definedBenefitDetail[*].grossPension is only now
+    // populated (the real pass just finished), hence resolved here.
+    for (const p of persons) {
+      const totalGross = measured[p].dbGrossPension ?? 0;
+      if (!(totalGross > 0)) continue;
+      const capExcessTotal = Math.max(0, totalGross - superRatesY.dbIncomeCap) * 0.5;
+      for (const db of dbRows) {
+        if (dbMeta[db.id].owner !== p) continue;
+        const g = row.definedBenefitDetail[db.id].grossPension;
+        row.definedBenefitDetail[db.id].dbIncomeCapExcess = capExcessTotal * (g / totalGross);
+      }
+    }
     row.closingBalance = combined[yearEnd(y)];
     row.wcaDetail.closing = wcaSeries[yearEnd(y)];
     row.wcaClosing = wcaSeries[yearEnd(y)];
@@ -5455,6 +5641,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       const bondDeficitAssessableWithdrawal = real[p].bondDeficitAssessableWithdrawal ?? 0;
       const untaxedSuperWithinCap = real[p].untaxedSuperWithinCap ?? 0;
       const untaxedSuperExcess = real[p].untaxedSuperExcess ?? 0;
+      // Defined benefit pensions (spec 26, Commit 2) — pass-independent,
+      // already fully assessed same-year in the "a" call above (no lag
+      // of its own). Still passed into EVERY call in this block,
+      // including both "without" isolation calls: omitting it here
+      // would understate the taxable base each call stacks its own gain
+      // on top of, silently mis-bracketing the CGT/bond/untaxed-super
+      // deltas this block computes — the general rule for combining
+      // independent deltas (see untaxedSuperWithinCap's own header).
+      const dbUntaxed = measured[p].dbUntaxedAssessable ?? 0;
+      const dbCapExcess = Math.max(0, (measured[p].dbGrossPension ?? 0) - superRatesY.dbIncomeCap) * 0.5;
       const a2 = assessPerson({
         fyStartYear: fyStart,
         bracketMode,
@@ -5469,6 +5665,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         bondAssessableWithdrawal: bondDeficitAssessableWithdrawal,
         untaxedSuperTaxable: untaxedSuperWithinCap,
         untaxedSuperExcess,
+        dbUntaxedPensionTaxable: dbUntaxed,
+        dbIncomeCapExcess: dbCapExcess,
       });
       lossCarryFwd[p] = a2.lossCarryFwd;
       newPending[p] = a2.cgtTax;
@@ -5484,6 +5682,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
           untaxedSuperTaxable: untaxedSuperWithinCap,
           untaxedSuperExcess,
+          dbUntaxedPensionTaxable: dbUntaxed,
+          dbIncomeCapExcess: dbCapExcess,
         });
         newPendingBondTax[p] = a2.netIncomeTax - withoutBond.netIncomeTax;
       }
@@ -5498,6 +5698,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           taxProfile: state.plan[p]?.taxProfile ?? null,
           excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
           bondAssessableWithdrawal: bondDeficitAssessableWithdrawal,
+          dbUntaxedPensionTaxable: dbUntaxed,
+          dbIncomeCapExcess: dbCapExcess,
         });
         newPendingUntaxedSuperTax[p] = a2.netIncomeTax - withoutUntaxedSuper.netIncomeTax;
       }

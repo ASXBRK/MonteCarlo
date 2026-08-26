@@ -172,6 +172,23 @@ export function assessPerson({
   untaxedSuperOffsetRate = 0.15,
   untaxedSuperExcess = 0,
   untaxedSuperExcessRate = 0.47,
+  // Defined benefit pensions (spec 26, Commit 2): from age 60, the
+  // TAXED element is tax-free (never reaches this function at all, the
+  // same way an ordinary pension's tax-free component is excluded
+  // upstream) but the UNTAXED element remains assessable at the
+  // marginal rate with a 10% offset — a DIFFERENT rate from the 15%
+  // lump-sum offset above, "a distinction easily conflated" per the
+  // spec's own words: a DB income stream's untaxed element gets the
+  // pension rate (10%), not the lump-sum rate (15%).
+  dbUntaxedPensionTaxable = 0,
+  dbUntaxedPensionOffsetRate = 0.10,
+  // Defined benefit income cap (spec 26, Commit 2): where a member's
+  // total DB income exceeds the cap, 50% of the excess is included in
+  // assessable income even though it would otherwise be tax-free —
+  // this is EXTRA assessable income with NO corresponding offset at
+  // all (nothing was pre-paid inside a fund to credit back), so unlike
+  // every other param in this stack it has no matching *OffsetRate.
+  dbIncomeCapExcess = 0,
 }) {
   const { key, k } = bracketSettings(fyStartYear, bracketMode, cpi);
   const nonResident = taxProfile?.residency === "nonResident";
@@ -195,7 +212,9 @@ export function assessPerson({
   const bondAssessable = Math.max(0, bondAssessableWithdrawal);
   const untaxedSuper = Math.max(0, untaxedSuperTaxable);
   const untaxedExcess = Math.max(0, untaxedSuperExcess); // NOT added to base — see param header
-  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease + ttrPension + bondAssessable + untaxedSuper);
+  const dbUntaxed = Math.max(0, dbUntaxedPensionTaxable);
+  const dbCapExcess = Math.max(0, dbIncomeCapExcess);
+  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease + ttrPension + bondAssessable + untaxedSuper + dbUntaxed + dbCapExcess);
 
   // Capital losses: a net loss year adds to the carry-forward; a gain
   // year consumes carried losses before any tax (losses never offset
@@ -236,7 +255,15 @@ export function assessPerson({
   // header for why it bypasses `base`/the progressive scale entirely).
   const untaxedSuperOffset = Math.min(untaxedSuper * untaxedSuperOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset - bondOffset));
   const untaxedSuperExcessTax = untaxedExcess * untaxedSuperExcessRate;
-  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset - bondOffset - untaxedSuperOffset + untaxedSuperExcessTax + medicare - frankingCredits;
+  // Defined benefit, Commit 2: the untaxed-element offset applies last
+  // among the non-refundable offsets, same "credited back" shape as
+  // every other one above (a DIFFERENT rate — 10%, not 15%). The
+  // income-cap excess is neither an offset nor a flat separate tax —
+  // it is ordinary extra assessable income (already folded into `base`
+  // above), taxed at whatever marginal rate it falls into, exactly like
+  // any other dollar of ordinaryIncome.
+  const dbUntaxedPensionOffset = Math.min(dbUntaxed * dbUntaxedPensionOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset - bondOffset - untaxedSuperOffset));
+  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset - bondOffset - untaxedSuperOffset + untaxedSuperExcessTax - dbUntaxedPensionOffset + medicare - frankingCredits;
 
   // CGT: the gain stacks on top of the income base. Marginal tax and
   // Medicare on the gain by differencing; post-reform (FY2027-28
@@ -260,6 +287,7 @@ export function assessPerson({
     bondOffset,
     untaxedSuperOffset,
     untaxedSuperExcessTax,
+    dbUntaxedPensionOffset,
     frankingCredits,
     netIncomeTax,
     cgtTax,

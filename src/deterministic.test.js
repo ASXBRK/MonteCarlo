@@ -6,6 +6,7 @@ import { checkYearConservation } from "./conservationCheck.js";
 import { lmiPremium } from "./data/lmiRates.js";
 import { levelPayment } from "./liabilities.js";
 import { agePensionRatesFor, cshcThresholdsFor } from "./data/agePension.js";
+import { superRatesFor } from "./data/superRates.js";
 import { heasEffectiveAnnualRate, heasMaxLoanAmount } from "./data/heas.js";
 import { assessPerson } from "./Tax/annual.js"; // only for the marginal-withholding hand-calc below
 
@@ -1776,6 +1777,126 @@ describe("Spec 26 Commit 1 — untaxed superannuation elements", () => {
   });
 });
 
+function dbRow(over = {}) {
+  return {
+    id: "db1", name: "DB", owner: "client",
+    commenceAt: { kind: "age", age: 40 },
+    annualPension: 50000,
+    indexBasis: "none", indexExtraPct: 0,
+    taxFreeProportion: 0, untaxedProportion: 0,
+    notionalTaxedContributions: 0,
+    ...over,
+  };
+}
+
+describe("Spec 26 Commit 2 — defined benefit pensions", () => {
+  it("commencing credits the transfer balance account at 16× the annual pension — NOT the pension amount itself", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { definedBenefits: [dbRow({ annualPension: 50000 })] },
+    });
+    const out = projectPlan(s);
+    // The canonical trap this spec exists to avoid: crediting $50,000
+    // (the pension amount) would understate cap usage sixteenfold.
+    expect(out.yearly[0].transferBalance.client.balance).toBeCloseTo(50000 * 16, 2);
+  });
+
+  it("the taxed element (gross less tax-free less untaxed) is tax-free from commencement — no tax impact at all", () => {
+    const withDb = mkState({
+      endAge: 41,
+      plan: { definedBenefits: [dbRow({ annualPension: 50000, taxFreeProportion: 20, untaxedProportion: 0 })] },
+    });
+    const without = mkState({ endAge: 41 });
+    const outWith = projectPlan(withDb);
+    const outWithout = projectPlan(without);
+    expect(outWith.yearly[0].definedBenefitDetail.db1.grossPension).toBeCloseTo(50000, 2);
+    expect(outWith.yearly[0].definedBenefitDetail.db1.untaxedAssessable).toBeCloseTo(0, 6);
+    // No untaxed element at all ⇒ identical tax outcome to no DB pension.
+    expect(outWith.yearly[0].taxDetail.client.incomeTax).toBeCloseTo(outWithout.yearly[0].taxDetail.client.incomeTax, 2);
+  });
+
+  it("the untaxed element is assessable with the 10% offset — a client with ONLY DB income pays less than the plain marginal+Medicare cost", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { definedBenefits: [dbRow({ annualPension: 50000, untaxedProportion: 100 })] },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].definedBenefitDetail.db1;
+    expect(d.untaxedAssessable).toBeCloseTo(50000, 2);
+    // The 10% offset directly reduces netIncomeTax relative to what the
+    // SAME assessable amount would cost as plain, unoffset income —
+    // verified against assessPerson directly (Tax/annual.test.js already
+    // covers the exact rate; this just confirms the engine wires the
+    // right figure through).
+    const plain = assessPerson({ fyStartYear: 2026, ordinaryIncome: 50000 });
+    const withOffset = assessPerson({ fyStartYear: 2026, ordinaryIncome: 0, dbUntaxedPensionTaxable: 50000 });
+    expect(withOffset.netIncomeTax).toBeLessThan(plain.netIncomeTax);
+  });
+
+  it("the defined benefit income cap: 50% of the excess is included in assessable income", () => {
+    const annualPension = 250000; // comfortably above the ~$131,250 FY2026-27 cap
+    const s = mkState({
+      endAge: 41,
+      plan: { definedBenefits: [dbRow({ annualPension, taxFreeProportion: 0, untaxedProportion: 0 })] },
+    });
+    const out = projectPlan(s);
+    const cap = superRatesFor(2026, "indexed", 0.025, 0.035).dbIncomeCap;
+    const expectedExcess = Math.max(0, annualPension - cap) * 0.5;
+    expect(out.yearly[0].definedBenefitDetail.db1.dbIncomeCapExcess).toBeCloseTo(expectedExcess, 0);
+    expect(expectedExcess).toBeGreaterThan(0); // sanity: the fixture actually exercises the cap
+  });
+
+  it("below the income cap, no excess is assessed at all", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { definedBenefits: [dbRow({ annualPension: 50000 })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].definedBenefitDetail.db1.dbIncomeCapExcess).toBe(0);
+  });
+
+  it("notional taxed contributions consume concessional cap headroom without crediting any super account", () => {
+    const capAmount = superRatesFor(2026, "indexed", 0.025, 0.035).concessionalCap;
+    const buildWithNotional = (notional) => mkState({
+      endAge: 41,
+      plan: {
+        superAccounts: [superAcct()],
+        definedBenefits: notional > 0 ? [dbRow({ commenceAt: { kind: "age", age: 65 }, notionalTaxedContributions: notional })] : [],
+      },
+      cashflows: { superContributions: [scRow({ type: "personalDeductible", amount: capAmount - 5000 })] },
+    });
+    const withoutNotional = projectPlan(buildWithNotional(0));
+    const withNotional = projectPlan(buildWithNotional(10000)); // pushes 5,000 over the cap
+    expect(withoutNotional.yearly[0].superCapUsage.client.available).toBeCloseTo(5000, 2);
+    // The notional contribution consumes the remaining headroom AND
+    // pushes $5,000 into excess — visible via the person's own excess-CC
+    // offset in their tax assessment (superCapUsage doesn't expose
+    // excessCC directly, but the tax outcome does).
+    expect(withNotional.yearly[0].superDetail.su1.contributions).toBeCloseTo(withoutNotional.yearly[0].superDetail.su1.contributions, 2);
+    expect(withNotional.yearly[0].taxDetail.client.excessConcessionalContributions).toBeCloseTo(5000, 0);
+    expect(withoutNotional.yearly[0].taxDetail.client.excessConcessionalContributions).toBeCloseTo(0, 2);
+  });
+
+  it("a defined benefit pension never appears in netAssets — it is income, not a balance", () => {
+    const s = mkState({
+      endAge: 41,
+      plan: { definedBenefits: [dbRow({ annualPension: 50000 })] },
+    });
+    const out = projectPlan(s);
+    // No balance anywhere this pension could have contributed to.
+    expect(out.yearly[0].superClosing).toBe(0);
+    expect(out.yearly[0].pensionClosing).toBe(0);
+  });
+
+  it("regression gate: no definedBenefits at all is unaffected", () => {
+    const s = mkState({ endAge: 44 });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.definedBenefitDetail).toEqual({});
+    }
+  });
+});
+
 // --- Tier 1.2, Commit 2: caps, contributions tax, Division 293 --------------
 
 function scRow(over = {}) {
@@ -2861,6 +2982,38 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
     }
 
+    // Defined benefit pensions (spec 26, Commit 2) — same olderCohort
+    // gating as pensions above (a DB pension similarly only makes sense
+    // near/at commencement age). Amounts span comfortably under and
+    // (occasionally) well over the DB income cap (~$131k FY2026-27) —
+    // exercising the 50%-of-excess mechanic — and the annualPension×16
+    // special value occasionally exceeds the general transfer balance
+    // cap (~$2.1m) on its own, exercising the TBA-excess disclosure
+    // path a NORMAL pension's own commencement amount could never
+    // reach (16× is a much bigger multiple than any realistic account
+    // balance). notionalTaxedContributions sometimes large enough to
+    // push the owner over their OWN concessional cap on top of whatever
+    // SG/personal contributions their super account already generates.
+    const definedBenefits = [];
+    if (olderCohort) {
+      for (const p of persons) {
+        if (Math.random() < 0.4) {
+          const taxFreeProportion = rand(0, 40);
+          definedBenefits.push({
+            id: `db_${p}`, name: `DB ${p}`, owner: p,
+            commenceAt: { kind: "age", age: randInt(startAge, endAge) },
+            annualPension: pick([rand(20000, 100000), rand(120000, 200000)]),
+            indexBasis: pick(["none", "cpi", "awote"]),
+            indexExtraPct: rand(0, 2),
+            taxFreeProportion,
+            untaxedProportion: rand(0, 100 - taxFreeProportion),
+            reversionaryPct: couple ? rand(0, 100) : 0,
+            notionalTaxedContributions: pick([0, rand(5000, 40000)]),
+          });
+        }
+      }
+    }
+
     // Gifting and deprivation (spec 21b, Commit 2) — a genuine new
     // money flow (a leak — see conservationCheck.js). 0-3 gifts,
     // spanning amounts comfortably under, at, and over BOTH the
@@ -3497,7 +3650,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         plan: {
           household: couple ? "couple" : "single",
           client, partner, children,
-          superAccounts, pensions, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
+          superAccounts, pensions, definedBenefits, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments, employers, novatedLeases,
         },
         cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows, bondContributions, superRollovers },

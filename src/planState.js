@@ -401,6 +401,7 @@ export function defaultPlan(now = new Date()) {
     employers: [],
     novatedLeases: [],
     pensions: [],
+    definedBenefits: [],
     gifts: [],
     heas: createHeas(),
     workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
@@ -2141,6 +2142,70 @@ export function normalisePensions(pensions, plan, superAccounts = [], profiles =
   return pensions.map((pn) => clampPension(pn, plan, superAccounts, profiles));
 }
 
+// --- Defined benefit pensions (spec 26, Commit 2) ---------------------------
+//
+// WA state-government schemes (GESB Gold State Super, and similar) —
+// a promised pension the client's own annual statement states, not
+// something this tool derives from a super account (the spec's own
+// scoping principle: "we do not compute what the fund's actuary
+// computes... we take those as inputs"). Deliberately simpler than
+// `pensions`: no sourceAccountId, no source-account cross-validation,
+// no second normalisation stage — clamped entirely inside clampPlan,
+// same as pensions but without the superAccounts dependency.
+export function createDefinedBenefit(plan, existing = [], owner = "client") {
+  const person = owner === "partner" ? plan.partner : plan.client;
+  const label = personDisplayName(person, owner === "partner" ? "Partner" : "Client");
+  return {
+    id: uid("db"),
+    name: `Defined benefit — ${label}`,
+    owner,
+    commenceAt: anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"),
+    annualPension: 0,
+    indexBasis: "cpi", // DB pensions commonly index at CPI (spec's own words)
+    indexExtraPct: 0,
+    taxFreeProportion: 0,
+    untaxedProportion: 0,
+    // Reversionary to spouse on death, typically 67% (spec's own
+    // figure) — meaningless with no partner, same input-integrity
+    // pattern clampPension's own `reversionary` flag already uses.
+    reversionaryPct: plan.partner ? 67 : 0,
+    notionalTaxedContributions: 0,
+  };
+}
+
+export function clampDefinedBenefit(db, plan) {
+  const owner = db.owner === "partner" && plan.partner ? "partner" : "client";
+  const commenceAt = clampDateRef(db.commenceAt ?? anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"), plan.client.currentAge, plan.endAge, plan);
+  // taxFreeProportion + untaxedProportion together can't exceed 100%
+  // (the remainder is the taxed element) — an input-integrity bound,
+  // not a warning: two independently-clamped 0-100 sliders could
+  // otherwise silently sum past what a real benefit statement can
+  // express. untaxedProportion is clamped SECOND, against whatever
+  // headroom taxFreeProportion leaves — an arbitrary but stable tie-
+  // break (matches every other "two proportions of the one whole"
+  // pattern in this codebase, e.g. deductiblePct vs the private
+  // balance it implies).
+  const taxFreeProportion = clampNumber(db.taxFreeProportion, 0, 100);
+  const untaxedProportion = clampNumber(db.untaxedProportion, 0, 100 - taxFreeProportion);
+  return {
+    id: typeof db.id === "string" && db.id ? db.id : uid("db"),
+    name: typeof db.name === "string" && db.name.trim() ? db.name : "Defined benefit",
+    owner,
+    commenceAt,
+    annualPension: clampNumber(db.annualPension, 0),
+    ...clampIndexation(db),
+    taxFreeProportion,
+    untaxedProportion,
+    reversionaryPct: plan.partner ? clampNumber(db.reversionaryPct, 0, 100) : 0,
+    notionalTaxedContributions: clampNumber(db.notionalTaxedContributions, 0),
+  };
+}
+
+export function normaliseDefinedBenefits(rows, plan) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((db) => clampDefinedBenefit(db, plan));
+}
+
 // --- Gifting and deprivation (spec 21b, Commit 2) ---------------------------
 //
 // A one-off cash gift, DateRef-anchored like a lump sum or a
@@ -2609,6 +2674,13 @@ export function clampPlan(plan, profiles = {}) {
   // release gate depends on it), same ordering reason as adviserFees
   // below.
   const pensions = normalisePensions(plan.pensions, { client, partner, endAge, keyDates }, superAccounts, profiles);
+  // Defined benefit pensions (spec 26, Commit 2) — unlike `pensions`,
+  // no superAccounts dependency at all (a DB pension is a scheme
+  // entitlement the client's own statement states, not drawn from a
+  // modelled account), so this resolves in the SAME single pass with
+  // no second hydrate() stage needed — see clampDefinedBenefit's own
+  // header.
+  const definedBenefits = normaliseDefinedBenefits(plan.definedBenefits, { client, partner, endAge, keyDates });
   // Gifting and deprivation (spec 21b, Commit 2) — client-anchored like
   // every other one-off event, so only needs client/partner/endAge,
   // already resolved above.
@@ -2640,7 +2712,7 @@ export function clampPlan(plan, profiles = {}) {
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
   const planSoFar = {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, novatedLeases, pensions, gifts, heas, workingCash, children,
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, novatedLeases, pensions, definedBenefits, gifts, heas, workingCash, children,
     adviserFees, implementation,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,
