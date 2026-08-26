@@ -2875,13 +2875,158 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   const randInt = (min, max) => Math.floor(rand(min, max + 1));
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
+  // --- Threshold-aware generation (spec 28, Commit 1) -----------------------
+  //
+  // docs/specs/28-generator-boundary-coverage.md: "the guard only
+  // guards what the generator generates" — two real conservation bugs
+  // (a super-drawn-down-in-the-FY's-final-month ordering bug; an NCC
+  // rejected near the bring-forward NIL tier, ~$2.1m) hid for months
+  // because a plain rand()/randInt() rarely lands near a boundary by
+  // chance. THRESHOLD_REGISTRY names every value this generator now
+  // deliberately straddles; stratify()/stratifyInt() draw from 5 strata
+  // {wellBelow, justBelow, at, justAbove, wellAbove} around a NAMED
+  // threshold (uniformly picking the stratum, then jittering within
+  // it) instead of a uniform range. thresholdCoverage records which
+  // stratum fired for which threshold, read by both this file's own
+  // "produces every stratum" test and the dedicated coverage-report
+  // test (spec 28 Commit 2).
+  //
+  // Figures below are FY2026-27 base values (src/Tax/engine.js,
+  // src/data/*.js) — the reference year this generator's own fixed
+  // planStart (2026-07) always starts in. Over the short 2-4 year
+  // (occasionally 1-year — see "timing" below) window this generator
+  // spans, CPI indexation moves the ACTUAL per-FY threshold only
+  // slightly from these base figures, so drawing near the base value
+  // reliably lands near the true indexed one too — a disclosed
+  // approximation (not exact for a later FY), not a claim of
+  // precision this test doesn't need.
+  const THRESHOLD_REGISTRY = [
+    // Tax — marginal brackets, resident, FY2026-27 (Tax/engine.js LEG)
+    "tax.bracket.18200", "tax.bracket.45000", "tax.bracket.135000", "tax.bracket.190000",
+    // Medicare levy shading-in range (single)
+    "tax.medicareShadeLower.28011", "tax.medicareShadeUpper.35014",
+    // MLS bands (singles; family bands share the same shape, not
+    // independently stratified here — a disclosed narrowing)
+    "tax.mls.single.105000", "tax.mls.single.123000", "tax.mls.single.164000",
+    // HELP brackets + the whole-income cliff
+    "tax.help.69528", "tax.help.129717", "tax.help.cliff.186052",
+    // Division 293 / 296
+    "tax.div293.250000", "tax.div296.3000000", "tax.div296.10000000",
+    // LITO phase-out
+    "tax.lito.taper1.37500", "tax.lito.taper2.45000", "tax.lito.cutout.66667",
+    // Super — caps, TSB gates, bring-forward tiers (incl. the nil tier
+    // that hid bug 7), untaxed plan cap, age limits, preservation/release
+    "super.concessionalCap.32500", "super.carryForwardTsbGate.500000",
+    "super.bringForward.1840000", "super.bringForward.1970000", "super.bringForward.nil.2100000",
+    "super.untaxedPlanCap.1935000", "super.contributionAge.67", "super.contributionAge.75",
+    "super.preservationAge.60", "super.releaseAge.65",
+    // Pension — minimum-drawdown age bands, transfer balance cap
+    // (incl. a member at exactly 100% used), June-vs-July commencement
+    "pension.minDrawdown.65", "pension.minDrawdown.75", "pension.minDrawdown.80",
+    "pension.minDrawdown.85", "pension.minDrawdown.90", "pension.minDrawdown.95",
+    "pension.tbc.2100000", "pension.commencement.julyVsJune",
+    // Age pension — assets/income test thresholds (single/homeowner
+    // shown; couple/non-homeowner share the same mechanism, a
+    // disclosed narrowing), deeming, Work Bonus, gifting, age.
+    // agePension.income.freeAreaSingle is approximated via an asset-
+    // balance proxy (the deemed-income equivalent), not the $5,876
+    // income figure directly — see randomAsset's own comment.
+    // agePension.workBonus is registered as the $7,800 EXEMPT ANNUAL
+    // income threshold (the actual per-month input the engine branches
+    // on), not the $0/$11,800 BANK figures themselves — the bank is a
+    // path-dependent accumulated OUTPUT, not something a single input
+    // draw can stratify directly.
+    "agePension.assets.fullHomeownerSingle.333000",
+    "agePension.income.freeAreaSingle.5876",
+    "agePension.deeming.single.66800",
+    "agePension.workBonus.exemptAnnual.7800",
+    "agePension.gifting.10000", "agePension.gifting.30000", "agePension.age.67",
+    // Property / debt
+    "property.lvr.80", "property.landTax.nsw.1075000",
+    // Bonds — the ten-year date, the 125% contribution cap
+    "bonds.maturity.120months", "bonds.contributionCap.125pct",
+    // Timing — start month. "Exactly one year" is generated too (see
+    // degenerateScenarios' own "single-year projection" case) but not
+    // registered here: years is a small discrete count with no natural
+    // "well below 1" (a 0-or-negative-year projection isn't a valid
+    // state), so it doesn't fit this 5-stratum model — it's covered as
+    // a degenerate PRESENCE case instead, per the spec's own separate
+    // "also generate degenerate states" list.
+    "timing.startMonth.julyVsOther",
+  ];
+
+  let thresholdCoverage = {};
+  function resetThresholdCoverage() {
+    thresholdCoverage = {};
+    for (const name of THRESHOLD_REGISTRY) {
+      thresholdCoverage[name] = { wellBelow: 0, justBelow: 0, at: 0, justAbove: 0, wellAbove: 0 };
+    }
+  }
+  resetThresholdCoverage();
+
+  function recordStratum(name, stratum) {
+    if (!thresholdCoverage[name]) thresholdCoverage[name] = { wellBelow: 0, justBelow: 0, at: 0, justAbove: 0, wellAbove: 0 };
+    thresholdCoverage[name][stratum]++;
+  }
+
+  // Stratified draw around a dollar/count threshold. `near` controls
+  // how tight "just below/above" are; `span` how far "well below/
+  // above" reach — both default off the threshold's own scale, but
+  // callers pass explicit values for small or oddly-shaped thresholds
+  // (an age, a percentage, a $10,000 limit).
+  function stratify(name, threshold, opts = {}) {
+    const near = opts.near ?? Math.max(1, threshold * 0.01);
+    const span = opts.span ?? Math.max(near * 4, threshold * 0.6);
+    const stratum = pick(["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]);
+    recordStratum(name, stratum);
+    switch (stratum) {
+      case "wellBelow": return Math.max(0, threshold - rand(near * 3, span));
+      case "justBelow": return Math.max(0, threshold - rand(1, near));
+      case "at": return threshold;
+      case "justAbove": return threshold + rand(1, near);
+      case "wellAbove": return threshold + rand(near * 3, span);
+    }
+  }
+
+  // Same 5 strata, integer-valued (ages, months, a count).
+  function stratifyInt(name, threshold, opts = {}) {
+    const near = opts.near ?? 2;
+    const span = opts.span ?? Math.max(near * 3, 10);
+    const stratum = pick(["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]);
+    recordStratum(name, stratum);
+    switch (stratum) {
+      case "wellBelow": return threshold - randInt(near + 1, span);
+      case "justBelow": return threshold - randInt(1, near);
+      case "at": return threshold;
+      case "justAbove": return threshold + randInt(1, near);
+      case "wellAbove": return threshold + randInt(near + 1, span);
+    }
+  }
+
   const randomAllocation = () => ({
     mode: "custom", incomePct: rand(0, 6), growthPct: rand(-2, 8),
     frankingPct: pick([0, 0, 50, 100]), volBasis: "Balanced",
   });
 
-  const randomAsset = (id) => {
-    const balance = rand(0, 200000);
+  // Age pension assets-test/deeming thresholds (spec 28 Commit 1) — all
+  // apply to a HOUSEHOLD TOTAL (assessable assets across every asset/
+  // super/property; deemed financial assets across every financial
+  // asset), not a single input. Stratifying the FIRST asset's own
+  // balance around one of them is an approximation (other assets/super
+  // still contribute independently), not an exact hit — the same
+  // disclosed trade-off land tax's priceToday stratification makes.
+  // agePension.income.freeAreaSingle is itself an INCOME figure, not a
+  // balance — approximated via the asset-balance that produces roughly
+  // that much deemed income at the lower (1.25%) deeming rate.
+  const ASSET_BALANCE_THRESHOLDS = [
+    ["agePension.assets.fullHomeownerSingle.333000", 333000],
+    ["agePension.deeming.single.66800", 66800],
+    ["agePension.income.freeAreaSingle.5876", 5876 / 0.0125],
+  ];
+  const randomAsset = (id, i = 1) => {
+    const balance = i === 0 && Math.random() < 0.4
+      ? Math.max(0, stratify(...pick(ASSET_BALANCE_THRESHOLDS)))
+      : rand(0, 200000);
     const cgtAsset = Math.random() < 0.5;
     return mkAsset({
       id, balance, cgtAsset,
@@ -2892,17 +3037,27 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     });
   };
 
-  // Stratified, not uniform: a plain rand(60000,200000) rarely lands
-  // below HELP's $69,528 floor or above its $186,052 cliff, and rarely
-  // crosses MLS's $105,000 single / $210,000 family thresholds either
-  // — exactly the gap that let a whole Document Set of money flows go
-  // unexercised. One band per HELP/MLS regime, picked uniformly.
-  const randomIncome = () => pick([
-    rand(20000, 69000),    // below HELP's floor, below MLS
-    rand(70000, 104000),   // HELP marginal, below MLS (singles)
-    rand(106000, 186000),  // HELP marginal, above MLS (singles)
-    rand(187000, 320000),  // above HELP's cliff, well above MLS (and family MLS)
-  ]);
+  // Stratified around a NAMED tax threshold (spec 28 Commit 1) — income
+  // is the single value that drives every tax boundary in the
+  // registry (brackets, Medicare shading, MLS, HELP, LITO; Division
+  // 293 income is a disclosed simplification, using plain income as a
+  // proxy for the real "taxable income + reportable super
+  // contributions" figure). Each call picks ONE registered threshold
+  // uniformly and stratifies tightly around it, replacing the four
+  // hand-picked wide bands this generator used before spec 28.
+  const INCOME_THRESHOLDS = [
+    ["tax.bracket.18200", 18200], ["tax.bracket.45000", 45000],
+    ["tax.bracket.135000", 135000], ["tax.bracket.190000", 190000],
+    ["tax.medicareShadeLower.28011", 28011], ["tax.medicareShadeUpper.35014", 35014],
+    ["tax.mls.single.105000", 105000], ["tax.mls.single.123000", 123000], ["tax.mls.single.164000", 164000],
+    ["tax.help.69528", 69528], ["tax.help.129717", 129717], ["tax.help.cliff.186052", 186052],
+    ["tax.lito.taper1.37500", 37500], ["tax.lito.taper2.45000", 45000], ["tax.lito.cutout.66667", 66667],
+    ["tax.div293.250000", 250000],
+  ];
+  const randomIncome = () => {
+    const [name, threshold] = pick(INCOME_THRESHOLDS);
+    return Math.max(1000, stratify(name, threshold));
+  };
 
   function randomScenario() {
     const couple = Math.random() < 0.4;
@@ -2917,7 +3072,36 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // ORIGINAL age-40 start byte-for-byte (every literal `40` below is
     // now `startAge`, but startAge === 40 whenever !olderCohort) — zero
     // behavioural change to the pre-existing coverage those runs give.
-    const olderCohort = Math.random() < 0.35;
+    // Age thresholds (spec 28, Commit 1) — every age boundary the
+    // engine branches on: preservation age 60, release age 65, the
+    // super contribution-age limits 67/75, the minimum-drawdown age
+    // bands, and age pension age 67 all live on the SAME "how old is
+    // this person" axis pension/definedBenefits/olderCohort already
+    // stratify loosely — a fourth, tightly-stratified cohort pushes
+    // startAge to sit within a couple of years of ONE of them,
+    // uniformly chosen, so the sweep actually lands ON, just-under,
+    // and just-over each rather than only spanning wide age bands.
+    const AGE_THRESHOLDS = [
+      ["super.contributionAge.67", 67], ["super.contributionAge.75", 75],
+      ["super.preservationAge.60", 60], ["super.releaseAge.65", 65],
+      ["agePension.age.67", 67],
+      ["pension.minDrawdown.65", 65], ["pension.minDrawdown.75", 75], ["pension.minDrawdown.80", 80],
+      ["pension.minDrawdown.85", 85], ["pension.minDrawdown.90", 90], ["pension.minDrawdown.95", 95],
+    ];
+    const boundaryAgeCohort = Math.random() < 0.25;
+    const [boundaryAgeName, boundaryAgeThreshold] = pick(AGE_THRESHOLDS);
+    // Pension phase (spec 20, Commit 1) can only ever fire within
+    // superReleaseAge's 60-65 window — unreachable from the ORIGINAL
+    // fixed age-40 start over a 2-4 year projection. Stratified, not
+    // uniform, same reasoning as randomIncome()'s own header: a plain
+    // rand(40, 65) start would rarely land close enough to 60 for the
+    // gate to bind within such a short window. boundaryAgeCohort also
+    // activates olderCohort (a boundary age near 60/65/67/75/etc is
+    // exactly the "older" case pensions/DB pensions need to be live
+    // for) — so the ORIGINAL "byte-for-byte age-40" comment below no
+    // longer holds for quite as large a share of runs as before spec
+    // 28, a disclosed trade-off for the extra boundary coverage.
+    const olderCohort = Math.random() < 0.35 || boundaryAgeCohort;
     // Age pension (spec 21a) can only ever fire once a person reaches
     // age pension age (67) — unreachable from EITHER the original
     // age-40 start or the pension-phase olderCohort (max 63+4-1=66)
@@ -2929,15 +3113,42 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // interaction the spec calls out as the case that "must be exactly
     // right".
     const retireeCohort = Math.random() < 0.2;
-    const startAge = retireeCohort ? randInt(65, 70) : olderCohort ? randInt(56, 63) : 40;
+    const startAge = retireeCohort ? randInt(65, 70)
+      : boundaryAgeCohort ? Math.max(18, stratifyInt(boundaryAgeName, boundaryAgeThreshold, { near: 2, span: 6 }))
+      : olderCohort ? randInt(56, 63)
+      : 40;
     const endAge = startAge + years - 1;
 
-    const assets = Array.from({ length: randInt(1, 3) }, (_, i) => randomAsset(`a${i}`));
+    const assets = Array.from({ length: randInt(1, 3) }, (_, i) => randomAsset(`a${i}`, i));
+
+    // Super balance thresholds (spec 28, Commit 1) — total super
+    // balance is what the carry-forward TSB gate, every bring-forward
+    // tier (including the ~$2.1m NIL tier that hid bug 7), the untaxed
+    // plan cap, and Division 296's two tiers all branch on. A plain
+    // rand(0,200000) never gets near any of them. Stratified around
+    // ONE of them, uniformly chosen, on top of the pre-existing zero-
+    // balance and ordinary-range cases (kept for the FHSSS/withdrawal
+    // coverage their own comments already describe). Approximate when
+    // a person also gets a second (rollover) account below — this
+    // stratifies the PRIMARY account only, a disclosed simplification
+    // rather than solving for an exact multi-account total.
+    const SUPER_BALANCE_THRESHOLDS = [
+      ["super.carryForwardTsbGate.500000", 500000],
+      ["super.bringForward.1840000", 1840000], ["super.bringForward.1970000", 1970000],
+      ["super.bringForward.nil.2100000", 2100000],
+      ["super.untaxedPlanCap.1935000", 1935000],
+      ["tax.div296.3000000", 3000000], ["tax.div296.10000000", 10000000],
+    ];
+    const randomSuperBalance = () => {
+      const r = Math.random();
+      if (r < 0.3) return 0;
+      if (r < 0.6) return rand(0, 200000);
+      const [name, threshold] = pick(SUPER_BALANCE_THRESHOLDS);
+      return Math.max(0, stratify(name, threshold));
+    };
 
     const superAccounts = persons.map((p) => superAcct({
-      // half zero-balance — exercises the FHSSS release cap / withdrawFromSuper
-      // shortfall path, which a uniform draw over (0, 200000) rarely hits exactly.
-      id: `su_${p}`, owner: p, balance: pick([0, rand(0, 200000)]), allocation: randomAllocation(),
+      id: `su_${p}`, owner: p, balance: randomSuperBalance(), allocation: randomAllocation(),
       // Insurance premiums inside super (spec 19 Commit 7) — sometimes
       // active, sometimes larger than a low starting balance can sustain
       // (exercising withdrawFromSuper's own floor-at-zero convention).
@@ -3013,9 +3224,29 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           pensions.push({
             id: `pn_${p}`, name: `Pension ${p}`, owner: p,
             sourceAccountId: acct.id,
-            commenceAt: { kind: "age", age: randInt(startAge, endAge) },
+            // Commencement in June (no minimum) vs July (spec 28
+            // Commit 1) — an age-based DateRef always resolves to 1
+            // July (this engine's own "ages tick each 1 July"
+            // convention), so it alone can never produce a June
+            // commencement; anchoring to "start" instead does, whenever
+            // this run's own randomStartMonth() landed on June.
+            commenceAt: (() => {
+              const stratum = pick(["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]);
+              recordStratum("pension.commencement.julyVsJune", stratum);
+              return stratum === "at" || stratum === "justBelow"
+                ? { kind: "anchor", anchorId: "start" }
+                : { kind: "age", age: randInt(startAge, endAge) };
+            })(),
             type,
-            commenceAmount: Math.random() < 0.5 ? null : rand(0, acct.balance),
+            // Transfer balance cap (spec 28 Commit 1) — stratified
+            // around the general TBC ($2.1m, incl. a member at exactly
+            // 100% used) when the source balance can reach it, on top
+            // of the pre-existing null/partial draw.
+            commenceAmount: Math.random() < 0.3
+              ? null
+              : acct.balance > 100000 && Math.random() < 0.3
+              ? Math.min(acct.balance, Math.max(0, stratify("pension.tbc.2100000", 2100000, { near: 50000, span: 1500000 })))
+              : rand(0, acct.balance),
             reversionary: Math.random() < 0.3,
             taxFreeProportion: null,
             allocation: randomAllocation(),
@@ -3076,19 +3307,23 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
     }
 
-    // Gifting and deprivation (spec 21b, Commit 2) — a genuine new
-    // money flow (a leak — see conservationCheck.js). 0-3 gifts,
-    // spanning amounts comfortably under, at, and over BOTH the
-    // $10,000 annual and $30,000 five-year limits, at random ages
-    // across the window — exercising allowable-in-full, partially-
-    // deprived, and (with several gifts close together) five-year-
-    // limit-breached cases all in the same sweep.
-    const gifts = Array.from({ length: randInt(0, 3) }, (_, i) => ({
-      id: `gift${i}`, owner: couple ? pick(["client", "partner", "joint"]) : "client",
-      amount: pick([rand(1000, 9000), rand(10000, 15000), rand(20000, 40000)]),
-      at: { kind: "age", age: randInt(startAge, endAge) },
-      label: `Gift ${i}`,
-    }));
+    // Gifting and deprivation (spec 21b, Commit 2; spec 28 Commit 1) —
+    // a genuine new money flow (a leak — see conservationCheck.js).
+    // 0-3 gifts, each stratified tightly around EITHER the $10,000
+    // annual or the $30,000 five-year limit (uniformly chosen), at
+    // random ages across the window — exercising allowable-in-full,
+    // just-under/at/just-over-deprived, and (with several gifts close
+    // together) five-year-limit-breached cases all in the same sweep.
+    const GIFT_THRESHOLDS = [["agePension.gifting.10000", 10000], ["agePension.gifting.30000", 30000]];
+    const gifts = Array.from({ length: randInt(0, 3) }, (_, i) => {
+      const [name, threshold] = pick(GIFT_THRESHOLDS);
+      return {
+        id: `gift${i}`, owner: couple ? pick(["client", "partner", "joint"]) : "client",
+        amount: Math.max(0, stratify(name, threshold, { near: threshold * 0.1, span: threshold })),
+        at: { kind: "age", age: randInt(startAge, endAge) },
+        label: `Gift ${i}`,
+      };
+    });
 
     // Redundancy and ETP (spec 19 Commit 3) — sometimes one person's
     // income row terminates: the row's own `to` is forced to match
@@ -3097,11 +3332,19 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // length, both types, and a payout spanning comfortably under and
     // over both the ETP cap and the (tighter, resignation-only)
     // whole-of-income cap.
+    // Work Bonus (spec 21b Commit 1; spec 28 Commit 1) — the $7,800
+    // annual exempt-income threshold is the actual per-period input the
+    // engine branches on (whether this month's earned income exceeds
+    // the pro-rated exempt amount); the bank's own $0/$11,800 figures
+    // are a path-dependent OUTPUT of that, not directly stratifiable
+    // (see THRESHOLD_REGISTRY's own comment). Retirees only — a young
+    // cohort's income is never assessed against Work Bonus at all.
+    const workBonusIncome = () => Math.max(0, stratify("agePension.workBonus.exemptAnnual.7800", 7800, { near: 500, span: 20000 }));
     const income = persons.map((p) => {
       const terminates = Math.random() < 0.3;
       const at = terminates ? randInt(startAge, endAge) : null;
       return employmentRow({
-        id: `sal_${p}`, owner: p, amount: randomIncome(),
+        id: `sal_${p}`, owner: p, amount: retireeCohort && Math.random() < 0.4 ? workBonusIncome() : randomIncome(),
         frequency: pick(["monthly", "annual"]),
         from: { kind: "age", age: startAge }, to: { kind: "age", age: terminates ? at : 120 },
         sgApplies: Math.random() < 0.9,
@@ -3189,7 +3432,15 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         superContributions.push(scRow({
           id: `sc_amt_${p}`, owner: p, accountId: `su_${p}`,
           type: pick(["salarySacrifice", "personalDeductible"]),
-          basis: "amount", amount: rand(1000, 15000), frequency: "annual",
+          basis: "amount",
+          // Concessional cap (spec 28 Commit 1) — combined with SG on a
+          // now-often-six-figure stratified income, a contribution
+          // stratified around the $32,500 cap itself exercises the
+          // headroom boundary directly, not just an arbitrary $1-15k.
+          amount: Math.random() < 0.5
+            ? Math.max(0, stratify("super.concessionalCap.32500", 32500, { near: 1000, span: 30000 }))
+            : rand(1000, 15000),
+          frequency: "annual",
           from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
           fhsssEligible: Math.random() < 0.5,
         }));
@@ -3413,7 +3664,11 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         currentValue: 0, acquisitionDate: null, costBase: 0,
         priceToday: rand(300000, 900000),
         purchaseAt: { kind: "age", age: purchaseAge },
-        lvrPct: pick([60, 70, 80, 85, 90, 95]),
+        // LMI's own trigger (spec 28 Commit 1) — stratified tightly
+        // around the 80% LVR boundary (LMI applies strictly ABOVE 80%,
+        // never at it — src/data/lmiRates.js) rather than the previous
+        // fixed list, which only ever hit 80 exactly, never 79 or 81.
+        lvrPct: Math.min(100, Math.max(0, stratifyInt("property.lvr.80", 80, { near: 1, span: 20 }))),
         firstHomeBuyer, newBuild: Math.random() < 0.3,
         purchaseCostsPct: rand(0, 3), dutyOverride: null, growthPct: rand(0, 6),
         rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
@@ -3446,7 +3701,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         state: sharedState, // biased toward the SAME state across both, to exercise aggregation
         propertyType: pick(["investment", "holiday"]), status: "planned",
         currentValue: 0, acquisitionDate: null, costBase: 0,
-        priceToday: rand(300000, 2000000),
+        // Land tax's NSW threshold (spec 28 Commit 1) applies to
+        // ASSESSED LAND VALUE (priceToday × landValuePct below), a
+        // compound of two independent draws — stratifying priceToday
+        // around threshold/0.7 (a representative mid-range
+        // landValuePct) is an approximation, not an exact hit, but
+        // meaningfully improves on a plain rand(300000,2000000) that
+        // rarely put land value anywhere near $1,075,000 at all.
+        priceToday: Math.max(50000, stratify("property.landTax.nsw.1075000", 1075000 / 0.7, { near: 50000, span: 900000 })),
         purchaseAt: { kind: "age", age: startAge },
         lvrPct: 0, firstHomeBuyer: false, newBuild: Math.random() < 0.5,
         purchaseCostsPct: 0, dutyOverride: null, growthPct: rand(-2, 6),
@@ -3514,7 +3776,24 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // drives, and the education expense window all get exercised
     // across a real spread of scenarios, not just the hand-picked ones
     // in the dedicated tests below.
-    const planStart = { year: 2026, month: 7 };
+    // Timing — start month (spec 28 Commit 1): stratified around July,
+    // the engine's own boundary for whether an annual/one-off event
+    // fires in a genuinely partial first year (CLAUDE.md's "Cashflows"
+    // convention) — previously ALWAYS July, so that skip path (and the
+    // partial-first-year length it produces) was never exercised here
+    // at all.
+    function randomStartMonth() {
+      const stratum = pick(["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]);
+      recordStratum("timing.startMonth.julyVsOther", stratum);
+      switch (stratum) {
+        case "wellBelow": return randInt(1, 4);   // Jan-Apr: long partial first year
+        case "justBelow": return 6;                 // June: at-or-before July — no skip
+        case "at": return 7;                         // July exactly — no partial year at all
+        case "justAbove": return 8;                  // August: just past — minimal partial, skipped
+        case "wellAbove": return randInt(10, 12);    // Oct-Dec: longer partial, skipped
+      }
+    }
+    const planStart = { year: 2026, month: randomStartMonth() };
     const children = Array.from({ length: randInt(0, 3) }, (_, i) => ({
       id: `ch${i}`, name: `Child ${i}`,
       dateOfBirth: synthDob(randInt(-2, 24), planStart),
@@ -3668,6 +3947,27 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // triggers a withdrawal, so maturity status itself doesn't affect
     // conservation yet, but stratifying now saves Commit 2/3 from
     // needing to revisit this generator.
+    //
+    // The ten-year date (spec 28 Commit 1) — bondMaturityMonth is
+    // start+120 months, a RELATIVE threshold (not a fixed calendar
+    // date), so this stratifies the OFFSET between a bond's own
+    // maturity and a random target month within the projection,
+    // around 0 — the resulting startDate lands well-before/just-
+    // before/exactly-at/just-after/well-after its own ten-year mark
+    // relative to something actually visible in this short window.
+    const projectionMonthsApprox = years * 12; // coarse — ignores the partial-first-year skip, fine for a target month
+    const planStartMonthsFromEpoch = planStart.year * 12 + (planStart.month - 1);
+    function isoFromMonthsFromEpoch(totalMonths) {
+      const year = Math.floor(totalMonths / 12);
+      const month0 = ((totalMonths % 12) + 12) % 12;
+      return `${year}-${String(month0 + 1).padStart(2, "0")}-01`;
+    }
+    function stratifiedBondStartDate() {
+      const targetMonth = randInt(0, Math.max(0, projectionMonthsApprox - 1));
+      const offset = stratifyInt("bonds.maturity.120months", 0, { near: 1, span: 6 });
+      return isoFromMonthsFromEpoch(planStartMonthsFromEpoch + targetMonth - 120 + offset);
+    }
+
     const bonds = [];
     const bondContributions = [];
     for (let i = 0; i < randInt(0, 2); i++) {
@@ -3686,28 +3986,48 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         id, name: `Bond ${i}`, type,
         owner: couple ? pick(["client", "partner", "joint"]) : "client",
         include: true, balance: rand(0, 150000),
-        startDate: pick(["2012-03-01", "2020-11-01", "2026-07-01", "2027-01-01"]),
+        startDate: Math.random() < 0.5
+          ? stratifiedBondStartDate()
+          : pick(["2012-03-01", "2020-11-01", "2026-07-01", "2027-01-01"]),
         allocation: randomAllocation(), icrPct: 0,
         beneficiaryChildId,
       });
-      // Sometimes no contribution stream at all (a bond just sitting
-      // there, growing); when present, amounts span from a compliant
-      // top-up to a 125%-rule-breaching one across the projection's
-      // short multi-year window, and sometimes 0 (the nil-contribution-
-      // year consequence) via rand's own lower bound.
+      // The 125% contribution cap (spec 28 Commit 1) — a single FLAT
+      // contribution row never changes year to year, so it can never
+      // breach or reset the ten-year clock. Two non-overlapping rows
+      // instead: the first establishes a prior-FY baseline (sometimes
+      // nil — the "no-contribution year followed by one with" case),
+      // the second (active only from a later age) is stratified
+      // tightly around 125% of the first's own annual total, so the
+      // sweep actually exercises at/just-under/just-over the breach.
       if (Math.random() < 0.7) {
+        const firstAnnual = Math.random() < 0.3 ? 0 : rand(500, 24000);
+        const midAge = endAge > startAge ? randInt(startAge, endAge - 1) : startAge;
         bondContributions.push({
           id: `bdc${i}`, label: "Contribution", bondId: id,
-          amount: rand(0, 2000), frequency: "monthly",
-          from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
+          amount: firstAnnual / 12, frequency: "monthly",
+          from: { kind: "age", age: startAge }, to: { kind: "age", age: midAge },
           indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: rand(0, 2),
         });
+        if (endAge > midAge) {
+          const cap = firstAnnual * 1.25;
+          const secondAnnual = Math.max(0, stratify("bonds.contributionCap.125pct", cap, {
+            near: Math.max(1, cap * 0.02 || 200), span: Math.max(cap, 2000),
+          }));
+          bondContributions.push({
+            id: `bdc${i}b`, label: "Contribution (later)", bondId: id,
+            amount: secondAnnual, frequency: "annual",
+            from: { kind: "age", age: midAge + 1 }, to: { kind: "age", age: endAge },
+            indexBasis: "none", indexExtraPct: 0,
+          });
+        }
       }
     }
 
     return {
       ...mkState({
         endAge, cpi: rand(0.02, 0.04), assets,
+        start: planStart,
         bonds,
         plan: {
           household: couple ? "couple" : "single",
@@ -3733,6 +4053,90 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     };
   }
 
+  // Degenerate states (spec 28, Commit 1) — edge-of-state-space cases
+  // a randomised sweep might never construct by chance, since each
+  // needs several fields to independently land at an extreme
+  // simultaneously. Built directly off mkState() rather than
+  // randomScenario() — these are meant to be minimal, not fully
+  // randomised, so the specific degenerate condition each one names
+  // is never accidentally diluted by unrelated randomised fields.
+  function degenerateScenarios() {
+    const bigLiability = {
+      id: "big", name: "Big loan", type: "mortgage", owner: "client",
+      balance: 5000000, interestRatePct: 5, termYears: 20, repayment: "pi", ioYears: 0,
+      deductible: false, linkedAssetId: null, offsetAssetId: null,
+      extraRepayments: [], oneOffRepayments: [], rateType: "variable",
+      fixedRatePct: 5, fixedUntil: { kind: "age", age: 120 }, revertRatePct: null,
+      commencedOn: null, deductiblePct: 0, repaymentAllocation: "proportional",
+      creditLimit: null, drawdowns: [],
+      recycling: { enabled: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 }, destinationAssetId: null, matchRepayments: false, annualCap: null },
+    };
+    return [
+      { label: "zero balances everywhere", state: { ...mkState({ endAge: 42, assets: [mkAsset({ balance: 0 })] }), liabilities: [], goals: [], properties: [] } },
+      // "timing.years.exactlyOne" — endAge === client.currentAge (40)
+      // is a genuine one-year projection; it also structurally makes
+      // checkYearConservation's own loop a no-op (the only year IS the
+      // final year, excluded — see the invariant's own header), so
+      // this checks projectPlan() doesn't throw/produce NaNs rather
+      // than re-running the (vacuous) conservation check.
+      { label: "single-year projection", state: { ...mkState({ endAge: 40 }), liabilities: [], goals: [], properties: [] } },
+      { label: "person with no income", state: { ...mkState({ endAge: 42, cashflows: { income: [], expenses: [cf({ amount: 1000 })] } }), liabilities: [], goals: [], properties: [] } },
+      { label: "every asset excluded", state: { ...mkState({ endAge: 42, assets: [mkAsset({ balance: 50000, include: false })] }), liabilities: [], goals: [], properties: [] } },
+      { label: "liability larger than all assets", state: { ...mkState({ endAge: 42, assets: [mkAsset({ balance: 10000 })] }), liabilities: [bigLiability], goals: [], properties: [] } },
+      {
+        label: "unfundable goal",
+        state: {
+          ...mkState({ endAge: 41, assets: [mkAsset({ balance: 0 })] }),
+          liabilities: [],
+          goals: [{ id: "unfundable", label: "Unfundable", targetAmount: 10000000, targetAt: { kind: "age", age: 41 }, fundedFrom: "surplus", indexBasis: "none", indexExtraPct: 0 }],
+          properties: [],
+        },
+      },
+    ];
+  }
+
+  // Report any conservation defect plainly (spec 28's own instruction)
+  // rather than letting the first failing expect() abort the sweep
+  // silently mid-run — every failure across the whole sweep is
+  // collected and reported together.
+  function runConservationSweep(runs, label) {
+    const failures = [];
+    for (let i = 0; i < runs; i++) {
+      const state = randomScenario();
+      let out;
+      try {
+        out = projectPlan(state);
+      } catch (e) {
+        failures.push(`${label} scenario ${i}: projectPlan threw: ${e.message}`);
+        continue;
+      }
+      const years = out.yearly.length;
+      for (let y = 0; y < years - 1; y++) { // final year excluded — see header
+        try {
+          checkYearConservation(out, y, `${label} scenario ${i}, year ${y}`);
+        } catch (e) {
+          failures.push(e.message);
+        }
+      }
+    }
+    for (const { label: degenerateLabel, state } of degenerateScenarios()) {
+      try {
+        const out = projectPlan(state);
+        const years = out.yearly.length;
+        for (let y = 0; y < years - 1; y++) {
+          try {
+            checkYearConservation(out, y, `degenerate "${degenerateLabel}", year ${y}`);
+          } catch (e) {
+            failures.push(e.message);
+          }
+        }
+      } catch (e) {
+        failures.push(`degenerate "${degenerateLabel}": projectPlan threw: ${e.message}`);
+      }
+    }
+    return failures;
+  }
+
   it("holds across a few hundred randomly generated scenarios", () => {
     const RUNS = 300;
     for (let i = 0; i < RUNS; i++) {
@@ -3743,6 +4147,39 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         checkYearConservation(out, y, `scenario ${i}, year ${y}`);
       }
     }
+  });
+
+  // Spec 28, Commit 1's own instruction: "run the conservation sweep
+  // at least 10 × 300 scenarios and report any defect" — a genuinely
+  // larger run than the 300-scenario gate above, over the newly
+  // threshold-stratified generator plus every degenerate state, with
+  // every failure collected and reported together rather than
+  // aborting on the first one.
+  it("threshold-stratified sweep: 10 × 300 scenarios plus every degenerate state, any defect reported", () => {
+    const failures = runConservationSweep(3000, "stratified sweep");
+    if (failures.length > 0) {
+      throw new Error(`${failures.length} conservation failure(s) found:\n${failures.slice(0, 20).join("\n")}`);
+    }
+  });
+
+  // Spec 28, Commit 1's own instruction: "the generator demonstrably
+  // produces values in every stratum for every registered threshold —
+  // assert this directly, since a generator that silently stops
+  // covering a boundary is the failure mode being fixed." Pure
+  // generation only (no projectPlan()) — this asserts the STRATIFY
+  // MECHANISM itself works across the registry, independent of
+  // whether any one 300/3000-run sweep happened to exercise it.
+  it("the generator produces every stratum for every registered threshold", () => {
+    resetThresholdCoverage();
+    for (let i = 0; i < 2000; i++) randomScenario();
+    const missing = [];
+    for (const name of THRESHOLD_REGISTRY) {
+      const strata = thresholdCoverage[name];
+      for (const stratum of ["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]) {
+        if (!strata || strata[stratum] === 0) missing.push(`${name}.${stratum}`);
+      }
+    }
+    expect(missing, `unexercised strata: ${missing.join(", ")}`).toEqual([]);
   });
 
   // Input Usability spec, Commit 2 — state.meta.touched records which
