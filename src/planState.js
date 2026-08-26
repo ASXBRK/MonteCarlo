@@ -398,6 +398,7 @@ export function defaultPlan(now = new Date()) {
     start,
     keyDates: [],
     superAccounts: [],
+    employers: [],
     pensions: [],
     gifts: [],
     heas: createHeas(),
@@ -660,6 +661,11 @@ export function createIncomeRow(plan, existing = []) {
     category: "salary",
     incomeType: "employment", // derived from category; kept for existing engine consumers
     sgApplies: true, // Super Guarantee (Tier 1.2) — default on for employment income
+    // Employers (spec 23, Commit 1) — resolved to a real employer of
+    // this row's owner in hydrate()/clampAllToPlan()'s second stage
+    // (resolveEmployerAssignment); null is a safe starting value, never
+    // trusted directly downstream.
+    employerId: null,
     // Redundancy and ETP (spec 19 Commit 3) — disabled by default; see
     // clampIncomeRow's own header for the field-by-field rationale.
     termination: { enabled: false, at: null, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 },
@@ -1322,6 +1328,62 @@ function clampInsurancePremium(ip) {
 export function normaliseSuperAccounts(accounts, plan, profiles = {}) {
   if (!Array.isArray(accounts)) return [];
   return accounts.map((sa) => clampSuperAccount(sa, plan, profiles));
+}
+
+// --- Employers (spec 23, Commit 1) ------------------------------------------
+//
+// A first-class concept solely because SG and the maximum contribution
+// base apply PER EMPLOYER, not to a person's pooled income — two jobs
+// at $200,000 each each generate SG up to the cap independently,
+// materially more than SG on $400,000 capped once. Deliberately
+// minimal (id/name/ownerId only) — this tool doesn't model anything
+// employer-specific beyond that until fbtType (Commit 3).
+export function createEmployer(plan, existing = [], owner = "client") {
+  return { id: uid("emp"), name: `Employer ${existing.filter((e) => e.ownerId === owner).length + 1}`, ownerId: owner };
+}
+
+export function clampEmployer(e, plan) {
+  return {
+    id: typeof e?.id === "string" && e.id ? e.id : uid("emp"),
+    name: typeof e?.name === "string" && e.name.trim() ? e.name.trim() : "Employer",
+    ownerId: e?.ownerId === "partner" && plan.partner ? "partner" : "client",
+  };
+}
+
+export function normaliseEmployers(employers, plan) {
+  if (!Array.isArray(employers)) return [];
+  return employers.map((e) => clampEmployer(e, plan));
+}
+
+// Second-stage migration (hydrate()/clampAllToPlan() only, once income
+// rows are known — the same two-stage reason HEAS's own propertyId
+// cross-validation runs there, see refineHeasProperty's own header):
+// auto-provisions a default employer for any owner who has employment-
+// category income but no employer of their own yet (so a pre-Commit-1
+// scenario, or brand-new employment row, is never orphaned), then
+// resolves every employment row's employerId to one of ITS OWNER's own
+// employers — a stale/wrong-owner/missing id falls back to that
+// owner's own FIRST employer (never silently keeps a cross-owner
+// attribution). Non-employment rows never carry an employerId at all.
+// Single-employer clients are unaffected: exactly the migration the
+// spec asks for ("existing employment rows get a default employer per
+// owner, so behaviour is unchanged for single-employer clients").
+export function resolveEmployerAssignment(employers, incomeRows, plan) {
+  const result = [...employers];
+  const owners = new Set(incomeRows.filter((r) => r.incomeType === "employment").map((r) => r.owner));
+  for (const owner of owners) {
+    if (!result.some((e) => e.ownerId === owner)) {
+      result.push(createEmployer(plan, result, owner));
+    }
+  }
+  const firstEmployerFor = (owner) => result.find((e) => e.ownerId === owner) ?? null;
+  const income = incomeRows.map((r) => {
+    if (r.incomeType !== "employment") return { ...r, employerId: null };
+    const valid = result.some((e) => e.id === r.employerId && e.ownerId === r.owner);
+    if (valid) return r;
+    return { ...r, employerId: firstEmployerFor(r.owner)?.id ?? null };
+  });
+  return { employers: result, income };
 }
 
 // --- superannuation contributions (Tier 1.2) -------------------------------
@@ -2092,6 +2154,15 @@ export function clampPlan(plan, profiles = {}) {
   // belong with identity rather than with the joint-ownable financial
   // asset list.
   const superAccounts = normaliseSuperAccounts(plan.superAccounts, { client, partner }, profiles);
+  // Employers (spec 23, Commit 1) — a first-class concept: SG and the
+  // maximum contribution base apply PER EMPLOYER, not to a person's
+  // aggregated income (a second job's SG shouldn't be capped by the
+  // first's). BASIC clamp only here; the migration that auto-provisions
+  // a default employer per owner (so single-employer clients are
+  // unaffected) and assigns every employment income row's employerId
+  // runs at the hydrate()/clampAllToPlan() level, once income rows are
+  // known — see resolveEmployerAssignment's own header.
+  const employers = normaliseEmployers(plan.employers, { client, partner });
   // Pension phase (spec 20, Commit 1) — validated against superAccounts
   // and the now-final client/partner retirementAge (the condition-of-
   // release gate depends on it), same ordering reason as adviserFees
@@ -2128,7 +2199,7 @@ export function clampPlan(plan, profiles = {}) {
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
   const planSoFar = {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, pensions, gifts, heas, workingCash, children,
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, pensions, gifts, heas, workingCash, children,
     adviserFees, implementation,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,
@@ -2383,7 +2454,12 @@ export function normaliseFundingOrder(order, assets) {
 export function clampAllToPlan(state, profiles = {}) {
   const plan = clampPlan(state.plan, profiles);
   const assets = state.assets.map((a) => ({ ...a }));
-  const income = state.cashflows.income.map((r) => clampIncomeRow(r, plan));
+  const clampedIncome = state.cashflows.income.map((r) => clampIncomeRow(r, plan));
+  // Employers (spec 23, Commit 1), second stage — see
+  // resolveEmployerAssignment's own header for why this can't happen
+  // inside clampPlan/clampIncomeRow (income rows are a sibling of plan,
+  // not a child of it).
+  const { employers, income } = resolveEmployerAssignment(plan.employers, clampedIncome, plan);
   const incomeRowIds = new Set(income.map((r) => r.id));
   const superAccountOwnerById = new Map(plan.superAccounts.map((s) => [s.id, s.owner]));
   const cashflows = {
@@ -2416,6 +2492,7 @@ export function clampAllToPlan(state, profiles = {}) {
     ...plan,
     implementation: refineImplementationAllocations(plan.implementation, assets, goals),
     heas: refineHeasProperty(plan.heas, properties),
+    employers,
   };
   return { ...state, plan: planWithRefinedImplementation, assets, cashflows, settings, liabilities, properties, goals };
 }
@@ -2981,7 +3058,10 @@ export function hydrate(json, profiles = {}) {
     // rows pointing at lifestyle assets drop on hydrate.
     const assetIds = new Set(assets.filter(isFinancial).map((a) => a.id));
     const cf = raw.cashflows || {};
-    const income = hydrateIncomeRows(cf.income, plan);
+    const hydratedIncome = hydrateIncomeRows(cf.income, plan);
+    // Employers (spec 23, Commit 1), second stage — see
+    // resolveEmployerAssignment's own header.
+    const { employers, income } = resolveEmployerAssignment(plan.employers, hydratedIncome, plan);
     const superAccountOwnerById = new Map(plan.superAccounts.map((s) => [s.id, s.owner]));
     const incomeRowIds = new Set(income.map((r) => r.id));
 
@@ -3000,6 +3080,7 @@ export function hydrate(json, profiles = {}) {
         ...plan,
         implementation: refineImplementationAllocations(plan.implementation, assets, goalsForImplementation),
         heas: refineHeasProperty(plan.heas, properties),
+        employers,
       },
       assets,
       cashflows: {
@@ -3172,6 +3253,7 @@ function hydrateIncomeRows(arr, plan) {
     incomeType: r.incomeType,
     sgApplies: r.sgApplies,
     category: r.category,
+    employerId: typeof r.employerId === "string" ? r.employerId : null,
   }, plan));
 }
 

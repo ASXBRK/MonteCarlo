@@ -460,37 +460,67 @@ export function buildSchedules(state) {
     income[m] = Math.max(0, income[m] - amount);
   };
 
-  // SG: one "employer" per employment income row (sgApplies, default
-  // on), capped at sgMaximumSalary per FY, credited to the owner's
-  // default (first-listed, included) super account. No account for
-  // that owner → nothing to credit (disclosed simplification — SG
-  // still legally accrues, but this tool has nowhere to put it).
-  for (const row of state.cashflows.income) {
-    if (row.incomeType !== "employment" || row.sgApplies === false) continue;
-    const account = superAccounts.find((s) => s.owner === row.owner);
-    if (!account) continue;
+  // SG: per EMPLOYER (spec 23, Commit 1), not per row and not pooled
+  // across a person's whole income — the maximum contribution base is
+  // a per-employer cap, so two rows sharing one employerId (e.g. base
+  // salary + a recurring allowance from the SAME job) share one cap,
+  // while two DIFFERENT employers each get their own, full cap — a
+  // second job at $200,000 generates SG on both up to the cap on each,
+  // materially more than SG on the combined $400,000 capped once.
+  // Grouped by owner+employerId; a row with no employerId at all
+  // (pre-Commit-1 raw state, or a test fixture that never set one up)
+  // falls back to its OWN row id as the group key — a singleton group,
+  // i.e. exactly the old per-row behaviour, so nothing changes for a
+  // scenario that never adopted the employer model. Capped ONCE per
+  // group per FY, then the capped total is distributed back across the
+  // group's own rows in proportion to each row's own uncapped share,
+  // preserving each row's own monthly-vs-annual crediting timing.
+  const employmentRows = state.cashflows.income.filter((row) => row.incomeType === "employment" && row.sgApplies !== false);
+  const sgGroups = new Map();
+  for (const row of employmentRows) {
+    const key = `${row.owner}::${row.employerId ?? row.id}`;
+    if (!sgGroups.has(key)) sgGroups.set(key, []);
+    sgGroups.get(key).push(row);
+  }
+  for (const rows of sgGroups.values()) {
+    const owner = rows[0].owner;
+    const account = superAccounts.find((s) => s.owner === owner);
+    if (!account) continue; // no account for that owner → nothing to credit (disclosed — SG still legally accrues)
     const flows = superFlows[account.id];
-    const bounds = {
+    const rowBounds = rows.map((row) => ({
       from: resolveRef(row.from, plan, dateSchedule, row.owner).planYear,
       to: resolveRef(row.to, plan, dateSchedule, row.owner).planYear,
-    };
-    const fyTotals = rowTotals.income[row.id];
-    for (let y = Math.max(0, bounds.from); y <= Math.min(planYears - 1, bounds.to); y++) {
-      const salaryFy = fyTotals[y];
-      if (!(salaryFy > 0)) continue;
+    }));
+    for (let y = 0; y < planYears; y++) {
+      let totalSalaryFy = 0;
+      const perRowSalary = rows.map((row, i) => {
+        if (y < rowBounds[i].from || y > rowBounds[i].to) return 0;
+        const v = rowTotals.income[row.id][y] ?? 0;
+        totalSalaryFy += v;
+        return v;
+      });
+      if (!(totalSalaryFy > 0)) continue;
       const rates = superRatesFor(fy0 + y, bracketMode, cpi, awote);
-      const sgFy = Math.min(salaryFy, rates.sgMaximumSalary) * rates.sgRate;
-      if (sgFy <= 0) continue;
-      if (row.frequency === "monthly") {
-        const s = yearStartM(y), e = yearEndM(y);
-        if (e > s) {
-          const per = sgFy / (e - s);
-          for (let m = s; m < e; m++) flows.sg[m] += per;
+      // Modelled annually (the real cap applies per quarter — this
+      // engine has no quarterly granularity anywhere else either;
+      // disclosed, same as every other annual-equivalent simplification).
+      const cappedTotalFy = Math.min(totalSalaryFy, rates.sgMaximumSalary) * rates.sgRate;
+      if (cappedTotalFy <= 0) continue;
+      rows.forEach((row, i) => {
+        const share = perRowSalary[i] / totalSalaryFy;
+        const sgFy = cappedTotalFy * share;
+        if (sgFy <= 0) return;
+        if (row.frequency === "monthly") {
+          const s = yearStartM(y), e = yearEndM(y);
+          if (e > s) {
+            const per = sgFy / (e - s);
+            for (let m = s; m < e; m++) flows.sg[m] += per;
+          }
+        } else {
+          const jm = julyMonthIndex(plan, y);
+          if (jm != null) flows.sg[jm] += sgFy;
         }
-      } else {
-        const jm = julyMonthIndex(plan, y);
-        if (jm != null) flows.sg[jm] += sgFy;
-      }
+      });
     }
   }
 

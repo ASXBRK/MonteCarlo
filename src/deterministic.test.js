@@ -8006,3 +8006,77 @@ describe("Death benefits (spec 22, Commit 2): reversionary pensions", () => {
     expect(final.deathBenefitDetail).toEqual({ client: null, partner: null });
   });
 });
+
+describe("Employers (spec 23, Commit 1): per-employer SG and contribution base", () => {
+  it("two employers each generate their OWN capped SG — the aggregate exceeds what single-capped SG would give", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: {
+        superAccounts: [superAcct()],
+        employers: [{ id: "emp1", name: "Employer 1", ownerId: "client" }, { id: "emp2", name: "Employer 2", ownerId: "client" }],
+      },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", amount: 200000, employerId: "emp1" }),
+          employmentRow({ id: "i2", amount: 200000, employerId: "emp2" }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    const sg = out.yearly[0].superDetail.su1.contributions;
+    const perEmployerCap = Math.min(200000, 270830) * 0.12;
+    expect(sg).toBeCloseTo(perEmployerCap * 2, 2);
+    const singleCapTotal = Math.min(400000, 270830) * 0.12;
+    expect(sg).toBeGreaterThan(singleCapTotal);
+  });
+
+  it("two income rows sharing the SAME employer share one cap, not two", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: {
+        superAccounts: [superAcct()],
+        employers: [{ id: "emp1", name: "Employer 1", ownerId: "client" }],
+      },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", amount: 200000, employerId: "emp1" }),
+          employmentRow({ id: "i2", amount: 200000, employerId: "emp1" }),
+        ],
+      },
+    });
+    const out = projectPlan(s);
+    const sg = out.yearly[0].superDetail.su1.contributions;
+    expect(sg).toBeCloseTo(Math.min(400000, 270830) * 0.12, 2);
+  });
+
+  it("no employerId at all (pre-Commit-1 raw state) behaves exactly as before — each row its own singleton cap", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: { superAccounts: [superAcct()] },
+      cashflows: { income: [employmentRow({ amount: 100000 })] },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].superDetail.su1.contributions).toBeCloseTo(100000 * 0.12, 2);
+  });
+
+  it("a percentOfIncome salary sacrifice is attributed to the SPECIFIC employer's income row it's tied to, not combined income", () => {
+    const s = mkState({
+      endAge: 40,
+      plan: {
+        superAccounts: [superAcct()],
+        employers: [{ id: "emp1", name: "Employer 1", ownerId: "client" }, { id: "emp2", name: "Employer 2", ownerId: "client" }],
+      },
+      cashflows: {
+        income: [
+          employmentRow({ id: "i1", amount: 100000, employerId: "emp1" }),
+          employmentRow({ id: "i2", amount: 50000, employerId: "emp2" }),
+        ],
+        superContributions: [scRow({ id: "sc1", type: "salarySacrifice", basis: "percentOfIncome", percent: 10, incomeRowId: "i1" })],
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    // 10% of employer 1's $100,000 = $10,000 — not 10% of the combined $150,000.
+    expect(d.salarySacrifice).toBeCloseTo(10000, 2);
+  });
+});

@@ -36,6 +36,7 @@ import {
   createHeas, clampHeas, refineHeasProperty,
   DEATH_BENEFIT_RELATIONSHIPS, isDeathBenefitTaxDependant,
   createDeathBenefitBeneficiary, clampDeathBenefitBeneficiary, clampDeathBenefit,
+  createEmployer, clampEmployer, normaliseEmployers, resolveEmployerAssignment,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2318,5 +2319,66 @@ describe("Death benefits (spec 22, Commit 1): plan model", () => {
     });
     expect(plan.client.deathBenefit.beneficiaries).toHaveLength(2);
     expect(plan.client.deathBenefit.beneficiaries[1].relationship).toBe("adultChild");
+  });
+});
+
+describe("Employers (spec 23, Commit 1): plan model", () => {
+  it("createEmployer defaults to the given owner, numbering per-owner", () => {
+    const plan = clampPlan(couplePlan());
+    const e1 = createEmployer(plan, [], "client");
+    expect(e1.ownerId).toBe("client");
+    expect(e1.name).toBe("Employer 1");
+    const e2 = createEmployer(plan, [e1], "client");
+    expect(e2.name).toBe("Employer 2");
+    const e3 = createEmployer(plan, [e1, e2], "partner");
+    expect(e3.name).toBe("Employer 1"); // partner's own first employer
+  });
+
+  it("clampEmployer defends a junk ownerId and a missing partner", () => {
+    const couple = clampPlan(couplePlan());
+    expect(clampEmployer({ ownerId: "partner" }, couple).ownerId).toBe("partner");
+    const single = clampPlan({ ...couplePlan(), household: "single", partner: null });
+    expect(clampEmployer({ ownerId: "partner" }, single).ownerId).toBe("client");
+    expect(clampEmployer({ id: "e1", name: "  " }, couple).name).toBe("Employer");
+  });
+
+  it("normaliseEmployers defends non-array input", () => {
+    expect(normaliseEmployers(null, clampPlan(couplePlan()))).toEqual([]);
+  });
+
+  it("resolveEmployerAssignment auto-provisions a default employer per owner with employment income, leaving single-employer scenarios' income rows otherwise untouched", () => {
+    const plan = clampPlan(couplePlan());
+    const income = [
+      { id: "i1", owner: "client", incomeType: "employment", employerId: null },
+      { id: "i2", owner: "client", incomeType: "otherTaxable", employerId: null },
+    ];
+    const { employers, income: resolved } = resolveEmployerAssignment([], income, plan);
+    expect(employers).toHaveLength(1);
+    expect(employers[0].ownerId).toBe("client");
+    expect(resolved[0].employerId).toBe(employers[0].id);
+    expect(resolved[1].employerId).toBeNull(); // non-employment row never carries one
+  });
+
+  it("resolveEmployerAssignment resets a stale/cross-owner employerId to that row's OWN owner's first employer", () => {
+    const plan = clampPlan(couplePlan());
+    const employers = [
+      { id: "empClient", name: "Client's employer", ownerId: "client" },
+      { id: "empPartner", name: "Partner's employer", ownerId: "partner" },
+    ];
+    const income = [
+      { id: "i1", owner: "client", incomeType: "employment", employerId: "empPartner" }, // wrong owner
+      { id: "i2", owner: "client", incomeType: "employment", employerId: "nonexistent" }, // stale
+    ];
+    const { income: resolved } = resolveEmployerAssignment(employers, income, plan);
+    expect(resolved[0].employerId).toBe("empClient");
+    expect(resolved[1].employerId).toBe("empClient");
+  });
+
+  it("resolveEmployerAssignment leaves a valid employerId untouched", () => {
+    const plan = clampPlan(couplePlan());
+    const employers = [{ id: "emp1", name: "Employer", ownerId: "client" }];
+    const income = [{ id: "i1", owner: "client", incomeType: "employment", employerId: "emp1" }];
+    const { income: resolved } = resolveEmployerAssignment(employers, income, plan);
+    expect(resolved[0].employerId).toBe("emp1");
   });
 });
