@@ -138,6 +138,19 @@ export function assessPerson({
   // deterministic.js's own a-termination comment).
   ttrPensionTaxable = 0,
   ttrPensionOffsetRate = 0.15,
+  // Investment/education bonds (spec 25, Commit 1): a withdrawal made
+  // before the bond's own ten-year date has its earnings component
+  // assessable at the member's marginal rate, with a flat 30% non-
+  // refundable offset — the SAME "add to income, credit back a flat
+  // offset" shape as fhsssTaxableRelease/ttrPensionTaxable above (a
+  // different source, the same 30% rate the bond itself already paid
+  // internally, so a rate above 30% still pays the difference and a
+  // rate below 30% gets (up to) a refund of it). A MATURED bond's
+  // withdrawal never reaches this function at all — deterministic.js
+  // never populates bondAssessableWithdrawal for one, the same way a
+  // tax-free pension component never reaches ordinaryIncome.
+  bondAssessableWithdrawal = 0,
+  bondOffsetRate = 0.30,
 }) {
   const { key, k } = bracketSettings(fyStartYear, bracketMode, cpi);
   const nonResident = taxProfile?.residency === "nonResident";
@@ -158,7 +171,8 @@ export function assessPerson({
   const excessCC = Math.max(0, excessConcessionalContributions);
   const fhsssRelease = Math.max(0, fhsssTaxableRelease);
   const ttrPension = Math.max(0, ttrPensionTaxable);
-  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease + ttrPension);
+  const bondAssessable = Math.max(0, bondAssessableWithdrawal);
+  const base = Math.max(0, ordinaryIncome + franked + unfranked + frankingCredits - deductions + excessCC + fhsssRelease + ttrPension + bondAssessable);
 
   // Capital losses: a net loss year adds to the carry-forward; a gain
   // year consumes carried losses before any tax (losses never offset
@@ -189,7 +203,10 @@ export function assessPerson({
   // Pension phase, Commit 2: applies last, same non-refundable,
   // "credited back" shape as the other two offsets above.
   const ttrPensionOffset = Math.min(ttrPension * ttrPensionOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset - fhsssOffset));
-  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset + medicare - frankingCredits;
+  // Bonds, Commit 1: applies last, same non-refundable "credited back"
+  // shape as the other three offsets above.
+  const bondOffset = Math.min(bondAssessable * bondOffsetRate, Math.max(0, incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset));
+  const netIncomeTax = incomeTax - litoApplied - excessCcOffset - fhsssOffset - ttrPensionOffset - bondOffset + medicare - frankingCredits;
 
   // CGT: the gain stacks on top of the income base. Marginal tax and
   // Medicare on the gain by differencing; post-reform (FY2027-28
@@ -210,6 +227,7 @@ export function assessPerson({
     excessCcOffset,
     fhsssOffset,
     ttrPensionOffset,
+    bondOffset,
     frankingCredits,
     netIncomeTax,
     cgtTax,

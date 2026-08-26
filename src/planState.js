@@ -1553,6 +1553,106 @@ export function normaliseSuperAccounts(accounts, plan, profiles = {}) {
   return accounts.map((sa) => clampSuperAccount(sa, plan, profiles));
 }
 
+// --- Investment and education bonds (spec 25, Commit 1) --------------------
+//
+// A top-level sibling array (state.bonds), like liabilities/properties/
+// goals — the spec's own pseudo-schema writes `plan.bonds`, but every
+// other such list in this codebase lives alongside `plan`, not nested
+// inside it (state.assets, state.liabilities, state.properties,
+// state.goals all follow this shape); nesting under plan would be the
+// one outlier.
+//
+// Contributions are flat, bondId-referencing rows under
+// cashflows.bondContributions — the SAME convention super's own
+// contributions/withdrawals already use (accountId-referencing rows,
+// not nested on the account), not the spec's own nested-array shorthand
+// (`contributions: [Cashflow]` on the bond itself). No owner field of
+// its own: a contribution's person attribution comes from the bond it
+// targets, exactly like an asset-targeted contribution today.
+//
+// startDate is a plain ISO date string, like Property.acquisitionDate —
+// NOT a DateRef — because an already-existing bond's ten-year clock
+// may have started years before the projection itself does, which the
+// client-age-anchored DateRef system has no way to express (every
+// DateRef resolves within [client.currentAge, plan.endAge]). A bond
+// newly established as part of the strategy simply gets a startDate at
+// or after the plan's own start.
+export const BOND_TYPES = ["investment", "education"];
+
+export function createBond(plan, existing = [], profiles = {}) {
+  const keys = Object.keys(profiles);
+  const middleProfile = keys.length ? keys[Math.floor((keys.length - 1) / 2)] : null;
+  return {
+    id: uid("bd"),
+    name: `Bond ${existing.length + 1}`,
+    type: "investment",
+    owner: "client",
+    include: true,
+    balance: 0,
+    startDate: isoDateOf(plan.start),
+    allocation: { mode: "profile", profile: middleProfile },
+    icrPct: 0,
+  };
+}
+
+function isoDateOf({ year, month }) {
+  return `${year}-${String(month).padStart(2, "0")}-01`;
+}
+
+export function clampBond(b, plan, profiles = {}) {
+  const type = BOND_TYPES.includes(b?.type) ? b.type : "investment";
+  const startDate = typeof b?.startDate === "string" && !Number.isNaN(new Date(b.startDate).getTime())
+    ? b.startDate : isoDateOf(plan.start);
+  return {
+    id: typeof b?.id === "string" && b.id ? b.id : uid("bd"),
+    name: typeof b?.name === "string" && b.name.trim() ? b.name : "Bond",
+    type,
+    owner: b?.owner === "partner" && plan.partner ? "partner" : (b?.owner === "joint" && plan.partner ? "joint" : "client"),
+    include: b?.include !== false,
+    balance: clampNumber(b?.balance, 0),
+    startDate,
+    allocation: clampAllocation(b?.allocation, profiles),
+    icrPct: clampNumber(b?.icrPct, 0, 100),
+  };
+}
+
+export function normaliseBonds(bonds, plan, profiles = {}) {
+  if (!Array.isArray(bonds)) return [];
+  return bonds.map((b) => clampBond(b, plan, profiles));
+}
+
+export function createBondContribution(plan, bonds = []) {
+  return {
+    id: uid("bdc"),
+    label: "Contribution",
+    bondId: bonds[0]?.id ?? null,
+    amount: 0,
+    frequency: "monthly",
+    from: anchorRef("start"),
+    to: anchorRef("end"),
+    indexBasis: "cpi",
+    indexExtraPct: 0,
+  };
+}
+
+export function clampBondContribution(bc, plan, bondIds) {
+  const { from, to } = clampFromTo(bc, plan.client.currentAge, plan.endAge, plan);
+  return {
+    id: typeof bc?.id === "string" && bc.id ? bc.id : uid("bdc"),
+    label: typeof bc?.label === "string" && bc.label.trim() ? bc.label : "Contribution",
+    bondId: bondIds.has(bc?.bondId) ? bc.bondId : null,
+    amount: clampNumber(bc?.amount, 0),
+    frequency: bc?.frequency === "annual" ? "annual" : "monthly",
+    from, to,
+    ...clampIndexation(bc ?? {}),
+  };
+}
+
+export function normaliseBondContributions(rows, plan, bondIds) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((bc) => clampBondContribution(bc, plan, bondIds));
+}
+
 // --- Employers (spec 23, Commit 1) ------------------------------------------
 //
 // A first-class concept solely because SG and the maximum contribution
@@ -2066,10 +2166,12 @@ export function defaultState(profiles = {}, now = new Date()) {
       lumpSums: [],
       superContributions: [],
       superWithdrawals: [],
+      bondContributions: [],
     },
     liabilities: [],
     properties: [],
     goals: [],
+    bonds: [],
     settings: {
       surplus: { periods: [createSurplusPeriod()] },
       fundingOrder: [asset.id],
@@ -2765,6 +2867,9 @@ export function clampAllToPlan(state, profiles = {}) {
     ),
     superWithdrawals: normaliseSuperWithdrawals(state.cashflows.superWithdrawals, plan, superAccountOwnerById),
   };
+  const bonds = normaliseBonds(state.bonds, plan, profiles);
+  const bondIds = new Set(bonds.map((b) => b.id));
+  cashflows.bondContributions = normaliseBondContributions(state.cashflows.bondContributions, plan, bondIds);
   // Liabilities/goals are clamped BEFORE settings — a surplus period's
   // allocations may target either, and settings needs the final,
   // already-clamped id sets to validate against, not the raw ones.
@@ -2794,7 +2899,7 @@ export function clampAllToPlan(state, profiles = {}) {
     heas: refineHeasProperty(plan.heas, properties),
     employers,
   };
-  return { ...state, plan: planWithRefinedImplementation, assets, cashflows, settings, liabilities, properties, goals };
+  return { ...state, plan: planWithRefinedImplementation, assets, cashflows, settings, liabilities, properties, goals, bonds };
 }
 
 // --- surplus allocation periods (Surplus and Deficit Allocation spec,
@@ -3377,6 +3482,8 @@ export function hydrate(json, profiles = {}) {
         : r
     );
     const properties = normaliseProperties(raw.properties, plan, assets);
+    const bonds = normaliseBonds(raw.bonds, plan, profiles);
+    const bondIds = new Set(bonds.map((b) => b.id));
     const state = {
       schemaVersion: SCHEMA_VERSION,
       // Flow of initial funds (Commit 2), second stage — see
@@ -3400,10 +3507,12 @@ export function hydrate(json, profiles = {}) {
         lumpSums: hydrateLumpSums(cf.lumpSums, plan, assetIds),
         superContributions: hydratedSuperContributions,
         superWithdrawals: hydrateSuperWithdrawals(cf.superWithdrawals, plan, superAccountOwnerById),
+        bondContributions: normaliseBondContributions(cf.bondContributions, plan, bondIds),
       },
       liabilities: hydratedLiabilities,
       properties,
       goals: goalsForImplementation,
+      bonds,
       settings: normaliseSettings(raw.settings, assets, plan, {
         liabilities: hydratedLiabilities, goals: goalsForImplementation, superContributions: hydratedSuperContributions,
       }),

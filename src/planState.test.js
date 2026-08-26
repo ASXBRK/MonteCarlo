@@ -41,6 +41,8 @@ import {
   FBT_TYPES, PACKAGING_TYPES,
   createNovatedLease, clampNovatedLease, normaliseNovatedLeases, RESIDUAL_DESTINATIONS,
   createDrawdown, clampDrawdown, DRAWDOWN_PURPOSES, REPAYMENT_ALLOCATIONS,
+  createBond, clampBond, normaliseBonds, BOND_TYPES,
+  createBondContribution, clampBondContribution, normaliseBondContributions,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2752,5 +2754,105 @@ describe("Debt recycling (spec 24, Commit 2): plan model", () => {
     expect(rec.enabled).toBe(true);
     expect(rec.destinationAssetId).toBe("a2");
     expect(rec.annualCap).toBe(15000);
+  });
+});
+
+describe("Investment and education bonds (spec 25, Commit 1): plan model", () => {
+  it("createBond defaults to an investment bond, zero balance, starting at the plan's own start date", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const b = createBond(plan, [], PROFILES);
+    expect(b.type).toBe("investment");
+    expect(b.owner).toBe("client");
+    expect(b.include).toBe(true);
+    expect(b.balance).toBe(0);
+    expect(b.startDate).toBe("2026-08-01"); // couplePlan's own start: {year:2026, month:8}
+    expect(BOND_TYPES).toEqual(["investment", "education"]);
+  });
+
+  it("clampBond: an unknown type clamps to investment", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(clampBond({ type: "bogus" }, plan, PROFILES).type).toBe("investment");
+    expect(clampBond({ type: "education" }, plan, PROFILES).type).toBe("education");
+  });
+
+  it("clampBond: a negative balance clamps to 0; a valid balance passes through", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(clampBond({ balance: -500 }, plan, PROFILES).balance).toBe(0);
+    expect(clampBond({ balance: 250000 }, plan, PROFILES).balance).toBe(250000);
+  });
+
+  it("clampBond: a valid ISO startDate (possibly before the plan starts) passes through; an invalid one falls back to the plan's start", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(clampBond({ startDate: "2019-03-15" }, plan, PROFILES).startDate).toBe("2019-03-15");
+    expect(clampBond({ startDate: "not-a-date" }, plan, PROFILES).startDate).toBe("2026-08-01");
+    expect(clampBond({ startDate: null }, plan, PROFILES).startDate).toBe("2026-08-01");
+  });
+
+  it("clampBond: owner defaults to client; joint/partner only apply for a couple", () => {
+    const couple = clampPlan(couplePlan(), PROFILES);
+    expect(clampBond({ owner: "partner" }, couple, PROFILES).owner).toBe("partner");
+    expect(clampBond({ owner: "joint" }, couple, PROFILES).owner).toBe("joint");
+    const single = clampPlan({ ...couplePlan(), household: "single", partner: null }, PROFILES);
+    expect(clampBond({ owner: "partner" }, single, PROFILES).owner).toBe("client");
+    expect(clampBond({ owner: "joint" }, single, PROFILES).owner).toBe("client");
+  });
+
+  it("normaliseBonds clamps every bond in the array and tolerates a missing/non-array field", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(normaliseBonds(undefined, plan, PROFILES)).toEqual([]);
+    const bonds = normaliseBonds([{ balance: -100 }, { type: "education" }], plan, PROFILES);
+    expect(bonds).toHaveLength(2);
+    expect(bonds[0].balance).toBe(0);
+    expect(bonds[1].type).toBe("education");
+  });
+
+  it("createBondContribution targets the first bond by default; no owner field of its own", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const bonds = [createBond(plan, [], PROFILES)];
+    const bc = createBondContribution(plan, bonds);
+    expect(bc.bondId).toBe(bonds[0].id);
+    expect(bc.owner).toBeUndefined();
+    expect(bc.amount).toBe(0);
+    expect(bc.frequency).toBe("monthly");
+  });
+
+  it("clampBondContribution: a dangling bondId drops to null (never coerced to a different bond)", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    const bondIds = new Set(["bd1"]);
+    expect(clampBondContribution({ bondId: "bd1", amount: 500 }, plan, bondIds).bondId).toBe("bd1");
+    expect(clampBondContribution({ bondId: "nonexistent", amount: 500 }, plan, bondIds).bondId).toBeNull();
+  });
+
+  it("normaliseBondContributions clamps every row and tolerates a missing/non-array field", () => {
+    const plan = clampPlan(couplePlan(), PROFILES);
+    expect(normaliseBondContributions(undefined, plan, new Set())).toEqual([]);
+    const rows = normaliseBondContributions([{ bondId: "bd1", amount: 1000 }], plan, new Set(["bd1"]));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amount).toBe(1000);
+  });
+
+  it("hydrate round-trips a bond and its contributions", () => {
+    const s = defaultState(PROFILES, NOW);
+    const plan = s.plan;
+    const bond = { ...createBond(plan, [], PROFILES), balance: 50000, startDate: "2022-01-01" };
+    s.bonds = [bond];
+    s.cashflows.bondContributions = [{ ...createBondContribution(plan, s.bonds), amount: 6000 }];
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back.bonds).toHaveLength(1);
+    expect(back.bonds[0].balance).toBe(50000);
+    expect(back.bonds[0].startDate).toBe("2022-01-01");
+    expect(back.cashflows.bondContributions).toHaveLength(1);
+    expect(back.cashflows.bondContributions[0].bondId).toBe(bond.id);
+    expect(back.cashflows.bondContributions[0].amount).toBe(6000);
+  });
+
+  it("clampAllToPlan re-clamps bonds and drops a bond contribution whose bond was removed", () => {
+    const s = defaultState(PROFILES, NOW);
+    const bond = createBond(s.plan, [], PROFILES);
+    s.bonds = [bond];
+    s.cashflows.bondContributions = [{ ...createBondContribution(s.plan, s.bonds), amount: 3000 }];
+    const reclamped = clampAllToPlan({ ...s, bonds: [] }, PROFILES);
+    expect(reclamped.bonds).toEqual([]);
+    expect(reclamped.cashflows.bondContributions[0].bondId).toBeNull();
   });
 });

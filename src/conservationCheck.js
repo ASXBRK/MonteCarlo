@@ -352,10 +352,24 @@ export function computeYearFlows(out, y) {
     ? prev.netAssets
     : row.openingBalance + row.wcaDetail.opening
       + sumVals(row.superDetail, "opening") + sumVals(row.pensionDetail ?? {}, "opening")
+      + sumVals(row.bondDetail ?? {}, "opening")
       - sumVals(row.liabilities, "opening") - (row.heasDetail?.opening ?? 0);
   const closingN = row.netAssets;
 
   const superEarningsNet = sumVals(row.superDetail, "earnings") - sumVals(row.superDetail, "earningsTax");
+  // Investment/education bonds (spec 25, Commit 1) — a genuine leak,
+  // same shape as superEarningsNet/pensionEarningsNet above: earnings
+  // are taxed INSIDE the bond (bondEffectiveTaxRate — see bonds.js),
+  // and only the NET-of-tax amount ever reaches bondsClosing. A
+  // contribution needs no term of its own: it's paid from household
+  // cash (bondContribCashOut, folded into `net` in deterministic.js,
+  // the same "personal super contribution" shape as superContribCashOut)
+  // and credited dollar-for-dollar to the SAME bond — a same-total
+  // transfer between two pockets already both inside netAssets (WCA,
+  // bondsClosing), invisible to this invariant by construction, the
+  // same reasoning already applied to pension commencement/contribution
+  // splitting/land tax/the PPR exemption elsewhere in this file.
+  const bondEarningsNet = sumVals(row.bondDetail ?? {}, "earnings") - sumVals(row.bondDetail ?? {}, "internalTax");
   // Pension phase (spec 20, Commit 1) — a genuine leak, same shape as
   // superEarningsNet just above (the 15%/10% fund-tax haircut, a
   // Commit 1 placeholder — Commit 3 zero-rates an ABP in retirement
@@ -425,7 +439,7 @@ export function computeYearFlows(out, y) {
   // would double-subtract it (once by excluding it from income, again
   // implicitly by not crediting where it actually landed).
   const income = row.income + row.wcaDetail.interest + salarySacrificed;
-  const growth = row.growth + superEarningsNet + pensionEarningsNet + liabilityRevaluation;
+  const growth = row.growth + superEarningsNet + pensionEarningsNet + bondEarningsNet + liabilityRevaluation;
 
   // --- Properties (Document Set Commits 3/4) — see the header derivation.
   // Property sale (spec 19 Commit 4) adds a THIRD property-shaped event

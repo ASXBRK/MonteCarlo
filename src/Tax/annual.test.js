@@ -292,3 +292,62 @@ describe("Pension phase, Commit 2 — pre-60 TTR taxable pension payment", () =>
     expect(explicit).toEqual(base);
   });
 });
+
+// Investment/education bonds (spec 25, Commit 1): a pre-ten-year
+// withdrawal's earnings component, assessable at the marginal rate with
+// a flat 30% offset — same shape as FHSSS/TTR above, but the ONE case
+// in this file whose whole point is to differ either side of the
+// offset rate itself, per the spec's own words: "a client on a
+// marginal rate above 30% still pays something, and one below 30% may
+// receive a refund of the difference."
+describe("Investment/education bonds (spec 25, Commit 1) — pre-ten-year withdrawal offset", () => {
+  it("the assessable earnings are taxed at the marginal rate, offset by 30%", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000 });
+    const withWithdrawal = assessPerson({ fyStartYear: 2027, ordinaryIncome: 100000, bondAssessableWithdrawal: 10000 });
+    expect(withWithdrawal.taxableIncome).toBeCloseTo(base.taxableIncome + 10000, 6);
+    expect(withWithdrawal.bondOffset).toBeCloseTo(3000, 6); // 30% of 10,000
+    const marginalOnWithdrawal = withWithdrawal.incomeTax - base.incomeTax;
+    const medicareOnWithdrawal = withWithdrawal.medicare - base.medicare;
+    expect(withWithdrawal.netIncomeTax - base.netIncomeTax).toBeCloseTo(marginalOnWithdrawal + medicareOnWithdrawal - 3000, 2);
+  });
+
+  it("a marginal rate ABOVE 30% still pays something extra, net of the offset", () => {
+    // $160,000 sits in the 37% bracket (135,001–190,000) — well above
+    // the bond's own 30% rate.
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 160000 });
+    const withWithdrawal = assessPerson({ fyStartYear: 2027, ordinaryIncome: 160000, bondAssessableWithdrawal: 10000 });
+    expect(withWithdrawal.netIncomeTax).toBeGreaterThan(base.netIncomeTax);
+  });
+
+  it("a marginal rate BELOW 30% receives a net benefit — the offset more than covers the marginal + Medicare cost", () => {
+    // $30,000 sits in the 16% bracket (18,201–45,000) — well below the
+    // bond's own 30% rate, and there's ample tax payable for the
+    // offset to actually bite against (not floored by non-refundability).
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 30000 });
+    const withWithdrawal = assessPerson({ fyStartYear: 2027, ordinaryIncome: 30000, bondAssessableWithdrawal: 5000 });
+    expect(withWithdrawal.netIncomeTax).toBeLessThan(base.netIncomeTax);
+  });
+
+  it("the offset is non-refundable — capped at the tax payable, applied after LITO, excess-CC, FHSSS and TTR offsets", () => {
+    const a = assessPerson({ fyStartYear: 2027, ordinaryIncome: 0, bondAssessableWithdrawal: 5000 });
+    expect(a.bondOffset).toBeLessThanOrEqual(a.incomeTax);
+  });
+
+  it("stacks correctly alongside the other three offsets in the same year — all four non-refundable, applied in sequence", () => {
+    const a = assessPerson({
+      fyStartYear: 2027, ordinaryIncome: 100000,
+      excessConcessionalContributions: 5000, fhsssTaxableRelease: 10000, ttrPensionTaxable: 8000,
+      bondAssessableWithdrawal: 6000,
+    });
+    expect(a.excessCcOffset).toBeCloseTo(750, 6); // 15% of 5,000
+    expect(a.fhsssOffset).toBeCloseTo(3000, 6); // 30% of 10,000
+    expect(a.ttrPensionOffset).toBeCloseTo(1200, 6); // 15% of 8,000
+    expect(a.bondOffset).toBeCloseTo(1800, 6); // 30% of 6,000 — plenty of tax remains
+  });
+
+  it("a matured bond's withdrawal never reaches this function assessable — zero (the default) leaves every figure unchanged", () => {
+    const base = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000 });
+    const explicit = assessPerson({ fyStartYear: 2027, ordinaryIncome: 80000, bondAssessableWithdrawal: 0 });
+    expect(explicit).toEqual(base);
+  });
+});

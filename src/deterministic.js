@@ -77,6 +77,7 @@ import {
   createPool, poolAdd, poolConsume, poolNewFy,
   poolDeemedReacquisition, preReformTaxableGain,
 } from "./costBasePool.js";
+import { bondEffectiveTaxRate, bondStartMonthIndex, bondContributionCapCheck } from "./bonds.js";
 
 const toMonthlyReal = (netNominal, cpi) =>
   Math.pow((1 + netNominal) / (1 + cpi), 1 / 12) - 1;
@@ -404,6 +405,56 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     superTaxFree[id] -= paid * taxFreeFraction;
     superBal[id] -= paid;
     return paid;
+  }
+
+  // --- Investment and education bonds (spec 25, Commit 1) -------------------
+  //
+  // A distinct pocket, never merged into `bal`/`combined`/fundingOrder
+  // (same pattern as super/pensions/properties/liabilities): its own
+  // balance series, its own per-year detail block. Earnings are taxed
+  // INSIDE the bond at bondEffectiveTaxRate (30% less the franked
+  // proportion's benefit — see bonds.js) and NEVER touch acc[p] — this
+  // is what keeps them out of assessable income, HELP repayment income,
+  // Division 293 income and the Medicare Levy Surcharge base, all by
+  // construction, the same way a pension's tax-free component never
+  // reaches acc[p] either. Only GAINS are taxed (a negative-return month
+  // realises no rebate) — a disclosed simplification, no fund-level
+  // capital-loss carry-forward modelled, matching the "no CGT discount"
+  // simplification bonds.js's own header already discloses.
+  const bonds = (state.bonds ?? []).filter((b) => b.include);
+  const bondMeta = {};
+  for (const b of bonds) {
+    const { incomeNominal, growthNominal, frankingPct } = assetReturnComponents(b, profiles);
+    const icr = b.icrPct / 100;
+    bondMeta[b.id] = {
+      // Pre-tax rate — for the earnings/internal-tax reporting split,
+      // the same grossRate/rate (net) pairing superMeta uses.
+      grossRate: toMonthlyReal(incomeNominal + growthNominal - icr, cpi),
+      effectiveRate: bondEffectiveTaxRate(frankingPct),
+      shares: ownerShares(b, couple),
+      startMonth: bondStartMonthIndex(b.startDate, state.plan.start),
+    };
+  }
+  const bondBal = {};
+  const bondSeries = {};
+  const bondCostBase = {}; // running notional cost base — original investment only, never earnings
+  // The 125% rule's own live state (spec 25, Commit 1's "single most
+  // important warning") — the PRIOR and THIS FY's contribution totals,
+  // and the clock's CURRENT effective start month (bondMeta's own
+  // startMonth is the OPENING value; a breach resets THIS, not that,
+  // so the opening figure stays available for reference/reporting).
+  const bondPriorFyContribution = {};
+  const bondThisFyContribution = {};
+  const bondEffectiveStartMonth = {};
+  const bondWarnings = [];
+  for (const b of bonds) {
+    bondBal[b.id] = b.balance;
+    bondSeries[b.id] = new Float64Array(months + 1);
+    bondSeries[b.id][0] = b.balance;
+    bondCostBase[b.id] = b.balance;
+    bondPriorFyContribution[b.id] = null; // null = no prior FY assessed yet (see the FY-end check's own comment)
+    bondThisFyContribution[b.id] = 0;
+    bondEffectiveStartMonth[b.id] = bondMeta[b.id].startMonth;
   }
 
   // --- pension phase (spec 20, Commit 1) -------------------------------------
@@ -1559,6 +1610,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }])),
     superClosing: 0,
     superCapUsage: { client: null, partner: null },
+    // Per-bond detail (spec 25, Commit 1): opening + contributions +
+    // earnings − internalTax = closing, per bond — the same opening/
+    // closing reconciliation shape as perAssetDetail/superDetail above.
+    // costBase: the running notional cost base (original investment
+    // only) — NOT a CGT cost-base pool (bonds are not CGT assets, no
+    // pool, no discount); just what the withdrawal-tax split (Commit 2)
+    // needs to know how much of a withdrawal is capital vs earnings.
+    bondDetail: Object.fromEntries(bonds.map((b) => [b.id, {
+      opening: 0, contributions: 0, earnings: 0, internalTax: 0, closing: 0, costBase: 0,
+    }])),
+    bondsClosing: 0,
     // Per-pension detail (spec 20, Commits 1-2): opening/closing balance,
     // the commencement transfer (nonzero only in the pension's own
     // commencement FY), fund earnings/earnings-tax (the SAME 15%/10%
@@ -2043,6 +2105,60 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           superBal[id] += netGrowth;
           row.superDetail[id].earnings += grossGrowth;
           row.superDetail[id].earningsTax += grossGrowth - netGrowth;
+        }
+
+        // Investment/education bonds (spec 25, Commit 1) — growth net of
+        // the internal tax haircut (only GAINS are taxed — see bonds.js's
+        // own header), a contribution credit (the cash side already ran,
+        // UNGATED, through bondContribCashOut/net below — this is just
+        // the balance side landing, real-pass only, same reason
+        // superBal's own credit above is real-pass only), and the 125%
+        // rule's own live clock, checked once per FY at FY-end.
+        for (const b of bonds) {
+          const bm = bondMeta[b.id];
+          const shock = shockFor(b.id, m);
+          const grossGrowth = bondBal[b.id] * (bm.grossRate + shock);
+          const tax = grossGrowth > 0 ? grossGrowth * bm.effectiveRate : 0;
+          bondBal[b.id] += grossGrowth - tax;
+          row.bondDetail[b.id].earnings += grossGrowth;
+          row.bondDetail[b.id].internalTax += tax;
+
+          const bondFlows = schedule.bondFlows[b.id];
+          const contrib = bondFlows ? bondFlows.contributions[m] : 0;
+          if (contrib > 0) {
+            bondBal[b.id] += contrib;
+            bondCostBase[b.id] += contrib;
+            row.bondDetail[b.id].contributions += contrib;
+            bondThisFyContribution[b.id] += contrib;
+          }
+          bondSeries[b.id][m + 1] = bondBal[b.id];
+
+          if (m === last - 1) {
+            // A bond's very first assessed FY has no real "prior year" to
+            // compare against — the rule only constrains a top-up
+            // relative to what was ACTUALLY contributed last time, so
+            // the first year simply establishes the baseline rather than
+            // being checked against a fabricated one (bondPriorFyContribution
+            // starts at null, not 0, for exactly this reason — a genuine
+            // zero-contribution year, by contrast, sets it to an actual
+            // 0, which DOES then constrain the following year to nil,
+            // per the spec's own "nil-contribution year" rule).
+            const { breach } = bondPriorFyContribution[b.id] == null
+              ? { breach: false }
+              : bondContributionCapCheck(bondPriorFyContribution[b.id], bondThisFyContribution[b.id]);
+            if (breach) {
+              // Resets the WHOLE bond's ten-year clock to the start of
+              // THIS FY — the spec's own "single most important warning",
+              // flagged rather than silently applied.
+              bondEffectiveStartMonth[b.id] = first;
+              bondWarnings.push({
+                bondId: b.id, type: "contributionCapBreach",
+                reason: `${b.name}: this year's contribution exceeds 125% of last year's — the ten-year clock has reset to ${schedule.fyLabels[y]}`,
+              });
+            }
+            bondPriorFyContribution[b.id] = bondThisFyContribution[b.id];
+            bondThisFyContribution[b.id] = 0;
+          }
         }
 
         // Pension phase (spec 20, Commit 3) — "the reason pension phase
@@ -3021,6 +3137,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const flows = schedule.superFlows[id];
         return s + (flows ? flows.personalDeductible[m] + flows.nonConcessional[m] : 0);
       }, 0) + fillCashDebit + adjSuperCashOut;
+      // Investment/education bonds (spec 25, Commit 1) — a contribution
+      // is paid from household cash, exactly like a personal super
+      // contribution above: UNGATED, so an unaffordable contribution
+      // runs the same funding-order-then-unfunded fallback as everything
+      // else, in BOTH passes (the measurement pass must see the same
+      // cash cost, or it could measure a different set of deficit-funded
+      // asset sales/realised gains than the real pass actually makes).
+      const bondContribCashOut = bonds.reduce((s, b) => {
+        const flows = schedule.bondFlows[b.id];
+        return s + (flows ? flows.contributions[m] : 0);
+      }, 0);
       // Adviser fees, outside-super cash (Implementation/Rates spec,
       // Commit 2) — UNGATED, exactly like exp/tax/superContribCashOut
       // above: this can force a deficit-funded asset sale (a real
@@ -3039,7 +3166,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // separately above — see the module header on gifting.js: "the
       // gifted amount leaves the client's assets regardless").
       const giftOut = (giftsByMonth[m] ?? []).reduce((s, g) => s + g.amount, 0);
-      let net = inc - (exp + propExpenseOut + landTaxOut) - tax - loanPayReal - settlementOut - superContribCashOut - adviserFeeCashOut - giftOut;
+      let net = inc - (exp + propExpenseOut + landTaxOut) - tax - loanPayReal - settlementOut - superContribCashOut - bondContribCashOut - adviserFeeCashOut - giftOut;
       // Goals, surplus-funded: capped at whatever's actually left over
       // this month (a goal can't manufacture cash that doesn't exist,
       // unlike an instructed transaction such as a loan repayment or a
@@ -4744,6 +4871,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     for (const id of ids) row.perAssetDetail[id].opening = series[id][yearStart(y)];
     for (const id of superIds) row.superDetail[id].opening = superSeries[id][yearStart(y)];
+    for (const b of bonds) row.bondDetail[b.id].opening = bondSeries[b.id][yearStart(y)];
     for (const id of pensionIds) row.pensionDetail[id].opening = pensionSeries[id][yearStart(y)];
     // Contribution splitting (spec 19 Commit 6 completion) — the actual
     // balance move already happened at the top of this year's loop
@@ -4777,6 +4905,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.superDetail[id].closing = superSeries[id][yearEnd(y)];
       row.superDetail[id].taxFreeClosing = superTaxFree[id];
       row.superClosing += superSeries[id][yearEnd(y)];
+    }
+    for (const b of bonds) {
+      row.bondDetail[b.id].closing = bondSeries[b.id][yearEnd(y)];
+      row.bondDetail[b.id].costBase = bondCostBase[b.id];
+      row.bondsClosing += bondSeries[b.id][yearEnd(y)];
     }
     for (const id of pensionIds) {
       row.pensionDetail[id].closing = pensionSeries[id][yearEnd(y)];
@@ -4864,7 +4997,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.properties[pid].value = propVal[pid];
       row.propertyClosing += propVal[pid];
     }
-    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.pensionClosing + row.wcaClosing - row.liabilitiesClosing - row.heasDetail.closing;
+    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.pensionClosing + row.bondsClosing + row.wcaClosing - row.liabilitiesClosing - row.heasDetail.closing;
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.
@@ -5251,6 +5384,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     superWarnings,
     propertyWarnings,
     drawdownWarnings,
+    bondWarnings,
     liabilityRepaymentStats,
     liabilityRollovers,
     goalStats,

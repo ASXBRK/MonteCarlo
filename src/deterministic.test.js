@@ -53,8 +53,10 @@ function mkState(over = {}) {
       ...over.plan,
     },
     assets,
+    bonds: over.bonds ?? [],
     cashflows: {
       income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [],
+      bondContributions: [],
       ...over.cashflows,
     },
     settings: {
@@ -3244,16 +3246,53 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       propertyId: pprProperty ? pprProperty.id : null,
     };
 
+    // Investment/education bonds (spec 25, Commit 1) — 0-2 per scenario.
+    // Earnings are taxed INSIDE the bond (never touching assessable
+    // income) and a contribution is paid from household cash: both are
+    // new money-flow shapes this invariant must cover. startDate spans
+    // well before the plan (an existing bond, already years into its
+    // ten-year clock — bondStartMonthIndex's negative-offset arithmetic)
+    // and at/after plan start (a newly-opened one); Commit 1 never
+    // triggers a withdrawal, so maturity status itself doesn't affect
+    // conservation yet, but stratifying now saves Commit 2/3 from
+    // needing to revisit this generator.
+    const bonds = [];
+    const bondContributions = [];
+    for (let i = 0; i < randInt(0, 2); i++) {
+      const id = `bd${i}`;
+      bonds.push({
+        id, name: `Bond ${i}`, type: "investment",
+        owner: couple ? pick(["client", "partner", "joint"]) : "client",
+        include: true, balance: rand(0, 150000),
+        startDate: pick(["2012-03-01", "2020-11-01", "2026-07-01", "2027-01-01"]),
+        allocation: randomAllocation(), icrPct: 0,
+      });
+      // Sometimes no contribution stream at all (a bond just sitting
+      // there, growing); when present, amounts span from a compliant
+      // top-up to a 125%-rule-breaching one across the projection's
+      // short multi-year window, and sometimes 0 (the nil-contribution-
+      // year consequence) via rand's own lower bound.
+      if (Math.random() < 0.7) {
+        bondContributions.push({
+          id: `bdc${i}`, label: "Contribution", bondId: id,
+          amount: rand(0, 2000), frequency: "monthly",
+          from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
+          indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: rand(0, 2),
+        });
+      }
+    }
+
     return {
       ...mkState({
         endAge, cpi: rand(0.02, 0.04), assets,
+        bonds,
         plan: {
           household: couple ? "couple" : "single",
           client, partner, children,
           superAccounts, pensions, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments, employers, novatedLeases,
         },
-        cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows },
+        cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows, bondContributions },
         surplus,
         deficit,
         fundingOrder: assets.map((a) => a.id),
@@ -3312,6 +3351,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         const d = row.decomposition;
         const prevNet = y > 0 ? out.yearly[y - 1].netAssets : row.openingBalance + row.wcaDetail.opening
           + Object.values(row.superDetail).reduce((s, v) => s + v.opening, 0)
+          + Object.values(row.bondDetail ?? {}).reduce((s, v) => s + v.opening, 0)
           - Object.values(row.liabilities).reduce((s, v) => s + v.opening, 0);
         const reconciled = prevNet + d.income + d.growth - d.tax - d.expenses - d.interest - d.fees + d.oneOffs;
         const gap = Math.abs(reconciled - row.netAssets);
@@ -8892,5 +8932,118 @@ describe("Debt recycling (spec 24, Commit 2)", () => {
     const a = projectPlan(withLoan(disabled));
     const b = projectPlan(withLoan(noField));
     expect(a.yearly[3].liabilities.lb1.closing).toBeCloseTo(b.yearly[3].liabilities.lb1.closing, 2);
+  });
+});
+
+describe("Investment and education bonds (spec 25, Commit 1)", () => {
+  const bond = (over = {}) => ({
+    id: "bd1", name: "Bond 1", type: "investment", owner: "client", include: true,
+    balance: 100000, startDate: "2026-07-01",
+    allocation: { mode: "custom", incomePct: 4, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+    icrPct: 0,
+    ...over,
+  });
+  const bondContribution = (over = {}) => ({
+    id: "bc1", label: "Contribution", bondId: "bd1", amount: 1000, frequency: "monthly",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+    indexBasis: "cpi", indexExtraPct: 0, // constant real — exact round-number totals
+    ...over,
+  });
+  const withBond = (b, over = {}) => mkState({ endAge: 40 + (over.years ?? 3), bonds: [b], ...over });
+
+  it("earnings are taxed at 30% inside the bond (no franking) and grow the balance net of that tax", () => {
+    const out = projectPlan(withBond(bond()));
+    const y0 = out.yearly[0].bondDetail.bd1;
+    expect(y0.earnings).toBeGreaterThan(0);
+    expect(y0.internalTax).toBeCloseTo(y0.earnings * 0.30, 2);
+    expect(y0.closing).toBeCloseTo(y0.opening + (y0.earnings - y0.internalTax) + y0.contributions, 1);
+  });
+
+  it("full franking (100%) reduces the effective internal tax rate to zero", () => {
+    const out = projectPlan(withBond(bond({
+      allocation: { mode: "custom", incomePct: 4, growthPct: 0, frankingPct: 100, volBasis: "Balanced" },
+    })));
+    const y0 = out.yearly[0].bondDetail.bd1;
+    expect(y0.internalTax).toBeCloseTo(0, 6);
+  });
+
+  it("bond earnings never appear in the investor's own assessable income, franked/unfranked distributions, or tax", () => {
+    const withoutBond = projectPlan(mkState({ endAge: 43 }));
+    const withEarnings = projectPlan(withBond(bond({ balance: 500000 })));
+    // Same household otherwise (no other income/assets differ) — if
+    // bond earnings leaked into assessable income, tax would rise.
+    expect(withEarnings.yearly[0].tax).toBeCloseTo(withoutBond.yearly[0].tax, 2);
+  });
+
+  it("a contribution is paid from household cash (reduces the WCA/other assets) and credits the bond balance", () => {
+    const withoutContribution = projectPlan(withBond(bond({ balance: 0 })));
+    const withContribution = projectPlan({
+      ...withBond(bond({ balance: 0 })),
+      cashflows: { income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [], bondContributions: [bondContribution()] },
+    });
+    expect(withContribution.yearly[0].bondDetail.bd1.contributions).toBeCloseTo(12000, 0);
+    expect(withContribution.yearly[0].bondsClosing).toBeGreaterThan(withoutContribution.yearly[0].bondsClosing + 11000);
+  });
+
+  it("bonds are included in netAssets", () => {
+    const out = projectPlan(withBond(bond()));
+    expect(out.yearly[0].bondsClosing).toBeCloseTo(out.yearly[0].bondDetail.bd1.closing, 2);
+    expect(out.yearly[0].netAssets).toBeGreaterThan(out.yearly[0].bondsClosing);
+  });
+
+  it("conservation holds across a bond's growth, internal tax, and contributions", () => {
+    const out = projectPlan({
+      ...withBond(bond({ balance: 200000 }), { years: 4 }),
+      cashflows: { income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [], bondContributions: [bondContribution({ amount: 2000 })] },
+    });
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `bond fixture, year ${y}`);
+  });
+
+  it("the 125% rule: a compliant increase (≤125% of last year's) does not reset the clock or warn", () => {
+    const out = projectPlan({
+      ...withBond(bond(), { years: 3 }),
+      cashflows: {
+        income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [],
+        bondContributions: [
+          bondContribution({ id: "bc1", amount: 1000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+          bondContribution({ id: "bc2", amount: 1250, from: { kind: "age", age: 41 }, to: { kind: "age", age: 41 } }),
+        ],
+      },
+    });
+    expect(out.bondWarnings.some((w) => w.type === "contributionCapBreach")).toBe(false);
+  });
+
+  it("the 125% rule: a breach resets the clock and is flagged, never silently applied or silently forbidden", () => {
+    const out = projectPlan({
+      ...withBond(bond(), { years: 3 }),
+      cashflows: {
+        income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [],
+        bondContributions: [
+          bondContribution({ id: "bc1", amount: 1000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+          bondContribution({ id: "bc2", amount: 5000, from: { kind: "age", age: 41 }, to: { kind: "age", age: 41 } }),
+        ],
+      },
+    });
+    expect(out.bondWarnings.some((w) => w.type === "contributionCapBreach" && w.bondId === "bd1")).toBe(true);
+  });
+
+  it("a nil-contribution year sets the following year's 125% base to nil — any positive contribution the year after breaches", () => {
+    const out = projectPlan({
+      ...withBond(bond(), { years: 3 }),
+      cashflows: {
+        income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [],
+        // No contribution in year 0 at all, then a small one in year 1.
+        bondContributions: [
+          bondContribution({ id: "bc1", amount: 500, from: { kind: "age", age: 41 }, to: { kind: "age", age: 41 } }),
+        ],
+      },
+    });
+    expect(out.bondWarnings.some((w) => w.type === "contributionCapBreach" && w.bondId === "bd1")).toBe(true);
+  });
+
+  it("regression gate: a plan with no bonds is bit-identical to one that never mentions the field", () => {
+    const withField = projectPlan(mkState({ endAge: 43, bonds: [] }));
+    const withoutField = projectPlan({ ...mkState({ endAge: 43 }), bonds: undefined });
+    expect(withField.yearly[2].netAssets).toBeCloseTo(withoutField.yearly[2].netAssets, 6);
   });
 });

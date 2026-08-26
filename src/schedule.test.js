@@ -12,6 +12,7 @@ function mkState({
   endAge = 44,
   assets = [{ id: "a1", include: true }],
   income = [], expenses = [], contributions = [], withdrawals = [], lumpSums = [],
+  bonds = [], bondContributions = [],
   cpi = 0.025,
   fundingOrder = null,
 } = {}) {
@@ -24,7 +25,8 @@ function mkState({
       start,
     },
     assets,
-    cashflows: { income, expenses, contributions, withdrawals, lumpSums },
+    bonds,
+    cashflows: { income, expenses, contributions, withdrawals, lumpSums, bondContributions },
     settings: {
       surplus: { mode: "spend", assetId: null },
       fundingOrder: fundingOrder ?? assets.filter((a) => a.include).map((a) => a.id),
@@ -231,5 +233,31 @@ describe("indexation model (D1)", () => {
       .toBe(at({ indexBasis: "cpi", indexExtraPct: 0, amount: 500 }, 120));
     expect(at({ indexed: false, indexBasis: undefined, amount: 500 }, 120))
       .toBe(at({ indexBasis: "none", indexExtraPct: 0, amount: 500 }, 120));
+  });
+});
+
+describe("Investment/education bonds (spec 25, Commit 1) — bond contribution flows", () => {
+  it("a bond contribution resolves into bondFlows[bondId].contributions, not assetFlows", () => {
+    const s = mkState({
+      bonds: [{ id: "bd1", include: true }],
+      bondContributions: [{ id: "bc1", bondId: "bd1", amount: 500, frequency: "monthly", from: { kind: "age", age: 40 }, to: { kind: "age", age: 44 }, indexBasis: "none", indexExtraPct: 0 }],
+    });
+    const out = buildSchedules(s);
+    expect(out.bondFlows.bd1.contributions[0]).toBe(500);
+    expect(out.assetFlows.a1.contributions[0]).toBe(0);
+  });
+
+  it("an excluded bond carries no flow arrays; a contribution targeting it is simply not applied", () => {
+    const s = mkState({
+      bonds: [{ id: "bd1", include: false }],
+      bondContributions: [{ id: "bc1", bondId: "bd1", amount: 500, frequency: "monthly", from: { kind: "age", age: 40 }, to: { kind: "age", age: 44 }, indexBasis: "none", indexExtraPct: 0 }],
+    });
+    const out = buildSchedules(s);
+    expect(out.bondFlows.bd1).toBeUndefined();
+  });
+
+  it("no bonds at all leaves bondFlows an empty object, no crash", () => {
+    const out = buildSchedules(mkState());
+    expect(out.bondFlows).toEqual({});
   });
 });

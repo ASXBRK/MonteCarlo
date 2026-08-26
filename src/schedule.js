@@ -223,6 +223,18 @@ export function buildSchedules(state) {
     };
   }
 
+  // Investment/education bonds (spec 25, Commit 1) — contributions
+  // only; a bond has no withdrawals/one-offs cashflow rows yet (those
+  // arrive via deficit funding, Commit 2, and education withdrawals,
+  // Commit 3 — resolved live in deterministic.js, not here, the same
+  // split liabilityDrawdownEvents/recycling already use: this module
+  // only resolves WHEN and WHERE a planned dollar lands).
+  const includedBondIds = new Set((state.bonds ?? []).filter((b) => b.include).map((b) => b.id));
+  const bondFlows = {};
+  for (const id of includedBondIds) {
+    bondFlows[id] = { contributions: new Float64Array(months) };
+  }
+
   // Per-row FY totals for the transposed output views (one line per
   // entered row) — filled alongside the monthly arrays.
   const rowTotals = { income: {}, expenses: {}, deductions: {} };
@@ -363,6 +375,10 @@ export function buildSchedules(state) {
   for (const row of state.cashflows.withdrawals) {
     const flows = assetFlows[row.assetId];
     if (flows) applyRegular(row, "client", flows.withdrawals);
+  }
+  for (const row of state.cashflows.bondContributions ?? []) {
+    const flows = bondFlows[row.bondId];
+    if (flows) applyRegular(row, "client", flows.contributions);
   }
 
   // One-offs fire in the July of the plan year resolved from ls.at,
@@ -1052,5 +1068,6 @@ export function buildSchedules(state) {
     oneOffsByAssetYear,
     liabilityExtraFlows,
     liabilityDrawdownEvents,
+    bondFlows,
   };
 }
