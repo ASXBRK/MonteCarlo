@@ -28,12 +28,13 @@ export const DEFAULT_INPUT_SECTION = "setup";
 // "money-decomposition" fold into Projection's and Net worth's own
 // chart selector (Commit 4) rather than staying separate subjects.
 export const OUTPUT_VIEWS = [
-  "projection", "cashflow", "assets", "liabilities", "super", "pension", "age-pension", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
+  "projection", "cashflow", "assets", "liabilities", "super", "pension", "age-pension", "death-benefits", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
   "focus-equity", "focus-transfer-schedule",                                                                                                                  // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
   "focus-surplus-allocation",                                                                                                                                 // Focus (docs/specs/16-surplus-allocation.md, Commit 3)
   "focus-ppr-exemption",                                                                                                                                      // Focus (docs/specs/19-engine-completion.md, Commit 5's own Focus view)
   "focus-age-pension",                                                                                                                                        // Focus (docs/specs/21a-age-pension-core.md, Commit 4)
+  "focus-death-benefits",                                                                                                                                     // Focus (docs/specs/22-death-benefits.md, Commit 3)
   // "focus-compare-scenarios" relocated to its own client-level Compare
   // page (#/clients/<cid>/compare) — no longer a workspace output view.
   // What if (docs/specs/14-what-if.md) — "what if the world is different"
@@ -59,6 +60,7 @@ export const OUTPUT_SUBJECT_FORMS = {
   super: ["chart", "table"],
   pension: ["table"],
   "age-pension": ["chart", "table"],
+  "death-benefits": ["table"],
   tax: ["table"],
   "net-worth": ["chart", "table"],
   allocation: ["chart"],

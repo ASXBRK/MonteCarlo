@@ -32,6 +32,7 @@ import {
   createSuperWithdrawal, normaliseSuperWithdrawals,
   SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, FHSSS_ELIGIBLE_TYPES,
   clampWorkingCash, uid, clampHeas,
+  DEATH_BENEFIT_RELATIONSHIPS, isDeathBenefitTaxDependant,
   createAllocation,
   INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
   incomeCategoryTaxTreatment,
@@ -71,6 +72,7 @@ import { eligibleFhsssPersons, buildFhsssFocus, buildFhsssComparison } from "./f
 import { FHSSS_ANNUAL_CAP, FHSSS_LIFETIME_CAP } from "./fhsss.js";
 import { eligibleSalarySacrificeRows, buildSalarySacrificeFocus } from "./focusSalarySacrifice.js";
 import { buildAgePensionStrategyFocus } from "./focusAgePensionStrategy.js";
+import { alternativeNominations, buildRecontributionFocus } from "./focusDeathBenefits.js";
 import { eligibleDebtPayoffLoans, buildDebtPayoffFocus, solveExtraRepaymentForPayoffDate } from "./focusDebtPayoff.js";
 import {
   computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
@@ -171,6 +173,9 @@ const els = {
   pensionTable: $("pensionTable"),
   agePensionEntity: $("agePensionEntity"),
   agePensionTable: $("agePensionTable"),
+  viewDeathBenefits: $("viewDeathBenefits"),
+  deathBenefitsTable: $("deathBenefitsTable"),
+  viewFocusDeathBenefits: $("viewFocusDeathBenefits"),
   liabilitiesEntity: $("liabilitiesEntity"),
   liabilitiesTable: $("liabilitiesTable"),
   viewSnapshot: $("viewSnapshot"),
@@ -497,6 +502,7 @@ const OUTPUT_NAV = {
     { id: "super", label: "Super" },
     { id: "pension", label: "Pension" },
     { id: "age-pension", label: "Age pension" },
+    { id: "death-benefits", label: "Death benefits" },
     { id: "tax", label: "Tax" },
     { id: "net-worth", label: "Net worth" },
     { id: "allocation", label: "Allocation" },
@@ -515,6 +521,7 @@ const OUTPUT_NAV = {
     { id: "focus-surplus-allocation", label: "Surplus allocation" },
     { id: "focus-ppr-exemption", label: "Main residence exemption" },
     { id: "focus-age-pension", label: "Age pension" },
+    { id: "focus-death-benefits", label: "Death benefits" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
@@ -6660,6 +6667,7 @@ const VIEW_MOUNTS = {
   super: () => els.viewSuper,
   pension: () => els.viewPension,
   "age-pension-table": () => els.viewAgePensionTable,
+  "death-benefits": () => els.viewDeathBenefits,
   liabilities: () => els.viewLiabilities,
   snapshot: () => els.viewSnapshot,
   "monte-carlo-table": () => els.viewMonteCarloTable,
@@ -6671,6 +6679,7 @@ const VIEW_MOUNTS = {
   "focus-surplus-allocation": () => els.viewFocusSurplusAllocation,
   "focus-ppr-exemption": () => els.viewFocusPprExemption,
   "focus-age-pension": () => els.viewFocusAgePension,
+  "focus-death-benefits": () => els.viewFocusDeathBenefits,
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
@@ -6729,6 +6738,7 @@ function renderActiveView() {
   else if (activeView === "tax") renderTaxView();
   else if (activeView === "super") renderSuperTableView();
   else if (activeView === "pension") renderPensionTableView();
+  else if (activeView === "death-benefits") renderDeathBenefitsTableView();
   else if (activeView === "age-pension-table") renderAgePensionTableView();
   else if (activeView === "liabilities") renderLiabilitiesView();
   else if (activeView === "snapshot") renderSnapshotView();
@@ -6741,6 +6751,7 @@ function renderActiveView() {
   else if (activeView === "focus-surplus-allocation") renderFocusSurplusAllocationView();
   else if (activeView === "focus-ppr-exemption") renderFocusPprExemptionView();
   else if (activeView === "focus-age-pension") renderFocusAgePensionView();
+  else if (activeView === "focus-death-benefits") renderFocusDeathBenefitsView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
@@ -9513,6 +9524,207 @@ function renderPensionTableView() {
     (id) => { pensionEntity = id; renderPensionTableView(); }
   );
   renderTransposed(els.pensionTable, buildPensionGroups(pensionEntity));
+}
+
+// --- View: Death benefits (spec 22, Commit 3) -------------------------------
+//
+// A TERMINAL figure — the FINAL projection year alone, per person, per
+// account (deterministic.js's own deathBenefitDetail, spec 22 Commits
+// 1-2) — never a year-by-year ledger, so this deliberately does NOT go
+// through renderTransposed's year-columns machinery; a plain table
+// instead, the same choice Snapshot/Focus views already make when the
+// data isn't a year series.
+const DEATH_BENEFIT_RELATIONSHIP_LABELS = {
+  spouse: "Spouse", adultChild: "Adult child", minorChild: "Minor child",
+  interdependent: "Interdependent", financialDependant: "Financial dependant", estate: "Estate",
+};
+
+function deathBenefitRowsHTML(label, detail) {
+  const beneficiaryRows = (detail?.byBeneficiary ?? []).flatMap((b) => b.accounts.map((a) => {
+    const net = a.taxFree + a.taxableTaxed + a.taxableUntaxed - a.tax;
+    return `<tr>
+      <td>${escapeHTML(label)}</td><td>${escapeHTML(a.accountName)}</td>
+      <td>${escapeHTML(b.label)} (${escapeHTML(DEATH_BENEFIT_RELATIONSHIP_LABELS[b.relationship] ?? b.relationship)})</td>
+      <td class="tl-num">${b.sharePct}%</td>
+      <td class="tl-num">${fmtLedgerCell(a.taxFree)}</td>
+      <td class="tl-num">${fmtLedgerCell(a.taxableTaxed)}</td>
+      <td class="tl-num">${fmtLedgerCell(a.taxableUntaxed)}</td>
+      <td class="tl-num">${fmtLedgerCell(a.tax)}</td>
+      <td class="tl-num">${fmtLedgerCell(net)}</td>
+    </tr>`;
+  }));
+  const reversionaryRows = (detail?.reversionaryPensions ?? []).map((rp) => `<tr>
+      <td>${escapeHTML(label)}</td><td>${escapeHTML(rp.pensionName)}</td>
+      <td>Reversionary — continues to spouse</td>
+      <td class="tl-num">—</td>
+      <td class="tl-num">${fmtLedgerCell(rp.valueAtDeath)}</td>
+      <td class="tl-num">–</td><td class="tl-num">–</td><td class="tl-num">–</td>
+      <td class="tl-num">${fmtLedgerCell(rp.valueAtDeath)}</td>
+    </tr>`);
+  if (beneficiaryRows.length === 0 && reversionaryRows.length === 0) {
+    return `<tr><td colspan="9" class="helper-text">No beneficiaries nominated for ${escapeHTML(label)}.</td></tr>`;
+  }
+  return beneficiaryRows.join("") + reversionaryRows.join("");
+}
+
+function buildDeathBenefitsTableHTML() {
+  const yl = projection.yearly;
+  const final = yl[yl.length - 1];
+  const d = final.deathBenefitDetail ?? { client: null, partner: null };
+  const fyLabel = projection.schedule.fyLabels[yl.length - 1];
+  const rows = deathBenefitRowsHTML(clientName(), d.client)
+    + (isCouple() ? deathBenefitRowsHTML(partnerName(), d.partner) : "");
+  const reversionaryTotal = (arr) => (arr ?? []).reduce((s, r) => s + r.valueAtDeath, 0);
+  const householdGross = (d.client?.totals.gross ?? 0) + (d.partner?.totals.gross ?? 0)
+    + reversionaryTotal(d.client?.reversionaryPensions) + reversionaryTotal(d.partner?.reversionaryPensions);
+  const householdTax = (d.client?.totals.tax ?? 0) + (d.partner?.totals.tax ?? 0);
+  return `
+    <p class="helper-text">The tax outcome IF the super/pension balance passed to these beneficiaries at the FINAL projection year (${escapeHTML(fyLabel ?? "")}, age ${final.clientAge ?? ""}) — a planning figure, not partner-death modelling; no projection branch. Nominate beneficiaries per person via each person's Tax details section.</p>
+    <div class="tl-wrap">
+      <table class="tl">
+        <thead><tr>
+          <th class="tl-label">Person</th><th class="tl-label">Account</th><th class="tl-label">Beneficiary</th>
+          <th>Share</th><th>Tax-free</th><th>Taxable (taxed)</th><th>Taxable (untaxed)</th><th>Tax</th><th>Net received</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr class="tl-total">
+          <th class="tl-label" colspan="7">Household total</th>
+          <th class="tl-num">${fmtLedgerCell(householdTax)}</th>
+          <th class="tl-num">${fmtLedgerCell(householdGross - householdTax)}</th>
+        </tr></tfoot>
+      </table>
+    </div>
+  `;
+}
+
+function renderDeathBenefitsTableView() {
+  els.deathBenefitsTable.innerHTML = buildDeathBenefitsTableHTML();
+}
+
+function exportDeathBenefitsCSV() {
+  const yl = projection.yearly;
+  const final = yl[yl.length - 1];
+  const d = final.deathBenefitDetail ?? { client: null, partner: null };
+  const lines = [["Person", "Account", "Beneficiary", "Relationship", "Share %", "Tax-free", "Taxable (taxed)", "Taxable (untaxed)", "Tax", "Net received"].map(csvEsc).join(",")];
+  const addPerson = (label, detail) => {
+    for (const b of detail?.byBeneficiary ?? []) {
+      for (const a of b.accounts) {
+        const net = a.taxFree + a.taxableTaxed + a.taxableUntaxed - a.tax;
+        lines.push([label, a.accountName, b.label, DEATH_BENEFIT_RELATIONSHIP_LABELS[b.relationship] ?? b.relationship, b.sharePct, a.taxFree.toFixed(2), a.taxableTaxed.toFixed(2), a.taxableUntaxed.toFixed(2), a.tax.toFixed(2), net.toFixed(2)].map(csvEsc).join(","));
+      }
+    }
+    for (const rp of detail?.reversionaryPensions ?? []) {
+      lines.push([label, rp.pensionName, "Reversionary — continues to spouse", "", "", rp.valueAtDeath.toFixed(2), "0.00", "0.00", "0.00", rp.valueAtDeath.toFixed(2)].map(csvEsc).join(","));
+    }
+  };
+  addPerson(clientName(), d.client);
+  if (isCouple()) addPerson(partnerName(), d.partner);
+  downloadCSV("death-benefits", lines);
+}
+
+// --- Focus: Death benefits (spec 22, Commit 3) ------------------------------
+//
+// Non-prescriptive (locked convention, and the spec's own words for
+// this feature): reports the tax difference and constraints under
+// alternative nominations and under an actually-modelled re-contribution
+// — never labels a nomination or the strategy as "better".
+function renderFocusDeathBenefitsView() {
+  const yl = projection.yearly;
+  const final = yl[yl.length - 1];
+  const d = final.deathBenefitDetail ?? { client: null, partner: null };
+  const anyDetail = d.client || d.partner;
+  if (!anyDetail) {
+    els.viewFocusDeathBenefits.innerHTML = focusEmptyStateHTML(
+      "The tax cost of the current nomination against alternatives, once at least one beneficiary is nominated (each person's Tax details section) or a reversionary pension exists.",
+      "tax-details"
+    );
+    return;
+  }
+
+  const alternativesSectionHTML = (label, detail) => {
+    const alts = alternativeNominations(detail);
+    if (!alts) return "";
+    const rows = alts.map((a) => `<tr><td>${escapeHTML(DEATH_BENEFIT_RELATIONSHIP_LABELS[a.relationship] ?? a.relationship)}</td>
+      <td class="tl-num">${fmtLedgerCell(a.tax)}</td><td class="tl-num">${fmtLedgerCell(a.net)}</td></tr>`).join("");
+    return `
+      <div class="focus-section">
+        <h3>${escapeHTML(label)} — if the WHOLE balance instead went to a single beneficiary type</h3>
+        <p class="helper-text">Same underlying balance (${fmtLedgerCell(detail.totals.gross)} gross) each time — only the tax changes with who receives it.</p>
+        <table class="tl"><thead><tr><th class="tl-label">If nominated as</th><th>Tax</th><th>Net received</th></tr></thead><tbody>${rows}</tbody></table>
+      </div>
+    `;
+  };
+
+  const withdrawals = state.cashflows.superWithdrawals ?? [];
+  const nccContributions = (state.cashflows.superContributions ?? []).filter((c) => c.type === "personalNonDeductible");
+  const recontributionSectionHTML = (withdrawals.length && nccContributions.length) ? `
+    <div class="focus-section">
+      <h3>Re-contribution strategy — with vs without an actually-modelled withdrawal + contribution</h3>
+      <p class="helper-text">Withdrawing a taxable amount after 60 and re-contributing it as a non-concessional contribution converts taxable component to tax-free — pick the withdrawal and contribution rows already in this scenario that model it.</p>
+      <div class="person-grid">
+        <div class="cf-cell">
+          <label>Withdrawal</label>
+          <select id="recontributionWithdrawalSelect">
+            <option value="">Select…</option>
+            ${withdrawals.map((w) => `<option value="${w.id}"${w.id === recontributionSelection.withdrawalId ? " selected" : ""}>${escapeHTML(w.label || "Withdrawal")}</option>`).join("")}
+          </select>
+        </div>
+        <div class="cf-cell">
+          <label>Non-concessional contribution</label>
+          <select id="recontributionContributionSelect">
+            <option value="">Select…</option>
+            ${nccContributions.map((c) => `<option value="${c.id}"${c.id === recontributionSelection.contributionId ? " selected" : ""}>${escapeHTML(c.label || "Contribution")}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div id="recontributionResult"></div>
+    </div>
+  ` : "";
+
+  els.viewFocusDeathBenefits.innerHTML = `
+    <h2 class="section-heading">Death benefits</h2>
+    <div class="focus-panel">
+      ${d.client ? alternativesSectionHTML(clientName(), d.client) : ""}
+      ${d.partner ? alternativesSectionHTML(partnerName(), d.partner) : ""}
+      ${recontributionSectionHTML}
+    </div>
+  `;
+
+  if (recontributionSectionHTML) {
+    $("recontributionWithdrawalSelect").addEventListener("change", (e) => {
+      recontributionSelection.withdrawalId = e.target.value || null;
+      renderRecontributionResult();
+    });
+    $("recontributionContributionSelect").addEventListener("change", (e) => {
+      recontributionSelection.contributionId = e.target.value || null;
+      renderRecontributionResult();
+    });
+    renderRecontributionResult();
+  }
+}
+
+// Persisted only for the life of this render pass — a lightweight UI
+// selection, not plan state (the withdrawal/contribution rows
+// themselves are the real, already-modelled strategy; this just picks
+// WHICH ones to compare).
+let recontributionSelection = { withdrawalId: null, contributionId: null };
+
+function renderRecontributionResult() {
+  const el = $("recontributionResult");
+  if (!el) return;
+  const { withdrawalId, contributionId } = recontributionSelection;
+  if (!withdrawalId || !contributionId) { el.innerHTML = ""; return; }
+  const withdrawal = (state.cashflows.superWithdrawals ?? []).find((w) => w.id === withdrawalId);
+  const owner = withdrawal?.owner === "partner" ? "partner" : "client";
+  const result = buildRecontributionFocus({ state, owner, withdrawalId, contributionId });
+  if (!result) { el.innerHTML = `<p class="helper-text">Couldn't find that withdrawal/contribution pair in the current plan.</p>`; return; }
+  el.innerHTML = `
+    <p class="helper-text">
+      ${result.cannotHelp
+        ? "Every nominated beneficiary for this person is already a tax dependant — re-contribution changes nothing, since a dependant pays no death benefit tax regardless of component."
+        : `Death benefit tax with this re-contribution modelled: ${fmtLedgerCell(result.withTax)}. Without it: ${fmtLedgerCell(result.withoutTax)}. Difference: ${fmtLedgerCell(result.taxSaved)}.`}
+    </p>
+  `;
 }
 
 // --- View: Liabilities (fix batch, item 5) ----------------------------------
@@ -12633,6 +12845,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "tax") exportTransposedCSV("tax", buildTaxGroups(taxPersonEntity));
   else if (activeView === "super") exportTransposedCSV("super", buildSuperGroups(superEntity));
   else if (activeView === "age-pension-table") exportTransposedCSV("age-pension", buildAgePensionGroups(agePensionPersonEntity));
+  else if (activeView === "death-benefits") exportDeathBenefitsCSV();
   else if (activeView === "liabilities") exportTransposedCSV("liabilities", buildLiabilitiesGroups(liabilitiesEntity));
   else if (activeView === "snapshot") exportSnapshotCSV();
   else if (activeView === "monte-carlo-table") exportMonteCarloCSV();

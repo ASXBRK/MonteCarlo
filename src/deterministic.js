@@ -208,6 +208,17 @@ function ownerShares(asset, couple) {
 // disclosed TIMING fact only (the real law's own deliberate delay,
 // giving the survivor time to restructure) — not simulated, since
 // nothing projects past the final year here anyway.
+// Death benefit tax on a taxable amount, by beneficiary relationship
+// (Commit 1's own table) — extracted and exported so
+// focusDeathBenefits.js's "alternative nomination" comparison (Commit
+// 3) can reuse the EXACT same rule for a hypothetical relationship,
+// rather than re-deriving it and risking the two quietly diverging.
+export function deathBenefitTax(relationship, taxableTaxed, taxableUntaxed) {
+  if (isDeathBenefitTaxDependant(relationship)) return 0;
+  if (relationship === "estate") return taxableTaxed * 0.15 + taxableUntaxed * 0.30;
+  return taxableTaxed * (0.15 + LEG.medicareLevy) + taxableUntaxed * (0.30 + LEG.medicareLevy);
+}
+
 function computeReversionaryPensions(owner, pensionRows, finalRow, couple, tba) {
   if (!couple) return [];
   const survivor = owner === "client" ? "partner" : "client";
@@ -250,15 +261,12 @@ function computeDeathBenefitForPerson(owner, person, superAccounts, pensionRows,
   const byBeneficiary = beneficiaries.map((b) => {
     const share = b.sharePct / 100;
     const isDependant = isDeathBenefitTaxDependant(b.relationship);
-    const isEstate = b.relationship === "estate";
     let taxFreeTotal = 0, taxableTaxedTotal = 0, taxableUntaxedTotal = 0, taxTotal = 0;
     const perAccount = accounts.map((a) => {
       const taxFreeShare = a.taxFree * share;
       const taxableTaxedShare = a.taxableTaxed * share;
       const taxableUntaxedShare = a.taxableUntaxed * share;
-      const tax = isDependant ? 0
-        : isEstate ? taxableTaxedShare * 0.15 + taxableUntaxedShare * 0.30
-          : taxableTaxedShare * (0.15 + LEG.medicareLevy) + taxableUntaxedShare * (0.30 + LEG.medicareLevy);
+      const tax = deathBenefitTax(b.relationship, taxableTaxedShare, taxableUntaxedShare);
       taxFreeTotal += taxFreeShare; taxableTaxedTotal += taxableTaxedShare; taxableUntaxedTotal += taxableUntaxedShare; taxTotal += tax;
       return {
         accountId: a.id, accountName: a.name, kind: a.kind,
