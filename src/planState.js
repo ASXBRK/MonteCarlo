@@ -2826,8 +2826,15 @@ export function clampDeductionRow(row, plan) {
 // order. Known included ids keep their relative order; missing
 // included ids append in display order; excluded/unknown/lifestyle
 // ids drop.
-export function normaliseFundingOrder(order, assets) {
-  const includedIds = assets.filter((a) => a.include && isFinancial(a)).map((a) => a.id);
+export function normaliseFundingOrder(order, assets, bonds = []) {
+  // Bonds (spec 25, Commit 2) are eligible for deficit funding — "they
+  // are liquid" (the spec's own words) — subject to the SAME funding
+  // order as an ordinary financial asset, so they're folded into the
+  // very same list here rather than tracked separately.
+  const includedIds = [
+    ...assets.filter((a) => a.include && isFinancial(a)).map((a) => a.id),
+    ...bonds.filter((b) => b.include).map((b) => b.id),
+  ];
   const includedSet = new Set(includedIds);
   const seen = new Set();
   const out = [];
@@ -2886,7 +2893,7 @@ export function clampAllToPlan(state, profiles = {}) {
   const properties = normaliseProperties(state.properties, plan, assets);
   const goals = normaliseGoals(state.goals, plan, assets);
   const settings = normaliseSettings(state.settings, assets, plan, {
-    liabilities, goals, superContributions: cashflows.superContributions,
+    liabilities, goals, superContributions: cashflows.superContributions, bonds,
   });
   // Flow of initial funds (Commit 2), second stage: targetAssetId needs
   // assets/goals, neither of which clampPlan can see (siblings of
@@ -3064,7 +3071,7 @@ export function normaliseSurplusPeriods(periods, plan, assets, ctx = {}) {
 // unrealised-gain-first). fundingOrder itself is untouched by this
 // phase — still the flat ordered list of financial asset ids.
 export function normaliseSettings(settings, assets, plan, ctx = {}) {
-  const fundingOrder = normaliseFundingOrder(settings?.fundingOrder, assets);
+  const fundingOrder = normaliseFundingOrder(settings?.fundingOrder, assets, ctx.bonds ?? []);
   const surplus = { periods: normaliseSurplusPeriods(settings?.surplus?.periods, plan, assets, ctx) };
   const includedIds = new Set(assets.filter((a) => a.include && isFinancial(a)).map((a) => a.id));
   const rawMinimums = settings?.deficit?.minimumBalances;
@@ -3126,6 +3133,7 @@ export function deletePartnerOwned(state) {
   };
   const settings = normaliseSettings(state.settings, keepAssets, state.plan, {
     liabilities: state.liabilities, goals: state.goals, superContributions: state.cashflows.superContributions,
+    bonds: state.bonds,
   });
   const liabilities = (state.liabilities ?? [])
     .filter((l) => l.owner !== "partner" && l.owner !== "joint")
@@ -3186,6 +3194,7 @@ export function removeAsset(state, assetId, reassignToId = null) {
   };
   const settings = normaliseSettings(state.settings, assets, state.plan, {
     liabilities: state.liabilities, goals: state.goals, superContributions: state.cashflows.superContributions,
+    bonds: state.bonds,
   });
   const liabilities = (state.liabilities ?? []).map((l) => ({
     ...l,
@@ -3515,6 +3524,7 @@ export function hydrate(json, profiles = {}) {
       bonds,
       settings: normaliseSettings(raw.settings, assets, plan, {
         liabilities: hydratedLiabilities, goals: goalsForImplementation, superContributions: hydratedSuperContributions,
+        bonds,
       }),
       display: {
         units: raw.display?.units === "nominal" ? "nominal" : "real",

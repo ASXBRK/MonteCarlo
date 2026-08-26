@@ -3295,7 +3295,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows, bondContributions },
         surplus,
         deficit,
-        fundingOrder: assets.map((a) => a.id),
+        // Bonds (spec 25, Commit 2) are eligible for deficit funding,
+        // subject to the SAME funding order — sometimes placed ahead of
+        // ordinary assets so a shortfall actually reaches (and sells
+        // from) one, exercising sellBond's own pre/post-maturity
+        // assessable-withdrawal split, not just growth/contributions.
+        fundingOrder: Math.random() < 0.5
+          ? [...bonds.map((b) => b.id), ...assets.map((a) => a.id)]
+          : [...assets.map((a) => a.id), ...bonds.map((b) => b.id)],
       }),
       liabilities,
       goals,
@@ -9045,5 +9052,87 @@ describe("Investment and education bonds (spec 25, Commit 1)", () => {
     const withField = projectPlan(mkState({ endAge: 43, bonds: [] }));
     const withoutField = projectPlan({ ...mkState({ endAge: 43 }), bonds: undefined });
     expect(withField.yearly[2].netAssets).toBeCloseTo(withoutField.yearly[2].netAssets, 6);
+  });
+});
+
+describe("Investment and education bonds (spec 25, Commit 2): deficit funding", () => {
+  const bond = (over = {}) => ({
+    id: "bd1", name: "Bond 1", type: "investment", owner: "client", include: true,
+    balance: 100000, startDate: "2020-07-01", // unmatured within this test's short window
+    allocation: { mode: "custom", incomePct: 6, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+    icrPct: 0,
+    ...over,
+  });
+  const salary = (amount) => ({
+    id: "sal", label: "Salary", owner: "client", amount, frequency: "annual",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 120 },
+    indexBasis: "none", indexExtraPct: 0, incomeType: "employment", category: "salary", sgApplies: false,
+  });
+  const bigExpense = (amount) => ({
+    id: "exp1", label: "Big expense", owner: "client", amount, frequency: "annual",
+    from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+    indexBasis: "none", indexExtraPct: 0, category: "nonDiscretionary",
+  });
+  const withShortfall = (b, over = {}) => mkState({
+    endAge: 43, bonds: [b],
+    cashflows: { income: [salary(80000)], expenses: [bigExpense(150000)], contributions: [], withdrawals: [], lumpSums: [], bondContributions: [] },
+    fundingOrder: ["bd1", "a1"],
+    ...over,
+  });
+
+  it("an unmatured bond drawn on for a shortfall has an assessable earnings component", () => {
+    const out = projectPlan(withShortfall(bond()));
+    expect(out.yearly[0].bondDetail.bd1.withdrawals).toBeGreaterThan(0);
+    expect(out.yearly[0].bondDetail.bd1.assessableWithdrawal).toBeGreaterThan(0);
+  });
+
+  it("a matured bond drawn on for the SAME shortfall has NO assessable component — entirely tax-free", () => {
+    const out = projectPlan(withShortfall(bond({ startDate: "2005-07-01" })));
+    expect(out.yearly[0].bondDetail.bd1.withdrawals).toBeGreaterThan(0);
+    expect(out.yearly[0].bondDetail.bd1.assessableWithdrawal).toBe(0);
+  });
+
+  it("an unmatured withdrawal's extra tax cost reduces net worth relative to the same withdrawal from a matured bond", () => {
+    // Surplus retained as cash (not swept to "spend") — otherwise any
+    // tax difference is absorbed into how much gets spent away each FY
+    // rather than showing up in the retained balance this test checks.
+    const retainCash = { surplus: { periods: [{
+      id: "sp1", from: { kind: "anchor", anchorId: "start" }, to: { kind: "anchor", anchorId: "end" },
+      payNonDeductibleDebtFirst: false, debtOrder: "interestRate", allocations: [], remainderTo: "cash",
+    }] } };
+    const unmatured = projectPlan(withShortfall(bond(), retainCash));
+    const matured = projectPlan(withShortfall(bond({ startDate: "2005-07-01" }), retainCash));
+    // Same household, same shortfall, same withdrawal size — the only
+    // difference is the assessable tax cost, which must show up as
+    // LOWER net worth for the unmatured case by year-end (year 1, once
+    // the deferred tax settles — see the engine's own PAYG-timing note).
+    expect(unmatured.yearly[1].netAssets).toBeLessThan(matured.yearly[1].netAssets);
+  });
+
+  it("respects the SAME funding order as an ordinary asset — a bond placed first is drawn before other assets", () => {
+    const out = projectPlan(withShortfall(bond({ balance: 200000 }), { fundingOrder: ["bd1", "a1"] }));
+    expect(out.yearly[0].bondDetail.bd1.withdrawals).toBeGreaterThan(0);
+    expect(out.yearly[0].perAssetDetail.a1.deficitFunding).toBe(0);
+  });
+
+  it("respects a configured minimum balance — never drawn below it", () => {
+    const out = projectPlan(withShortfall(bond(), { deficit: { minimumBalances: { bd1: 20000 }, sellRule: "order" } }));
+    expect(out.yearly[0].bondDetail.bd1.closing).toBeGreaterThanOrEqual(20000 - 1);
+  });
+
+  it("conservation holds across a bond-funded shortfall, both unmatured and matured", () => {
+    for (const startDate of ["2020-07-01", "2005-07-01"]) {
+      const out = projectPlan(withShortfall(bond({ startDate })));
+      for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `bond shortfall (${startDate}), year ${y}`);
+    }
+  });
+
+  it("regression gate: fundingOrder's bond-eligibility check doesn't affect a plan with no bonds at all", () => {
+    const withoutBonds = mkState({
+      endAge: 43,
+      cashflows: { income: [salary(80000)], expenses: [bigExpense(150000)], contributions: [], withdrawals: [], lumpSums: [], bondContributions: [] },
+    });
+    const out = projectPlan(withoutBonds);
+    expect(out.yearly[0].perAssetDetail.a1.deficitFunding).toBeGreaterThan(0);
   });
 });

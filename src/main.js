@@ -179,6 +179,9 @@ const els = {
   viewFocusDeathBenefits: $("viewFocusDeathBenefits"),
   liabilitiesEntity: $("liabilitiesEntity"),
   liabilitiesTable: $("liabilitiesTable"),
+  viewBonds: $("viewBonds"),
+  bondsEntity: $("bondsEntity"),
+  bondsTable: $("bondsTable"),
   viewSnapshot: $("viewSnapshot"),
   snapshotYearPicker: $("snapshotYearPicker"),
   snapshotPersonSelector: $("snapshotPersonSelector"),
@@ -501,6 +504,7 @@ const OUTPUT_NAV = {
     { id: "cashflow", label: "Cashflow" },
     { id: "assets", label: "Assets" },
     { id: "liabilities", label: "Liabilities" },
+    { id: "bonds", label: "Bonds" },
     { id: "super", label: "Super" },
     { id: "pension", label: "Pension" },
     { id: "age-pension", label: "Age pension" },
@@ -6556,6 +6560,7 @@ let assetsEntity = "all"; // Assets view entity selector: "all" | assetId
 let superEntity = "all"; // Super view entity selector: "all" | "client" | "partner" | super account id
 let pensionEntity = "all"; // Pension view entity selector: "all" | pension id
 let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liability id
+let bondsEntity = "all"; // Bonds view entity selector (spec 25, Commit 2): "all" | bond id
 
 // Navigation, View Consolidation, and Simple Charts (spec 17), Commit 3
 // — Client/Partner/Consolidated selectors, one module-level var per
@@ -6672,6 +6677,7 @@ const VIEW_MOUNTS = {
   "age-pension-table": () => els.viewAgePensionTable,
   "death-benefits": () => els.viewDeathBenefits,
   liabilities: () => els.viewLiabilities,
+  bonds: () => els.viewBonds,
   snapshot: () => els.viewSnapshot,
   "monte-carlo-table": () => els.viewMonteCarloTable,
   assumptions: () => els.viewAssumptions,
@@ -6745,6 +6751,7 @@ function renderActiveView() {
   else if (activeView === "death-benefits") renderDeathBenefitsTableView();
   else if (activeView === "age-pension-table") renderAgePensionTableView();
   else if (activeView === "liabilities") renderLiabilitiesView();
+  else if (activeView === "bonds") renderBondsView();
   else if (activeView === "snapshot") renderSnapshotView();
   else if (activeView === "monte-carlo-table") renderMonteCarloTableView();
   else if (activeView === "assumptions") renderAssumptionsView();
@@ -7293,8 +7300,9 @@ function renderAssetAllocationChart() {
   const forOwner = allocationPersonEntity === "all" ? null : allocationPersonEntity;
   const filteredAssets = forOwner == null ? state.assets : state.assets.filter((a) => a.owner === forOwner || a.owner === "joint");
   const filteredSuper = forOwner == null ? (state.plan.superAccounts ?? []) : (state.plan.superAccounts ?? []).filter((s) => s.owner === forOwner);
+  const filteredBonds = forOwner == null ? (state.bonds ?? []) : (state.bonds ?? []).filter((b) => b.owner === forOwner || b.owner === "joint");
   const { perYear, usesCustom } = allocationSeries(
-    yearIdxs.map((y) => projection.yearly[y]), filteredAssets, filteredSuper, PROFILES
+    yearIdxs.map((y) => projection.yearly[y]), filteredAssets, filteredSuper, PROFILES, filteredBonds
   );
   const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#d97b2f"];
 
@@ -9295,6 +9303,16 @@ function buildAssetsGroups(entity) {
         ],
       });
     }
+    const bondList = (state.bonds ?? []).filter((b) => b.include);
+    if (bondList.length) {
+      groups.push({
+        title: "Investment/education bonds",
+        rows: [
+          ...bondList.map((b) => ({ label: b.name, cell: (y) => yl[y].bondDetail?.[b.id]?.closing ?? 0 })),
+          { label: "Total bonds", cell: (y) => yl[y].bondsClosing, always: true, cls: "tl-total" },
+        ],
+      });
+    }
     const liabs = state.liabilities ?? [];
     if (liabs.length || Object.keys(yl[0]?.liabilities ?? {}).length) {
       groups.push({
@@ -9847,6 +9865,89 @@ function renderLiabilitiesView() {
     (id) => { liabilitiesEntity = id; renderLiabilitiesView(); }
   );
   renderTransposed(els.liabilitiesTable, buildLiabilitiesGroups(liabilitiesEntity), liabilitiesPayoffFooter(liabIds));
+}
+
+// --- View: Bonds (spec 25, Commit 2) ----------------------------------------
+//
+// Per bond per year: opening + contributions + earnings − internalTax
+// − withdrawals = closing, plus the assessable portion of any
+// withdrawal (the real cost of tapping an unmatured bond, shown rather
+// than hidden), years to the ten-year date, and the current 125%
+// contribution headroom — every figure read straight off
+// row.bondDetail, nothing re-derived here. yearsToMaturity/
+// contributionHeadroom are suppressed in the combined view (summing a
+// YEAR COUNT or a $ headroom across bonds with different clocks is
+// meaningless), same reasoning as Liabilities' own interest-rate row.
+
+function bondDetailRows(get, opts = {}) {
+  return [
+    { label: "Opening balance", cell: (y) => get(y).opening, always: true },
+    { label: "Contributions", cell: (y) => get(y).contributions },
+    { label: "Earnings", cell: (y) => get(y).earnings },
+    { label: "Internal tax (30% less franking benefit)", cell: (y) => -get(y).internalTax },
+    { label: "Withdrawals", cell: (y) => -get(y).withdrawals },
+    { label: "— of which assessable (pre-ten-year earnings)", cell: (y) => get(y).assessableWithdrawal },
+    ...(opts.combined ? [] : [
+      { label: "Years to the ten-year date", cell: (y) => get(y).yearsToMaturity ?? 0 },
+      { label: "125% contribution headroom next FY", cell: (y) => get(y).contributionHeadroom ?? 0 },
+    ]),
+  ];
+}
+
+function bondName(id) {
+  return (state.bonds ?? []).find((b) => b.id === id)?.name ?? "Bond";
+}
+
+function buildBondsGroups(entity) {
+  const yl = projection.yearly;
+  const bondIds = Object.keys(yl[0]?.bondDetail ?? {});
+  const zero = {
+    opening: 0, contributions: 0, earnings: 0, internalTax: 0, withdrawals: 0, assessableWithdrawal: 0,
+    closing: 0, costBase: 0, yearsToMaturity: 0, contributionHeadroom: 0,
+  };
+
+  if (entity === "all") {
+    const combined = bondDetailRows((y) => bondIds.reduce((s, bid) => {
+      const d = yl[y].bondDetail[bid] ?? zero;
+      for (const k in s) s[k] += d[k] ?? 0;
+      return s;
+    }, { ...zero }), { combined: true });
+    combined.push({ label: "Closing balance", cell: (y) => yl[y].bondsClosing, always: true, cls: "tl-total" });
+    const closingRow = (bid) => ({ label: bondName(bid), cell: (y) => yl[y].bondDetail[bid]?.closing ?? 0 });
+    const byBond = bondIds.map(closingRow);
+    byBond.push({ label: "Total", cell: (y) => yl[y].bondsClosing, always: true, cls: "tl-total" });
+    return [
+      { title: "Combined", rows: combined },
+      { title: "Closing balance by bond", rows: byBond },
+    ];
+  }
+
+  const name = bondName(entity);
+  const rows = bondDetailRows((y) => yl[y].bondDetail[entity] ?? zero);
+  rows.push({ label: "Closing balance", cell: (y) => (yl[y].bondDetail[entity] ?? zero).closing, always: true, cls: "tl-total" });
+  return [{ title: name, rows }];
+}
+
+function renderBondsView() {
+  const bondIds = Object.keys(projection.yearly[0]?.bondDetail ?? {});
+  if (bondIds.length === 0) {
+    els.bondsEntity.innerHTML = "";
+    els.bondsTable.innerHTML = focusEmptyStateHTML(
+      "Per-bond opening, contributions, earnings, internal tax, withdrawals and the ten-year/125% clocks — add an investment or education bond to see it.",
+      "financial-assets"
+    );
+    return;
+  }
+  if (bondsEntity !== "all" && !bondIds.includes(bondsEntity)) {
+    bondsEntity = "all"; // entity was removed/excluded
+  }
+  renderEntitySelector(
+    els.bondsEntity,
+    [{ id: "all", label: "Consolidated" }, ...bondIds.map((bid) => ({ id: bid, label: bondName(bid) }))],
+    bondsEntity,
+    (id) => { bondsEntity = id; renderBondsView(); }
+  );
+  renderTransposed(els.bondsTable, buildBondsGroups(bondsEntity));
 }
 
 // --- View: Snapshot (Document Set Commit 7) -------------------------------
@@ -13021,6 +13122,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "age-pension-table") exportTransposedCSV("age-pension", buildAgePensionGroups(agePensionPersonEntity));
   else if (activeView === "death-benefits") exportDeathBenefitsCSV();
   else if (activeView === "liabilities") exportTransposedCSV("liabilities", buildLiabilitiesGroups(liabilitiesEntity));
+  else if (activeView === "bonds") exportTransposedCSV("bonds", buildBondsGroups(bondsEntity));
   else if (activeView === "snapshot") exportSnapshotCSV();
   else if (activeView === "monte-carlo-table") exportMonteCarloCSV();
   else if (activeView === "assumptions") exportTransposedCSV("assumptions", buildAssumptionsGroups());

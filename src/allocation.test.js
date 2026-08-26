@@ -3,8 +3,8 @@ import { allocationSeries, classWeightsForAllocation } from "./allocation.js";
 import { PROFILES } from "./profiles.js";
 
 // Minimal per-year row shape — only the fields allocationSeries reads.
-function row(perAssetClosing, superDetail = {}) {
-  return { perAssetClosing, superDetail };
+function row(perAssetClosing, superDetail = {}, bondDetail = {}) {
+  return { perAssetClosing, superDetail, bondDetail };
 }
 
 describe("classWeightsForAllocation", () => {
@@ -106,5 +106,22 @@ describe("allocationSeries", () => {
     const { perYear } = allocationSeries([row({ a1: 0 })], assets, [], PROFILES);
     expect(perYear[0].total).toBe(0);
     for (const v of Object.values(perYear[0].weightPct)) expect(v).toBeNull();
+  });
+
+  it("bonds (spec 25, Commit 2) contribute to the mix like any other holding, folded into the SAME class blend", () => {
+    const assets = [{ id: "a1", include: true, class: "financial", allocation: { mode: "profile", profile: "Cash" } }];
+    const bonds = [{ id: "bd1", include: true, allocation: { mode: "profile", profile: "Balanced" } }];
+    const yearly = [row({ a1: 40000 }, {}, { bd1: { closing: 60000 } })];
+    const { perYear } = allocationSeries(yearly, assets, [], PROFILES, bonds);
+    expect(perYear[0].total).toBe(100000);
+    const expected = 60000 * (PROFILES["Balanced"].classWeights.ausEquity / 100) / 100000 * 100;
+    expect(perYear[0].weightPct.ausEquity).toBeCloseTo(expected, 6);
+  });
+
+  it("an excluded bond contributes nothing", () => {
+    const bonds = [{ id: "bd1", include: false, allocation: { mode: "profile", profile: "Balanced" } }];
+    const yearly = [row({}, {}, { bd1: { closing: 60000 } })];
+    const { perYear } = allocationSeries(yearly, [], [], PROFILES, bonds);
+    expect(perYear[0].total).toBe(0);
   });
 });

@@ -10,7 +10,11 @@
 // to contribute here (this is a different exclusion from the Assets/
 // Composite views' chartTreatment, which is about display, not about
 // what data exists to show). Super accounts ARE included and follow
-// their own allocation, exactly like a financial asset.
+// their own allocation, exactly like a financial asset. Bonds (spec
+// 25, Commit 2) are included the same way — "as their own class" (the
+// spec's own words) simply means folded into the SAME class-weighted
+// mix every other holding already contributes to, not a separate
+// bucket of its own.
 //
 // A "custom" allocation (bespoke incomePct/growthPct/frankingPct) has
 // no class split of its own — per the brief, it borrows its
@@ -43,19 +47,21 @@ function zeroTotals() {
   return t;
 }
 
-// allocationSeries(yearly, assets, superAccounts, profiles) →
+// allocationSeries(yearly, assets, superAccounts, profiles, bonds) →
 //   { perYear: [{ total, byClass: {key: $}, weightPct: {key: %} }, ...],
 //     usesCustom: boolean }
 //
 // byClass/weightPct are always present for every key in
 // ASSET_CLASS_KEYS (zero where nothing contributes). weightPct is null
 // (rather than a divide-by-zero NaN) for a year with zero total.
-export function allocationSeries(yearly, assets, superAccounts, profiles) {
+export function allocationSeries(yearly, assets, superAccounts, profiles, bonds = []) {
   const holdings = [
     ...assets.filter((a) => a.include && a.class !== "lifestyle")
       .map((a) => ({ id: a.id, allocation: a.allocation, balanceOf: (row) => row.perAssetClosing[a.id] ?? 0 })),
     ...(superAccounts ?? []).filter((sa) => sa.include)
       .map((sa) => ({ id: sa.id, allocation: sa.allocation, balanceOf: (row) => row.superDetail?.[sa.id]?.closing ?? 0 })),
+    ...(bonds ?? []).filter((b) => b.include)
+      .map((b) => ({ id: b.id, allocation: b.allocation, balanceOf: (row) => row.bondDetail?.[b.id]?.closing ?? 0 })),
   ];
   const usesCustom = holdings.some((h) => h.allocation?.mode === "custom");
 

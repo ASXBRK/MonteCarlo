@@ -77,7 +77,10 @@ import {
   createPool, poolAdd, poolConsume, poolNewFy,
   poolDeemedReacquisition, preReformTaxableGain,
 } from "./costBasePool.js";
-import { bondEffectiveTaxRate, bondStartMonthIndex, bondContributionCapCheck } from "./bonds.js";
+import {
+  bondEffectiveTaxRate, bondStartMonthIndex, bondContributionCapCheck, bondHasMatured, bondWithdrawalTax,
+  bondMaturityMonth,
+} from "./bonds.js";
 
 const toMonthlyReal = (netNominal, cpi) =>
   Math.pow((1 + netNominal) / (1 + cpi), 1 / 12) - 1;
@@ -1204,8 +1207,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
 
   // Lifestyle assets are illiquid to the engine: never funding
   // sources, never surplus targets (defensive — settings invariants
-  // already exclude them).
-  const fundingOrder = state.settings.fundingOrder.filter((id) => id in bal && !meta[id].lifestyle);
+  // already exclude them). Bonds (spec 25, Commit 2) ARE eligible —
+  // "they are liquid" (the spec's own words) — subject to the SAME
+  // funding order and minimum balances as an ordinary financial asset,
+  // so a bond id may sit anywhere in the adviser's own chosen order.
+  const fundingOrder = state.settings.fundingOrder.filter(
+    (id) => (id in bal && !meta[id].lifestyle) || id in bondBal
+  );
   // Deficit side (Surplus and Deficit Allocation spec, Commit 1):
   // per-asset minimum balances and the sell-rule choice. fundingOrder
   // itself is untouched by this phase.
@@ -1323,6 +1331,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     partner: Math.max(0, state.plan.partner?.taxProfile?.openingCapitalLosses ?? 0),
   };
   let pendingCgt = { client: 0, partner: 0 }; // assessed in FY t, payable July t+1
+  // Investment/education bonds (spec 25, Commit 2) — the incremental
+  // tax cost of this FY's pre-ten-year bond withdrawal(s), assessed in
+  // FY t (using the REAL pass's own actual withdrawal amount — see the
+  // a2 block for why), payable July t+1, exactly the same shape and
+  // reason as pendingCgt above.
+  let pendingBondTax = { client: 0, partner: 0 };
   const quarantineCarry = { client: 0, partner: 0 }; // D4 quarantined rental losses
   // Document Set Commit 1 — HELP/HECS outstanding balance, real $.
   // Indexed annually and reduced by actual dollar repayments below (see
@@ -1617,8 +1631,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // only) — NOT a CGT cost-base pool (bonds are not CGT assets, no
     // pool, no discount); just what the withdrawal-tax split (Commit 2)
     // needs to know how much of a withdrawal is capital vs earnings.
+    // withdrawals (spec 25, Commit 2): the total withdrawn this FY via
+    // deficit funding (the only withdrawal mechanism until Commit 3's
+    // education withdrawals); assessableWithdrawal: the slice of that
+    // which was earnings withdrawn from an UNMATURED bond — the real
+    // cost the plan should show, not hide (the spec's own words).
+    // yearsToMaturity/contributionHeadroom: read-only reporting for the
+    // Bonds table, resolved once at year-end below.
     bondDetail: Object.fromEntries(bonds.map((b) => [b.id, {
-      opening: 0, contributions: 0, earnings: 0, internalTax: 0, closing: 0, costBase: 0,
+      opening: 0, contributions: 0, earnings: 0, internalTax: 0, withdrawals: 0, assessableWithdrawal: 0,
+      closing: 0, costBase: 0, yearsToMaturity: null, contributionHeadroom: null,
     }])),
     bondsClosing: 0,
     // Per-pension detail (spec 20, Commits 1-2): opening/closing balance,
@@ -1734,6 +1756,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // for genuine spec correctness and direct unit-testability —
         // see Tax/annual.test.js.
         ttrPensionTaxable: 0,
+        // Investment/education bonds (spec 25, Commit 2): the assessable
+        // earnings component of any pre-ten-year bond withdrawal this FY
+        // (deficit funding, below) — same "add to income, credit back a
+        // flat offset" shape as fhsssTaxableRelease/ttrPensionTaxable
+        // above. A MATURED bond's withdrawal never adds here at all
+        // (sellBond only computes a nonzero assessableEarnings when
+        // unmatured — see bonds.js's bondWithdrawalTax).
+        bondAssessableWithdrawal: 0,
       };
     }
     // Per-property net-rental tracking for the gearing rules (D4).
@@ -1768,6 +1798,44 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         }
       }
       bal[id] -= paid;
+      return paid;
+    };
+
+    // A sale of `want` real dollars from a bond (spec 25, Commit 2):
+    // proportional cost-base reduction (bonds.js's bondWithdrawalTax —
+    // no CGT pool, no discount, unlike sell() above), with the earnings
+    // component of an UNMATURED bond's withdrawal assessable at the
+    // owner's marginal rate (acc[p].bondAssessableWithdrawal — see
+    // assessPerson's own param of the same name). A MATURED bond's
+    // withdrawal is entirely tax-free — bondWithdrawalTax already
+    // returns 0 assessable for one. Returns paid.
+    const sellBond = (id, want, m) => {
+      const balance = bondBal[id];
+      const paid = Math.min(want, balance);
+      if (paid <= 0) return 0;
+      const matured = bondHasMatured(bondEffectiveStartMonth[id], m);
+      const { assessableEarnings } = bondWithdrawalTax({
+        withdrawalAmount: paid, balance, costBase: bondCostBase[id], matured,
+      });
+      const bm = bondMeta[id];
+      for (const p of persons) {
+        if (bm.shares[p]) acc[p].bondAssessableWithdrawal += assessableEarnings * bm.shares[p];
+      }
+      // markIncome, same as every other income source in this engine —
+      // without it, a person whose ONLY assessable income this FY is an
+      // unmatured bond withdrawal has an empty incomeMonths set, and
+      // spreadTax (below, in the real pass) has no month to spread the
+      // resulting tax across — a real leak, not a display quirk (found
+      // via the conservation invariant).
+      if (assessableEarnings > 0) markIncome(bm.shares, m);
+      bondCostBase[id] -= bondCostBase[id] * (paid / balance);
+      bondBal[id] -= paid;
+      // Reported directly here (not by the caller) — the same "the
+      // ACTUAL sell()/cash effect runs unconditionally, only the
+      // reporting needs to avoid double-counting the measure pass"
+      // split every other deficit-funding site in this file already
+      // uses (see goalAccruedTotal's own header).
+      if (row) row.bondDetail[id].assessableWithdrawal += assessableEarnings;
       return paid;
     };
 
@@ -1830,6 +1898,75 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         if (row) {
           row.growth += g;
           row.perAssetDetail[id].growth += g;
+        }
+      }
+
+      // a-bonds. Investment/education bonds (spec 25, Commit 2): growth
+      // net of the internal tax haircut (only GAINS are taxed — see
+      // bonds.js's own header) and the contribution credit run UNGATED,
+      // exactly the same "mutate always, report only in the real pass"
+      // shape as ordinary asset growth just above — once bonds are
+      // eligible for deficit funding (below), the measurement pass must
+      // see an accurate bondBal for any same-FY sale to compute the
+      // correct assessable-withdrawal amount. bondBal/bondCostBase are
+      // snapshotted/restored around the measurement pass for this
+      // reason (see the Pass 1 setup); bondSeries is pure per-month
+      // output and needs no restore, same as `series` itself.
+      for (const b of bonds) {
+        const bm = bondMeta[b.id];
+        const shock = shockFor(b.id, m);
+        const grossGrowth = bondBal[b.id] * (bm.grossRate + shock);
+        const tax = grossGrowth > 0 ? grossGrowth * bm.effectiveRate : 0;
+        bondBal[b.id] += grossGrowth - tax;
+        if (row) {
+          row.bondDetail[b.id].earnings += grossGrowth;
+          row.bondDetail[b.id].internalTax += tax;
+        }
+
+        const bondFlows = schedule.bondFlows[b.id];
+        const contrib = bondFlows ? bondFlows.contributions[m] : 0;
+        if (contrib > 0) {
+          bondBal[b.id] += contrib;
+          bondCostBase[b.id] += contrib;
+          if (row) {
+            row.bondDetail[b.id].contributions += contrib;
+            bondThisFyContribution[b.id] += contrib;
+          }
+        }
+        bondSeries[b.id][m + 1] = bondBal[b.id];
+
+        // The 125% rule's own bookkeeping — real-pass only:
+        // bondThisFyContribution/bondPriorFyContribution/
+        // bondEffectiveStartMonth persist ACROSS years with no
+        // snapshot/restore of their own, so they must be written
+        // exactly once per FY, from the real pass alone (the
+        // measurement pass never touches them at all, unlike bondBal/
+        // bondCostBase above).
+        if (row && m === last - 1) {
+          // A bond's very first assessed FY has no real "prior year" to
+          // compare against — the rule only constrains a top-up
+          // relative to what was ACTUALLY contributed last time, so the
+          // first year simply establishes the baseline rather than
+          // being checked against a fabricated one (bondPriorFyContribution
+          // starts at null, not 0, for exactly this reason — a genuine
+          // zero-contribution year, by contrast, sets it to an actual
+          // 0, which DOES then constrain the following year to nil, per
+          // the spec's own "nil-contribution year" rule).
+          const { breach } = bondPriorFyContribution[b.id] == null
+            ? { breach: false }
+            : bondContributionCapCheck(bondPriorFyContribution[b.id], bondThisFyContribution[b.id]);
+          if (breach) {
+            // Resets the WHOLE bond's ten-year clock to the start of
+            // THIS FY — the spec's own "single most important warning",
+            // flagged rather than silently applied.
+            bondEffectiveStartMonth[b.id] = first;
+            bondWarnings.push({
+              bondId: b.id, type: "contributionCapBreach",
+              reason: `${b.name}: this year's contribution exceeds 125% of last year's — the ten-year clock has reset to ${schedule.fyLabels[y]}`,
+            });
+          }
+          bondPriorFyContribution[b.id] = bondThisFyContribution[b.id];
+          bondThisFyContribution[b.id] = 0;
         }
       }
 
@@ -2105,60 +2242,6 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           superBal[id] += netGrowth;
           row.superDetail[id].earnings += grossGrowth;
           row.superDetail[id].earningsTax += grossGrowth - netGrowth;
-        }
-
-        // Investment/education bonds (spec 25, Commit 1) — growth net of
-        // the internal tax haircut (only GAINS are taxed — see bonds.js's
-        // own header), a contribution credit (the cash side already ran,
-        // UNGATED, through bondContribCashOut/net below — this is just
-        // the balance side landing, real-pass only, same reason
-        // superBal's own credit above is real-pass only), and the 125%
-        // rule's own live clock, checked once per FY at FY-end.
-        for (const b of bonds) {
-          const bm = bondMeta[b.id];
-          const shock = shockFor(b.id, m);
-          const grossGrowth = bondBal[b.id] * (bm.grossRate + shock);
-          const tax = grossGrowth > 0 ? grossGrowth * bm.effectiveRate : 0;
-          bondBal[b.id] += grossGrowth - tax;
-          row.bondDetail[b.id].earnings += grossGrowth;
-          row.bondDetail[b.id].internalTax += tax;
-
-          const bondFlows = schedule.bondFlows[b.id];
-          const contrib = bondFlows ? bondFlows.contributions[m] : 0;
-          if (contrib > 0) {
-            bondBal[b.id] += contrib;
-            bondCostBase[b.id] += contrib;
-            row.bondDetail[b.id].contributions += contrib;
-            bondThisFyContribution[b.id] += contrib;
-          }
-          bondSeries[b.id][m + 1] = bondBal[b.id];
-
-          if (m === last - 1) {
-            // A bond's very first assessed FY has no real "prior year" to
-            // compare against — the rule only constrains a top-up
-            // relative to what was ACTUALLY contributed last time, so
-            // the first year simply establishes the baseline rather than
-            // being checked against a fabricated one (bondPriorFyContribution
-            // starts at null, not 0, for exactly this reason — a genuine
-            // zero-contribution year, by contrast, sets it to an actual
-            // 0, which DOES then constrain the following year to nil,
-            // per the spec's own "nil-contribution year" rule).
-            const { breach } = bondPriorFyContribution[b.id] == null
-              ? { breach: false }
-              : bondContributionCapCheck(bondPriorFyContribution[b.id], bondThisFyContribution[b.id]);
-            if (breach) {
-              // Resets the WHOLE bond's ten-year clock to the start of
-              // THIS FY — the spec's own "single most important warning",
-              // flagged rather than silently applied.
-              bondEffectiveStartMonth[b.id] = first;
-              bondWarnings.push({
-                bondId: b.id, type: "contributionCapBreach",
-                reason: `${b.name}: this year's contribution exceeds 125% of last year's — the ten-year clock has reset to ${schedule.fyLabels[y]}`,
-              });
-            }
-            bondPriorFyContribution[b.id] = bondThisFyContribution[b.id];
-            bondThisFyContribution[b.id] = 0;
-          }
         }
 
         // Pension phase (spec 20, Commit 3) — "the reason pension phase
@@ -3337,7 +3420,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           }
         }
         const gainRatio = (id) => {
-          if (!meta[id].cgt) return -Infinity; // no CGT — realises nothing, always sells first
+          // Bonds (spec 25, Commit 2) are not CGT assets at all — same
+          // "realises nothing, always sells first" treatment as a plain
+          // non-CGT asset like cash, since this rule is specifically
+          // about MINIMISING realised CGT, a concept that doesn't apply
+          // to a bond's own (entirely different) tax base.
+          if (!(id in bal) || !meta[id].cgt) return -Infinity;
           const value = bal[id];
           if (value <= 0) return Infinity;
           return (value - pools[id].pool) / value;
@@ -3348,15 +3436,26 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const drawTo = (floorOf) => {
           for (const id of sellOrder) {
             if (shortfall <= 0) break;
+            const isBond = id in bondBal;
             const floor = floorOf(id);
-            const available = Math.max(0, bal[id] - floor);
+            const available = Math.max(0, (isBond ? bondBal[id] : bal[id]) - floor);
             if (available <= 0) continue;
-            const paid = sell(id, Math.min(shortfall, available), m);
+            const paid = isBond
+              ? sellBond(id, Math.min(shortfall, available), m)
+              : sell(id, Math.min(shortfall, available), m);
             shortfall -= paid;
             wcaBal += paid;
+            // A bond sale mutates bondBal AFTER this month's own
+            // "a-bonds" step already stamped bondSeries[id][m+1] — the
+            // same re-stamp requirement debt recycling's own redraw
+            // needed (spec 24, Commit 2): the LAST month of the FY has
+            // no later month within this same year to naturally correct
+            // a stale stamp via its own growth step.
+            if (isBond) bondSeries[id][m + 1] = bondBal[id];
             if (row) {
               row.deficitFundedFromAssets += paid;
-              row.perAssetDetail[id].deficitFunding += paid;
+              if (isBond) row.bondDetail[id].withdrawals += paid;
+              else row.perAssetDetail[id].deficitFunding += paid;
             }
           }
         };
@@ -3794,8 +3893,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         });
       }
     }
+    const bondTaxDue = y > 0 ? pendingBondTax.client + pendingBondTax.partner : 0;
     const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0)
-      + divReleaseCash.client + divReleaseCash.partner - refundDue;
+      + divReleaseCash.client + divReleaseCash.partner - refundDue + bondTaxDue;
     const cgtDueDetail = y > 0 ? pendingCgt : { client: 0, partner: 0 };
 
     // Pension drawdown (spec 20, Commit 2): resolved ONCE per FY, before
@@ -4363,6 +4463,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const propValSnap = { ...propVal };
     const propPoolSnap = { ...propPools };
     const wcaBalSnap = wcaBal;
+    // Investment/education bonds (spec 25, Commit 2): bondBal/
+    // bondCostBase are now path-dependent within the SAME measurement
+    // pass (a deficit-funded bond sale mid-year changes what's left to
+    // grow/sell for the rest of that pass), so they need the same
+    // snapshot/restore as bal/pools — bondSeries does NOT (it's pure
+    // per-month output, overwritten wholesale by the real pass that
+    // follows, the same reason `series` itself needs no restore).
+    const bondBalSnap = { ...bondBal };
+    const bondCostBaseSnap = { ...bondCostBase };
     const measured = runYear(y, {
       taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
@@ -4379,6 +4488,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     Object.assign(propVal, propValSnap);
     propPools = propPoolSnap;
     wcaBal = wcaBalSnap;
+    Object.assign(bondBal, bondBalSnap);
+    Object.assign(bondCostBase, bondCostBaseSnap);
 
     // HELP/HECS annual indexation (HELP-as-liability follow-up fix):
     // applied ONCE per FY, before this year's compulsory repayment below
@@ -4521,7 +4632,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         ttrPensionTaxable: measured[p].ttrPensionTaxable ?? 0,
       });
       // Disclosed simplification: excludes this FY's own realised
-      // capital gain, which this engine only ever assesses in a later,
+      // capital gain AND bond assessable withdrawal (spec 25, Commit 2)
+      // — both are deficit-funding-driven, so their exact SIZE is only
+      // known once the real pass actually runs (the measurement pass's
+      // own shortfall differs, since it simulates zero tax cash outflow
+      // that month — see the a2 block below for why this MUST be
+      // assessed from real[p], not measured[p], the same reason CGT
+      // already is), which this engine only ever assesses in a later,
       // separately-timed block.
       repaymentIncome[p] = pre.taxableIncome
         + (superOutcome[p]?.reportableSuperContributions ?? 0)
@@ -4678,6 +4795,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
         fhsssTaxableRelease: measured[p].fhsssTaxableRelease ?? 0,
         ttrPensionTaxable: measured[p].ttrPensionTaxable ?? 0,
+        // bondAssessableWithdrawal deliberately excluded — see the "pre"
+        // call above and the a2 block below for why it must be assessed
+        // from real[p], not measured[p].
       });
       assessed[p] = a;
 
@@ -4910,6 +5030,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.bondDetail[b.id].closing = bondSeries[b.id][yearEnd(y)];
       row.bondDetail[b.id].costBase = bondCostBase[b.id];
       row.bondsClosing += bondSeries[b.id][yearEnd(y)];
+      // Bonds table reporting (spec 25, Commit 2): years to the ten-year
+      // date (floored at 0 — already matured), and the 125% headroom
+      // for NEXT FY's contribution (this FY's own total, ×1.25 — the
+      // basis bondContributionCapCheck will compare next FY's total
+      // against; the FY-end check above has already rolled
+      // bondPriorFyContribution over to it).
+      row.bondDetail[b.id].yearsToMaturity = Math.max(0, (bondMaturityMonth(bondEffectiveStartMonth[b.id]) - yearEnd(y)) / 12);
+      row.bondDetail[b.id].contributionHeadroom = bondPriorFyContribution[b.id] * 1.25;
     }
     for (const id of pensionIds) {
       row.pensionDetail[id].closing = pensionSeries[id][yearEnd(y)];
@@ -5002,6 +5130,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.
     const newPending = { client: 0, partner: 0 };
+    // Investment/education bonds (spec 25, Commit 2): the incremental
+    // tax cost of THIS FY's pre-ten-year bond withdrawal(s) — assessed
+    // here, from real[p].bondAssessableWithdrawal (the REAL pass's own
+    // actual withdrawal amount), the SAME reason CGT is assessed from
+    // real[p].netCapitalGain rather than measured[p]: a deficit-funded
+    // sale's exact size depends on this month's ACTUAL tax cash outflow,
+    // which the measurement pass (taxOut: null) never simulates, so the
+    // two passes can genuinely draw down a different amount — using
+    // measured[p]'s figure to size THIS FY's tax would silently mismatch
+    // what was actually sold. Isolated by differencing (the same
+    // technique the bonus-PAYG withholding block above already uses),
+    // stacked on top of BOTH ordinary income and this FY's own gain —
+    // bondAssessableWithdrawal is passed into a2 itself for this reason
+    // (so cgtTax's own gain-stacking base already reflects it).
+    const newPendingBondTax = { client: 0, partner: 0 };
     for (const p of persons) {
       // Remaining quarantined carry offsets this year's realised gains.
       if (quarantineCarry[p] > 0 && real[p].netCapitalGain > 0) {
@@ -5009,6 +5152,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         real[p].netCapitalGain -= useGain;
         quarantineCarry[p] -= useGain;
       }
+      const bondAssessableWithdrawal = real[p].bondAssessableWithdrawal ?? 0;
       const a2 = assessPerson({
         fyStartYear: fyStart,
         bracketMode,
@@ -5020,9 +5164,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         capitalLossCarryFwd: lossCarryFwd[p],
         taxProfile: state.plan[p]?.taxProfile ?? null,
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
+        bondAssessableWithdrawal,
       });
       lossCarryFwd[p] = a2.lossCarryFwd;
       newPending[p] = a2.cgtTax;
+      if (bondAssessableWithdrawal > 0) {
+        const withoutBond = assessPerson({
+          fyStartYear: fyStart, bracketMode, cpi,
+          ordinaryIncome: measured[p].ordinary,
+          deductions: measured[p].deductions,
+          distributions: { franked: measured[p].franked, unfranked: measured[p].unfranked },
+          netCapitalGain: real[p].netCapitalGain,
+          capitalLossCarryFwd: lossCarryFwd[p],
+          taxProfile: state.plan[p]?.taxProfile ?? null,
+          excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
+        });
+        newPendingBondTax[p] = a2.netIncomeTax - withoutBond.netIncomeTax;
+      }
     }
 
     const detail = (p) => persons.includes(p) ? {
@@ -5152,6 +5310,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     };
     yearly.push(row);
     pendingCgt = newPending;
+    pendingBondTax = newPendingBondTax;
     pendingDiv293 = newPendingDiv293;
     pendingDiv296 = newPendingDiv296;
     pendingRefund = newPendingRefund;
@@ -5370,6 +5529,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     yearly,
     shortfall,
     accruedCgtAtEnd: pendingCgt.client + pendingCgt.partner,
+    // Same unpayable-final-FY convention as accruedCgtAtEnd (spec 25,
+    // Commit 2): the final FY's own bond-withdrawal tax never settles
+    // inside the projection either.
+    accruedBondTaxAtEnd: pendingBondTax.client + pendingBondTax.partner,
     // Tier 1.2: the final FY's Division 293 is unpayable inside the
     // projection, same as accruedCgtAtEnd; superWarnings collects every
     // rejected/gated contribution (age 75, work test, excess NCC)
