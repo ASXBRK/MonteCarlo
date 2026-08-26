@@ -32,7 +32,7 @@ import {
   createSuperWithdrawal, normaliseSuperWithdrawals,
   SUPER_CONTRIBUTION_TYPES, SUPER_CONTRIBUTION_BASES, FHSSS_ELIGIBLE_TYPES,
   clampWorkingCash, uid, clampHeas,
-  DEATH_BENEFIT_RELATIONSHIPS, isDeathBenefitTaxDependant,
+  DEATH_BENEFIT_RELATIONSHIPS, isDeathBenefitTaxDependant, createDeathBenefitBeneficiary,
   createAllocation,
   INCOME_CATEGORIES, INCOME_CATEGORY_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS,
   incomeCategoryTaxTreatment,
@@ -50,6 +50,7 @@ import {
   createGift,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
+import { resolveGiftDeprivation, GIFT_ANNUAL_LIMIT, GIFT_FIVE_YEAR_LIMIT } from "./gifting.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
 import { dutyWithConcessions, fhogAmount } from "./data/stampDuty.js";
 import { lmiPremium } from "./data/lmiRates.js";
@@ -1949,6 +1950,57 @@ function personTaxDetailsHTML(prefix, person, title) {
           </label>
         </div>
       </div>
+      ${deathBenefitBlockHTML(prefix, person)}
+    </div>
+  `;
+}
+
+// --- Death benefit nominations (spec 22 engine; spec 27 Commit 2 UI) --------
+//
+// Per-person, not a household list — each person nominates beneficiaries
+// for their OWN super/pension death benefit (planState.js's own header
+// on person.deathBenefit). Lives here (each person's Tax details block)
+// because that's where the death-benefits OUTPUT table's own helper
+// text already pointed ("Nominate beneficiaries per person via each
+// person's Tax details section") — that text was aspirational until
+// this commit built the editor it describes.
+//
+// deterministic.js applies sharePct/100 directly with no normalisation,
+// so a total that doesn't sum to 100% either under- or over-counts the
+// balance distributed — every edit here is clamped to the remaining
+// headroom (100% minus every OTHER row's share), the same "incapable
+// of exceeding 100%, prevented at input" convention the surplus
+// allocation percentage field already uses (onSurplusPeriodChange).
+function deathBenefitBeneficiaryRowHTML(prefix, b) {
+  const isDependant = isDeathBenefitTaxDependant(b.relationship);
+  return `
+    <div class="db-beneficiary-row" data-dbprefix="${prefix}" data-bid="${b.id}">
+      <input type="text" maxlength="40" value="${escapeHTML(b.label)}" aria-label="Beneficiary name"
+             data-dbprefix="${prefix}" data-bid="${b.id}" data-bfield="label" />
+      <select data-dbprefix="${prefix}" data-bid="${b.id}" data-bfield="relationship" aria-label="Relationship">
+        ${DEATH_BENEFIT_RELATIONSHIPS.map((r) => `<option value="${r}"${b.relationship === r ? " selected" : ""}>${escapeHTML(DEATH_BENEFIT_RELATIONSHIP_LABELS[r])}</option>`).join("")}
+      </select>
+      <span class="db-share-input">
+        <input type="number" min="0" max="100" step="1" value="${b.sharePct}" aria-label="Share %"
+               data-dbprefix="${prefix}" data-bid="${b.id}" data-bfield="sharePct" />%
+      </span>
+      <span class="helper-inline">${isDependant ? "Tax dependant" : "Not a tax dependant"}</span>
+      <button class="cf-remove" type="button" data-dbprefix="${prefix}" data-db-beneficiary-action="remove" data-bid="${b.id}" aria-label="Remove beneficiary">×</button>
+    </div>
+  `;
+}
+
+function deathBenefitBlockHTML(prefix, person) {
+  const beneficiaries = person.deathBenefit?.beneficiaries ?? [];
+  const total = beneficiaries.reduce((s, b) => s + b.sharePct, 0);
+  return `
+    <div class="cf-subsection">
+      <div class="cf-section-title">Death benefit nominations ${tooltipHTML("Who this person's super/pension death benefit passes to, and each beneficiary's share. Tax dependency is derived from relationship, not chosen directly — an adult child, for instance, is NOT a tax dependant and pays tax on the taxable component even though a spouse or minor child would not.")}</div>
+      ${beneficiaries.length ? `
+        <div class="db-beneficiary-list">${beneficiaries.map((b) => deathBenefitBeneficiaryRowHTML(prefix, b)).join("")}</div>
+        <p class="helper-text${total !== 100 ? " helper-warning" : ""}">Shares total ${total}%${total !== 100 ? " — the death benefits output only distributes what's nominated here, so an unallocated remainder simply isn't shown to anyone." : "."}</p>
+      ` : `<p class="helper-text">No beneficiaries nominated — the death benefits output (Super → Death benefits) has nothing to show for ${escapeHTML(personDisplayName(person, prefix === "client" ? "the client" : "the partner"))} until at least one is added.</p>`}
+      <button class="btn-text" type="button" data-dbprefix="${prefix}" data-db-beneficiary-action="add">+ Add beneficiary</button>
     </div>
   `;
 }
@@ -2397,6 +2449,56 @@ function handlePlanFieldChange(e) {
 wireDeferredDateCommit(els.planBar, handlePlanFieldChange);
 els.taxDetailsSection.addEventListener("change", handlePlanFieldChange);
 els.superSection.addEventListener("change", handlePlanFieldChange);
+
+function personByPrefix(prefix) {
+  return prefix === "partner" ? state.plan.partner : state.plan.client;
+}
+
+els.taxDetailsSection.addEventListener("change", (e) => {
+  const prefix = e.target.dataset.dbprefix;
+  const bid = e.target.dataset.bid;
+  const bfield = e.target.dataset.bfield;
+  if (!prefix || !bid || !bfield) return;
+  const person = personByPrefix(prefix);
+  const b = person?.deathBenefit?.beneficiaries.find((x) => x.id === bid);
+  if (!b) return;
+  const v = e.target.value;
+  if (bfield === "label") b.label = v.trim() || b.label;
+  else if (bfield === "relationship") b.relationship = DEATH_BENEFIT_RELATIONSHIPS.includes(v) ? v : "spouse";
+  else if (bfield === "sharePct") {
+    // Clamped to this row's own remaining headroom (100% minus every
+    // OTHER beneficiary's share) — same convention as the surplus
+    // allocation percentage field, so the total can never exceed 100%.
+    const others = person.deathBenefit.beneficiaries.reduce((s, x) => (x.id === bid ? s : s + x.sharePct), 0);
+    b.sharePct = clampNumber(v, 0, Math.max(0, 100 - others));
+  } else {
+    return;
+  }
+  saveState();
+  refreshOutputs();
+  renderTaxDetails();
+});
+
+els.taxDetailsSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-db-beneficiary-action]");
+  if (!btn) return;
+  const person = personByPrefix(btn.dataset.dbprefix);
+  if (!person) return;
+  const beneficiaries = person.deathBenefit?.beneficiaries ?? [];
+  const action = btn.dataset.dbBeneficiaryAction;
+  if (action === "add") {
+    person.deathBenefit = { beneficiaries: [...beneficiaries, createDeathBenefitBeneficiary(beneficiaries)] };
+  } else if (action === "remove") {
+    const b = beneficiaries.find((x) => x.id === btn.dataset.bid);
+    if (!b || !window.confirm(`Remove "${b.label}"?`)) return;
+    person.deathBenefit = { beneficiaries: beneficiaries.filter((x) => x.id !== b.id) };
+  } else {
+    return;
+  }
+  saveState();
+  refreshOutputs();
+  renderTaxDetails();
+});
 
 els.planBar.addEventListener("click", (e) => {
   const btn = e.target.closest('[data-plan-action="household"]');
@@ -3646,9 +3748,103 @@ function renderSettings() {
         </div>
         <p class="helper-text">If the account would fall below its minimum, the shortfall is drawn from the deficit funding order below. Leave the rate blank to use the firm's Cash profile return.</p>
       </div>
+      ${giftsSectionHTML()}
       ${heasSectionHTML()}
       ${surplusPeriodsSectionHTML()}
       ${deficitSectionHTML(orderItems)}
+    </div>
+  `;
+}
+
+// --- Gifts (spec 21b engine; spec 27 Commit 2 UI) ---------------------------
+//
+// A household-level list (owner is informational only — the deprivation
+// limits are assessed against the household as one pool regardless of
+// whose asset the gift notionally came from, src/gifting.js's own
+// header), so this lives in Settings alongside the other household-wide
+// elections (Working Cash, HEAS) rather than under any one person — the
+// spec's own "Age pension or Settings, whichever is the more natural
+// home" is resolved here since there's no Age pension INPUT section to
+// put it in (age pension is an output view only).
+function findGift(gid) {
+  return (state.plan.gifts ?? []).find((g) => g.id === gid) ?? null;
+}
+
+// Mirrors deterministic.js's own julyOf/yearStartIdx exactly (a gift
+// "fires in July of its resolved plan year, or never" — the same
+// convention every other one-off event in this engine uses) so this
+// live preview lands on the same month the engine itself will use.
+function giftJulyOf(planYear) {
+  return planYear === 0 ? (state.plan.start.month === 7 ? 0 : null) : endMonthOfYear(planYear - 1);
+}
+
+// The live deprivation position for every CURRENTLY entered gift — the
+// same resolveGiftDeprivation the engine itself runs (src/gifting.js),
+// fed from the plan's own gifts rather than a projected schedule, so
+// the $10,000/yr and $30,000/5-year running position is visible at the
+// point of entry rather than only after landing on the Age pension
+// output view.
+function resolvedGiftsForPreview() {
+  const events = (state.plan.gifts ?? []).map((g) => {
+    const planYear = resolveRef(g.at, state.plan, projection.schedule, "client").planYear;
+    const month = giftJulyOf(planYear);
+    return month == null ? null : { id: g.id, month, amount: g.amount, planYear };
+  }).filter(Boolean);
+  return resolveGiftDeprivation(events);
+}
+
+function giftCardHTML(g, resolved) {
+  const r = resolved.find((x) => x.id === g.id);
+  return `
+    <div class="pcard" data-gid="${g.id}">
+      <div class="pcard-head">
+        <span class="pcard-name">${escapeHTML(g.label)}</span>
+        <button class="pcard-remove" type="button" data-gift-action="remove" data-gid="${g.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Label</label>
+            <input type="text" maxlength="40" value="${escapeHTML(g.label)}" data-gid="${g.id}" data-gfield="label" />
+          </div>
+          ${isCouple() ? `
+          <div class="cf-cell">
+            <label>Owner ${tooltipHTML(`Informational only — the ${fmtMoney(GIFT_ANNUAL_LIMIT)}/yr and ${fmtMoney(GIFT_FIVE_YEAR_LIMIT)}/five-year gifting limits are assessed against the household as one pool regardless of whose asset it notionally came from.`)}</label>
+            <select data-gid="${g.id}" data-gfield="owner">
+              <option value="client"${g.owner === "client" ? " selected" : ""}>${escapeHTML(clientName())}</option>
+              <option value="partner"${g.owner === "partner" ? " selected" : ""}>${escapeHTML(partnerName())}</option>
+              <option value="joint"${g.owner === "joint" ? " selected" : ""}>Joint</option>
+            </select>
+          </div>` : ""}
+          <div class="cf-cell">
+            <label>Amount ($)</label>
+            <input type="number" min="0" step="1000" value="${g.amount}" data-gid="${g.id}" data-gfield="amount" />
+          </div>
+          <div class="cf-cell">
+            <label>At</label>
+            ${dateRefControlHTML(g.at, "client", `data-gid="${g.id}" data-gfield="at"`, state.plan.client.currentAge, state.plan.endAge)}
+          </div>
+        </div>
+        ${r ? `
+          <p class="helper-text">
+            ${r.deprived > 0
+              ? `${fmtMoney(r.allowable)} within the gifting limits; ${fmtMoney(r.deprived)} is a DEPRIVED ASSET — assessed under both the assets test and the income test (deemed) for five years from this gift's own date.`
+              : `Fully within the ${fmtMoney(GIFT_ANNUAL_LIMIT)}/financial-year and ${fmtMoney(GIFT_FIVE_YEAR_LIMIT)}/rolling-five-year gifting limits — not assessed as a deprived asset.`}
+          </p>
+        ` : `<p class="helper-text">Falls outside the projection window (or before the projection start) — never fires, so it isn't assessed.</p>`}
+      </div>
+    </div>
+  `;
+}
+
+function giftsSectionHTML() {
+  const gifts = state.plan.gifts ?? [];
+  const resolved = gifts.length ? resolvedGiftsForPreview() : [];
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Gifts ${tooltipHTML(`A one-off cash gift out of the household. Centrelink treats gifting above ${fmtMoney(GIFT_ANNUAL_LIMIT)}/financial year or ${fmtMoney(GIFT_FIVE_YEAR_LIMIT)}/rolling five years as a DEPRIVED ASSET — still assessed under both means tests for five years from the gift's own date.`)}</div>
+      ${gifts.length ? `<div class="portfolio-stack">${gifts.map((g) => giftCardHTML(g, resolved)).join("")}</div>` : ""}
+      <button class="btn-text" type="button" data-gift-action="add">+ Add gift</button>
     </div>
   `;
 }
@@ -3685,6 +3881,33 @@ function heasSectionHTML() {
 }
 
 els.settingsPanel.addEventListener("change", (e) => {
+  const gid = e.target.dataset.gid;
+  const gfield = e.target.dataset.gfield;
+  if (gid && gfield) {
+    const g = findGift(gid);
+    if (!g) return;
+    const v = e.target.value;
+    if (gfield === "label") g.label = v.trim() || g.label;
+    else if (gfield === "owner") g.owner = ["client", "partner", "joint"].includes(v) ? v : "client";
+    else if (gfield === "amount") g.amount = clampNumber(v, 0);
+    else if (gfield === "at") {
+      if (e.target.dataset.drRole === "anchor") {
+        g.at = v === "__age__"
+          ? { kind: "age", age: resolveRef(g.at, state.plan, projection.schedule, "client").age }
+          : { kind: "anchor", anchorId: v };
+      } else {
+        const age = clampInt(v, state.plan.client.currentAge, state.plan.endAge);
+        g.at = { kind: "age", age };
+        flagIfClamped(e.target, age);
+      }
+    } else {
+      return;
+    }
+    saveState();
+    refreshOutputs();
+    renderSettings();
+    return;
+  }
   const pid = e.target.dataset.pid;
   if (pid) { onSurplusPeriodChange(e.target, pid); return; }
   const field = e.target.dataset.settingsField;
@@ -3793,6 +4016,24 @@ function onSurplusPeriodChange(el, pid) {
 }
 
 els.settingsPanel.addEventListener("click", (e) => {
+  const giftBtn = e.target.closest("[data-gift-action]");
+  if (giftBtn) {
+    const giftAction = giftBtn.dataset.giftAction;
+    if (giftAction === "add") {
+      const owner = isCouple() && (state.plan.gifts ?? []).some((g) => g.owner === "client") ? "partner" : "client";
+      state.plan.gifts = [...(state.plan.gifts ?? []), { ...createGift(state.plan, state.plan.gifts ?? []), owner }];
+    } else if (giftAction === "remove") {
+      const g = findGift(giftBtn.dataset.gid);
+      if (!g || !window.confirm(`Remove "${g.label}"?`)) return;
+      state.plan.gifts = state.plan.gifts.filter((x) => x.id !== g.id);
+    } else {
+      return;
+    }
+    saveState();
+    refreshOutputs();
+    renderSettings();
+    return;
+  }
   const btn = e.target.closest("[data-action], [data-paction]");
   if (!btn) return;
   const { action, paction, pid, said } = btn.dataset;

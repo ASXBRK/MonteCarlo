@@ -300,7 +300,16 @@ export function isDeathBenefitTaxDependant(relationship) {
 }
 
 export function createDeathBenefitBeneficiary(existing = []) {
-  return { id: uid("db"), label: `Beneficiary ${existing.length + 1}`, relationship: "spouse", sharePct: 100 };
+  // The engine applies sharePct/100 directly to every account with no
+  // normalisation (deterministic.js's own byBeneficiary map) — a new
+  // row defaulting to 100% regardless of what's already nominated would
+  // silently double-count the moment a second beneficiary is added.
+  // Default to whatever headroom remains instead (0 once already full,
+  // forcing an explicit rebalance) so the total can never exceed 100%
+  // by construction, the same "bound the control" principle the
+  // surplus-allocation percentage field already uses.
+  const usedPct = existing.reduce((s, b) => s + (b.sharePct ?? 0), 0);
+  return { id: uid("db"), label: `Beneficiary ${existing.length + 1}`, relationship: "spouse", sharePct: existing.length === 0 ? 100 : Math.max(0, 100 - usedPct) };
 }
 
 export function clampDeathBenefitBeneficiary(b) {

@@ -2295,6 +2295,18 @@ describe("Death benefits (spec 22, Commit 1): plan model", () => {
     expect(b.sharePct).toBe(100);
   });
 
+  it("createDeathBenefitBeneficiary defaults a subsequent row to the remaining headroom, not another 100%", () => {
+    // The engine applies sharePct/100 directly with no normalisation
+    // (deterministic.js's byBeneficiary map) — a second row defaulting
+    // to 100% again would silently double-count the balance the
+    // moment it's added, before the user has touched anything.
+    const first = createDeathBenefitBeneficiary();
+    const second = createDeathBenefitBeneficiary([first]);
+    expect(second.sharePct).toBe(0); // no headroom left after a 100% first row
+    const third = createDeathBenefitBeneficiary([{ ...first, sharePct: 60 }]);
+    expect(third.sharePct).toBe(40); // remaining headroom, not another 100
+  });
+
   it("clampDeathBenefitBeneficiary defends a junk relationship and clamps sharePct to [0,100]", () => {
     const b = clampDeathBenefitBeneficiary({ id: "b1", label: "Jo", relationship: "not-a-real-one", sharePct: 150 });
     expect(DEATH_BENEFIT_RELATIONSHIPS).toContain(b.relationship);
