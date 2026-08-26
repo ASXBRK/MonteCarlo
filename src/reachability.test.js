@@ -104,3 +104,46 @@ describe("UI reachability sweep (spec 27 Commit 5)", () => {
     });
   }
 });
+
+// --- Field-level reachability -----------------------------------------
+//
+// The sweep above is COLLECTION-granular: "deductions" and "income" both
+// passed it the whole time salary packaging (spec 23, Commit 3) and
+// bonus/allowance/overtime (spec 23, Commit 2) sat with zero UI, because
+// DEDUCTION_CATEGORIES/INCOME_CATEGORIES were both genuinely reachable —
+// the categories existed and could be selected. What had no UI was ONE
+// FIELD within an already-reachable row: packagingType, employerId (on
+// a salaryPackaging row specifically), bonusMonth, bonusDestination, and
+// the allowance-only `taxable` flag. A collection can be reachable while
+// the fields that make it useful are not — this registry checks
+// INDIVIDUAL FIELDS for exactly that reason, not just their parent
+// collection.
+const FIELD_REGISTRY = [
+  // Salary packaging (spec 23, Commit 3) — packagingType select, an
+  // employer select scoped to the salaryPackaging category (distinct
+  // from the income row's own employerId case), and the live cap-usage/
+  // FBT/reportable-fringe-benefits consequence beside them.
+  { name: "deduction.packagingType", markers: ['data-field="packagingType"', "PACKAGING_TYPES.map"] },
+  { name: "deduction.employerId (salary packaging)", markers: ['r.category === "salaryPackaging"', 'data-field="employerId"'] },
+  { name: "deduction.packagingType consequence (cap usage / RFB)", markers: ["packagingNoteHTML", "reportable fringe benefits"] },
+  // Bonus (spec 23, Commit 2) — payment month and destination
+  // (loan/super/asset), the "the bonus goes to the mortgage" fields.
+  { name: "income.bonusMonth", markers: ['data-field="bonusMonth"'] },
+  { name: "income.bonusDestination", markers: ['data-field="bonusDestinationType"', 'data-field="bonusDestinationTarget"'] },
+  // Allowance (spec 23, Commit 2) — some allowances are assessable, some
+  // aren't; the taxable flag is the only thing that decides which.
+  { name: "income.taxable (allowance)", markers: ['data-field="taxable"'] },
+  // Overtime (spec 23, Commit 2) — no field to enter (sgApplies is
+  // forced off, not user-set), but the surprising consequence still
+  // needs to be STATED, derived and read-only, or it reads as a bug
+  // report waiting to happen.
+  { name: "income.overtime no-SG consequence", markers: ["No SG applies"] },
+];
+
+describe("UI field reachability (spec 23 Commits 2/3 gap)", () => {
+  for (const f of FIELD_REGISTRY) {
+    it(`${f.name} is genuinely reachable in main.js`, () => {
+      for (const marker of f.markers) expect(mainSrc).toContain(marker);
+    });
+  }
+});

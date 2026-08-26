@@ -1623,6 +1623,58 @@ $32,500 (`min($300k, $270,830) × 12%`); a second employer at the same
 salary → SG $64,999 (~double, each employer's contribution base capped
 independently).
 
+### Salary packaging and income category fields UI (spec 23 Commits 2/3, gaps closed)
+Input UI and per-income-row assignment for the two adjacent gaps
+disclosed (not fixed) in the entry above.
+
+Salary packaging (Commit 3): a `salaryPackaging` deduction row gains an
+employer select and a `packagingType` select. A live note beside them —
+reading this row's own FY0 row total off the live projection, plus its
+employer's `fbtType`/`fbtCaps`, the same math schedule.js's own
+packaging resolution uses — shows cap usage and, where FBT/reportable
+fringe benefits apply, states the add-back consequence plainly rather
+than a "$ saved" figure (that side needs a full marginal-rate
+assessment this row-level note doesn't attempt): a standard employer
+gets "no cap benefit — the whole $X packaged is FBT-liable"; an
+exempt/rebatable employer gets "$X of the $Y cap used, $Z over" plus
+the FBT/RFB figures once either is non-zero; "car" gets a static "never
+covered by either cap" note; "exemptItem" gets a static "no cap
+consequence" note. The add-back note names all three downstream
+effects (HELP repayment income, Division 293 income, Medicare levy
+surcharge base) every time it fires.
+
+Income category fields (Commit 2): a "bonus" row gains a payment-month
+select and a destination select (loan/super/asset, "the bonus goes to
+the mortgage"), reusing the row's own `bonusMonth`/`bonusDestination`
+fields that already drove the engine with no UI; an "allowance" row
+gains the `taxable` checkbox (some allowances are assessable, some
+aren't); an "overtime" row gains a static, read-only "No SG applies —
+overtime isn't ordinary time earnings" note (sgApplies is forced off by
+the engine, not user-set — the surprising part is worth stating rather
+than leaving silent).
+
+`reachability.test.js` gained a FIELD-level registry (not just
+collection-level): the existing sweep passed the whole time both gaps
+existed, since `DEDUCTION_CATEGORIES`/`INCOME_CATEGORIES` were
+themselves genuinely reachable — a collection being reachable doesn't
+mean every field on it is. Seven new assertions cover
+packagingType/employerId (salary packaging)/the cap-usage note/
+bonusMonth/bonusDestination/taxable/the overtime no-SG note
+individually.
+
+Regression: no engine files touched, no new plan-state fields — every
+field involved already existed with engine treatment and no UI;
+scenarios not using these fields are bit-identical. Browser-verified:
+an FBT-exempt employer with a $5,000 cap and $7,700 packaged shows "$5,000
+of the $5,000 cap used, $2,700 over... ≈$2,394/yr FBT... $5,094 added to
+reportable fringe benefits" (exactly `2,700 × 1.8868 × 0.47` and
+`2,700 × 1.8868`); switching to a standard employer shows "no cap
+benefit... the whole $7,700 packaged is FBT-liable... ≈$6,828/yr FBT...
+$14,528 added to reportable fringe benefits" (exactly `7,700 × 1.8868`
+and `× 0.47`); a $50,000 bonus redirected to a $300,000 loan reduces its
+FY1 closing balance from $251,673 to $232,942 and pays it off three
+years earlier (FY5 vs FY8) versus the same bonus with no destination.
+
 ---
 
 ## WHERE WE'RE GOING

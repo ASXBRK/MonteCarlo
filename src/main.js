@@ -49,6 +49,7 @@ import {
   createBond, BOND_TYPES, createBondContribution,
   createGift,
   createEmployer, FBT_TYPES,
+  PACKAGING_TYPES, BONUS_DESTINATION_TYPES,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { resolveGiftDeprivation, GIFT_ANNUAL_LIMIT, GIFT_FIVE_YEAR_LIMIT } from "./gifting.js";
@@ -3287,6 +3288,68 @@ function sgNoteHTML(r) {
   return `<p class="helper-inline">SG ${(rates.sgRate * 100).toFixed(0)}% on ${fmtMoney(totalFy)}, capped at the maximum contribution base for this employer ≈ ${fmtMoney(sg)}/yr.</p>`;
 }
 
+// Shared by employment income rows (incomeType "employment") and
+// salaryPackaging deduction rows — the two row kinds whose engine
+// behaviour (SG/cap grouping; FBT cap/type) depends on a real employer
+// link. Auto-provisions a default employer the first time a row that
+// needs one exists for its owner, same convention resolveEmployerAssignment
+// applies at the schema layer for income rows on hydrate/clampAllToPlan
+// — this is the LIVE-EDIT-SESSION mirror of that, needed because this
+// direct field-edit path never calls the full clamp.
+function ensureEmployerAssigned(row) {
+  if ((state.plan.employers ?? []).some((emp) => emp.id === row.employerId && emp.ownerId === row.owner)) return;
+  if (!(state.plan.employers ?? []).some((emp) => emp.ownerId === row.owner)) {
+    state.plan.employers = [...(state.plan.employers ?? []), createEmployer(state.plan, state.plan.employers ?? [], row.owner)];
+  }
+  row.employerId = (state.plan.employers ?? []).find((emp) => emp.ownerId === row.owner)?.id ?? null;
+}
+
+// Bonus/allowance/overtime fields (spec 23, Commit 2; UI closing the
+// reachability gap) — categories existed with real engine treatment
+// (applyBonus/bonusMonthIndex; incomeCategoryTaxTreatment's taxable
+// branch; overtime's forced sgApplies=false) but no way to enter or
+// see any of it.
+const BONUS_DESTINATION_LABELS = {
+  loanRepayment: "Pay down a loan",
+  superContribution: "Super contribution",
+  asset: "Invest in an asset",
+};
+function liabilityOptions(selected) {
+  const liabs = state.liabilities ?? [];
+  if (liabs.length === 0) return `<option value="">No liabilities yet</option>`;
+  return liabs.map((l) => `<option value="${l.id}"${l.id === selected ? " selected" : ""}>${escapeHTML(l.name)}</option>`).join("");
+}
+function bonusDestinationTargetOptions(r, dest) {
+  if (dest.type === "loanRepayment") return liabilityOptions(dest.targetId);
+  if (dest.type === "superContribution") return superAccountOptions(dest.targetId, r.owner);
+  if (dest.type === "asset") return assetOptions(dest.targetId);
+  return "";
+}
+function bonusFieldsHTML(r) {
+  const dest = r.bonusDestination ?? { type: null, targetId: null };
+  return `
+    <div class="cf-bonus-fields">
+      <label>Payment month
+        <select data-kind="income" data-cfid="${r.id}" data-field="bonusMonth">
+          ${MONTH_NAMES.map((m, i) => `<option value="${i + 1}"${(r.bonusMonth ?? 6) === i + 1 ? " selected" : ""}>${m}</option>`).join("")}
+        </select>
+      </label>
+      <label>Destination
+        <select data-kind="income" data-cfid="${r.id}" data-field="bonusDestinationType">
+          <option value=""${!dest.type ? " selected" : ""}>Ordinary surplus (no destination)</option>
+          ${BONUS_DESTINATION_TYPES.map((t) => `<option value="${t}"${dest.type === t ? " selected" : ""}>${BONUS_DESTINATION_LABELS[t]}</option>`).join("")}
+        </select>
+      </label>
+      ${dest.type ? `
+        <select data-kind="income" data-cfid="${r.id}" data-field="bonusDestinationTarget">
+          <option value="">Select…</option>
+          ${bonusDestinationTargetOptions(r, dest)}
+        </select>
+      ` : ""}
+    </div>
+  `;
+}
+
 function incomeRowHTML(r) {
   return `
     <tr class="cf-tr" data-cfid="${r.id}">
@@ -3308,6 +3371,15 @@ function incomeRowHTML(r) {
           </label>
           <button type="button" class="btn-text" data-action="edit-termination" data-cfid="${r.id}">${r.termination?.enabled ? "Termination ✓" : "Termination…"}</button>
         ` : ""}
+        ${r.category === "bonus" ? bonusFieldsHTML(r) : ""}
+        ${r.category === "allowance" ? `
+          <label class="ptg-check cf-sg-check">
+            <input type="checkbox"${r.taxable !== false ? " checked" : ""}
+                   data-kind="income" data-cfid="${r.id}" data-field="taxable" />
+            <span>Taxable</span>
+          </label>
+        ` : ""}
+        ${r.category === "overtime" ? `<p class="helper-inline">No SG applies — overtime isn't ordinary time earnings.</p>` : ""}
       </td>
       ${labelTdHTML("income", r)}
       ${isCouple() ? `
@@ -3363,6 +3435,85 @@ function expenseRowHTML(r) {
   `;
 }
 
+// Salary packaging (spec 23, Commit 3; UI closing the reachability gap
+// a1ab5a9 disclosed) — the live cap-usage/net-position disclosure
+// beside a "salaryPackaging" deduction row. The gross-up/FBT math
+// mirrors schedule.js's own packaging resolution exactly (same
+// grouping key, same FBT_GROSSUP_RATE/FBT_RATE — spec-given ATO
+// figures, not re-derived differently here); unlike sgNoteHTML this
+// needs no live projection at all — cap/excess/FBT are fully
+// self-contained from this FY's own row totals plus the employer's
+// own cap fields, so it reads projection.schedule.rowTotals.deductions
+// (this row's own already-computed FY0 amount, same "year 0 only, live
+// estimate" convention) purely to annualise amount×frequency correctly,
+// not because the math itself needs multi-year context.
+// Disclosed simplification: shows the FBT/reportable-fringe-benefits
+// consequence (the add-back that counts toward HELP repayment income,
+// Division 293 income and the Medicare levy surcharge base) rather
+// than a net "$X saved" figure — the actual income-tax-saved side
+// needs a full marginal-rate assessment (this row's own amount against
+// the owner's whole tax position), which sgNoteHTML-style live notes
+// elsewhere in this file don't attempt either; stating the add-back
+// plainly, without ALSO claiming an unverified saved figure, is the
+// safer disclosure of the two.
+const PKG_FBT_GROSSUP_RATE = 1.8868;
+const PKG_FBT_RATE = 0.47;
+const PACKAGING_TYPE_LABELS = {
+  livingExpense: "Living expenses",
+  mealEntertainment: "Meal entertainment",
+  car: "Car",
+  exemptItem: "Exempt item (work-related)",
+};
+function packagingNoteHTML(r) {
+  if (r.category !== "salaryPackaging") return "";
+  if (r.packagingType === "car") {
+    return `<p class="helper-warning">Cars are never covered by either FBT cap — the whole packaged amount is always FBT-liable via the statutory formula, whatever the employer type.</p>`;
+  }
+  if (r.packagingType === "exemptItem") {
+    return `<p class="helper-inline">FBT-exempt under the general Act — no cap consequence, any employer type.</p>`;
+  }
+  const employer = findEmployer(r.employerId);
+  if (!employer) return `<p class="helper-warning">No employer selected — pick one to see the cap/FBT consequence.</p>`;
+  if (!projection?.schedule?.rowTotals?.deductions) return "";
+  const key = (row) => `${row.owner}::${row.employerId ?? row.id}`;
+  const siblings = (state.cashflows.deductions ?? []).filter((row) => row.category === "salaryPackaging" && key(row) === key(r));
+  const rt = projection.schedule.rowTotals.deductions;
+  let livingTotal = 0, mealTotal = 0;
+  for (const row of siblings) {
+    const v = rt[row.id]?.[0] ?? 0;
+    if (v <= 0) continue;
+    if (row.packagingType === "livingExpense") livingTotal += v;
+    else if (row.packagingType === "mealEntertainment") mealTotal += v;
+  }
+  const thisTotal = r.packagingType === "livingExpense" ? livingTotal : mealTotal;
+  if (!(thisTotal > 0)) return "";
+  const fbtType = employer.fbtType;
+  const caps = employer.fbtCaps;
+  const capApplies = fbtType !== "standard";
+  const cap = r.packagingType === "livingExpense" ? caps.livingExpenseCap : caps.mealEntertainmentCap;
+  const excess = capApplies ? Math.max(0, thisTotal - cap) : thisTotal;
+  const withinCap = thisTotal - excess;
+  // Only "fbtRebatable" has a within-cap rebated base — a rebate
+  // reduces FBT payable, unlike "fbtExempt", where the within-cap
+  // portion has NO FBT and no reportable-fringe-benefits consequence
+  // at all (see schedule.js's own header on this exact asymmetry).
+  const rebatedBase = fbtType === "fbtRebatable" ? withinCap : 0;
+  const rebatePct = fbtType === "fbtRebatable" ? caps.rebatePct : 0;
+  const grossedUpExcess = excess * PKG_FBT_GROSSUP_RATE;
+  const grossedUpRebated = rebatedBase * PKG_FBT_GROSSUP_RATE;
+  const fbt = grossedUpExcess * PKG_FBT_RATE + grossedUpRebated * PKG_FBT_RATE * (1 - rebatePct / 100);
+  const rfb = grossedUpExcess + grossedUpRebated;
+  if (fbtType === "standard") {
+    return `<p class="helper-warning">${escapeHTML(employer.name)} is a standard employer — no cap benefit. The whole ${fmtMoney(thisTotal)} packaged is FBT-liable: ≈ ${fmtMoney(fbt)}/yr FBT, plus ${fmtMoney(rfb)} added to reportable fringe benefits. That add-back counts toward HELP repayment income, Division 293 income and the Medicare levy surcharge base — it does not reduce them, so packaging here typically costs more than the income tax it saves.</p>`;
+  }
+  const typeLabel = fbtType === "fbtExempt" ? "FBT-exempt" : "FBT-rebatable";
+  const capUsageLine = `${fmtMoney(withinCap)} of the ${fmtMoney(cap)} cap used${excess > 0 ? `, ${fmtMoney(excess)} over` : ""}`;
+  if (fbt <= 0 && rfb <= 0) {
+    return `<p class="helper-inline">${escapeHTML(employer.name)} (${typeLabel}): ${capUsageLine} — fully within cap, no FBT or reportable-fringe-benefits consequence.</p>`;
+  }
+  return `<p class="helper-warning">${escapeHTML(employer.name)} (${typeLabel}): ${capUsageLine}. ≈ ${fmtMoney(fbt)}/yr FBT payable${excess > 0 ? ` on the ${fmtMoney(excess)} excess` : ""}, plus ${fmtMoney(rfb)} added to reportable fringe benefits — counts toward HELP repayment income, Division 293 income and the Medicare levy surcharge base, it does not correspondingly reduce them.</p>`;
+}
+
 // PAYG withholding, tax refund timing, and deductions: a deduction row
 // reduces its owner's assessable income only — it never itself debits
 // household cash (disclosed — see schedule.js's deductionsByOwner
@@ -3377,6 +3528,15 @@ function deductionRowHTML(r) {
             `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(DEDUCTION_CATEGORY_LABELS[c])}</option>`
           ).join("")}
         </select>
+        ${r.category === "salaryPackaging" ? `
+          <select data-kind="deductions" data-cfid="${r.id}" data-field="employerId" aria-label="Employer">
+            ${employerOptions(r.owner, r.employerId)}
+          </select>
+          <select data-kind="deductions" data-cfid="${r.id}" data-field="packagingType" aria-label="Packaging type">
+            ${PACKAGING_TYPES.map((t) => `<option value="${t}"${r.packagingType === t ? " selected" : ""}>${PACKAGING_TYPE_LABELS[t]}</option>`).join("")}
+          </select>
+          <span class="cf-pkg-note" data-cfid="${r.id}">${packagingNoteHTML(r)}</span>
+        ` : ""}
       </td>
       ${labelTdHTML("deductions", r)}
       ${isCouple() ? `
@@ -4690,6 +4850,17 @@ function refreshIncomeSgNote(cfid) {
   if (el) el.innerHTML = sgNoteHTML(row);
 }
 
+// Salary packaging (spec 23, Commit 3) — same surgical-update reason as
+// refreshIncomeSgNote just above: packagingNoteHTML reads this FY's
+// row totals off the live projection, which only becomes fresh AFTER
+// refreshOutputs() runs.
+function refreshDeductionPackagingNote(cfid) {
+  const row = findRow("deductions", cfid);
+  if (!row) return;
+  const el = document.querySelector(`.cf-pkg-note[data-cfid="${cfid}"]`);
+  if (el) el.innerHTML = packagingNoteHTML(row);
+}
+
 function applyFieldEdit(el, commit) {
   const field = el.dataset.field;
   if (!field) return;
@@ -4709,6 +4880,9 @@ function applyFieldEdit(el, commit) {
     // not a full row re-render, so typing never loses focus.
     if (commit && el.dataset.kind === "income" && (field === "amount" || field === "frequency" || field === "sgApplies")) {
       refreshIncomeSgNote(el.dataset.cfid);
+    }
+    if (commit && el.dataset.kind === "deductions" && (field === "amount" || field === "frequency")) {
+      refreshDeductionPackagingNote(el.dataset.cfid);
     }
     return;
   }
@@ -4864,17 +5038,63 @@ function applyRowEdit(kind, row, field, el, commit) {
       if (findAsset(el.value)) row.assetId = el.value;
       break;
     // Employers (spec 23, Commit 1; UI closing the reachability gap
-    // a1ab5a9 disclosed) — an income row's own employer, scoped to the
-    // ROW'S OWN owner (an employer belongs to one person). A cross-
-    // owner selection can't reach here (employerOptions only lists
-    // this row's own owner's employers), but is re-validated anyway,
-    // same defensive belt-and-braces every other reference field here
-    // already applies.
+    // a1ab5a9 disclosed) — shared by income rows (SG/cap grouping) and
+    // salaryPackaging deduction rows (FBT cap/type), scoped to the
+    // ROW'S OWN owner (an employer belongs to one person) either way. A
+    // cross-owner selection can't reach here (employerOptions only
+    // lists this row's own owner's employers), but is re-validated
+    // anyway, same defensive belt-and-braces every other reference
+    // field here already applies.
     case "employerId":
       if ((state.plan.employers ?? []).some((e) => e.id === el.value && e.ownerId === row.owner)) row.employerId = el.value;
       else row.employerId = null;
-      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // the SG note depends on the new employer's siblings
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // the SG/cap-usage note depends on the new employer's siblings
       break;
+    // Salary packaging (spec 23, Commit 3; UI closing the reachability
+    // gap) — only meaningful on a "salaryPackaging" deduction row (see
+    // planState.js's own header on why it's carried on every row
+    // regardless).
+    case "packagingType": {
+      row.packagingType = PACKAGING_TYPES.includes(el.value) ? el.value : "livingExpense";
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // the cap-usage note depends on the packaging type
+      break;
+    }
+    // Bonus/allowance/overtime (spec 23, Commit 2; UI closing the
+    // reachability gap) — bonusMonth/bonusDestination only ever mean
+    // anything on a "bonus" category row (carried-but-inert on every
+    // other row, same convention as termination); taxable only ever
+    // varies treatment on "allowance" (see incomeCategoryTaxTreatment).
+    case "bonusMonth":
+      row.bonusMonth = clampInt(el.value, 1, 12);
+      break;
+    case "bonusDestinationType": {
+      // Changing the destination TYPE invalidates any previously chosen
+      // target (a liability id is meaningless once the type switches to
+      // "asset") — reset it rather than leaving a stale cross-type id,
+      // same "reset the dependent field" convention fromAccountId uses
+      // above for toAccountId.
+      const type = BONUS_DESTINATION_TYPES.includes(el.value) ? el.value : null;
+      row.bonusDestination = { type, targetId: null };
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // the target select depends on the new type
+      break;
+    }
+    case "bonusDestinationTarget": {
+      const dest = row.bonusDestination ?? { type: null, targetId: null };
+      let valid = false;
+      if (dest.type === "loanRepayment") valid = (state.liabilities ?? []).some((l) => l.id === el.value);
+      else if (dest.type === "superContribution") valid = (state.plan.superAccounts ?? []).some((s) => s.id === el.value && s.owner === row.owner && s.include);
+      else if (dest.type === "asset") valid = state.assets.some((a) => a.id === el.value && a.class !== "lifestyle");
+      row.bonusDestination = { type: dest.type, targetId: valid ? el.value : null };
+      break;
+    }
+    case "taxable": {
+      row.taxable = el.checked;
+      row.incomeType = incomeCategoryTaxTreatment(row.category, row.taxable);
+      if (row.incomeType !== "employment") row.sgApplies = false;
+      else ensureEmployerAssigned(row); // toggling an allowance taxable can turn it into an employment row for the first time
+      if (commit) { const rowEl = el.closest(".cf-tr"); if (rowEl) rowEl.outerHTML = rowHTMLFor(kind, row); } // employer select/SG note visibility depends on incomeType
+      break;
+    }
     case "bondId":
       if ((state.bonds ?? []).some((b) => b.id === el.value)) row.bondId = el.value;
       break;
@@ -4968,9 +5188,10 @@ function applyRowEdit(kind, row, field, el, commit) {
     case "category": {
       if (kind === "income") {
         row.category = INCOME_CATEGORIES.includes(el.value) ? el.value : "salary";
-        row.incomeType = incomeCategoryTaxTreatment(row.category);
-        // SG only ever applies to salary (planState's clampIncomeRow
-        // convention) — force it off here too.
+        row.incomeType = incomeCategoryTaxTreatment(row.category, row.taxable);
+        // SG only ever applies to salary/bonus/allowance-taxable
+        // (planState's clampIncomeRow convention: any employment-typed
+        // category except overtime) — force it off here too.
         if (row.incomeType !== "employment") row.sgApplies = false;
         // Employers (spec 23, Commit 1) — this row's employerId is only
         // ever auto-resolved to the owner's default employer by a FULL
@@ -4984,16 +5205,7 @@ function applyRowEdit(kind, row, field, el, commit) {
         // edit happens to trigger a full clamp; resolved eagerly here so
         // the select is never misleadingly behind what the engine itself
         // will actually use.
-        if (row.incomeType === "employment" && !(state.plan.employers ?? []).some((emp) => emp.id === row.employerId && emp.ownerId === row.owner)) {
-          // No existing employer belongs to this owner at all yet
-          // (e.g. their only prior income was non-employment) — auto-
-          // provision one, same reason/convention as the "add-row"
-          // case just above.
-          if (!(state.plan.employers ?? []).some((emp) => emp.ownerId === row.owner)) {
-            state.plan.employers = [...(state.plan.employers ?? []), createEmployer(state.plan, state.plan.employers ?? [], row.owner)];
-          }
-          row.employerId = (state.plan.employers ?? []).find((emp) => emp.ownerId === row.owner)?.id ?? null;
-        }
+        if (row.incomeType === "employment") ensureEmployerAssigned(row);
         // Input behaviour fix — label as a derived default: follows the
         // category until the user types their own (see labelTdHTML's
         // own header comment), mirroring planState.js's clampDerivedLabel
@@ -5372,10 +5584,7 @@ function onCashflowSectionClick(e) {
       // employer yet" until an unrelated edit triggers the next full
       // clampAllToPlan() pass — the FIRST income row added to a fresh
       // client is exactly this case, not an edge one.
-      if (row.incomeType === "employment" && !(state.plan.employers ?? []).some((e) => e.ownerId === row.owner)) {
-        state.plan.employers = [...(state.plan.employers ?? []), createEmployer(state.plan, state.plan.employers ?? [], row.owner)];
-      }
-      row.employerId = (state.plan.employers ?? []).find((emp) => emp.ownerId === row.owner)?.id ?? null;
+      if (row.incomeType === "employment") ensureEmployerAssigned(row);
       cf.income.push(row);
     }
     else if (kind === "deductions") cf.deductions.push(createDeductionRow(state.plan, cf.deductions));
@@ -5395,19 +5604,22 @@ function onCashflowSectionClick(e) {
     }
     saveState();
     if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
-    // Employers (spec 23, Commit 1) — the SG note (sgNoteHTML) reads
-    // the live projection, which is still ONE STEP STALE at the
+    // Employers (spec 23, Commit 1) — the SG note (sgNoteHTML) and the
+    // salary-packaging cap-usage note (packagingNoteHTML) both read the
+    // live projection, which is still ONE STEP STALE at the
     // renderCashflows() call just above (refreshOutputs() — and the
     // fresh projection it produces — runs AFTER it, for every kind but
     // super's own). A second, cheap re-render with the now-current
     // projection is the simplest fix that doesn't touch the shared
-    // render/refresh order every other kind already relies on.
-    if (kind === "income") renderCashflows();
+    // render/refresh order every other kind already relies on — needed
+    // for "deductions" too since adding/removing one packaging row
+    // changes its SIBLINGS' own cap-usage totals, not just its own.
+    if (kind === "income" || kind === "deductions") renderCashflows();
   } else if (action === "remove-row") {
     if (cf[kind]) cf[kind] = cf[kind].filter((r) => r.id !== cfid);
     saveState();
     if (isSuperKind) { refreshOutputs(); renderSuper(); } else { renderCashflows(); refreshOutputs(); }
-    if (kind === "income") renderCashflows(); // see the "add-row" branch's own comment
+    if (kind === "income" || kind === "deductions") renderCashflows(); // see the "add-row" branch's own comment
   } else if (action === "edit-termination") {
     openTerminationEditor(cfid);
   }

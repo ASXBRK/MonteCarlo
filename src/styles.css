@@ -750,6 +750,16 @@ html, body {
   text-transform: none; letter-spacing: normal; font-weight: 500;
 }
 .cf-sg-check input { width: 14px; height: 14px; accent-color: var(--accent); }
+/* Bonus fields (spec 23, Commit 2; UI closing the reachability gap) —
+   payment month + destination, stacked in the Category cell below the
+   category select, same "shares the cell" convention as the SG toggle. */
+.cf-bonus-fields {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px;
+}
+.cf-bonus-fields label {
+  display: flex; flex-direction: column; gap: 2px; font-size: 11px;
+  color: var(--ink-soft); text-transform: none; letter-spacing: normal; font-weight: 500;
+}
 /* Indexation: one header, two narrow adjacent inputs, computed total
    as muted subtext beneath. */
 .cf-index-pair { display: flex; gap: 4px; }
