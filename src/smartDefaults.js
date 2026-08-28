@@ -45,6 +45,10 @@ export const SMART_DEFAULTS = {
     kind: DEFAULT_KIND.HOUSE,
     describe: () => `Default: 80% — house view (typical lender LVR ceiling for a security property)`,
   },
+  "property.landValuePct": {
+    kind: DEFAULT_KIND.DERIVED,
+    describe: (ctx) => `Default: ${fmtPct(ctx.value)} — derived (${ctx.dwellingType === "unit" ? "unit, land shared across the strata" : "house on a standard block"}); recomputes if the dwelling type changes until you enter your own figure, or the actual unimproved value from a rates notice`,
+  },
   "property.rentAmount": {
     kind: DEFAULT_KIND.DERIVED,
     describe: (ctx) => `Default: ${fmtDollars(ctx.value)} — derived (4% of property value); recomputes as value changes until you enter your own figure`,

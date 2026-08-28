@@ -205,7 +205,10 @@ describe("exclusions + display scaling", () => {
 describe("indexation model (D1)", () => {
   const at = (row, m) => {
     const s = mkState({ endAge: 55, contributions: [{ ...cf({ toAge: 55 }), ...row }] });
-    s.assumptions.awote = 0.035;
+    // Row indexation's "awote" basis reads assumptions.wageGrowth, not
+    // assumptions.awote (kept only for super/ETP/redundancy caps —
+    // assumptions-provenance.md §1.2).
+    s.assumptions.wageGrowth = 0.035;
     return buildSchedules(s).assetFlows.a1.contributions[m];
   };
 
@@ -218,7 +221,7 @@ describe("indexation model (D1)", () => {
       .toBeCloseTo(500 / Math.pow(1.025, 10), 10);
   });
 
-  it("AWOTE-linked rows grow in real terms by the wage premium", () => {
+  it("wage-linked (\"awote\" basis) rows grow in real terms by the wage premium", () => {
     expect(at({ indexBasis: "awote", indexExtraPct: 0, amount: 500 }, 120))
       .toBeCloseTo(500 * Math.pow(1.035 / 1.025, 10), 10);
   });

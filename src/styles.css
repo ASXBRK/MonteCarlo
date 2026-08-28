@@ -760,6 +760,12 @@ html, body {
   display: flex; flex-direction: column; gap: 2px; font-size: 11px;
   color: var(--ink-soft); text-transform: none; letter-spacing: normal; font-weight: 500;
 }
+/* FBT cap presets (assumptions-provenance.md §4) — one-click cash-cap
+   fill buttons beneath the cap input, same row-of-links convention as
+   the "Convert to cash" warning button. */
+.fbt-cap-presets {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 3px;
+}
 /* Indexation: one header, two narrow adjacent inputs, computed total
    as muted subtext beneath. */
 .cf-index-pair { display: flex; gap: 4px; }

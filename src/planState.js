@@ -24,7 +24,7 @@
 //   - Income rows anchor from/to ages to their OWNER's age; expenses
 //     and asset cashflows anchor to the client timeline.
 
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 
 import { remainingLE } from "./data/lifeTables.js";
 import { INPUT_SECTIONS, OUTPUT_VIEWS, DEFAULT_INPUT_SECTION, OUTPUT_SUBJECT_FORMS } from "./router.js";
@@ -948,6 +948,15 @@ export const isFinancial = (a) => !isLifestyle(a);
 
 export const PROPERTY_STATES = ["NSW", "VIC", "QLD", "WA", "SA", "TAS", "ACT", "NT"];
 export const PROPERTY_TYPES = ["ppr", "holiday", "investment"];
+// Building type (assumptions-provenance.md §7.4) — distinct from
+// propertyType (a USE classification: ppr/holiday/investment). Land
+// tax is assessed on unimproved land value, and a unit's land is
+// shared across the whole strata, so it needs its own, much lower,
+// default share of total value than a standalone house on its own
+// block. landValuePct remains the actual per-property override either
+// way (a rates notice's actual unimproved value always beats either
+// ratio) — this only changes which ratio a NEW property starts from.
+export const PROPERTY_DWELLING_TYPES = ["house", "unit"];
 
 export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
   return {
@@ -956,6 +965,7 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
     owner: "client",
     state: "NSW",
     propertyType: "ppr",     // ppr | holiday | investment
+    dwellingType: "house",   // house | unit — drives the landValuePct default only (§7.4)
     status: "owned",         // owned | planned
     // owned:
     currentValue: 0,
@@ -1000,12 +1010,23 @@ export function createProperty(plan, existing = [], defaultGrowthPct = 5) {
     depositFromEquity: false,
     depositFromEquitySourcePropertyId: null,
     // Land tax (spec 19 Commit 2) — non-PPR only (investment/holiday).
-    // landValuePct estimates the unimproved-land share of total value
-    // (default 60%, the feature's largest disclosed approximation);
+    // landValuePct estimates the unimproved-land share of total value;
     // landTaxOverride bypasses the aggregate per-owner/jurisdiction
     // calculation for this property entirely, same "manual figure wins"
     // convention as dutyOverride/lmiOverride.
-    landValuePct: 60,
+    //
+    // landValuePctIsDefault (assumptions-provenance.md §7.4; same
+    // one-way-flip convention as rent/expenses' own isDefault, just
+    // above) — true until the user types their own figure, tracking
+    // dwellingType's 50%/20% split (house/unit) while it does. Defaults
+    // FALSE when absent (clampProperty): every property created before
+    // this field existed already has an explicit landValuePct (baked
+    // in by every prior clamp cycle's own `?? 60` fallback), and
+    // treating that as still-tracking would silently change a figure
+    // that may since have been deliberately confirmed or edited — the
+    // same regression concern rent/expenses' own header already raises.
+    landValuePct: 50,
+    landValuePctIsDefault: true,
     landTaxOverride: null,
     // Property sale (spec 19 Commit 4) — disabled by default. Only a
     // linked purchase-derived loan (id `prop-<propertyId>`, the SAME
@@ -1048,12 +1069,23 @@ export function clampProperty(p, plan) {
     amount: clampNumber(f?.amount, 0), isDefault: f?.isDefault === true, ...clampIndexation(f ?? {}),
   });
   const propertyType = PROPERTY_TYPES.includes(p.propertyType) ? p.propertyType : "ppr";
+  const dwellingType = PROPERTY_DWELLING_TYPES.includes(p.dwellingType) ? p.dwellingType : "house";
   const status = p.status === "planned" ? "planned" : "owned";
   const valueForDefaults = status === "planned" ? clampNumber(p.priceToday, 0) : clampNumber(p.currentValue, 0);
   let rent = flow(p.rent);
   if (rent.isDefault) rent = { ...rent, amount: valueForDefaults * 0.04 }; // 4% of property value
   let expenses = flow(p.expenses);
-  if (expenses.isDefault) expenses = { ...expenses, amount: rent.amount * 0.2 }; // 20% of gross rent
+  // 25% of gross rent (assumptions-provenance.md §7.2) — the midpoint
+  // of the 20-30% supported range, not its floor.
+  if (expenses.isDefault) expenses = { ...expenses, amount: rent.amount * 0.25 };
+  // Land value (§7.4) — same one-way-flip convention as rent/expenses,
+  // just above: tracks dwellingType's 50%/20% split until the user
+  // types their own landValuePct, then stops (see createProperty's own
+  // header on why this defaults FALSE, not true, when absent).
+  const landValuePctIsDefault = p.landValuePctIsDefault === true;
+  const landValuePct = landValuePctIsDefault
+    ? (dwellingType === "unit" ? 20 : 50)
+    : clampNumber(p.landValuePct ?? 60, 0, 100);
   return {
     id: typeof p.id === "string" && p.id ? p.id : uid("pr"),
     name: typeof p.name === "string" && p.name.trim() ? p.name : "Property",
@@ -1061,6 +1093,7 @@ export function clampProperty(p, plan) {
       ? p.owner : "client",
     state: PROPERTY_STATES.includes(p.state) ? p.state : "NSW",
     propertyType,
+    dwellingType,
     status,
     currentValue: clampNumber(p.currentValue, 0),
     acquisitionDate: typeof p.acquisitionDate === "string" && !Number.isNaN(new Date(p.acquisitionDate).getTime())
@@ -1117,7 +1150,8 @@ export function clampProperty(p, plan) {
     // engine skips PPR entirely — see deterministic.js), same "inert
     // but not hidden unless it could mislead" treatment as other
     // fields that only apply to a subset of properties.
-    landValuePct: clampNumber(p.landValuePct ?? 60, 0, 100),
+    landValuePct,
+    landValuePctIsDefault,
     landTaxOverride: p.landTaxOverride == null ? null : clampNumber(p.landTaxOverride, 0),
     // Property sale (spec 19 Commit 4) — dates anchor to the CLIENT's
     // own age window, same simplification purchaseAt above already
@@ -2369,7 +2403,17 @@ export function defaultState(profiles = {}, now = new Date()) {
       // only one chart option) falls back to its first chart.
       chartSelection: {},
     },
-    assumptions: { cpi: 0.025, awote: 0.035, mortgageRate: 0.06, bracketMode: "indexed", fhsssEarningsRate: 0.0794 },
+    // Wage growth is split by basis (assumptions-provenance.md §1.2,
+    // firm decision August 2026): `wageGrowth` (WPI concept, 2.70% —
+    // Xplan-aligned) drives salary/wage row indexation and HELP
+    // indexation; `awote` (3.2%, the 10-year AWOTE average) is kept
+    // ONLY for what the statute actually indexes on AWOTE — super
+    // contribution caps, the ETP cap, and redundancy base/per-year
+    // figures. Not a preference: the split matches each figure's own
+    // legislated basis. See deterministic.js/schedule.js's own
+    // wageGrowthAssum-vs-awoteAssum split for exactly which figure each
+    // consumer uses.
+    assumptions: { cpi: 0.025, awote: 0.032, wageGrowth: 0.027, mortgageRate: 0.06, bracketMode: "indexed", fhsssEarningsRate: 0.0743 },
     // A newly created scenario starts fully untouched — correct, since
     // nobody has reviewed it yet (Input Usability spec, Commit 2).
     meta: { touched: [] },
@@ -3619,6 +3663,34 @@ function migrateV16toV17(raw) {
   };
 }
 
+// v17 → v18 (assumptions-provenance.md §0.2, corrections #2/#6): the
+// wage-growth split (assumptions.awote 3.5%→3.2%, new assumptions
+// .wageGrowth 2.70%) and the FHSSS earnings rate (7.94%→7.43%) both
+// correct a globally-wrong HOUSE VIEW constant, not a per-scenario
+// choice — but assumptions.awote/fhsssEarningsRate have no isDefault-
+// style flag (unlike property rent/expenses), so a genuinely
+// customised value is indistinguishable, on disk, from one that was
+// merely baked in by a prior clamp cycle at the old default. Heuristic
+// (disclosed, not silent): a stored value EXACTLY equal to the OLD
+// universal default is treated as never having been deliberately
+// typed (vanishingly unlikely as a coincidental manual entry) and is
+// corrected; anything else is a real customisation and is preserved
+// untouched. wageGrowth itself is a brand-new field, so it always
+// starts at the new default — there is no old value to preserve.
+function migrateV17toV18(raw) {
+  const a = raw?.assumptions ?? {};
+  return {
+    ...raw,
+    schemaVersion: 18,
+    assumptions: {
+      ...a,
+      awote: a.awote === 0.035 ? 0.032 : a.awote,
+      wageGrowth: a.wageGrowth ?? 0.027,
+      fhsssEarningsRate: a.fhsssEarningsRate === 0.0794 ? 0.0743 : a.fhsssEarningsRate,
+    },
+  };
+}
+
 // Parse + validate a stored blob, migrating older schema versions
 // forward. Returns a clamped v9 state or null (caller falls back to
 // defaults). Never throws.
@@ -3642,6 +3714,7 @@ export function hydrate(json, profiles = {}) {
     if (raw.schemaVersion === 14) raw = migrateV14toV15(raw);
     if (raw.schemaVersion === 15) raw = migrateV15toV16(raw);
     if (raw.schemaVersion === 16) raw = migrateV16toV17(raw);
+    if (raw.schemaVersion === 17) raw = migrateV17toV18(raw);
     if (raw.schemaVersion !== SCHEMA_VERSION) return null;
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
@@ -3720,15 +3793,27 @@ export function hydrate(json, profiles = {}) {
       },
       assumptions: {
         cpi: clampNumber(raw.assumptions?.cpi, 0, 0.2) || 0.025,
-        awote: clampNumber(raw.assumptions?.awote ?? 0.035, 0, 0.2),
+        // AWOTE — kept ONLY for what the statute indexes on AWOTE (see
+        // defaultState's own header): super caps, ETP cap, redundancy
+        // base/per-year. Not used for row/HELP indexation any more —
+        // see wageGrowth below (assumptions-provenance.md §1.2).
+        awote: clampNumber(raw.assumptions?.awote ?? 0.032, 0, 0.2),
+        // Salary and wage indexation, WPI basis (assumptions-provenance
+        // .md §1.2, firm decision August 2026) — drives every row's
+        // "awote"-labelled indexBasis option and HELP indexation
+        // (§5.3: HELP is legislated to the lower of CPI and WPI, and
+        // this figure is a WPI-basis rate, unlike the AWOTE proxy it
+        // replaces).
+        wageGrowth: clampNumber(raw.assumptions?.wageGrowth ?? 0.027, 0, 0.2),
         mortgageRate: clampNumber(raw.assumptions?.mortgageRate ?? 0.06, 0, 0.3),
         bracketMode: raw.assumptions?.bracketMode === "frozen" ? "frozen" : "indexed",
         // Document Set Commit 3 (FHSSS) — the deemed rate associated
-        // earnings accrue at. Defaults to an indicative ATO shortfall
-        // interest rate (SIC); confirm the current quarterly rate
-        // before relying on this in client work (see build-log.md's
-        // Open Items).
-        fhsssEarningsRate: clampNumber(raw.assumptions?.fhsssEarningsRate ?? 0.0794, 0, 0.3),
+        // earnings accrue at: the ATO Shortfall Interest Charge rate
+        // (90-day BAB + 3%), reset QUARTERLY (assumptions-provenance.md
+        // §1.4). 7.43% is the Jul–Sep 2026 rate. Refresh this default
+        // from the ATO SIC page each quarter; confirm the current rate
+        // before relying on this in client work.
+        fhsssEarningsRate: clampNumber(raw.assumptions?.fhsssEarningsRate ?? 0.0743, 0, 0.3),
       },
       // Existing saved scenarios have no touched data — mark nothing
       // rather than guessing; showing everything as unreviewed is the

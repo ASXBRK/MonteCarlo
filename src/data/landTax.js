@@ -18,10 +18,12 @@
 // well-established fact, not a simplification).
 //
 // Land tax is assessed on UNIMPROVED land value; this tool holds total
-// property value, so `landValuePct` (default 60%, editable per
-// property — see planState.js/smartDefaults.js) estimates the land
-// component. This is the single largest approximation in the feature,
-// disclosed per the spec's own instruction. Metropolitan/regional and
+// property value, so `landValuePct` (default 50% for a house, 20% for
+// a unit — a unit's land is shared across the whole strata; editable
+// per property — see planState.js's own header, and assumptions-
+// provenance.md §7.4) estimates the land component. This is the single
+// largest approximation in the feature, disclosed per the spec's own
+// instruction. Metropolitan/regional and
 // absentee/foreign-owner surcharges (e.g. WA's MRIT, NSW/VIC/QLD
 // foreign-owner surcharges) are NOT modelled.
 export const LAND_TAX_META = Object.freeze({

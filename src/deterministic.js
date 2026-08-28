@@ -624,7 +624,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     let requested = 0;
     if (pm.drawdownOption === "fixed") {
-      const basisRate = pm.indexBasis === "awote" ? awoteAssum : pm.indexBasis === "cpi" ? cpi : 0;
+      const basisRate = pm.indexBasis === "awote" ? wageGrowthAssum : pm.indexBasis === "cpi" ? cpi : 0;
       const g = basisRate + (pm.indexExtraPct ?? 0) / 100;
       // Real amount at FY start — the annual-figure form of the locked
       // indexation formula (no /12: this IS the annual amount, not a
@@ -755,7 +755,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // nominal law) and deflated. Properties are illiquid: never in
   // fundingOrder, no sales in v1.
   const mortgageRateAssum = state.assumptions.mortgageRate ?? 0.06;
-  const awoteAssum = state.assumptions.awote ?? 0.035;
+  // Wage growth is split by basis (assumptions-provenance.md §1.2):
+  // awoteAssum (AWOTE, 3.2%) is kept ONLY for what the statute indexes
+  // on AWOTE — super caps (superRatesFor), the ETP cap and redundancy
+  // base/per-year (etpRatesFor), and the age pension's MTAWE wages
+  // benchmark (agePensionRatesFor). wageGrowthAssum (WPI concept,
+  // 2.70%) drives every "awote"-indexBasis ROW (pension/DB/property-
+  // flow/adviser-fee/goal indexation, below) and HELP indexation —
+  // see each call site's own comment for which one it uses and why.
+  const awoteAssum = state.assumptions.awote ?? 0.032;
+  const wageGrowthAssum = state.assumptions.wageGrowth ?? 0.027;
   const props = (state.properties ?? []).filter((p) =>
     p.status === "owned" ? p.currentValue > 0 : p.priceToday > 0);
   // HEAS (spec 21b, Commit 5) — the secured property, resolved once. A
@@ -818,7 +827,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // duplicated in two places is a formula that can silently drift).
   function dbAnnualAmountFor(db, y) {
     const dm = dbMeta[db.id];
-    const basisRate = dm.indexBasis === "awote" ? awoteAssum : dm.indexBasis === "cpi" ? cpi : 0;
+    const basisRate = dm.indexBasis === "awote" ? wageGrowthAssum : dm.indexBasis === "cpi" ? cpi : 0;
     const g = basisRate + (dm.indexExtraPct ?? 0) / 100;
     return dm.annualPension * Math.pow((1 + g) / (1 + cpi), yearStartIdx(y) / 12);
   }
@@ -1008,7 +1017,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // indexation settings.
   const propFlowAt = (flow, m) => {
     if (!flow || !(flow.amount > 0)) return 0;
-    const basisRate = flow.indexBasis === "awote" ? awoteAssum : flow.indexBasis === "cpi" ? cpi : 0;
+    const basisRate = flow.indexBasis === "awote" ? wageGrowthAssum : flow.indexBasis === "cpi" ? cpi : 0;
     const g = basisRate + (flow.indexExtraPct ?? 0) / 100;
     return (flow.amount / 12) * Math.pow((1 + g) / (1 + cpi), m / 12);
   };
@@ -1046,7 +1055,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
 
   const ongoingFee = adviserFeesPlan.ongoing;
   const ongoingSuperFraction = ongoingFee.annualAmount > 0 ? ongoingFee.fromSuperAmount / ongoingFee.annualAmount : 0;
-  const ongoingBasisRate = ongoingFee.indexBasis === "awote" ? awoteAssum : ongoingFee.indexBasis === "none" ? 0 : cpi;
+  const ongoingBasisRate = ongoingFee.indexBasis === "awote" ? wageGrowthAssum : ongoingFee.indexBasis === "none" ? 0 : cpi;
   // Real-dollar ANNUAL figure at month m — the same indexed-real
   // convention every other annual flow here uses (propFlowAt, goal
   // targets): real amount = annual × ((1+g)/(1+cpi))^(m/12).
@@ -1275,7 +1284,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const targetYear = resolveRef(g.targetAt, state.plan, schedule, "client").planYear;
     const targetMonth = julyOf(targetYear); // null = never fires (partial-first-year skip, convention 5)
     if (targetMonth == null) continue;
-    const basisRate = g.indexBasis === "awote" ? awoteAssum : g.indexBasis === "cpi" ? cpi : 0;
+    const basisRate = g.indexBasis === "awote" ? wageGrowthAssum : g.indexBasis === "cpi" ? cpi : 0;
     const gRate = basisRate + (g.indexExtraPct ?? 0) / 100;
     const targetReal = g.targetAmount * Math.pow((1 + gRate) / (1 + cpi), targetMonth / 12);
     const totalMonths = Math.max(1, targetMonth);
@@ -1485,7 +1494,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     client: { concessional: 0, nonConcessional: 0, earnings: 0, lifetimeContributed: 0, released: false },
     partner: { concessional: 0, nonConcessional: 0, earnings: 0, lifetimeContributed: 0, released: false },
   };
-  const fhsssEarningsRateAssum = state.assumptions.fhsssEarningsRate ?? 0.0794;
+  // ATO Shortfall Interest Charge (90-day BAB + 3%), reset QUARTERLY
+  // (assumptions-provenance.md §1.4) — 7.43% is the Jul–Sep 2026 rate;
+  // refresh from the ATO SIC page each quarter.
+  const fhsssEarningsRateAssum = state.assumptions.fhsssEarningsRate ?? 0.0743;
   // Fisher-deflated to the engine's real-terms convention, same as
   // every other nominal assumption rate (mortgageRate, growthPct).
   const fhsssAnnualReal = (1 + fhsssEarningsRateAssum) / (1 + cpi) - 1;
@@ -3012,10 +3024,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // rule below (line ~2400) — otherwise land tax would always
       // offset other income even in a year the quarantine should apply.
       // landValuePct estimates the unimproved-land share of total value
-      // (disclosed approximation); landTaxOverride bypasses the
-      // aggregate calculation for that one property, added to its
-      // owner's cash/deduction totals directly instead (dutyOverride's
-      // own precedence convention).
+      // (disclosed approximation; defaults 50%/20% by dwellingType —
+      // house vs unit — assumptions-provenance.md §7.4); landTaxOverride
+      // bypasses the aggregate calculation for that one property, added
+      // to its owner's cash/deduction totals directly instead
+      // (dutyOverride's own precedence convention).
       let landTaxOut = 0;
       if (m === julyOf(y)) {
         const aggValue = {};
@@ -4662,7 +4675,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const generalCapDelta = superRatesY.generalTransferBalanceCap - lastTransferBalanceCap;
     for (const p of persons) tba[p] = indexTransferBalanceCap(tba[p], generalCapDelta);
     lastTransferBalanceCap = superRatesY.generalTransferBalanceCap;
-    const helpRatesY = helpRatesFor(fyStart, bracketMode, cpi, awoteAssum);
+    // HELP indexes to the LOWER of CPI and WPI (assumptions-provenance
+    // .md §5.3) — wageGrowthAssum is itself a WPI-basis rate now (the
+    // §1.2 split), a materially closer proxy than the AWOTE figure
+    // this used before.
+    const helpRatesY = helpRatesFor(fyStart, bracketMode, cpi, wageGrowthAssum);
     const mlsRatesY = mlsRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     const superOutcome = { client: null, partner: null };
     // Cap headroom snapshot (Tier 1.2, Commit 4 UI): the cap and
@@ -4975,7 +4992,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // mirror of the liabilityRevaluation term ordinary (un-indexed)
     // liabilities already get for free from nominal/real conversion.
     const helpOpening = { client: helpBal.client, partner: helpBal.partner };
-    const helpIndexRate = Math.min(cpi, awoteAssum);
+    const helpIndexRate = Math.min(cpi, wageGrowthAssum);
     const helpIndexation = { client: 0, partner: 0 };
     for (const p of persons) {
       helpIndexation[p] = helpOpening[p] * ((1 + helpIndexRate) / (1 + cpi) - 1);

@@ -110,12 +110,21 @@ export function nominalFactor(m, cpi) {
 // Per-row indexation (D1): nominal growth g = basis rate + additional
 // %, so the real amount at month m is amount × ((1+g)/(1+cpi))^(m/12).
 // CPI+0 → constant real; None+0 → decays at CPI (fixed nominal);
-// AWOTE-linked rows grow in real terms. Rows carrying only the pre-D1
+// wage-linked rows grow in real terms. Rows carrying only the pre-D1
 // `indexed` flag fall back to its CPI/None equivalents.
-export function realAmountAt(row, m, cpi, awote) {
+//
+// The 4th parameter is the "awote" indexBasis rate — despite the row
+// field's own stored id ("awote", unchanged for schema stability), the
+// NUMBER it means is `assumptions.wageGrowth` (WPI concept), not
+// `assumptions.awote` (kept only for what the statute indexes on
+// AWOTE — super/ETP/redundancy caps, none of which are row indexation).
+// See buildSchedules' own local `wageGrowth` — every call site below
+// passes that, never the true AWOTE figure. assumptions-provenance.md
+// §1.2.
+export function realAmountAt(row, m, cpi, wageGrowth) {
   let basis = row.indexBasis;
   if (basis == null) basis = row.indexed === false ? "none" : "cpi";
-  const basisRate = basis === "awote" ? awote : basis === "cpi" ? cpi : 0;
+  const basisRate = basis === "awote" ? wageGrowth : basis === "cpi" ? cpi : 0;
   const g = basisRate + (row.indexExtraPct ?? 0) / 100;
   if (g === cpi) return row.amount; // exact constant-real fast path
   return row.amount * Math.pow((1 + g) / (1 + cpi), m / 12);
@@ -158,7 +167,15 @@ function bonusMonthIndex(plan, y, bonusMonth) {
 export function buildSchedules(state) {
   const plan = state.plan;
   const cpi = state.assumptions.cpi;
-  const awote = state.assumptions.awote ?? 0.035;
+  // Wage growth is split by basis (assumptions-provenance.md §1.2):
+  // `awote` (true AWOTE, 3.2%) is used ONLY below for the SG maximum
+  // contribution base (superRatesFor — legislated AWOTE basis, same as
+  // the concessional cap); `wageGrowth` (WPI concept, 2.70%) drives
+  // every "awote"-indexBasis ROW via realAmountAt — see that function's
+  // own header for why its 4th parameter is always this one, never the
+  // true AWOTE figure.
+  const awote = state.assumptions.awote ?? 0.032;
+  const wageGrowth = state.assumptions.wageGrowth ?? 0.027;
   const bracketMode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
   const fy0 = firstFyStartYear(plan.start);
   const months = totalMonths(plan);
@@ -265,7 +282,7 @@ export function buildSchedules(state) {
     if (row.frequency === "monthly") {
       for (let m = 0; m < months; m++) {
         if (activeInPlanYear(bounds, yearOfMonth[m])) {
-          const v = realAmountAt(row, m, cpi, awote);
+          const v = realAmountAt(row, m, cpi, wageGrowth);
           target[m] += v;
           if (totals) totals[yearOfMonth[m]] += v;
         }
@@ -275,7 +292,7 @@ export function buildSchedules(state) {
         if (!activeInPlanYear(bounds, y)) continue;
         const jm = julyMonthIndex(plan, y);
         if (jm == null) continue; // partial first year without a firing July
-        const v = realAmountAt(row, jm, cpi, awote);
+        const v = realAmountAt(row, jm, cpi, wageGrowth);
         target[jm] += v;
         if (totals) totals[y] += v;
       }
@@ -300,7 +317,7 @@ export function buildSchedules(state) {
       if (!activeInPlanYear(bounds, y)) continue;
       const bm = bonusMonthIndex(plan, y, row.bonusMonth ?? 6);
       if (bm == null) continue; // partial first year without a firing July — convention 5
-      const v = realAmountAt(row, bm, cpi, awote);
+      const v = realAmountAt(row, bm, cpi, wageGrowth);
       target[bm] += v;
       if (totals) totals[y] += v;
     }
@@ -363,7 +380,7 @@ export function buildSchedules(state) {
         if (!activeInPlanYear(bounds, y)) continue;
         const jm = julyMonthIndex(plan, y);
         if (jm == null) continue;
-        const v = realAmountAt(asRow, jm, cpi, awote);
+        const v = realAmountAt(asRow, jm, cpi, wageGrowth);
         expenses[jm] += v;
         childEducationFlows[child.id][jm] += v;
         rowTotals.education[block.id][y] += v;
@@ -454,7 +471,7 @@ export function buildSchedules(state) {
     for (let y = 0; y < planYears; y++) {
       const jm = julyMonthIndex(plan, y);
       if (jm == null) continue;
-      amountAtYear[y] = realAmountAt(premium, jm, cpi, awote);
+      amountAtYear[y] = realAmountAt(premium, jm, cpi, wageGrowth);
     }
     superInsurancePremiums[s.id] = amountAtYear;
   }
@@ -652,8 +669,8 @@ export function buildSchedules(state) {
         if (y < bounds.from || y > bounds.to) continue;
         if (y < incBounds.from || y > incBounds.to) continue;
         let incomeAtM = 0;
-        if (incomeRow.frequency === "monthly") incomeAtM = realAmountAt(incomeRow, m, cpi, awote);
-        else if (julyMonthIndex(plan, y) === m) incomeAtM = realAmountAt(incomeRow, m, cpi, awote);
+        if (incomeRow.frequency === "monthly") incomeAtM = realAmountAt(incomeRow, m, cpi, wageGrowth);
+        else if (julyMonthIndex(plan, y) === m) incomeAtM = realAmountAt(incomeRow, m, cpi, wageGrowth);
         if (incomeAtM <= 0) continue;
         temp[m] += incomeAtM * (sc.percent / 100);
       }
@@ -842,7 +859,7 @@ export function buildSchedules(state) {
     for (let y = Math.max(0, fromYear); y <= Math.min(planYears - 1, toYear); y++) {
       const jm = julyMonthIndex(plan, y);
       if (jm == null) continue;
-      amountAtYear[y] = realAmountAt(a, jm, cpi, awote);
+      amountAtYear[y] = realAmountAt(a, jm, cpi, wageGrowth);
     }
     return { ...a, fromYear, toYear, amountAtYear };
   });
@@ -899,7 +916,7 @@ export function buildSchedules(state) {
       if (!activeInPlanYear(bounds, y)) continue;
       const month = bonusMonthIndex(plan, y, row.bonusMonth ?? 6);
       if (month == null) continue;
-      const grossAmount = realAmountAt(row, month, cpi, awote);
+      const grossAmount = realAmountAt(row, month, cpi, wageGrowth);
       if (grossAmount <= 0) continue;
       bonusDestinationEvents.push({ rowId: row.id, owner: row.owner, year: y, month, grossAmount, destination: dest });
     }

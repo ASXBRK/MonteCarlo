@@ -460,9 +460,10 @@ function mountWorkspace(clientId, scenarioId) {
   applyUnitsLabel();
   populateParamsTable();
   els.inflationInput.value = (state.assumptions.cpi * 100).toFixed(1);
-  awoteInput.value = ((state.assumptions.awote ?? 0.035) * 100).toFixed(1);
+  wageGrowthInput.value = ((state.assumptions.wageGrowth ?? 0.027) * 100).toFixed(1);
+  awoteInput.value = ((state.assumptions.awote ?? 0.032) * 100).toFixed(1);
   mortgageRateInput.value = ((state.assumptions.mortgageRate ?? 0.06) * 100).toFixed(2);
-  fhsssEarningsRateInput.value = ((state.assumptions.fhsssEarningsRate ?? 0.0794) * 100).toFixed(2);
+  fhsssEarningsRateInput.value = ((state.assumptions.fhsssEarningsRate ?? 0.0743) * 100).toFixed(2);
   syncBracketModeInputs();
   els.chartTreatmentSelects.forEach((sel) => { sel.value = state.display.chartTreatment[sel.dataset.treatment]; });
 }
@@ -1971,8 +1972,61 @@ function findEmployer(id) {
   return (state.plan.employers ?? []).find((e) => e.id === id) ?? null;
 }
 
+// FBT cap presets (assumptions-provenance.md §4) — CASH figures. The
+// engine already compares packaged amounts against the cap in cash
+// terms and grosses up only the excess (schedule.js's own header) —
+// correct — but the ATO publishes the GROSSED-UP figure, and nothing
+// in the UI ever said which form to enter, so a $30,000 entry silently
+// doubled the real $15,900 cap. Presets exist so the adviser never has
+// to convert by hand. Source: ATO, FBT rates and thresholds, unchanged
+// 31 Mar 2023 – 31 Mar 2027. Cash = grossed-up ÷ 1.8868 (the Type 2
+// gross-up rate — the same constant schedule.js's own FBT_GROSSUP_RATE
+// uses for the live packaging note, kept independently here since this
+// is a UI-only convenience, never read by the engine).
+const FBT_CAP_TYPE2_GROSSUP_RATE = 1.8868;
+const FBT_LIVING_EXPENSE_CAP_PRESETS = {
+  fbtExempt: [
+    { key: "pbiHealthPromotion", label: "PBI / health promotion charity", grossedUp: 30000, cash: 15900 },
+    { key: "hospitalAmbulance", label: "Public/NFP hospital, public ambulance", grossedUp: 17000, cash: 9010 },
+  ],
+  fbtRebatable: [
+    { key: "fbtRebatable", label: "FBT-rebatable (standard)", grossedUp: 30000, cash: 15900 },
+  ],
+};
+const FBT_MEAL_ENTERTAINMENT_PRESET = { label: "All NFP", grossedUp: 5000, cash: 2650 };
+const FBT_CAP_SOURCE_NOTE = "Source: ATO, FBT rates and thresholds, unchanged 31 Mar 2023 – 31 Mar 2027.";
+// $20,000 sits safely above every real CASH cap (max $15,900) and
+// safely below every real GROSSED-UP one (min $17,000) — the clean
+// dividing line the spec itself specifies.
+const FBT_CAP_GROSSED_UP_WARNING_THRESHOLD = 20000;
+
+function fbtCapTooltipHTML() {
+  return tooltipHTML(
+    "The engine compares this cap against the packaged amount in CASH terms and grosses up only the excess — enter the CASH figure, not the ATO's published grossed-up one. " +
+    "PBI / health promotion charities: $30,000 grossed-up = $15,900 cash. Public and NFP hospitals, ambulance: $17,000 grossed-up = $9,010 cash. " +
+    "Meal entertainment (all NFP): $5,000 grossed-up = $2,650 cash. Cash = grossed-up ÷ 1.8868 (Type 2 gross-up rate). " + FBT_CAP_SOURCE_NOTE
+  );
+}
+
+// "That looks like a grossed-up figure" warning + one-click convert
+// (item 3 of the spec) — shown whenever a cap field is entered above
+// the threshold, regardless of which preset (or none) it came from.
+function fbtCapGrossedUpWarningHTML(prefix, e, field, value) {
+  if (!(value > FBT_CAP_GROSSED_UP_WARNING_THRESHOLD)) return "";
+  const cash = Math.round(value / FBT_CAP_TYPE2_GROSSUP_RATE);
+  return `<p class="helper-warning">That looks like a grossed-up figure. The cash equivalent is ${fmtMoney(cash)}.
+    <button type="button" class="btn-text" data-empprefix="${prefix}" data-empid="${e.id}" data-employer-action="convert-cap" data-empfield="${field}" data-cash="${cash}">Convert to cash</button></p>`;
+}
+
+function fbtCapPresetButtonsHTML(prefix, e, field, presets) {
+  return `<div class="fbt-cap-presets">${presets.map((p) =>
+    `<button type="button" class="btn-text" data-empprefix="${prefix}" data-empid="${e.id}" data-employer-action="apply-cap-preset" data-empfield="${field}" data-cash="${p.cash}">${escapeHTML(p.label)}: ${fmtMoney(p.cash)}</button>`
+  ).join("")}</div>`;
+}
+
 function employerRowHTML(prefix, e) {
   const showCaps = e.fbtType !== "standard";
+  const livingPresets = FBT_LIVING_EXPENSE_CAP_PRESETS[e.fbtType] ?? [];
   return `
     <div class="employer-row" data-empprefix="${prefix}" data-empid="${e.id}">
       <div class="person-grid">
@@ -1993,16 +2047,18 @@ function employerRowHTML(prefix, e) {
       ${showCaps ? `
         <div class="person-grid">
           <div class="cf-cell">
-            <label>Living expense cap ($/yr)</label>
+            <label>Living expense cap ($ cash benefit, not grossed-up) ${fbtCapTooltipHTML()}</label>
             <input type="number" min="0" step="100" value="${e.fbtCaps.livingExpenseCap}"
                    data-empprefix="${prefix}" data-empid="${e.id}" data-empfield="fbtCaps.livingExpenseCap" />
-            ${e.fbtCaps.livingExpenseCap === 0 ? `<p class="helper-warning">Cap not set — enter your employer's current cap. A zero cap silently disables packaging rather than flagging it: the ATO's published figures aren't in the firm reference, so nothing is assumed on your behalf.</p>` : ""}
+            ${livingPresets.length ? fbtCapPresetButtonsHTML(prefix, e, "fbtCaps.livingExpenseCap", livingPresets) : ""}
+            ${e.fbtCaps.livingExpenseCap === 0 ? `<p class="helper-warning">Cap not set — enter your employer's current cap (cash, not grossed-up). A zero cap silently disables packaging rather than flagging it — use a preset above, or your employer's own figure.</p>` : fbtCapGrossedUpWarningHTML(prefix, e, "fbtCaps.livingExpenseCap", e.fbtCaps.livingExpenseCap)}
           </div>
           <div class="cf-cell">
-            <label>Meal entertainment cap ($/yr)</label>
+            <label>Meal entertainment cap ($ cash benefit, not grossed-up) ${fbtCapTooltipHTML()}</label>
             <input type="number" min="0" step="100" value="${e.fbtCaps.mealEntertainmentCap}"
                    data-empprefix="${prefix}" data-empid="${e.id}" data-empfield="fbtCaps.mealEntertainmentCap" />
-            ${e.fbtCaps.mealEntertainmentCap === 0 ? `<p class="helper-warning">Cap not set — enter your employer's current cap.</p>` : ""}
+            ${fbtCapPresetButtonsHTML(prefix, e, "fbtCaps.mealEntertainmentCap", [FBT_MEAL_ENTERTAINMENT_PRESET])}
+            ${e.fbtCaps.mealEntertainmentCap === 0 ? `<p class="helper-warning">Cap not set — enter your employer's current cap (cash, not grossed-up).</p>` : fbtCapGrossedUpWarningHTML(prefix, e, "fbtCaps.mealEntertainmentCap", e.fbtCaps.mealEntertainmentCap)}
           </div>
           ${e.fbtType === "fbtRebatable" ? `
             <div class="cf-cell">
@@ -2099,6 +2155,16 @@ els.taxDetailsSection.addEventListener("click", (e) => {
     // orphaned, never silently reattributed to a DIFFERENT owner.
     if (!window.confirm(`Remove "${emp.name}"? Income and packaging rows linked to it will reassign to this person's next employer, if any.`)) return;
     state.plan.employers = state.plan.employers.filter((x) => x.id !== emp.id);
+  } else if (action === "apply-cap-preset" || action === "convert-cap") {
+    // FBT cap presets + "that looks grossed-up" convert (assumptions-
+    // provenance.md §4) — both write a CASH figure straight into the
+    // cap field, same one-way-flip-to-real-value path as typing it
+    // directly.
+    const emp = findEmployer(btn.dataset.empid);
+    if (!emp) return;
+    const field = btn.dataset.empfield; // "fbtCaps.livingExpenseCap" | "fbtCaps.mealEntertainmentCap"
+    const [, sub] = field.split(".");
+    emp.fbtCaps[sub] = clampNumber(btn.dataset.cash, 0);
   } else {
     return;
   }
@@ -2391,7 +2457,7 @@ function educationRowHTML(chid, ed) {
         <select data-chid="${chid}" data-edid="${ed.id}" data-edfield="indexBasis" aria-label="Index basis">
           <option value="none"${ed.indexBasis === "none" ? " selected" : ""}>None</option>
           <option value="cpi"${ed.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
-          <option value="awote"${ed.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+          <option value="awote"${ed.indexBasis === "awote" ? " selected" : ""}>Wage index (WPI)</option>
         </select>
         <input type="number" min="-10" max="10" step="0.1" value="${ed.indexExtraPct}" aria-label="Additional %"
                data-chid="${chid}" data-edid="${ed.id}" data-edfield="indexExtraPct" />
@@ -3283,7 +3349,7 @@ function sgNoteHTML(r) {
   if (!(totalFy > 0)) return "";
   const f0 = firstFyStartYear(state.plan.start);
   const mode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
-  const rates = superRatesFor(f0, mode, state.assumptions.cpi, state.assumptions.awote ?? 0.035);
+  const rates = superRatesFor(f0, mode, state.assumptions.cpi, state.assumptions.awote ?? 0.032);
   const sg = Math.min(totalFy, rates.sgMaximumSalary) * rates.sgRate;
   return `<p class="helper-inline">SG ${(rates.sgRate * 100).toFixed(0)}% on ${fmtMoney(totalFy)}, capped at the maximum contribution base for this employer ≈ ${fmtMoney(sg)}/yr.</p>`;
 }
@@ -3655,7 +3721,7 @@ function indexationTdHTML(kind, row) {
   const basis = row.indexBasis ?? (row.indexed === false ? "none" : "cpi");
   const extra = row.indexExtraPct ?? 0;
   const basisRate = basis === "awote"
-    ? (state.assumptions.awote ?? 0.035)
+    ? (state.assumptions.wageGrowth ?? 0.027)
     : basis === "cpi" ? state.assumptions.cpi : 0;
   const fixed1 = (v) => `${v.toFixed(1)}%`;
   const total = basis === "none" && extra === 0
@@ -3686,7 +3752,7 @@ function indexationDetailRowHTML(kind, row) {
   const basis = row.indexBasis ?? (row.indexed === false ? "none" : "cpi");
   const extra = row.indexExtraPct ?? 0;
   const basisRate = basis === "awote"
-    ? (state.assumptions.awote ?? 0.035)
+    ? (state.assumptions.wageGrowth ?? 0.027)
     : basis === "cpi" ? state.assumptions.cpi : 0;
   const fixed1 = (v) => `${v.toFixed(1)}%`;
   const total = basis === "none" && extra === 0
@@ -5329,7 +5395,7 @@ function updateIndexTotalText(container, row) {
   const basis = row.indexBasis ?? (row.indexed === false ? "none" : "cpi");
   const extra = row.indexExtraPct ?? 0;
   const basisRate = basis === "awote"
-    ? (state.assumptions.awote ?? 0.035)
+    ? (state.assumptions.wageGrowth ?? 0.027)
     : basis === "cpi" ? state.assumptions.cpi : 0;
   const fixed1 = (v) => `${v.toFixed(1)}%`;
   span.textContent = basis === "none" && extra === 0
@@ -5748,7 +5814,7 @@ function propertyCardHTML(p) {
       <select data-pid="${p.id}" data-pfield="${field}.indexBasis">
         <option value="none"${flow.indexBasis === "none" ? " selected" : ""}>None</option>
         <option value="cpi"${flow.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
-        <option value="awote"${flow.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+        <option value="awote"${flow.indexBasis === "awote" ? " selected" : ""}>Wage index (WPI)</option>
       </select>`)}
     ${num(`${label} additional %`, `${field}.indexExtraPct`, flow.indexExtraPct, 'min="-10" max="10" step="0.1"')}
   `;
@@ -5803,7 +5869,15 @@ function propertyCardHTML(p) {
             ${num("Depreciation ($ p.a., deductible)", "depreciation", p.depreciation ?? 0)}
           ` : ""}
           ${p.propertyType !== "ppr" ? `
-            ${num(`Land value (% of property value) ${tooltipHTML("Land tax is assessed on unimproved land value, not total property value — this estimates the land component (the largest approximation in this feature). Investment and holiday properties both attract land tax; a main residence is exempt.")}`, "landValuePct", p.landValuePct ?? 60, 'min="0" max="100" step="1"')}
+            ${cell("Dwelling type", `<select data-pid="${p.id}" data-pfield="dwellingType">
+              <option value="house"${p.dwellingType !== "unit" ? " selected" : ""}>House</option>
+              <option value="unit"${p.dwellingType === "unit" ? " selected" : ""}>Unit / apartment</option>
+            </select>`)}
+            ${num(`Land value (% of property value) ${tooltipHTML(
+              "Land tax is assessed on unimproved land value, not total property value — this estimates the land component (the largest approximation in this feature). " +
+              "Investment and holiday properties both attract land tax; a main residence is exempt. Use the actual unimproved value from a rates notice wherever you have one — " +
+              "it always beats either ratio."
+            )}${p.landValuePctIsDefault ? ` ${tooltipHTML(describeDefault("property.landValuePct", { value: p.landValuePct, dwellingType: p.dwellingType }))}` : ""}`, "landValuePct", p.landValuePct ?? 60, 'min="0" max="100" step="1"')}
             ${num("Land tax override ($/yr, blank = calculated)", "landTaxOverride", p.landTaxOverride ?? "", 'min="0" step="100"')}
           ` : ""}
         </div>
@@ -5901,6 +5975,7 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field === "owner") p.owner = v;
   else if (field === "state") p.state = v;
   else if (field === "propertyType") p.propertyType = v;
+  else if (field === "dwellingType") p.dwellingType = v; // landValuePct recomputes below (normaliseProperties) while still tracking the default
   else if (field === "growthPct") p.growthPct = clampNumber(v, -10, 30);
   else if (field === "currentValue") p.currentValue = clampNumber(v, 0);
   else if (field === "acquisitionDate") {
@@ -5958,7 +6033,7 @@ wireDeferredDateCommit(els.propertySection, (e) => {
   else if (field === "equityCeilingPct") p.equityCeilingPct = clampNumber(v, 0, 100);
   else if (field === "depositFromEquity") p.depositFromEquity = e.target.checked;
   else if (field === "depositFromEquitySourcePropertyId") p.depositFromEquitySourcePropertyId = v || null;
-  else if (field === "landValuePct") p.landValuePct = clampNumber(v, 0, 100);
+  else if (field === "landValuePct") { p.landValuePct = clampNumber(v, 0, 100); p.landValuePctIsDefault = false; }
   else if (field === "landTaxOverride") p.landTaxOverride = v === "" ? null : clampNumber(v, 0);
   else if (field.includes(".")) {
     const [group, sub] = field.split(".");
@@ -6291,7 +6366,7 @@ function superAccountCardHTML(sa) {
             <select data-said="${sa.id}" data-sfield="insurancePremium.indexBasis">
               <option value="none"${sa.insurancePremium.indexBasis === "none" ? " selected" : ""}>None</option>
               <option value="cpi"${sa.insurancePremium.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
-              <option value="awote"${sa.insurancePremium.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+              <option value="awote"${sa.insurancePremium.indexBasis === "awote" ? " selected" : ""}>Wage index (WPI)</option>
             </select>
           </div>
           <div class="cf-cell">
@@ -6943,7 +7018,7 @@ function pensionCardHTML(pn) {
                 <select data-pid="${pn.id}" data-pfield="indexBasis">
                   <option value="none"${pn.indexBasis === "none" ? " selected" : ""}>None</option>
                   <option value="cpi"${pn.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
-                  <option value="awote"${pn.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+                  <option value="awote"${pn.indexBasis === "awote" ? " selected" : ""}>Wage index (WPI)</option>
                 </select>
               </div>
               <div class="cf-cell">
@@ -7155,7 +7230,7 @@ function definedBenefitCardHTML(db) {
             <select data-dbid="${db.id}" data-dbfield="indexBasis">
               <option value="none"${db.indexBasis === "none" ? " selected" : ""}>None</option>
               <option value="cpi"${db.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
-              <option value="awote"${db.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+              <option value="awote"${db.indexBasis === "awote" ? " selected" : ""}>Wage index (WPI)</option>
             </select>
           </div>
           <div class="cf-cell">
@@ -7902,7 +7977,7 @@ function goalCardHTML(g) {
             <select data-gid="${g.id}" data-gfield="indexBasis">
               <option value="none"${g.indexBasis === "none" ? " selected" : ""}>None (fixed nominal)</option>
               <option value="cpi"${g.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
-              <option value="awote"${g.indexBasis === "awote" ? " selected" : ""}>Wage index (AWOTE)</option>
+              <option value="awote"${g.indexBasis === "awote" ? " selected" : ""}>Wage index (WPI)</option>
             </select>
           </div>
           <div class="cf-cell">
@@ -9723,7 +9798,7 @@ function renderFocusAgePensionCharts() {
   const fy0 = firstFyStartYear(state.plan.start);
   const couple = isCouple();
   const cpi = state.assumptions.cpi;
-  const awote = state.assumptions.awote ?? 0.035;
+  const awote = state.assumptions.awote ?? 0.032;
   const bracketMode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
   const detail = (y) => projection.yearly[y].agePensionDetail;
   const ratesAt = (y) => agePensionRatesFor(fy0 + y, bracketMode, cpi, awote);
@@ -11841,7 +11916,12 @@ function buildAssumptionsGroups() {
 
   const economic = [
     { label: "CPI (% p.a.)", cell: () => cpi * 100, pct: true, always: true },
-    { label: "Wage index (AWOTE, % p.a. nominal)", cell: () => (state.assumptions.awote ?? 0.035) * 100, pct: true, always: true },
+    // Wage growth is split by basis (assumptions-provenance.md §1.2) —
+    // salary/wage row indexation and HELP use the WPI-basis figure;
+    // super caps/ETP cap/redundancy figures use AWOTE, the legislated
+    // basis for those specifically.
+    { label: "Salary and wage indexation (WPI, % p.a. nominal)", cell: () => (state.assumptions.wageGrowth ?? 0.027) * 100, pct: true, always: true },
+    { label: "Super cap indexation (AWOTE, % p.a. nominal)", cell: () => (state.assumptions.awote ?? 0.032) * 100, pct: true, always: true },
   ];
   // Shown only when FHSSS is actually in play — unlike CPI/AWOTE this
   // rate is a constant % every year regardless of use, so it would
@@ -11850,7 +11930,7 @@ function buildAssumptionsGroups() {
   const fhsssInUse = (state.cashflows.superContributions ?? []).some((c) => c.fhsssEligible)
     || (state.properties ?? []).some((p) => p.releaseFhsssAtPurchase);
   if (fhsssInUse) {
-    economic.push({ label: "FHSSS associated earnings rate (% p.a. nominal)", cell: () => (state.assumptions.fhsssEarningsRate ?? 0.0794) * 100, pct: true, always: true });
+    economic.push({ label: "FHSSS associated earnings rate (% p.a. nominal)", cell: () => (state.assumptions.fhsssEarningsRate ?? 0.0743) * 100, pct: true, always: true });
   }
   for (const a of included) {
     const { incomeNominal, growthNominal } = assetReturnComponents(a);
@@ -11901,7 +11981,7 @@ function buildAssumptionsGroups() {
   // cap step up irregularly in real dollars as their own nominal
   // rounding thresholds are crossed.
   if ((state.plan.superAccounts ?? []).length) {
-    const awote = state.assumptions.awote ?? 0.035;
+    const awote = state.assumptions.awote ?? 0.032;
     const sr = (y) => superRatesFor(f0 + y, mode, cpi, awote);
     groups.push({
       title: "Super thresholds",
@@ -15294,23 +15374,40 @@ mortgageRateInput.addEventListener("change", () => {
   renderProperties(); // planned-purchase helper lines re-derive
 });
 
+// Wage growth is split by basis (assumptions-provenance.md §1.2) —
+// wageGrowth (WPI concept) drives salary/wage row indexation and HELP
+// indexation; awote is kept only for what the statute actually indexes
+// on AWOTE (super caps, ETP cap, redundancy figures). Two separate
+// inputs, same "change" convention as every other assumption here.
+const wageGrowthInput = $("wageGrowthInput");
+wageGrowthInput.addEventListener("change", () => {
+  const n = Number(wageGrowthInput.value);
+  if (!Number.isFinite(n) || n < 0 || n > 20) {
+    wageGrowthInput.value = ((state.assumptions.wageGrowth ?? 0.027) * 100).toFixed(1);
+    return;
+  }
+  state.assumptions.wageGrowth = n / 100;
+  saveState();
+  refreshOutputs(); // wage-indexed rows and HELP indexation re-derive
+});
+
 const awoteInput = $("awoteInput");
 awoteInput.addEventListener("change", () => {
   const n = Number(awoteInput.value);
   if (!Number.isFinite(n) || n < 0 || n > 20) {
-    awoteInput.value = ((state.assumptions.awote ?? 0.035) * 100).toFixed(1);
+    awoteInput.value = ((state.assumptions.awote ?? 0.032) * 100).toFixed(1);
     return;
   }
   state.assumptions.awote = n / 100;
   saveState();
-  refreshOutputs(); // wage-indexed rows re-derive
+  refreshOutputs(); // super/ETP/redundancy caps re-derive
 });
 
 const fhsssEarningsRateInput = $("fhsssEarningsRateInput");
 fhsssEarningsRateInput.addEventListener("change", () => {
   const n = Number(fhsssEarningsRateInput.value);
   if (!Number.isFinite(n) || n < 0 || n > 30) {
-    fhsssEarningsRateInput.value = ((state.assumptions.fhsssEarningsRate ?? 0.0794) * 100).toFixed(2);
+    fhsssEarningsRateInput.value = ((state.assumptions.fhsssEarningsRate ?? 0.0743) * 100).toFixed(2);
     return;
   }
   state.assumptions.fhsssEarningsRate = n / 100;

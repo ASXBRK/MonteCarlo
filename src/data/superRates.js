@@ -43,12 +43,18 @@ export const SUPER_RATES_BASE = Object.freeze({
   // = 4 × concessionalCap, always — not independently indexed. Kept
   // here only as the FY2026/27 spot-check figure; superRatesFor derives
   // it fresh from that FY's own concessionalCap for every FY.
+  // CONFIRMED CORRECT by the firm (assumptions-provenance.md §5.4) —
+  // conflicting secondary sources quoting $120,000 were stale. Do not
+  // "fix" this back down without a firm-confirmed reason.
   nonConcessionalCap: 130000,
   // General transfer balance cap: CPI-indexed, rounds DOWN to the
   // nearest $100,000 (s960-285). $2,100,000 is the figure the
   // pre-Commit-1 bring-forward thresholds below were already
   // internally consistent with (full = GTBC − 2×NCC, two = GTBC − NCC,
   // one = GTBC), so this re-base introduces no discontinuity in those.
+  // CONFIRMED CORRECT by the firm (assumptions-provenance.md §5.4) —
+  // conflicting secondary sources quoting $2.0m were stale. Do not
+  // "fix" this back down without a firm-confirmed reason.
   generalTransferBalanceCap: 2100000,
   // Untaxed plan cap: CONFIRMED against the firm's FY2026/27 source
   // (Macquarie Big Black Book). AWOTE-indexed, rounds DOWN to the

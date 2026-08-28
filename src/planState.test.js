@@ -151,7 +151,7 @@ describe("Smart defaults (spec 19, Commit 1) — property rent/expenses recomput
     expect(p.expenses.isDefault).toBe(true);
     const clamped = clampProperty({ ...p, propertyType: "investment", currentValue: 500000 }, plan);
     expect(clamped.rent.amount).toBeCloseTo(500000 * 0.04, 6); // 4% of property value
-    expect(clamped.expenses.amount).toBeCloseTo(clamped.rent.amount * 0.2, 6); // 20% of gross rent
+    expect(clamped.expenses.amount).toBeCloseTo(clamped.rent.amount * 0.25, 6); // 25% of gross rent
   });
 
   it("recomputes again on a later clamp as value changes, while still isDefault", () => {
@@ -160,7 +160,7 @@ describe("Smart defaults (spec 19, Commit 1) — property rent/expenses recomput
     expect(p.rent.amount).toBeCloseTo(20000, 6);
     p = clampProperty({ ...p, currentValue: 800000 }, plan);
     expect(p.rent.amount).toBeCloseTo(32000, 6); // still tracking — 4% of the NEW value
-    expect(p.expenses.amount).toBeCloseTo(32000 * 0.2, 6);
+    expect(p.expenses.amount).toBeCloseTo(32000 * 0.25, 6);
   });
 
   it("typing an amount directly (main.js sets isDefault:false) freezes it — no further recompute", () => {
@@ -171,7 +171,7 @@ describe("Smart defaults (spec 19, Commit 1) — property rent/expenses recomput
     expect(p.rent.amount).toBe(15000); // untouched by the value change
     expect(p.rent.isDefault).toBe(false);
     // expenses is still tracking rent's amount, which is now the user's own 15000.
-    expect(p.expenses.amount).toBeCloseTo(15000 * 0.2, 6);
+    expect(p.expenses.amount).toBeCloseTo(15000 * 0.25, 6);
   });
 
   it("regression gate: a pre-Commit-1 property blob (no isDefault field at all) is treated as already user-entered, not overwritten", () => {

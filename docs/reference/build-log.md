@@ -1675,6 +1675,88 @@ and `× 0.47`); a $50,000 bonus redirected to a $300,000 loan reduces its
 FY1 closing balance from $251,673 to $232,942 and pays it off three
 years earlier (FY5 vs FY8) versus the same bonus with no destination.
 
+### FBT caps: cash labelling, presets, and grossed-up warning; four provenance-doc corrections
+`docs/reference/assumptions-provenance.md` (591 lines, verified against
+primary sources) landed and identified five defects, all fixed here.
+
+**FBT caps (§4) — the caps were entered as grossed-up, not cash.** The
+engine already compared packaged amounts against the cap in CASH terms
+and grossed up only the excess (correct), but nothing in the UI ever
+said which form to enter, and the ATO publishes the grossed-up figure —
+entering $30,000 where $15,900 was meant silently doubled the real
+cap. Fixed: both cap fields relabelled "($ cash benefit, not
+grossed-up)"; a tooltip giving both forms, the conversion (cash =
+grossed-up ÷ 1.8868), and the source/as-at date (ATO, unchanged 31 Mar
+2023 – 31 Mar 2027); a warning above $20,000 ("That looks like a
+grossed-up figure. The cash equivalent is $X.") with a one-click
+"Convert to cash" button; one-click cash-figure presets per employer
+subtype (PBI/health promotion charity $15,900, hospital/ambulance
+$9,010, FBT-rebatable $15,900, meal entertainment $2,650 for either).
+
+**FHSSS earnings rate (§1.4): 7.94% → 7.43%.** The ATO Shortfall
+Interest Charge rate (90-day BAB + 3%, reset quarterly) — 7.43% is the
+Jul–Sep 2026 rate. A comment beside the constant now notes the
+quarterly refresh requirement.
+
+**Wage growth split by basis (§1.2), a firm decision.** Was a single
+3.5% figure used for both row indexation and super-cap indexation.
+Now: `assumptions.wageGrowth` (new field, 2.70%, WPI concept —
+Xplan-aligned) drives every row's "awote"-labelled indexBasis option
+(income/expense/deduction/property/pension/DB/goal/adviser-fee rows —
+the stored basis id stays "awote" for schema stability, but the NUMBER
+it means changed) and HELP indexation (§5.3 — HELP is legislated to
+the lower of CPI and WPI, and 2.70% is itself a WPI-basis rate, a
+materially closer proxy than the AWOTE figure it replaces);
+`assumptions.awote` (3.2%, was 3.5%) is kept only for what the statute
+actually indexes on AWOTE — super contribution caps, the ETP cap,
+redundancy base/per-year, the age pension's MTAWE benchmark. Both are
+separate Parameters-modal inputs now ("Salary and wage indexation
+(WPI)" / "Super cap indexation (AWOTE)"). `realAmountAt`'s (schedule.js)
+4th parameter renamed `wageGrowth` throughout, since every call site
+already passed the row-indexation figure, never true AWOTE.
+Migration (v17→v18): a stored `awote`/`fhsssEarningsRate` value EXACTLY
+equal to the old universal default is treated as never having been
+deliberately typed and corrected; anything else (a real customisation)
+is preserved untouched — disclosed heuristic, see the migration
+function's own comment.
+
+**Land value (§7.4): 60% flat → 50% houses / 20% units.** A unit's
+land is shared across the whole strata, so it needs its own default,
+much lower than a house's. New `dwellingType` field ("house"/"unit")
+plus a `landValuePctIsDefault` flag (same one-way-flip convention as
+property rent/expenses — recomputes on dwellingType change until the
+user types their own figure or the actual unimproved value from a
+rates notice, then stops). Defaults FALSE for any property predating
+this field (same regression reasoning as rent/expenses' own header) —
+existing scenarios keep whatever landValuePct they already resolved to,
+bit-identical; only new properties get the dwelling-type-aware default.
+
+**Property expenses (§7.2): 20% → 25% of gross rent.** The midpoint of
+the researched 20–30% range, not its floor. Already behind the
+existing rent/expenses `isDefault` mechanism, so this is a one-line
+multiplier change — a property still tracking the default recomputes
+at 25% immediately; an overridden one is unaffected.
+
+**Super caps (§5.4) — confirmed correct, no change.** General transfer
+balance cap $2,100,000 and non-concessional cap $130,000 were flagged
+by conflicting (stale) secondary sources; the firm confirmed both are
+right for FY2026-27. A comment now sits beside each in superRates.js
+so this doesn't get "fixed" back down without a firm-confirmed reason.
+
+Gates: full suite 1663/1663, build green. Regression: land-value
+default only applies to properties created after this commit (existing
+data preserved exactly); property-expenses default recomputes only for
+rows already tracking it (isDefault mechanism, pre-existing); wage-
+growth/FHSSS-rate corrections apply going forward via the v17→v18
+migration's old-default-equality heuristic, disclosed above. Browser-
+verified: FBT-exempt $30,000 entry → "That looks like a grossed-up
+figure. The cash equivalent is $15,900" with a working Convert button;
+PBI/HPC preset button fills $15,900 directly; a new investment
+property defaults to 50% land value as a house, 20% as a unit, and
+freezes at a typed value even after the dwelling type is changed again;
+Parameters modal shows Salary and wage indexation 2.7%, Super cap
+indexation (AWOTE) 3.2%, FHSSS associated earnings rate 7.43%.
+
 ---
 
 ## WHERE WE'RE GOING

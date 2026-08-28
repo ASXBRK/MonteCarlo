@@ -1555,9 +1555,12 @@ describe("Tier 1.2 — Super (Commit 1): accounts, contributions, SG derivation,
       },
       cpi: 0.025,
     });
-    s.assumptions.awote = 0.035;
+    // Row indexation's "awote" basis reads assumptions.wageGrowth, not
+    // assumptions.awote (kept only for super/ETP/redundancy caps —
+    // assumptions-provenance.md §1.2).
+    s.assumptions.wageGrowth = 0.035;
     const out = projectPlan(s);
-    // Salary at year 5 grows in real terms at the AWOTE/CPI premium;
+    // Salary at year 5 grows in real terms at the wage/CPI premium;
     // the 10% contribution must track that same indexed value exactly.
     const salaryY5 = 100000 * Math.pow(1.035 / 1.025, 5);
     expect(out.yearly[5].superDetail.su1.contributions).toBeCloseTo(salaryY5 * 0.1, 2);
@@ -6014,10 +6017,12 @@ describe("Goals (Document Set Commit 6)", () => {
     const cpiTarget = projectPlan(base("cpi")).goalStats.gl1.targetReal;
     const awote = projectPlan(base("awote")).goalStats.gl1.targetReal;
     // "none" (fixed nominal) decays in real terms; "cpi" stays exactly
-    // 12,000; "awote" (> cpi by default) grows in real terms.
+    // 12,000; "awote" (the row basis id; sourced from assumptions
+    // .wageGrowth, > cpi by default — assumptions-provenance.md §1.2)
+    // grows in real terms.
     expect(none).toBeCloseTo(12000 / Math.pow(1.025, 2), 2);
     expect(cpiTarget).toBeCloseTo(12000, 2);
-    expect(awote).toBeCloseTo(12000 * Math.pow(1.035 / 1.025, 2), 2);
+    expect(awote).toBeCloseTo(12000 * Math.pow(1.027 / 1.025, 2), 2);
     expect(none).toBeLessThan(cpiTarget);
     expect(cpiTarget).toBeLessThan(awote);
   });
@@ -8230,7 +8235,7 @@ describe("Age pension (spec 21a, Commit 3): engine integration", () => {
     // Age 67 (y=2): reached. Zero assessable assets/income (no assets,
     // no income rows) → full single rate, homeowner status irrelevant
     // at $0 assessable assets either way.
-    const rates2028 = agePensionRatesFor(2028, "indexed", 0.025, 0.035);
+    const rates2028 = agePensionRatesFor(2028, "indexed", 0.025, 0.032);
     expect(out.yearly[2].agePensionDetail.client.ageEligible).toBe(true);
     expect(out.yearly[2].agePensionDetail.entitlement).toBeCloseTo(rates2028.single.rate, 2);
     expect(out.yearly[2].agePensionDetail.client.paid).toBeCloseTo(rates2028.single.rate, 2);
