@@ -23,12 +23,22 @@ function surplusPeriodsFor(over) {
   return [legacySurplusPeriod(over ?? { mode: "spend", assetId: null })];
 }
 
+function superAcct(over = {}) {
+  return {
+    id: "su1", name: "Super", owner: "client", balance: 0, taxFreeComponent: 0,
+    allocation: { mode: "custom", incomePct: 0, growthPct: 5, frankingPct: 0, volBasis: "Balanced" },
+    icrPct: 0, include: true,
+    ...over,
+  };
+}
+
 function mkState(over = {}) {
   const assets = over.assets ?? [mkAsset()];
   return {
     plan: {
       household: "single", client: { currentAge: 40 }, partner: null,
       endAge: over.endAge ?? 44, start: over.start ?? { year: 2026, month: 7 },
+      superAccounts: over.superAccounts ?? [], pensions: over.pensions ?? [],
       ...over.plan,
     },
     assets,
@@ -163,6 +173,32 @@ describe("projectStatic — surplus lost once its liability destination closes",
     expect(afterClose.principal).toBe(0);
     expect(afterClose.extra).toBe(0);
     expect(afterClose.closing).toBe(0);
+  });
+});
+
+describe("projectStatic — super accounts roll forward too", () => {
+  it("a super account's balance grows at its own implied real return and is included in netAssets", () => {
+    const state = mkState({
+      assets: [],
+      fundingOrder: [],
+      superAccounts: [superAcct({ balance: 100000, allocation: { mode: "custom", incomePct: 0, growthPct: 5, frankingPct: 0, volBasis: "Balanced" } })],
+      cashflows: { income: [], expenses: [] },
+      endAge: 50,
+    });
+    const out = projectPlan(state);
+    const staticYearly = projectStatic(state, { snapshotYears: 0, indexation: "cpi" });
+    // Growth-only, no contributions this scenario — the static
+    // account should keep growing every year, not sit flat, and its
+    // balance should feed netAssets (there are no other accounts).
+    expect(staticYearly[1].superClosing).toBeGreaterThan(staticYearly[0].superClosing);
+    expect(staticYearly[staticYearly.length - 1].netAssets).toBeCloseTo(staticYearly[staticYearly.length - 1].superClosing, 6);
+    // Sanity: broadly in the same neighbourhood as the real engine's
+    // own super balance path (fund tax mechanics differ slightly from
+    // the implied-rate approximation, so this is a loose bound, not an
+    // exact-agreement assertion).
+    const realFinalSuper = out.yearly[out.yearly.length - 1].superClosing;
+    const staticFinalSuper = staticYearly[staticYearly.length - 1].superClosing;
+    expect(Math.abs(staticFinalSuper - realFinalSuper) / realFinalSuper).toBeLessThan(0.1);
   });
 });
 
