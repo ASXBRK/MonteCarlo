@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { runProjection, validateInput, ENGINE_VERSION, FIGURES_AS_AT } from "./engine.js";
 import { build as buildFamilyWithMortgage } from "./demo/familyWithMortgage.js";
+import { serialize, hydrate } from "./planState.js";
+import { PROFILES } from "./profiles.js";
+import { cashflowStatement } from "./cashflowStatement.js";
+import { buildSnapshotColumns, buildSnapshotTable } from "./snapshot.js";
 
 // The contract's declared top-level fields (spec 31 Commit 1) — the
 // three this module adds, plus every field deterministic.js's own
@@ -108,5 +112,101 @@ describe("engine.js — public API contract (spec 31 Commit 1)", () => {
     expect(result.figuresAsAt).toBe(FIGURES_AS_AT);
     expect(result.yearly).toBeUndefined();
     expect(Object.keys(result).sort()).toEqual(["engineVersion", "errors", "figuresAsAt"]);
+  });
+});
+
+describe("engine.js — serialisation and worked integration (spec 31 Commit 3)", () => {
+  it("the whole result round-trips through JSON with deep equality", () => {
+    const result = runProjection(populatedState());
+    const roundTripped = JSON.parse(JSON.stringify(result));
+    expect(roundTripped).toEqual(result);
+  });
+
+  it("no functions, undefined values, or circular references appear anywhere in a real result", () => {
+    const result = runProjection(populatedState());
+    const seen = new Set();
+    const walk = (value) => {
+      if (value === null || typeof value !== "object") {
+        expect(typeof value).not.toBe("function");
+        return;
+      }
+      expect(seen.has(value)).toBe(false); // would be a circular reference
+      seen.add(value);
+      if (Array.isArray(value)) { value.forEach(walk); return; }
+      for (const k of Object.keys(value)) {
+        expect(value[k]).not.toBeUndefined();
+        walk(value[k]);
+      }
+    };
+    walk(result);
+  });
+
+  it("converts every typed array (schedule/monthly) to a plain Array, values unchanged", () => {
+    const result = runProjection(populatedState());
+    expect(Array.isArray(result.monthly.combined)).toBe(true);
+    expect(result.monthly.combined.length).toBeGreaterThan(0);
+    expect(Array.isArray(result.schedule.income)).toBe(true);
+  });
+
+  it("ids stay stable through a save/load (serialize/hydrate) round-trip of the INPUT", () => {
+    const state = populatedState();
+    const r1 = runProjection(state);
+    const roundTrippedState = hydrate(serialize(state), PROFILES);
+    expect(roundTrippedState).not.toBeNull();
+    const r2 = runProjection(roundTrippedState);
+    expect(r2.errors).toEqual([]);
+    const y = 2;
+    expect(Object.keys(r2.yearly[y].superDetail).sort()).toEqual(Object.keys(r1.yearly[y].superDetail).sort());
+    expect(Object.keys(r2.yearly[y].liabilities).sort()).toEqual(Object.keys(r1.yearly[y].liabilities).sort());
+    expect(Object.keys(r2.yearly[y].perAssetDetail).sort()).toEqual(Object.keys(r1.yearly[y].perAssetDetail).sort());
+  });
+
+  // Worked integration example (docs/reference/engine-api.md §9) — run
+  // live so the documented figures cannot silently drift. Deliberately
+  // household-only (forOwner: null): a per-owner vs. household-total
+  // reconciliation issue was found in cashflowStatement.js while
+  // building this and is tracked separately (out of scope for this
+  // spec, which changes no engine behaviour) — this example does not
+  // touch that comparison.
+  it("worked example: construct a client from JSON, run a projection, read the firm's row vocabulary", () => {
+    const demoState = buildFamilyWithMortgage(new Date(2026, 7, 28)).scenarios[0].state;
+    const json = serialize(demoState);
+    const state = hydrate(json, PROFILES);
+    expect(state).not.toBeNull();
+
+    const result = runProjection(state);
+    expect(result.errors).toEqual([]);
+
+    const y = 0;
+    const rt = result.schedule.rowTotals;
+    const ctx = {
+      incomeRows: state.cashflows.income, rowTotalsIncome: rt.income,
+      expenseRows: state.cashflows.expenses, rowTotalsExpenses: rt.expenses,
+      deductionRows: state.cashflows.deductions ?? [], rowTotalsDeductions: rt.deductions,
+      properties: state.properties ?? [], liabilities: state.liabilities ?? [],
+      superAccounts: state.plan.superAccounts ?? [], y,
+      educationBlocks: [], rowTotalsEducation: rt.education,
+    };
+    const statement = cashflowStatement(result.yearly[y], ctx, null);
+    expect(Math.round(statement.assessable.total)).toBe(238616);
+    expect(Math.round(statement.deductions.total)).toBe(0);
+    expect(Math.round(statement.taxableIncome)).toBe(238616);
+    expect(Math.round(statement.tax.total)).toBe(60487);
+    expect(Math.round(statement.netIncome)).toBe(178129);
+    expect(Math.round(statement.cashReceived.total)).toBe(178468);
+    expect(Math.round(statement.expenses.total)).toBe(119016);
+    expect(Math.round(statement.surplusIncome)).toBe(59453);
+    // The statement's own running subtotals reconcile to each other,
+    // by construction — the firm's own vocabulary's defining relations.
+    expect(statement.taxableIncome).toBeCloseTo(statement.assessable.total - statement.deductions.total, 6);
+    expect(statement.netIncome).toBeCloseTo(statement.taxableIncome - statement.tax.total, 6);
+    expect(statement.surplusIncome).toBeCloseTo(statement.cashReceived.total - statement.expenses.total, 6);
+
+    const ctxFor = (yy) => ({ ...ctx, y: yy });
+    const columns = buildSnapshotColumns(result.yearly, ctxFor, [0, 1, 2], false);
+    const table = buildSnapshotTable(columns, { hideEmptyRows: true });
+    expect(table.rows.length).toBe(17);
+    const surplusRow = table.rows.find((r) => r.label === "SURPLUS INCOME");
+    expect(surplusRow.cells.map((c) => Math.round(c.total))).toEqual([59453, 63055, 62069]);
   });
 });

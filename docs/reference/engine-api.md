@@ -362,7 +362,119 @@ in the Assumptions view rather than presenting bare numbers.
 
 ---
 
-## 7. What the engine does not model
+## 7. JSON serialisation
+
+`ProjectionResult` is JSON-safe end to end: `JSON.parse(JSON.stringify(result))`
+deep-equals `result` for a real populated scenario — verified directly, not
+assumed (`engine.test.js`, Commit 3). The one thing this actually required:
+deterministic.js uses `Float64Array` internally throughout `schedule` and
+`monthly` for performance, and `JSON.stringify` does **not** turn a typed
+array into a JSON array — it serialises to an object keyed by string
+indices (`{"0":1.5,"1":2.5,...}`), which is silently wrong for a consumer
+expecting an array back. `runProjection` converts every typed array in the
+result to a plain `Array` before returning (`engine.js`'s `toJSONSafe`) —
+field names and nesting are unchanged, only the concrete JS type of
+array-like leaves. No field anywhere in a real result contains a function,
+an `undefined` value, or a circular reference.
+
+The **input** already had this guarantee — `planState.js`'s
+`serialize(state)`/`hydrate(json, profiles)` are this app's own export/
+import path, and are exactly what "construct a client from JSON" (§9)
+uses. `hydrate` takes the JSON **string** (it calls `JSON.parse` itself),
+not a pre-parsed object.
+
+## 8. Stable identifiers
+
+Every asset, liability, property, goal, bond, super account, pension and
+cashflow row carries an `id` (a short string, e.g. `"as-mtd3okej-4-fm56"`)
+that is stable across a save/load round-trip — `serialize`/`hydrate`
+preserve every id unchanged, verified directly (`engine.test.js`, Commit
+3: the same ids appear as `superDetail`/`liabilities`/`perAssetDetail`
+keys in the result both before and after a state round-trips through
+`serialize`/`hydrate`). A consumer correlating rows across two separate
+`runProjection` calls (e.g. a "before" and "after" comparison, or a
+re-run after the client's data changes) can rely on an id continuing to
+identify the same underlying row, as long as the input it constructed
+that id from is itself unchanged. The one exception: a HELP/HECS debt is
+represented in the output only, as the synthetic id `help_client` /
+`help_partner` (§4, "Liabilities") — it has no corresponding row in the
+input's own `liabilities` array at all, so it is stable by construction
+(derived from a fixed template, not a stored id) rather than by the
+save/load guarantee.
+
+## 9. Worked integration example
+
+The scenario a document-generation consumer actually has: a client
+exported from this app (or another system) as JSON, which it needs to
+turn into the figures its own house-format document expects — the
+firm's own row vocabulary (`cashflowStatement.js`) and the Snapshot
+view's multi-year table (`snapshot.js`), the same two things this app's
+own Cashflow table and Snapshot page are built from. This example runs
+as a live test (`engine.test.js`, `describe("worked integration example")`)
+so these figures cannot silently drift from what's printed here.
+
+```js
+import { runProjection } from "./src/engine.js";
+import { serialize, hydrate } from "./src/planState.js";
+import { cashflowStatement } from "./src/cashflowStatement.js";
+import { buildSnapshotColumns, buildSnapshotTable } from "./src/snapshot.js";
+
+// 1. "Construct a client from JSON" — exactly this app's own export/
+//    import path (a couple, income, expenses, a liability).
+const json = serialize(someClientState);
+const state = hydrate(json, PROFILES);
+
+// 2. Run the projection through the public API.
+const result = runProjection(state);
+
+// 3. Read the figures a document generator needs, for one FY — the
+//    firm's own row vocabulary. ctx mirrors what main.js's own
+//    Cashflow/Snapshot views already build (see engine-api.md §4's
+//    `schedule.rowTotals`).
+const y = 0;
+const rt = result.schedule.rowTotals;
+const ctx = {
+  incomeRows: state.cashflows.income, rowTotalsIncome: rt.income,
+  expenseRows: state.cashflows.expenses, rowTotalsExpenses: rt.expenses,
+  deductionRows: state.cashflows.deductions ?? [], rowTotalsDeductions: rt.deductions,
+  properties: state.properties ?? [], liabilities: state.liabilities ?? [],
+  superAccounts: state.plan.superAccounts ?? [], y,
+  educationBlocks: [], rowTotalsEducation: rt.education,
+};
+const statement = cashflowStatement(result.yearly[y], ctx, null); // null = household
+```
+
+For the "Family with a mortgage" demo client (`src/demo/familyWithMortgage.js`),
+FY2026–27's household statement is —
+
+```
+assessable.total: 238616    deductions.total: 0        taxableIncome: 238616
+tax.total: 60487             netIncome: 178129           cashReceived.total: 178468
+expenses.total: 119016       surplusIncome: 59453
+```
+
+`assessable`/`deductions`/`tax`/`cashReceived`/`expenses` are each a
+**breakdown object** (every category the firm's template shows as its own
+row — salary, franking credits, mortgage repayments, and so on) with a
+`.total` field; `taxableIncome`, `netIncome`, and `surplusIncome` are
+plain numbers, each the difference the spec's own vocabulary names:
+`taxableIncome = assessable.total − deductions.total`; `netIncome =
+taxableIncome − tax.total`; `surplusIncome = cashReceived.total −
+expenses.total`.
+
+For a MULTI-year table matching the Snapshot page exactly,
+`buildSnapshotColumns(result.yearly, ctxFor, [0, 1, 2], couple)` (one
+column per requested plan-year index) then `buildSnapshotTable(columns)`
+→ `{ rows: [{ section, label, total, cells: [...] }] }`, one row per
+non-empty line in the firm's own template (17 rows survive
+`hideEmptyRows` for this client — the SURPLUS INCOME row's household
+total across the first three years is `[59453, 63055, 62069]`).
+`cashflowStatement`'s optional third argument (`"client"` / `"partner"` /
+`null`) also supports a per-person breakdown — see the module's own
+header comment for the owner-attribution rules it applies (a jointly-
+owned item splits 50/50).
+
+## 10. What the engine does not model
 
 The current, authoritative list is `docs/reference/build-log.md`'s own
 "Deferred — do not build" and "PARKED AND OPEN ITEMS" sections — read

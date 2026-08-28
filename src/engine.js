@@ -95,6 +95,30 @@ export function validateInput(input) {
   return errors;
 }
 
+// toJSONSafe(value) — deep-clones `value`, converting every typed array
+// (Float64Array, the monthly-series backing store deterministic.js uses
+// throughout `schedule`/`monthly` for performance) into a plain Array.
+// JSON has no typed-array concept: `JSON.stringify(new Float64Array(...))`
+// serialises to an object keyed by string indices ("0","1",...), not an
+// array — silently wrong for a JSON consumer expecting an array back.
+// Every other value in a real projection result (checked directly
+// against a populated demo scenario while building this commit) is
+// already JSON-safe — no functions, no `undefined`, no circular
+// references — so this is the one transform the public boundary needs.
+// Field NAMES and nesting are unchanged; only the concrete JS type of
+// array-like leaves changes, which is exactly what "JSON in, JSON out"
+// requires (spec 31 Commit 3) and does not touch the Commit 1 contract.
+function toJSONSafe(value) {
+  if (ArrayBuffer.isView(value)) return Array.from(value);
+  if (Array.isArray(value)) return value.map(toJSONSafe);
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = toJSONSafe(value[k]);
+    return out;
+  }
+  return value;
+}
+
 // runProjection(input, profiles = PROFILES) → ProjectionResult
 //
 // ProjectionResult is always the SAME shape: { engineVersion,
@@ -103,11 +127,13 @@ export function validateInput(input) {
 // is absent (there is no partial/best-effort projection of invalid
 // input — deterministic.js's own yearly loop assumes the state it's
 // given already clamps to something coherent). On success, `...rest`
-// is exactly deterministic.js's own projectPlan() result, unmodified —
-// `yearly` (the per-year ledger), `schedule`, `monthly`, `shortfall`,
-// the accrued-tax summary fields, the warning arrays, and the rest —
-// see docs/reference/engine-api.md for the full field-by-field
-// reference (Commit 2).
+// is deterministic.js's own projectPlan() result, values unchanged,
+// passed through `toJSONSafe` — `yearly` (the per-year ledger),
+// `schedule`, `monthly`, `shortfall`, the accrued-tax summary fields,
+// the warning arrays, and the rest — see docs/reference/engine-api.md
+// for the full field-by-field reference (Commit 2). The WHOLE result,
+// including this envelope, round-trips through JSON.stringify/parse
+// with deep equality — see engine.test.js's Commit 3 tests.
 export function runProjection(input, profiles = PROFILES) {
   const errors = validateInput(input);
   if (errors.length > 0) {
@@ -115,5 +141,5 @@ export function runProjection(input, profiles = PROFILES) {
   }
   const state = clampAllToPlan(input, profiles);
   const out = projectPlan(state, profiles);
-  return { engineVersion: ENGINE_VERSION, figuresAsAt: FIGURES_AS_AT, errors: [], ...out };
+  return toJSONSafe({ engineVersion: ENGINE_VERSION, figuresAsAt: FIGURES_AS_AT, errors: [], ...out });
 }
