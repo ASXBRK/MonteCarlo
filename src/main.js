@@ -83,6 +83,7 @@ import { alternativeNominations, buildRecontributionFocus } from "./focusDeathBe
 import { eligibleDebtPayoffLoans, buildDebtPayoffFocus, solveExtraRepaymentForPayoffDate } from "./focusDebtPayoff.js";
 import { eligibleDebtRecyclingLoans, buildDebtRecyclingFocus } from "./focusDebtRecycling.js";
 import { eligibleEducationFundingChildren, buildEducationFundingFocus } from "./focusEducationFunding.js";
+import { buildApproachComparisonFocus } from "./focusApproachComparison.js";
 import {
   computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
   STAMP_DUTY_META, LMI_META, FHBG_META,
@@ -185,6 +186,7 @@ const els = {
   viewDeathBenefits: $("viewDeathBenefits"),
   deathBenefitsTable: $("deathBenefitsTable"),
   viewFocusDeathBenefits: $("viewFocusDeathBenefits"),
+  viewFocusApproachComparison: $("viewFocusApproachComparison"),
   liabilitiesEntity: $("liabilitiesEntity"),
   liabilitiesTable: $("liabilitiesTable"),
   viewBonds: $("viewBonds"),
@@ -540,6 +542,7 @@ const OUTPUT_NAV = {
     { id: "focus-ppr-exemption", label: "Main residence exemption" },
     { id: "focus-age-pension", label: "Age pension" },
     { id: "focus-death-benefits", label: "Death benefits" },
+    { id: "focus-approach-comparison", label: "Approach comparison" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
@@ -8202,6 +8205,7 @@ const VIEW_MOUNTS = {
   "focus-ppr-exemption": () => els.viewFocusPprExemption,
   "focus-age-pension": () => els.viewFocusAgePension,
   "focus-death-benefits": () => els.viewFocusDeathBenefits,
+  "focus-approach-comparison": () => els.viewFocusApproachComparison,
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
@@ -8277,6 +8281,7 @@ function renderActiveView() {
   else if (activeView === "focus-ppr-exemption") renderFocusPprExemptionView();
   else if (activeView === "focus-age-pension") renderFocusAgePensionView();
   else if (activeView === "focus-death-benefits") renderFocusDeathBenefitsView();
+  else if (activeView === "focus-approach-comparison") renderFocusApproachComparisonView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
@@ -11372,6 +11377,119 @@ function renderRecontributionResult() {
     </p>
   `;
 }
+
+// --- Approach comparison (spec 30, Commit 3) --------------------------------
+//
+// The real engine vs. a naive "snapshot one year, hold constant or
+// index at CPI" extrapolation — the kind of estimate a simpler tool
+// (or a back-of-envelope guess) would produce. Both figures, the
+// divergence, and the seven-driver attribution come from
+// src/divergence.js's measureDivergence() via focusApproachComparison.js
+// — this file only renders it. Runs on the active scenario; the
+// snapshot year and indexation choice are local UI state, not plan
+// state, exactly like focusDebtPayoffLoanId above.
+let focusApproachSnapshotYear = 0;
+let focusApproachIndexation = "cpi";
+
+function renderFocusApproachComparisonView() {
+  const planYears = projection.yearly.length;
+  focusApproachSnapshotYear = clampInt(focusApproachSnapshotYear, 0, planYears - 1);
+  const f = buildApproachComparisonFocus({ state, snapshotYear: focusApproachSnapshotYear, indexation: focusApproachIndexation });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const endFactor = factor(planYears - 1);
+  const pctLine = (r) => (r ? `${(r.pctDiff * 100).toFixed(1)}%` : "—");
+  const ageOf = (y) => projection.schedule.clientAges[y];
+  const yearOptions = Array.from({ length: planYears }, (_, y) =>
+    `<option value="${y}"${y === focusApproachSnapshotYear ? " selected" : ""}>${escapeHTML(projection.yearly[y].fyLabel)} (age ${ageOf(y)})</option>`
+  ).join("");
+
+  els.viewFocusApproachComparison.innerHTML = `
+    <h2 class="section-heading">Approach comparison</h2>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <p class="helper-text">A simple extrapolation — snapshot one year's numbers, then hold them constant or index them at CPI — is the kind of estimate a back-of-envelope guess or a simpler tool might produce. This compares that against this plan's own full projection from a chosen starting year, so the value of modelling contributions stopping, loans maturing, tax brackets, and pensions and the age pension commencing — rather than just extending one year's numbers — is visible rather than assumed. Property, bonds and the Working Cash Account are excluded from both sides so the comparison is scope-matched; this is a diagnostic on the modelling approach, not advice.</p>
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Extrapolate from
+              <select id="focusApproachSnapshotYear">${yearOptions}</select>
+            </label>
+          </div>
+          <div class="cf-cell">
+            <label>Non-evolving figures
+              <select id="focusApproachIndexation">
+                <option value="cpi"${focusApproachIndexation === "cpi" ? " selected" : ""}>Indexed at CPI</option>
+                <option value="flat"${focusApproachIndexation === "flat" ? " selected" : ""}>Held constant (nominal)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <div class="summary-strip">
+          <div class="stat stat-headline"><div class="stat-label">Gap at end of projection</div><div class="stat-value">${fmtMoney(f.totalGap * endFactor)}</div></div>
+          <div class="stat"><div class="stat-label">Divergence at +10 years</div><div class="stat-value">${pctLine(f.summary.at10)}</div></div>
+          <div class="stat"><div class="stat-label">Divergence at +20 years</div><div class="stat-value">${pctLine(f.summary.at20)}</div></div>
+          <div class="stat"><div class="stat-label">Divergence at +30 years</div><div class="stat-value">${pctLine(f.summary.at30)}</div></div>
+          <div class="stat"><div class="stat-label">First exceeds 5%</div><div class="stat-value">${f.summary.firstExceeds5Pct != null ? `age ${ageOf(f.summary.firstExceeds5Pct)}` : "Never"}</div></div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Net assets over time</h3>
+        <div id="focusApproachChart"></div>
+      </div>
+      <div class="focus-section">
+        <h3>Where the gap comes from</h3>
+        <p class="helper-text">Each driver is measured by re-running the static model with just that one feature made realistic, holding everything else naive. The seven don't sum exactly to the total gap because they interact with each other — a loan closing changes how much surplus is available for a contribution that also stops, for instance — so the remainder is shown as its own line rather than folded into any one driver's figure.</p>
+        <table class="tl"><thead><tr><th class="tl-label">Driver</th><th>Contribution</th></tr></thead><tbody>
+          ${f.drivers.map((d) => `<tr><td>${escapeHTML(d.label)}</td><td class="tl-num">${fmtLedgerCell(d.contribution * endFactor)}</td></tr>`).join("")}
+          <tr><td>Residual (driver interaction)</td><td class="tl-num">${fmtLedgerCell(f.residual * endFactor)}</td></tr>
+          <tr class="tl-total"><td>Total gap</td><td class="tl-num">${fmtLedgerCell(f.totalGap * endFactor)}</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+  `;
+  renderFocusApproachChart(f, factor);
+}
+
+function renderFocusApproachChart(f, factor) {
+  const el = $("focusApproachChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = f.byYear.map((r) => projection.schedule.clientAges[r.y]);
+  Plotly.react(el, [
+    {
+      x: ages, y: f.byYear.map((r) => r.netAssetsReal * factor(r.y)), name: "Full projection",
+      type: "scatter", mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Full projection</extra>",
+    },
+    {
+      x: ages, y: f.byYear.map((r) => r.netAssetsStatic * factor(r.y)), name: "Static extrapolation",
+      type: "scatter", mode: "lines", line: { color: "rgb(217, 90, 40)", width: 2, dash: "dash" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Static extrapolation</extra>",
+    },
+  ], {
+    margin: { l: 70, r: 20, t: 24, b: 40 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `${isNominal() ? "Future" : "Today's"} dollars`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+els.viewFocusApproachComparison.addEventListener("change", (e) => {
+  if (e.target.id === "focusApproachSnapshotYear") {
+    focusApproachSnapshotYear = clampInt(e.target.value, 0, projection.yearly.length - 1);
+    renderFocusApproachComparisonView();
+  } else if (e.target.id === "focusApproachIndexation") {
+    focusApproachIndexation = e.target.value === "flat" ? "flat" : "cpi";
+    renderFocusApproachComparisonView();
+  }
+});
 
 // --- View: Liabilities (fix batch, item 5) ----------------------------------
 

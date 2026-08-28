@@ -176,6 +176,7 @@ describe("known section/view ids", () => {
       "focus-ppr-exemption",
       "focus-age-pension",
       "focus-death-benefits",
+      "focus-approach-comparison",
       "focus-debt-recycling",
       "focus-education-funding",
       "monte-carlo", "monte-carlo-table",

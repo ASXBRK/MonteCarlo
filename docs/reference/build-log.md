@@ -1757,6 +1757,79 @@ freezes at a typed value even after the dwelling type is changed again;
 Parameters modal shows Salary and wage indexation 2.7%, Super cap
 indexation (AWOTE) 3.2%, FHSSS associated earnings rate 7.43%.
 
+### Divergence analysis (spec 30, 3 commits)
+Measures the engine rather than extending it — quantifies the gap
+between this full projection and the naive "snapshot one year, then
+hold constant or index at CPI" extrapolation a simpler tool (or a
+back-of-envelope guess) would produce, and attributes it to seven named
+drivers.
+
+**Commit 1 — static extrapolation model** (`src/staticProjection.js`,
+`4165cca`, extended to super/pension in `20c691b`). `projectStatic(state,
+opts)` rolls a chosen snapshot year's own per-account real return/rate
+(backed out directly from that year's already-computed real-dollar
+outcome, never re-deriving fund tax or amortisation) forward flat or
+CPI-indexed. Tracks assets, super, pension, and liabilities (closing on
+payoff); does NOT track property, bonds, or the Working Cash Account —
+disclosed in the module header, and the reason `divergence.js` compares
+on a narrowed, scope-matched net-assets figure rather than the real
+engine's full one. A `realism` flag bag (7 booleans, default off,
+reproduces the naive baseline exactly) substitutes the real engine's own
+per-year figure for one component at a time — the mechanism Commit 2's
+driver attribution runs on.
+
+**Bug found and fixed in the same area:** the liability tracker read
+`state.liabilities` (the plan-state array) for which ids to track, which
+never includes the engine's own synthetic `help_<person>` HELP/HECS-debt
+entries that DO appear in the real per-year `liabilities` map — a First
+Home Buyer scenario diverged 56% AT THE SNAPSHOT YEAR (must be exactly 0
+by construction). Fixed by iterating `Object.keys(snap.liabilities)`
+instead (`e693e6d`) — generalizes to any future synthetic liability, not
+just HELP, per CLAUDE.md's close-the-whole-class rule. Regression test
+added with a real HELP-debt scenario.
+
+**Commit 2 — divergence measurement and driver attribution**
+(`src/divergence.js`, `4f868ca`). `measureDivergence(state, opts)`
+computes the real engine's own comparable net-assets figure per year
+(assets + super + pension − liabilities, scope-matched to what the
+static model tracks), the by-year gap and % divergence, summary
+statistics (divergence at +10/+20/+30 years and at end; first year
+exceeding 5%/10%), and re-runs the static model once per driver with
+just that one `realism` flag enabled to attribute the final-year gap.
+The seven drivers sum to the gap only approximately since they interact
+(a loan closing changes how much surplus is available for a
+contribution that also stops) — the residual is reported explicitly,
+never folded into any one driver's figure.
+
+**Commit 3 — Focus view and committed report.** Focus → Approach
+comparison (`src/focusApproachComparison.js`, wired into `router.js`/
+`main.js`/`index.html`) runs on the active scenario: a snapshot-year and
+indexation-basis selector, the summary strip, a net-assets-over-time
+chart (real vs. static), and the driver table with the residual and
+total gap as their own rows. `docs/reference/divergence-analysis.md` —
+a committed report across four scenarios (First home buyer, Family with
+a mortgage, High earner pre-retirement, and a new Retiree demo fixture,
+`src/demo/retiree.js`, deliberately NOT added to the "Load demo clients"
+list) — is locked in by `src/divergenceReport.test.js` recomputing the
+same figures live, not a `toMatchSnapshot`. Two more findings surfaced
+while generating it, both disclosed in the report rather than smoothed
+over: the residual frequently exceeds the total gap itself (Family
+$468k residual vs. $206k gap; High earner $1.80m residual vs. $373k
+gap — over four times it); and the retiree scenario's snapshot year 1
+(the pension's own commencement year) produces a ~20× larger, dominated-
+by-the-one-off-rollover divergence than year 2, so year 2 is used for
+that scenario, with the reason stated in the report and covered by a
+dedicated regression test.
+
+Gates: full suite 1682/1682, build green. Regression: N/A (new files
+and a new Focus view only; no existing money flow or output changed).
+Browser-verified: Focus → Approach comparison on a populated demo
+scenario (Family with a mortgage) shows the summary strip, driver table,
+and residual/total-gap rows with figures matching the committed report;
+changing the snapshot-year selector re-renders all figures live; the
+net-assets chart falls back to "Chart unavailable" cleanly when Plotly's
+CDN is blocked, same as every other chart in this app.
+
 ---
 
 ## WHERE WE'RE GOING
