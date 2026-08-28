@@ -226,7 +226,12 @@ heasDetail.closing`), `income`, `cashDistributions`, `expenses`, `tax`.
 `surplusOrDeficit`, `surplusInvested`, `surplusSpent`, `surplusAccumulated`,
 `deficitFundedFromAssets`, `unfundedCashflow`, `contributions`,
 `withdrawals`, `oneOffsNet`, `growth`, `adjustments` (array), `termination`
-(array — redundancy/ETP events this FY), `giftsPaid`.
+(array — redundancy/ETP events this FY), `giftsPaid`. `decomposition` /
+`cumulativeDecomposition`: `{ income, growth, tax, expenses, interest,
+fees, oneOffs }` — the change in net worth this year (and its running
+total since the projection started) split into these 7 named buckets;
+`wealthCrossoverYear` (§4, summary) is the first year `cumulativeDecomposition.growth`
+exceeds `cumulativeDecomposition.income`.
 
 **Per-asset** — `perAssetDetail` (keyed by asset id): `{ opening,
 contributions, withdrawals, oneOffs, deficitFunding, surplusInvested,

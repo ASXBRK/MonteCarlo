@@ -50,6 +50,12 @@ spec wins and says so explicitly.**
   final-month ordering bug; an NCC rejected near the bring-forward nil
   tier, ~$2.1m) hid for months in ranges the generator never reached —
   see docs/specs/28-generator-boundary-coverage.md.
+- The engine result shape is a published contract. Any commit changing
+  it must update the contract snapshot and bump the result version in
+  the same commit. Removing or renaming a field is a breaking change.
+  See `src/engine.js` (`runProjection`, `ENGINE_VERSION`),
+  `src/engineContractShape.js` (the committed shape + `compareShapes`),
+  and `docs/reference/engine-api.md` (docs/specs/31-engine-api.md).
 
 ## Architecture map
 - `src/planState.js` — schema (v5+), migrations, factories. localStorage via

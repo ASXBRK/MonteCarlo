@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { runProjection, validateInput, ENGINE_VERSION, FIGURES_AS_AT } from "./engine.js";
 import { build as buildFamilyWithMortgage } from "./demo/familyWithMortgage.js";
+import { build as buildFirstHomeBuyer } from "./demo/firstHomeBuyer.js";
 import { serialize, hydrate } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 import { cashflowStatement } from "./cashflowStatement.js";
 import { buildSnapshotColumns, buildSnapshotTable } from "./snapshot.js";
+import { shapeOf, mergeShapes, compareShapes, COMMITTED_SHAPE } from "./engineContractShape.js";
 
 // The contract's declared top-level fields (spec 31 Commit 1) — the
 // three this module adds, plus every field deterministic.js's own
@@ -208,5 +210,74 @@ describe("engine.js — serialisation and worked integration (spec 31 Commit 3)"
     expect(table.rows.length).toBe(17);
     const surplusRow = table.rows.find((r) => r.label === "SURPLUS INCOME");
     expect(surplusRow.cells.map((c) => Math.round(c.total))).toEqual([59453, 63055, 62069]);
+  });
+});
+
+// The two fixtures COMMITTED_SHAPE (engineContractShape.js) was
+// generated from — its own header comment names them and explains the
+// choice. Comparing a SINGLE fixture's shape against the committed
+// UNION would spuriously flag whatever that one fixture doesn't
+// happen to use (e.g. familyWithMortgage has no property) as
+// "removed", so this merges the same two fixtures' live shapes the
+// same way before comparing — see mergeShapes's own header.
+function currentLiveShape() {
+  const fhb = buildFirstHomeBuyer(new Date(2026, 7, 28)).scenarios[2].state; // "Buy 2030 with FHSSS"
+  const fwm = buildFamilyWithMortgage(new Date(2026, 7, 28)).scenarios[0].state; // "Current"
+  const r1 = runProjection(fhb);
+  const r2 = runProjection(fwm);
+  const s1 = shapeOf(r1); s1.yearly = ["array", shapeOf(r1.yearly[r1.yearly.length - 1])];
+  const s2 = shapeOf(r2); s2.yearly = ["array", shapeOf(r2.yearly[r2.yearly.length - 1])];
+  return mergeShapes(s1, s2);
+}
+
+describe("engine.js — contract stability (spec 31 Commit 4)", () => {
+  it("the committed shape matches live output exactly — no fields removed, renamed, or added", () => {
+    const { errors, notices } = compareShapes(COMMITTED_SHAPE, currentLiveShape());
+    for (const n of notices) console.warn(n); // see compareShapes's own header — a notice never fails the test
+    expect(errors).toEqual([]);
+    expect(notices).toEqual([]);
+  });
+
+  // compareShapes's own contract, verified directly (mirrors this
+  // project's convention for the conservation invariant — temporarily
+  // break the thing being guarded and confirm the guard actually
+  // fires — except here it's the comparator itself under test, not
+  // engine.js, so the break is a synthetic shape mutation rather than
+  // a real code change).
+  describe("compareShapes — verified against synthetic mutations", () => {
+    it("flags a field removed from live output as an ERROR (breaking change)", () => {
+      const live = currentLiveShape();
+      const mutatedLive = JSON.parse(JSON.stringify(live));
+      delete mutatedLive.yearly[1].netAssets;
+      const { errors } = compareShapes(COMMITTED_SHAPE, mutatedLive);
+      expect(errors.some((e) => e.includes("netAssets") && e.includes("REMOVED"))).toBe(true);
+    });
+
+    it("flags a field renamed in live output as an ERROR (old name missing)", () => {
+      const live = currentLiveShape();
+      const mutatedLive = JSON.parse(JSON.stringify(live));
+      mutatedLive.yearly[1].netAssetsRenamed = mutatedLive.yearly[1].netAssets;
+      delete mutatedLive.yearly[1].netAssets;
+      const { errors, notices } = compareShapes(COMMITTED_SHAPE, mutatedLive);
+      expect(errors.some((e) => e.includes("netAssets") && e.includes("REMOVED"))).toBe(true);
+      expect(notices.some((n) => n.includes("netAssetsRenamed"))).toBe(true);
+    });
+
+    it("flags a genuinely NEW field as a notice only — does not fail", () => {
+      const live = currentLiveShape();
+      const liveWithExtra = { ...live, brandNewSummaryField: "number" };
+      const { errors, notices } = compareShapes(COMMITTED_SHAPE, liveWithExtra);
+      expect(errors).toEqual([]);
+      expect(notices.some((n) => n.includes("brandNewSummaryField"))).toBe(true);
+    });
+
+    it("a type change on an existing field is an ERROR", () => {
+      const live = currentLiveShape();
+      const mutatedLive = JSON.parse(JSON.stringify(live));
+      mutatedLive.figuresAsAt = 12345; // shapeOf would report "number", was "string"
+      const liveShapeWithTypeChange = { ...mutatedLive, figuresAsAt: "number" };
+      const { errors } = compareShapes(COMMITTED_SHAPE, liveShapeWithTypeChange);
+      expect(errors.some((e) => e.includes("figuresAsAt") && e.includes("type changed"))).toBe(true);
+    });
   });
 });
