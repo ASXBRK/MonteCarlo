@@ -252,6 +252,30 @@ describe("projectStatic — super accounts roll forward too", () => {
   });
 });
 
+describe("projectStatic — synthetic HELP debt liability", () => {
+  it("tracks HELP/HECS debt (a synthetic help_<person> liability with no entry in state.liabilities) at the snapshot year", () => {
+    // A HELP balance produces a synthetic `help_client` entry in the
+    // real engine's own row.liabilities, with NO corresponding object
+    // in state.liabilities at all — this file's liability tracking
+    // must key off the REAL row's own liability ids (Object.keys),
+    // not state.liabilities.map(l => l.id), or it silently drops any
+    // liability that's synthetic rather than user-entered. Found while
+    // generating the divergence report (spec 30, Commit 3): a real
+    // client with HELP debt showed a 56% "divergence" at the SNAPSHOT
+    // YEAR ITSELF, which must be exactly 0 by construction.
+    const state = mkState({
+      plan: { client: { currentAge: 29, retirementAge: 65, helpBalance: 28000 } },
+      cashflows: { income: [incomeRow({ amount: 9000, incomeType: "employment" })], expenses: [expenseRow({ amount: 2000 })] },
+      endAge: 50,
+    });
+    const out = projectPlan(state);
+    expect(out.yearly[0].liabilitiesClosing).toBeGreaterThan(0); // sanity: HELP is genuinely active here
+    const staticYearly = projectStatic(state, { snapshotYears: 0, indexation: "cpi" });
+    expect(staticYearly[0].liabilitiesClosing).toBeCloseTo(out.yearly[0].liabilitiesClosing, 6);
+    expect(staticYearly[0].netAssets).toBeCloseTo(out.yearly[0].netAssets, 6);
+  });
+});
+
 describe("projectStatic — multiple snapshot years", () => {
   it("returns one independent extrapolation per snapshot year when snapshotYears is an array", () => {
     const state = mkState({

@@ -226,7 +226,16 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles, realism = {}
   const snap = out.yearly[sy];
 
   const assets = (state.assets ?? []).filter((a) => a.include);
-  const liabilities = state.liabilities ?? [];
+  // Liability ids come from the REAL row's own `liabilities` dict, not
+  // `state.liabilities` — the real engine also reports synthetic
+  // `help_<person>` entries there (HELP/HECS debt) that have no
+  // corresponding object in state.liabilities at all. This file only
+  // ever reads snap.liabilities[id]'s own real-dollar figures (never
+  // the raw liability object's own fields — the "implied rate" is
+  // derived from interest ÷ opening, not from interestRatePct), so the
+  // id set is all that's needed and Object.keys(snap.liabilities)
+  // already includes both kinds uniformly.
+  const liabilityIds = Object.keys(snap.liabilities ?? {});
   const superAccounts = (state.plan?.superAccounts ?? []).filter((s) => s.include);
   const pensions = state.plan?.pensions ?? [];
 
@@ -268,12 +277,12 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles, realism = {}
   const liabScheduledBase = {};
   const liabExtraBase = {};
   const liabBalance = {};
-  for (const l of liabilities) {
-    const d = snap.liabilities?.[l.id];
-    liabRate[l.id] = d && d.opening > 0 ? d.interest / d.opening : 0;
-    liabScheduledBase[l.id] = d ? (d.interest ?? 0) + (d.principal ?? 0) : 0;
-    liabExtraBase[l.id] = d ? (d.extraRepayment ?? 0) + (d.surplusRepayment ?? 0) : 0;
-    liabBalance[l.id] = d?.closing ?? 0;
+  for (const id of liabilityIds) {
+    const d = snap.liabilities?.[id];
+    liabRate[id] = d && d.opening > 0 ? d.interest / d.opening : 0;
+    liabScheduledBase[id] = d ? (d.interest ?? 0) + (d.principal ?? 0) : 0;
+    liabExtraBase[id] = d ? (d.extraRepayment ?? 0) + (d.surplusRepayment ?? 0) : 0;
+    liabBalance[id] = d?.closing ?? 0;
   }
 
   const incomeBase = snap.income ?? 0;
@@ -332,30 +341,30 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles, realism = {}
     }
 
     const liabilitiesRow = {};
-    for (const l of liabilities) {
-      const opening = liabBalance[l.id];
+    for (const id of liabilityIds) {
+      const opening = liabBalance[id];
       let closing = opening;
       let interest = 0, principal = 0, extra = 0;
       if (opening > 1e-6) {
         const rate = realism.fixedRateRollover
           ? (() => {
-              const rd = realRow.liabilities?.[l.id];
-              return rd && rd.opening > 0 ? rd.interest / rd.opening : liabRate[l.id];
+              const rd = realRow.liabilities?.[id];
+              return rd && rd.opening > 0 ? rd.interest / rd.opening : liabRate[id];
             })()
-          : liabRate[l.id];
+          : liabRate[id];
         interest = opening * rate;
-        const scheduled = liabScheduledBase[l.id] * idx;
-        extra = liabExtraBase[l.id] * idx;
+        const scheduled = liabScheduledBase[id] * idx;
+        extra = liabExtraBase[id] * idx;
         const payment = Math.min(scheduled + extra, opening + interest);
         principal = Math.max(0, payment - interest);
         closing = Math.max(0, opening + interest - payment);
-      } else if (realism.loanMaturity && liabExtraBase[l.id] > 0) {
+      } else if (realism.loanMaturity && liabExtraBase[id] > 0) {
         // Already closed: the baseline drops `extra` here — redirect
         // it into static cash instead, isolating JUST this behaviour.
-        staticCash += liabExtraBase[l.id] * idx;
+        staticCash += liabExtraBase[id] * idx;
       }
-      liabBalance[l.id] = closing;
-      liabilitiesRow[l.id] = { opening, interest, principal, extra, closing };
+      liabBalance[id] = closing;
+      liabilitiesRow[id] = { opening, interest, principal, extra, closing };
     }
 
     const closingBalance = assetTrack.total();
