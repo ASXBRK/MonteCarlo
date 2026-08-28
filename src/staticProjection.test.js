@@ -176,6 +176,56 @@ describe("projectStatic — surplus lost once its liability destination closes",
   });
 });
 
+describe("projectStatic — realism overrides isolate one driver at a time", () => {
+  it("realism.loanMaturity redirects the freed-up extra repayment into static cash instead of dropping it", () => {
+    const state = mkState({
+      liabilities: [loan({ balance: 150000, termYears: 20, interestRatePct: 6 })],
+      cashflows: {
+        income: [incomeRow({ amount: 4000 })],
+        expenses: [expenseRow({ amount: 1500 })],
+      },
+      fundingOrder: [],
+      endAge: 60,
+      surplus: {
+        periods: [{
+          id: "sp1", from: { kind: "anchor", anchorId: "start" }, to: { kind: "anchor", anchorId: "end" },
+          payNonDeductibleDebtFirst: false, debtOrder: "interestRate", remainderTo: "cash",
+          allocations: [{ id: "sa1", targetType: "liability", targetId: "lb1", pct: 100 }],
+        }],
+      },
+    });
+    const baseline = projectStatic(state, { snapshotYears: 0, indexation: "cpi" });
+    const fixed = projectStatic(state, { snapshotYears: 0, indexation: "cpi", realism: { loanMaturity: true } });
+    const closedIndex = baseline.findIndex((row) => row.liabilities.lb1.closing <= 1e-6);
+    expect(closedIndex).toBeGreaterThan(0);
+
+    // Baseline: nothing accumulates once the loan is closed.
+    expect(baseline[closedIndex + 1].staticCash).toBe(0);
+    // Fixed: the freed-up amount is captured instead.
+    expect(fixed[closedIndex + 1].staticCash).toBeGreaterThan(0);
+    // The fix can only help (or do nothing), never hurt, net worth.
+    const lastBaseline = baseline[baseline.length - 1].netAssets;
+    const lastFixed = fixed[fixed.length - 1].netAssets;
+    expect(lastFixed).toBeGreaterThanOrEqual(lastBaseline);
+  });
+
+  it("realism.taxBrackets substitutes the real engine's own per-year tax instead of the held/indexed figure", () => {
+    const state = mkState({
+      cashflows: { income: [incomeRow({ amount: 8000, incomeType: "employment", sgApplies: false })], expenses: [expenseRow({ amount: 2000 })] },
+      endAge: 60,
+    });
+    const out = projectPlan(state);
+    const baseline = projectStatic(state, { snapshotYears: 0, indexation: "cpi" });
+    const withRealTax = projectStatic(state, { snapshotYears: 0, indexation: "cpi", realism: { taxBrackets: true } });
+    const y = baseline.length - 1;
+    expect(withRealTax[y].tax).toBeCloseTo(out.yearly[y].tax, 2);
+    // The baseline holds tax at the snapshot's own figure — it should
+    // NOT already equal the real engine's later-year figure (otherwise
+    // this scenario isn't exercising the override at all).
+    expect(baseline[y].tax).not.toBeCloseTo(out.yearly[y].tax, 2);
+  });
+});
+
 describe("projectStatic — super accounts roll forward too", () => {
   it("a super account's balance grows at its own implied real return and is included in netAssets", () => {
     const state = mkState({

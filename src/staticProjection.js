@@ -91,6 +91,38 @@
 //     drawdown), but adds no NEW surplus-driven flow beyond what the
 //     snapshot year already shows. Not the primary scenario this
 //     analysis is built to measure.
+//
+// `opts.realism` (divergence.js, Commit 2) — each flag substitutes the
+// REAL engine's OWN per-year figure for ONE naive held/indexed
+// component, isolating exactly one of the seven named drivers at a
+// time ("re-running the static model with that single evolving
+// feature enabled" — the spec's own words). All default false, which
+// reproduces this file's Commit 1 baseline exactly (regression gate:
+// no test passes `realism` at all).
+//   - `expenseWindows` — real out.yearly[y].expenses instead of held/
+//     indexed (school fees ending, a goal funded).
+//   - `contributionsStopping` — each asset's/super account's REAL net
+//     flow that year instead of the snapshot's held/indexed one
+//     (a contribution stopping at retirement or a cap binding).
+//   - `taxBrackets` — real out.yearly[y].tax instead of held/indexed.
+//   - `fixedRateRollover` — the liability's REAL implied rate that
+//     year (interest ÷ opening) instead of the snapshot's flat implied
+//     rate, applied to the SCHEDULED portion only (the "extra" surplus
+//     payment still behaves per the baseline, isolating the rate
+//     effect on its own).
+//   - `agePension` — a correction term added to income for JUST the
+//     age pension entitlement's real-vs-held-constant difference
+//     (income is otherwise still held/indexed as normal — this isolates
+//     the pension changing without also isolating wage/other growth).
+//   - `superPensionTransitions` — the real engine's OWN combined
+//     super+pension total that year, substituted whole, instead of
+//     this file's own tracked approximation (captures a preservation-
+//     age/pension-phase transition this file's simple per-account
+//     roll-forward has no other way to notice).
+//   - `loanMaturity` — once a liability's static balance closes, the
+//     amount that WOULD have gone to it is REDIRECTED into a synthetic
+//     "static cash" balance (included in netAssets) instead of being
+//     dropped — the baseline's own defect, switched off in isolation.
 
 import { projectPlan, assetMonthlyRate } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
@@ -130,11 +162,16 @@ function makeAccountTrack(items, openingOf, returnOf, netFlowOf) {
   }
   return {
     balance,
-    stepYear(idx) {
+    // `netFlowOverride(id)`, if it returns a finite number, replaces
+    // THIS year's held/indexed net flow for that one item — the hook
+    // `realism.contributionsStopping` uses to substitute the real
+    // year's own flow (see projectStaticFromSnapshot).
+    stepYear(idx, netFlowOverride) {
       const detail = {};
       for (const id of Object.keys(balance)) {
         const opening = balance[id];
-        const netFlow = netFlowBase[id] * idx;
+        const overridden = netFlowOverride?.(id);
+        const netFlow = Number.isFinite(overridden) ? overridden : netFlowBase[id] * idx;
         const growth = (opening + netFlow / 2) * rate[id];
         const closing = Math.max(0, opening + netFlow + growth);
         balance[id] = closing;
@@ -156,17 +193,30 @@ function makeAccountTrack(items, openingOf, returnOf, netFlowOf) {
 // blended series). `profiles` defaults to the same PROFILES the real
 // engine uses.
 export function projectStatic(state, opts = {}) {
-  const { snapshotYears, indexation = "flat", profiles = PROFILES } = opts;
+  const { snapshotYears, indexation = "flat", profiles = PROFILES, realism = {} } = opts;
   if (Array.isArray(snapshotYears)) {
     return snapshotYears.map((sy) => ({
       snapshotYear: sy,
-      yearly: projectStaticFromSnapshot(state, sy, indexation, profiles),
+      yearly: projectStaticFromSnapshot(state, sy, indexation, profiles, realism),
     }));
   }
-  return projectStaticFromSnapshot(state, snapshotYears, indexation, profiles);
+  return projectStaticFromSnapshot(state, snapshotYears, indexation, profiles, realism);
 }
 
-function projectStaticFromSnapshot(state, sy, indexation, profiles) {
+// The net non-growth flow for one asset/super-account's row detail —
+// the SAME decomposition used to seed each track's snapshot-year base,
+// reused again per-year when `realism.contributionsStopping` asks for
+// the REAL year's own flow instead of the held/indexed one.
+function assetNetFlowOf(d) {
+  return d ? (d.contributions ?? 0) - (d.withdrawals ?? 0) + (d.oneOffs ?? 0) - (d.deficitFunding ?? 0) + (d.surplusInvested ?? 0) : 0;
+}
+function superLikeNetFlowOf(d) {
+  if (!d) return 0;
+  const growth = d.earnings - d.earningsTax;
+  return d.closing - d.opening - growth;
+}
+
+function projectStaticFromSnapshot(state, sy, indexation, profiles, realism = {}) {
   const out = projectPlan(state, profiles);
   const cpi = state.assumptions.cpi ?? 0.025;
   const planYears = out.yearly.length;
@@ -184,12 +234,7 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles) {
     assets,
     (a) => snap.perAssetDetail?.[a.id]?.closing ?? 0,
     (a) => assetAnnualRealReturn(a, cpi, profiles),
-    (a) => {
-      const d = snap.perAssetDetail?.[a.id];
-      return d
-        ? (d.contributions ?? 0) - (d.withdrawals ?? 0) + (d.oneOffs ?? 0) - (d.deficitFunding ?? 0) + (d.surplusInvested ?? 0)
-        : 0;
-    },
+    (a) => assetNetFlowOf(snap.perAssetDetail?.[a.id]),
   );
 
   // Super/pension: the implied real return backs out whatever the fund
@@ -201,30 +246,18 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles) {
     (s) => snap.superDetail?.[s.id]?.closing ?? 0,
     (s) => {
       const d = snap.superDetail?.[s.id];
-      if (!d || !(d.opening > 0)) return 0;
-      return (d.earnings - d.earningsTax) / d.opening;
+      return d && d.opening > 0 ? (d.earnings - d.earningsTax) / d.opening : 0;
     },
-    (s) => {
-      const d = snap.superDetail?.[s.id];
-      if (!d) return 0;
-      const growth = d.earnings - d.earningsTax;
-      return d.closing - d.opening - growth;
-    },
+    (s) => superLikeNetFlowOf(snap.superDetail?.[s.id]),
   );
   const pensionTrack = makeAccountTrack(
     pensions,
     (p) => snap.pensionDetail?.[p.id]?.closing ?? 0,
     (p) => {
       const d = snap.pensionDetail?.[p.id];
-      if (!d || !(d.opening > 0)) return 0;
-      return (d.earnings - d.earningsTax) / d.opening;
+      return d && d.opening > 0 ? (d.earnings - d.earningsTax) / d.opening : 0;
     },
-    (p) => {
-      const d = snap.pensionDetail?.[p.id];
-      if (!d) return 0;
-      const growth = d.earnings - d.earningsTax;
-      return d.closing - d.opening - growth;
-    },
+    (p) => superLikeNetFlowOf(snap.pensionDetail?.[p.id]),
   );
 
   // Liabilities keep their own bespoke step (a payment can EXHAUST the
@@ -246,9 +279,14 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles) {
   const incomeBase = snap.income ?? 0;
   const expensesBase = snap.expenses ?? 0;
   const taxBase = snap.tax ?? 0;
+  const agePensionEntitlementBase = snap.agePensionDetail?.entitlement ?? 0;
 
-  const netAssetsOf = (assetsTotal, superTotal, pensionTotal, liabTotal) =>
-    assetsTotal + superTotal + pensionTotal - liabTotal;
+  // Loan maturity (`realism.loanMaturity`) — the amount that would
+  // have gone to a now-closed liability accumulates here instead of
+  // being dropped. Real dollars, no return of its own by default (a
+  // conservative "sits in cash" reading — see this file's own header
+  // on favouring the static approach where a behaviour is ambiguous).
+  let staticCash = 0;
 
   // The snapshot year itself is reported as-is (the real figure — the
   // two models agree exactly at the snapshot by construction).
@@ -257,14 +295,41 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles) {
   for (let y = sy + 1; y < planYears; y++) {
     const yearsElapsed = y - sy;
     const idx = indexFactor(indexation, cpi, yearsElapsed);
-    const income = incomeBase * idx;
-    const expenses = expensesBase * idx;
-    const tax = taxBase * idx;
+    const realRow = out.yearly[y];
+
+    let income = incomeBase * idx;
+    if (realism.agePension) {
+      const realEntitlement = realRow.agePensionDetail?.entitlement ?? 0;
+      income += realEntitlement - agePensionEntitlementBase * idx;
+    }
+    const expenses = realism.expenseWindows ? realRow.expenses : expensesBase * idx;
+    const tax = realism.taxBrackets ? realRow.tax : taxBase * idx;
     const surplusOrDeficit = income - expenses - tax;
 
-    const perAssetDetail = assetTrack.stepYear(idx);
-    const superDetail = superTrack.stepYear(idx);
-    const pensionDetail = pensionTrack.stepYear(idx);
+    const netFlowFromReal = (realDetailById) => (id) => {
+      const d = realDetailById?.[id];
+      return d ? assetNetFlowOf(d) : NaN;
+    };
+    const superNetFlowFromReal = (realDetailById) => (id) => {
+      const d = realDetailById?.[id];
+      return d ? superLikeNetFlowOf(d) : NaN;
+    };
+
+    const perAssetDetail = assetTrack.stepYear(idx, realism.contributionsStopping ? netFlowFromReal(realRow.perAssetDetail) : undefined);
+    let superDetail = superTrack.stepYear(idx, realism.contributionsStopping ? superNetFlowFromReal(realRow.superDetail) : undefined);
+    let pensionDetail = pensionTrack.stepYear(idx, realism.contributionsStopping ? superNetFlowFromReal(realRow.pensionDetail) : undefined);
+
+    let superClosing = superTrack.total();
+    let pensionClosing = pensionTrack.total();
+    // Super preservation / pension phase transitions
+    // (`realism.superPensionTransitions`) — substitute the real
+    // engine's own combined total whole, rather than trying to detect
+    // the transition itself (a rollover from accumulation to pension
+    // phase isn't a "flow" this file's per-account tracks see at all).
+    if (realism.superPensionTransitions) {
+      superClosing = realRow.superClosing ?? 0;
+      pensionClosing = realRow.pensionClosing ?? 0;
+    }
 
     const liabilitiesRow = {};
     for (const l of liabilities) {
@@ -272,22 +337,30 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles) {
       let closing = opening;
       let interest = 0, principal = 0, extra = 0;
       if (opening > 1e-6) {
-        interest = opening * liabRate[l.id];
+        const rate = realism.fixedRateRollover
+          ? (() => {
+              const rd = realRow.liabilities?.[l.id];
+              return rd && rd.opening > 0 ? rd.interest / rd.opening : liabRate[l.id];
+            })()
+          : liabRate[l.id];
+        interest = opening * rate;
         const scheduled = liabScheduledBase[l.id] * idx;
         extra = liabExtraBase[l.id] * idx;
         const payment = Math.min(scheduled + extra, opening + interest);
         principal = Math.max(0, payment - interest);
         closing = Math.max(0, opening + interest - payment);
+      } else if (realism.loanMaturity && liabExtraBase[l.id] > 0) {
+        // Already closed: the baseline drops `extra` here — redirect
+        // it into static cash instead, isolating JUST this behaviour.
+        staticCash += liabExtraBase[l.id] * idx;
       }
       liabBalance[l.id] = closing;
       liabilitiesRow[l.id] = { opening, interest, principal, extra, closing };
     }
 
     const closingBalance = assetTrack.total();
-    const superClosing = superTrack.total();
-    const pensionClosing = pensionTrack.total();
     const liabilitiesClosing = Object.values(liabBalance).reduce((s, v) => s + v, 0);
-    const netAssets = netAssetsOf(closingBalance, superClosing, pensionClosing, liabilitiesClosing);
+    const netAssets = closingBalance + superClosing + pensionClosing + staticCash - liabilitiesClosing;
 
     yearly.push({
       y,
@@ -295,7 +368,7 @@ function projectStaticFromSnapshot(state, sy, indexation, profiles) {
       clientAge: out.schedule.clientAges[y],
       partnerAge: out.schedule.partnerAges ? out.schedule.partnerAges[y] : null,
       income, expenses, tax, surplusOrDeficit,
-      perAssetDetail, superDetail, pensionDetail, liabilities: liabilitiesRow,
+      perAssetDetail, superDetail, pensionDetail, liabilities: liabilitiesRow, staticCash,
       closingBalance, superClosing, pensionClosing, liabilitiesClosing, netAssets,
     });
   }
@@ -319,7 +392,7 @@ function staticRowFrom(sy, snap, assetTrack, superTrack, pensionTrack, liabBalan
     fyLabel: snap.fyLabel, clientAge: snap.clientAge, partnerAge: snap.partnerAge,
     income: snap.income, expenses: snap.expenses, tax: snap.tax, surplusOrDeficit: snap.surplusOrDeficit,
     perAssetDetail: snap.perAssetDetail, superDetail: snap.superDetail, pensionDetail: snap.pensionDetail,
-    liabilities: snap.liabilities,
+    liabilities: snap.liabilities, staticCash: 0,
     closingBalance, superClosing, pensionClosing, liabilitiesClosing,
     netAssets: closingBalance + superClosing + pensionClosing - liabilitiesClosing,
   };
