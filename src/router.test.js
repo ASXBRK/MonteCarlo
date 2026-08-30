@@ -177,6 +177,7 @@ describe("known section/view ids", () => {
       "focus-age-pension",
       "focus-death-benefits",
       "focus-approach-comparison",
+      "focus-aged-care-accommodation",
       "focus-debt-recycling",
       "focus-education-funding",
       "monte-carlo", "monte-carlo-table",

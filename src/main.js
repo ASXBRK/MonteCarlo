@@ -84,6 +84,7 @@ import { eligibleDebtPayoffLoans, buildDebtPayoffFocus, solveExtraRepaymentForPa
 import { eligibleDebtRecyclingLoans, buildDebtRecyclingFocus } from "./focusDebtRecycling.js";
 import { eligibleEducationFundingChildren, buildEducationFundingFocus } from "./focusEducationFunding.js";
 import { buildApproachComparisonFocus } from "./focusApproachComparison.js";
+import { buildAgedCareAccommodationFocus } from "./focusAgedCareAccommodation.js";
 import {
   computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
   STAMP_DUTY_META, LMI_META, FHBG_META,
@@ -187,6 +188,7 @@ const els = {
   deathBenefitsTable: $("deathBenefitsTable"),
   viewFocusDeathBenefits: $("viewFocusDeathBenefits"),
   viewFocusApproachComparison: $("viewFocusApproachComparison"),
+  viewFocusAgedCareAccommodation: $("viewFocusAgedCareAccommodation"),
   liabilitiesEntity: $("liabilitiesEntity"),
   liabilitiesTable: $("liabilitiesTable"),
   viewBonds: $("viewBonds"),
@@ -543,6 +545,7 @@ const OUTPUT_NAV = {
     { id: "focus-age-pension", label: "Age pension" },
     { id: "focus-death-benefits", label: "Death benefits" },
     { id: "focus-approach-comparison", label: "Approach comparison" },
+    { id: "focus-aged-care-accommodation", label: "Aged care accommodation" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
@@ -8206,6 +8209,7 @@ const VIEW_MOUNTS = {
   "focus-age-pension": () => els.viewFocusAgePension,
   "focus-death-benefits": () => els.viewFocusDeathBenefits,
   "focus-approach-comparison": () => els.viewFocusApproachComparison,
+  "focus-aged-care-accommodation": () => els.viewFocusAgedCareAccommodation,
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
@@ -8282,6 +8286,7 @@ function renderActiveView() {
   else if (activeView === "focus-age-pension") renderFocusAgePensionView();
   else if (activeView === "focus-death-benefits") renderFocusDeathBenefitsView();
   else if (activeView === "focus-approach-comparison") renderFocusApproachComparisonView();
+  else if (activeView === "focus-aged-care-accommodation") renderFocusAgedCareAccommodationView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
@@ -11490,6 +11495,165 @@ els.viewFocusApproachComparison.addEventListener("change", (e) => {
     renderFocusApproachComparisonView();
   }
 });
+
+// --- Aged care accommodation (spec 29, Commit 3) ----------------------------
+//
+// Local UI inputs only (not persisted plan state — Commit 5 adds the
+// real "Aged care" fact-find section); buildAgedCareAccommodationFocus
+// (focusAgedCareAccommodation.js) does the actual work.
+const REGIME_LABELS = {
+  old: "Pre-1 November 2025 rules (means-tested fee)",
+  new: "1 November 2025+ rules (Non-Clinical Care Contribution + Hotelling)",
+  pre2014: "Pre-1 July 2014 — grandfathered regime, NOT modelled",
+};
+let focusAgedCareInputs = { accommodationPrice: null, radAmount: null, entryAge: null, extraServiceFeesAnnual: 0, fundingAssetId: null, optedIntoNewRegime: false };
+
+function renderFocusAgedCareAccommodationView() {
+  const financialAssets = state.assets.filter((a) => a.include && a.class === "financial");
+  if (financialAssets.length === 0) {
+    els.viewFocusAgedCareAccommodation.innerHTML = focusEmptyStateHTML(
+      "The RAD, DAP, and combination accommodation options side by side — total cost of care, remaining assets, and the estate position — add an included financial asset to fund it from.",
+      "financial-assets"
+    );
+    return;
+  }
+  if (!focusAgedCareInputs.fundingAssetId || !financialAssets.some((a) => a.id === focusAgedCareInputs.fundingAssetId)) {
+    focusAgedCareInputs.fundingAssetId = financialAssets[0].id;
+  }
+  if (focusAgedCareInputs.entryAge == null) {
+    focusAgedCareInputs.entryAge = Math.min(state.plan.endAge, state.plan.client.currentAge + 15);
+  }
+  if (focusAgedCareInputs.accommodationPrice == null) focusAgedCareInputs.accommodationPrice = 500000;
+  if (focusAgedCareInputs.radAmount == null) focusAgedCareInputs.radAmount = Math.round(focusAgedCareInputs.accommodationPrice / 2);
+
+  const f = buildAgedCareAccommodationFocus({ state, ...focusAgedCareInputs });
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+
+  const inputsHTML = `
+    <div class="focus-section">
+      <p class="helper-text">The RAD, DAP, and combination options side by side, run through the plan exactly as it stands today. Property, bonds, and a retained former home are not modelled by this estimate yet (see Commit 5) — only the accommodation payment and ongoing fees against the funding asset chosen below. Non-prescriptive: this shows what each option costs and leaves, not which to choose.</p>
+      <div class="person-grid">
+        <div class="cf-cell"><label>Accommodation price
+          <input type="number" id="agedCarePrice" value="${focusAgedCareInputs.accommodationPrice}" min="0" step="1000" />
+        </label></div>
+        <div class="cf-cell"><label>RAD amount (combination arm)
+          <input type="number" id="agedCareRad" value="${focusAgedCareInputs.radAmount}" min="0" step="1000" />
+        </label></div>
+        <div class="cf-cell"><label>Entry age
+          <input type="number" id="agedCareEntryAge" value="${focusAgedCareInputs.entryAge}" min="${state.plan.client.currentAge}" max="${state.plan.endAge}" />
+        </label></div>
+        <div class="cf-cell"><label>Extra service fees ($/yr)
+          <input type="number" id="agedCareExtra" value="${focusAgedCareInputs.extraServiceFeesAnnual}" min="0" step="100" />
+        </label></div>
+        <div class="cf-cell"><label>Funding asset
+          <select id="agedCareFundingAsset">${financialAssets.map((a) => `<option value="${a.id}"${a.id === focusAgedCareInputs.fundingAssetId ? " selected" : ""}>${escapeHTML(a.name)}</option>`).join("")}</select>
+        </label></div>
+      </div>
+    </div>
+  `;
+
+  if (!f) {
+    els.viewFocusAgedCareAccommodation.innerHTML = `
+      <h2 class="section-heading">Aged care accommodation</h2>
+      <div class="focus-panel">
+        ${inputsHTML}
+        <div class="focus-section">${focusEmptyStateHTML("The entry age isn't reached within this projection — lower it or extend the plan's own end age.", null)}</div>
+      </div>
+    `;
+    wireAgedCareAccommodationInputs();
+    return;
+  }
+
+  const regimeNote = f.regime === "pre2014"
+    ? `<p class="helper-warning">Entry falls before 1 July 2014 — that grandfathered regime is not modelled. No fee is calculated for any arm.</p>`
+    : `<p class="helper-text">Entry regime: ${escapeHTML(REGIME_LABELS[f.regime])}.</p>`;
+
+  const armStatsHTML = f.arms.map((a) => `
+    <div class="stat"><div class="stat-label">${escapeHTML(a.label)}</div><div class="stat-value">${fmtMoney(a.radPaid * factor(f.entryYear))} RAD</div></div>
+  `).join("");
+
+  const tableRows = [
+    { label: "RAD paid", cell: (a) => a.radPaid },
+    { label: "Unpaid balance (DAP base)", cell: (a) => a.unpaidBalance },
+    { label: "DAP (annual)", cell: (a) => a.dapAnnualCost },
+    { label: "Basic daily fee (annual)", cell: (a) => a.basicDailyAnnual },
+    { label: "Means-tested contribution (annual)", cell: (a) => a.contributionAnnual },
+    { label: "Total ongoing annual cost", cell: (a) => a.dapAnnualCost + a.basicDailyAnnual + a.contributionAnnual, total: true },
+    { label: "Estate position at end", cell: (a) => f.estate[a.id], total: true },
+  ];
+
+  els.viewFocusAgedCareAccommodation.innerHTML = `
+    <h2 class="section-heading">Aged care accommodation</h2>
+    <div class="focus-panel">
+      ${inputsHTML}
+      <div class="focus-section">
+        ${regimeNote}
+        <div class="summary-strip">${armStatsHTML}</div>
+      </div>
+      <div class="focus-section">
+        <h3>Cost breakdown</h3>
+        <table class="tl"><thead><tr><th class="tl-label">Figure</th>${f.arms.map((a) => `<th>${escapeHTML(a.label)}</th>`).join("")}</tr></thead><tbody>
+          ${tableRows.map((r) => `<tr${r.total ? ' class="tl-total"' : ""}><td>${escapeHTML(r.label)}</td>${f.arms.map((a) => `<td class="tl-num">${fmtLedgerCell(r.cell(a) * factor(f.entryYear))}</td>`).join("")}</tr>`).join("")}
+        </tbody></table>
+      </div>
+      <div class="focus-section">
+        <h3>Remaining assets over time</h3>
+        <div id="agedCareChart"></div>
+      </div>
+    </div>
+  `;
+  renderAgedCareAccommodationChart(f, factor);
+  wireAgedCareAccommodationInputs();
+}
+
+function renderAgedCareAccommodationChart(f, factor) {
+  const el = $("agedCareChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = f.byYear.map((p) => p.age);
+  const colors = { rad: "rgb(28, 90, 180)", dap: "rgb(217, 90, 40)", combination: "rgb(60, 150, 90)" };
+  const dashes = { rad: "solid", dap: "dash", combination: "dot" };
+  Plotly.react(el, f.arms.map((a) => ({
+    x: ages, y: f.byYear.map((p) => p[a.id].remainingAssets * factor(p.year)), name: a.label,
+    type: "scatter", mode: "lines", line: { color: colors[a.id], width: 2, dash: dashes[a.id] },
+    hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(a.label)}</extra>`,
+  })), {
+    margin: { l: 70, r: 20, t: 24, b: 40 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `${isNominal() ? "Future" : "Today's"} dollars`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
+    },
+    font: { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 13, color: "#222" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function wireAgedCareAccommodationInputs() {
+  const priceEl = $("agedCarePrice"), radEl = $("agedCareRad"), ageEl = $("agedCareEntryAge"), extraEl = $("agedCareExtra"), assetEl = $("agedCareFundingAsset");
+  if (priceEl) priceEl.addEventListener("change", (e) => {
+    focusAgedCareInputs.accommodationPrice = clampNumber(e.target.value, 0);
+    renderFocusAgedCareAccommodationView();
+  });
+  if (radEl) radEl.addEventListener("change", (e) => {
+    focusAgedCareInputs.radAmount = clampNumber(e.target.value, 0);
+    renderFocusAgedCareAccommodationView();
+  });
+  if (ageEl) ageEl.addEventListener("change", (e) => {
+    focusAgedCareInputs.entryAge = clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge);
+    renderFocusAgedCareAccommodationView();
+  });
+  if (extraEl) extraEl.addEventListener("change", (e) => {
+    focusAgedCareInputs.extraServiceFeesAnnual = clampNumber(e.target.value, 0);
+    renderFocusAgedCareAccommodationView();
+  });
+  if (assetEl) assetEl.addEventListener("change", (e) => {
+    focusAgedCareInputs.fundingAssetId = e.target.value;
+    renderFocusAgedCareAccommodationView();
+  });
+}
 
 // --- View: Liabilities (fix batch, item 5) ----------------------------------
 

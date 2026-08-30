@@ -36,6 +36,7 @@ export const OUTPUT_VIEWS = [
   "focus-age-pension",                                                                                                                                        // Focus (docs/specs/21a-age-pension-core.md, Commit 4)
   "focus-death-benefits",                                                                                                                                     // Focus (docs/specs/22-death-benefits.md, Commit 3)
   "focus-approach-comparison",                                                                                                                                 // Focus (docs/specs/30-divergence-analysis.md, Commit 3)
+  "focus-aged-care-accommodation",                                                                                                                             // Focus (docs/specs/29-aged-care.md, Commit 3)
   // Reachability bug found by spec 27's own pre-Commit-1 audit: bonds
   // (spec 25) and both these Focus views (specs 24/25) were already
   // fully BUILT (a complete Bonds table; complete Focus views) but
