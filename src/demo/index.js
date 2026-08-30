@@ -10,11 +10,20 @@
 // factories (createAsset, createLiability, etc.) and clampAllToPlan,
 // never a hand-written object literal, so a schema change surfaces as
 // a build/test-time break here rather than silent hydration drift.
+//
+// Four clients, chosen for coverage as a set (docs/reference/demo-
+// coverage.md is the presenter's map of which client/scenario shows
+// which view) rather than each one trying to be a feature checklist on
+// its own — a client that shows a feature it has no real reason to
+// have undermines a demo more than a missing view.
 import { build as buildFirstHomeBuyer } from "./firstHomeBuyer.js";
 import { build as buildFamilyWithMortgage } from "./familyWithMortgage.js";
-import { build as buildHighEarnerPreRetirement } from "./highEarnerPreRetirement.js";
+import { build as buildComprehensivePreRetiree } from "./comprehensivePreRetiree.js";
+import { build as buildModestRetiree } from "./modestRetiree.js";
 
-export const DEMO_BUILDERS = [buildFirstHomeBuyer, buildFamilyWithMortgage, buildHighEarnerPreRetirement];
+export const DEMO_BUILDERS = [
+  buildFirstHomeBuyer, buildFamilyWithMortgage, buildComprehensivePreRetiree, buildModestRetiree,
+];
 
 // buildDemoClients(now) → [{ name, scenarios: [{ name, expectAffordable, state }] }, ...]
 // `now` is threaded through so a test can pin it for reproducibility;

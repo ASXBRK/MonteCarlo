@@ -361,6 +361,7 @@ the STORED INPUT (the plan state schema; currently 18). Rule:
 |---|---|
 | `1.0.0` | Initial published contract (spec 31, Commit 1). |
 | `1.1.0` | Additive: top-level `agedCareWarnings`, yearly-row `agedCareDetail` (spec 29, Commit 5). |
+| `1.2.0` | No new fields — `goals`, `goalStats`, and `schedule.rowTotals.deductions` were already part of the engine's output but had never been populated by either contract-shape fixture; the demo client set rewrite gave one of them a real goal and deduction row, so the committed shape now captures their actual inner shape instead of pinning them as empty placeholders (docs/reference/build-log.md's own "Demo clients" entry). |
 
 Any commit that changes the result shape must update `ENGINE_VERSION`,
 this table, and the Commit 4 contract-shape snapshot in the SAME commit

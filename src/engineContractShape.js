@@ -26,14 +26,19 @@
 // FIRST year with a non-empty `agedCareDetail`, not necessarily the
 // final year). `yearly` otherwise uses each fixture's FINAL year
 // (captures deathBenefitDetail, which is null on every other row).
-// Disclosed gap: none of the three fixtures has bonds, a pension, a
-// defined benefit, or a goal, so `bondDetail`, `pensionDetail`,
-// `definedBenefitDetail`, `goals`, `schedule.bondFlows`,
-// `schedule.superInsurancePremiums`, `liabilityRepaymentStats`,
-// `goalStats`, and `schedule.rowTotals.deductions` are pinned as
-// empty objects here, not their populated inner shape — those are
-// still exercised (for correctness, not shape-pinning) by their own
+// Disclosed gap: none of the three fixtures has bonds, a pension, or a
+// defined benefit, so `bondDetail`, `pensionDetail`,
+// `definedBenefitDetail`, `schedule.bondFlows`,
+// `schedule.superInsurancePremiums`, and `liabilityRepaymentStats` are
+// pinned as empty objects here, not their populated inner shape — those
+// are still exercised (for correctness, not shape-pinning) by their own
 // dedicated test files (bonds.test.js, pensionTba.test.js, etc.).
+// `goals`, `goalStats`, and `schedule.rowTotals.deductions` WERE on
+// this same disclosed-gap list until the demo client set rewrite gave
+// "Family with a mortgage" a real goal and a real deduction row (salary
+// packaging) — its own populated shape is captured here now, not a
+// deliberate addition to the engine's own output, just this fixture
+// finally exercising a field the engine already had.
 //
 // Dictionaries keyed by a generated row id (asset/liability/super/
 // property/etc — see planState.js's `uid()`) collapse to a single
@@ -147,7 +152,16 @@ export const COMMITTED_SHAPE ={
     "empty"
   ],
   "figuresAsAt": "string",
-  "goalStats": {},
+  "goalStats": {
+    "<id>": {
+      "accrued": "number",
+      "achieved": "boolean",
+      "alternativeMonth": "number",
+      "shortfall": "number",
+      "targetMonth": "number",
+      "targetReal": "number"
+    }
+  },
   "liabilityRepaymentStats": {},
   "liabilityRollovers": {
     "<id>": {
@@ -316,7 +330,12 @@ export const COMMITTED_SHAPE ={
     },
     "planYears": "number",
     "rowTotals": {
-      "deductions": {},
+      "deductions": {
+        "<id>": [
+          "array",
+          "number"
+        ]
+      },
       "education": {
         "<id>": [
           "array",
@@ -525,7 +544,12 @@ export const COMMITTED_SHAPE ={
       },
       "fyLabel": "string",
       "giftsPaid": "number",
-      "goals": {},
+      "goals": {
+        "<id>": {
+          "contribution": "number",
+          "surplusContribution": "number"
+        }
+      },
       "growth": "number",
       "heasDetail": {
         "closing": "number",

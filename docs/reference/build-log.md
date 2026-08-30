@@ -2013,6 +2013,116 @@ spec 31 Commit 3.
 
 ---
 
+### Demo clients: comprehensive coverage set
+Replaced the three-client demo set with four, chosen for coverage as a
+set — every `router.js` output view now has at least one demo client/
+scenario producing real data for it, enforced by a new `src/demo/
+coverage.test.js` rather than left to a presenter to discover the hard
+way. Each client is still a coherent, individually plausible person
+first (a feature bolted onto a client with no real reason to have it
+undermines a demo more than a missing view), built through the same
+real factories and `clampAllToPlan` as before — never a hand-written
+state object.
+
+**A — First home buyer** (lightly revised): unchanged single/29/HELP/
+FHSSS shape, planned purchase moved to Perth (WA) rather than NSW —
+deliberately, so the three property-owning demo clients between them
+exercise three different states' stamp duty/land tax schedules, not the
+same one three times over.
+
+**B — Family with a mortgage** (substantially extended): gained a
+negatively geared investment property in VIC (its own land tax
+threshold is low — $50,000 of land value — so an ordinary-priced
+property clears it, unlike NSW's $1,075,000), salary packaging through
+the partner's FBT-exempt employer, a travel goal, and a fourth "Debt
+recycling" scenario. The added property/packaging/goal genuinely
+changed this fixture's own numbers, which cascaded into two other
+places that had come to depend on its OLD exact figures — both fixed
+as part of this same commit, not deferred:
+- `engine.test.js`'s worked integration example (docs/reference/
+  engine-api.md §9) hardcoded this fixture's own dollar figures;
+  recomputed and updated, and its own contract-stability test picked up
+  three fields (`goals`, `goalStats`, `schedule.rowTotals.deductions`)
+  that had been sitting on `engineContractShape.js`'s own disclosed-gap
+  list since spec 31 (no fixture had ever populated them) — now
+  captured with their real shape instead of an empty placeholder.
+  `ENGINE_VERSION` bumped to `1.2.0` (additive; no new engine fields, an
+  existing gap finally closed by richer fixture data).
+- `divergenceReport.test.js` and its committed `docs/reference/
+  divergence-analysis.md` (spec 30) both reconcile against this exact
+  fixture's own numbers; regenerated Scenario 2's own section (the
+  divergence at end genuinely flipped sign, +5.0% → −2.5%, and gained a
+  third driver) with the real new output, including a note on why the
+  10-year horizon shows an eye-catching −438%: a percentage against a
+  still-small net-worth base early in a geared property's own equity
+  build, not a computation error — the same caution the Retiree
+  scenario's own commencement-year note already raises.
+- `demo/highEarnerPreRetirement.js` — superseded as a live demo option
+  by the new Comprehensive pre-retiree below, but RETAINED (not
+  deleted) purely because `divergenceReport.test.js` and its own
+  committed report figures are separately anchored to it — the same
+  "internal fixture, not a live option" role `demo/retiree.js` already
+  has. No numbers there changed.
+
+**C — Comprehensive pre-retiree** (new, replaces High earner pre-
+retirement as a live demo option): couple 55/53, $450k combined
+income, a deliberately asymmetric $3.2m/$420k super split either side
+of the carry-forward threshold (also large enough on the client's side
+to trigger Division 296 alongside 293), a negatively geared QLD
+property, an education bond (no linked child — present to exercise the
+bond engine's own "education" tax treatment specifically), one defined
+benefit pension already in payment, death benefit nominations for both,
+and an aged care entry firing at 88. Projected to age 95 (`endBasis`
+fixedAge, not the default life-expectancy basis). Two real, non-obvious
+findings while building it:
+- A defined benefit's `commenceAt` resolves against the CLIENT's age
+  regardless of whose pension it is (this engine's own documented
+  convention) — setting it to the PARTNER's own current age put it
+  inside the projection's partial first year (no July to fire an annual
+  event in), so it silently never fired at all. Caught by this file's
+  own sanity check before it ever reached a test, not discovered later;
+  fixed by using the client's own age one plan year in instead.
+  Every other age-anchored one-off across all four new clients was
+  re-checked against the same class of mistake once this one surfaced.
+- The pension-phase design deliberately splits TTR and a genuine
+  retirement ABP across two DIFFERENT scenarios (Maximise concessional;
+  Retire at 60) rather than both in one, specifically so the
+  retirement-phase earnings-tax exemption's presence/absence is
+  directly, separately visible (verified: the TTR pension's own
+  `earningsTax` is nonzero, the ABP's is exactly zero, on otherwise
+  near-identical pensions).
+
+**D — Modest retiree** (new): couple 70/68, ~$420k combined super
+already in pension phase, own their home outright, minimal other
+assets, a small casual income for the partner (the Work Bonus needs
+someone still working to exempt). Draws a near-full age pension — the
+age pension actually binding, not the token/zero amount the two
+wealthier clients see. The $30,000 gift scenario lands exactly on the
+spec's own worked example of the annual ($10,000) vs. five-year
+($30,000) limits interacting: $10,000 of a single $30k gift is
+allowable, the remaining $20,000 is deprived — verified directly
+(`toBeCloseTo(20_000, 0)`), not just asserted nonzero.
+
+**Coverage test and map.** `src/demo/coverage.test.js` — one checker
+per `OUTPUT_VIEWS` id (mirroring each view's own Focus-module null-gate
+where one exists, e.g. `focus-debt-recycling` requires a real
+`liability.recycling.enabled`, rather than re-deriving the condition
+from scratch) — asserts every view has at least one populating client/
+scenario, and separately asserts every `OUTPUT_VIEWS` id has a checker
+registered at all (so a newly added view without one fails loudly
+rather than silently passing by omission). `docs/reference/demo-
+coverage.md` is the resulting presenter's map — one best client/
+scenario per view, with a one-line reason.
+
+Gates: full suite 1854/1854, build green. Browser-swept all four
+clients' first scenario across every one of the 37 output views: zero
+console errors, zero near-blank renders; every view's own "empty" state
+across the sweep was independently confirmed to be a legitimate
+per-client gap already covered by a DIFFERENT client/scenario per the
+coverage test above, not a real bug.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

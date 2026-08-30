@@ -1,6 +1,13 @@
-// Demo client: High earner pre-retirement — docs/reference/demo-
-// clients.md has the walkthrough. Built through the same factories as
-// every other demo client (see firstHomeBuyer.js's own header for why).
+// Retained fixture: High earner pre-retirement — superseded as a
+// user-facing "Load demo clients" option by the richer Comprehensive
+// pre-retiree (src/demo/comprehensivePreRetiree.js), per the demo
+// client set rewrite. Kept here, NOT in DEMO_BUILDERS (src/demo/
+// index.js), purely because divergenceReport.test.js and its committed
+// docs/reference/divergence-analysis.md figures are anchored to this
+// exact fixture's exact numbers — the same "internal fixture, not a
+// live demo option" role retiree.js's own header already documents.
+// Built through the same factories as every other demo client (see
+// firstHomeBuyer.js's own header for why).
 import { PROFILES } from "../profiles.js";
 import {
   defaultState, clampPlan, clampAllToPlan,

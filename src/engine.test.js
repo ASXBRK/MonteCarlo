@@ -190,14 +190,14 @@ describe("engine.js — serialisation and worked integration (spec 31 Commit 3)"
       educationBlocks: [], rowTotalsEducation: rt.education,
     };
     const statement = cashflowStatement(result.yearly[y], ctx, null);
-    expect(Math.round(statement.assessable.total)).toBe(238616);
-    expect(Math.round(statement.deductions.total)).toBe(0);
-    expect(Math.round(statement.taxableIncome)).toBe(238616);
-    expect(Math.round(statement.tax.total)).toBe(60487);
-    expect(Math.round(statement.netIncome)).toBe(178129);
+    expect(Math.round(statement.assessable.total)).toBe(260576);
+    expect(Math.round(statement.deductions.total)).toBe(41769);
+    expect(Math.round(statement.taxableIncome)).toBe(218807);
+    expect(Math.round(statement.tax.total)).toBe(53711);
+    expect(Math.round(statement.netIncome)).toBe(165096);
     expect(Math.round(statement.cashReceived.total)).toBe(178468);
-    expect(Math.round(statement.expenses.total)).toBe(119016);
-    expect(Math.round(statement.surplusIncome)).toBe(59453);
+    expect(Math.round(statement.expenses.total)).toBe(147493);
+    expect(Math.round(statement.surplusIncome)).toBe(30976);
     // The statement's own running subtotals reconcile to each other,
     // by construction — the firm's own vocabulary's defining relations.
     expect(statement.taxableIncome).toBeCloseTo(statement.assessable.total - statement.deductions.total, 6);
@@ -207,9 +207,9 @@ describe("engine.js — serialisation and worked integration (spec 31 Commit 3)"
     const ctxFor = (yy) => ({ ...ctx, y: yy });
     const columns = buildSnapshotColumns(result.yearly, ctxFor, [0, 1, 2], false);
     const table = buildSnapshotTable(columns, { hideEmptyRows: true });
-    expect(table.rows.length).toBe(17);
+    expect(table.rows.length).toBe(23);
     const surplusRow = table.rows.find((r) => r.label === "SURPLUS INCOME");
-    expect(surplusRow.cells.map((c) => Math.round(c.total))).toEqual([59453, 63055, 62069]);
+    expect(surplusRow.cells.map((c) => Math.round(c.total))).toEqual([30976, 39441, 39770]);
   });
 });
 
@@ -217,9 +217,9 @@ describe("engine.js — serialisation and worked integration (spec 31 Commit 3)"
 // generated from — its own header comment names them and explains the
 // choice. Comparing a SINGLE fixture's shape against the committed
 // UNION would spuriously flag whatever that one fixture doesn't
-// happen to use (e.g. familyWithMortgage has no property) as
-// "removed", so this merges the same two fixtures' live shapes the
-// same way before comparing — see mergeShapes's own header.
+// happen to use (e.g. firstHomeBuyer has no goal) as "removed", so
+// this merges the same two fixtures' live shapes the same way before
+// comparing — see mergeShapes's own header.
 // The third fixture engineContractShape.js's own header names —
 // nothing else in this suite has an aged care entry, so this is the
 // ONLY source of a populated `agedCareDetail` in the committed shape.

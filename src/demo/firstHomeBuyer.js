@@ -95,13 +95,17 @@ function buildCurrent(now) {
   return finalize(base, plan, assets, income, expenses, superAccounts);
 }
 
-// A planned first-home purchase in ~4 years, at a high LVR — the First
-// Home Guarantee waives LMI here rather than the client paying it, the
-// point of the feature this scenario exists to show.
+// A planned first-home purchase in Perth, ~4 years out (2030 from a
+// present-day "now") at a high LVR — the First Home Guarantee waives
+// LMI here rather than the client paying it, the point of the feature
+// this scenario exists to show. WA rather than NSW/VIC deliberately —
+// this is the only demo client that exercises WA's own stamp duty
+// schedule (docs/reference/demo-coverage.md tracks which client covers
+// which state).
 function plannedHome(plan) {
   return {
     ...createProperty(plan, [], 5),
-    name: "First home", owner: "client", state: "NSW", propertyType: "ppr", status: "planned",
+    name: "First home (Perth)", owner: "client", state: "WA", propertyType: "ppr", status: "planned",
     priceToday: 650_000, purchaseAt: { kind: "age", age: 33 },
     lvrPct: 95, firstHomeBuyer: true, firstHomeGuarantee: true, newBuild: false,
     purchaseCostsPct: 2,

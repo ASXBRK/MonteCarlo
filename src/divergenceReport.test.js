@@ -70,10 +70,10 @@ describe("Divergence analysis report reconciles to measureDivergence (spec 30, C
     expect(result.residual).toBeCloseTo(158680, -2);
   });
 
-  it("Family with a mortgage: +5.0% at end, contributions stopping the largest driver, residual exceeds the total gap", () => {
+  it("Family with a mortgage: -2.5% at end, contributions stopping the largest driver, residual exceeds the total gap", () => {
     const state = buildFamilyWithMortgage(NOW).scenarios[0].state;
     const result = measureDivergence(state, { snapshotYears: 0, indexation: "cpi" });
-    expect(result.summary.atEnd.pctDiff * 100).toBeCloseTo(5.0, 0);
+    expect(result.summary.atEnd.pctDiff * 100).toBeCloseTo(-2.5, 0);
     expect(result.drivers[0].key).toBe("contributionsStopping");
     expect(Math.abs(result.residual)).toBeGreaterThan(Math.abs(result.totalGap));
   });

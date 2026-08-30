@@ -65,20 +65,32 @@ divergence.
 ## Scenario 2 — Family with a mortgage
 
 Couple, mid-30s, two children, an $850k mortgage (fixed/variable split),
-private school fees from age 12, combined income $260k (the "Current" demo
-scenario). 49-year projection.
+private school fees from age 12, combined income $260k, a negatively
+geared investment property (VIC — land tax applies), salary packaging
+through an FBT-exempt employer, and a travel goal (the "Current" demo
+scenario, revised for spec 29/demo-coverage's own broadened Family
+fixture — see docs/reference/build-log.md). 49-year projection.
 
 | Horizon | Divergence |
 |---|---|
-| 10 years | −49.8% |
-| 20 years | −17.3% |
-| 30 years | −6.3% |
-| End | **+5.0%** ($206k on a $4.16m real net worth) |
+| 10 years | −437.9% ($73k on a near-zero base — see note below) |
+| 20 years | −45.2% |
+| 30 years | −23.3% |
+| End | **−2.5%** (−$103k on a $4.16m real net worth) |
 
-First divergence over 5%: year 1. Over 10%: year 2.
+First divergence over 5%: year 2. Over 10%: year 3.
 
-**Top drivers:** contributions stopping (−$468k), super/pension transitions
-(−$206k). Residual: **$468k** — larger than the total gap itself.
+**The 10-year figure is a percentage-of-a-small-base artefact, not a
+literal "438% wrong" claim** — with a geared property still early in its
+own equity build, net assets are genuinely small at that point ($73k
+real), so an entirely ordinary absolute gap reads as a huge percentage
+against that small base. The same caution the Retiree scenario's own
+commencement-year note raises below applies here: read the dollar gap,
+not the percentage, whenever the base itself is close to zero.
+
+**Top drivers:** contributions stopping (−$468k), super/pension
+transitions (−$206k), fixed-rate rollover (−$130k). Residual: **$908k**
+— nearly nine times the total gap.
 
 The largest driver is contributions: this household's own contribution
 pattern changes materially over the projection (children's education
@@ -88,15 +100,16 @@ from that early and by a wide margin, before narrowing again later as
 other effects offset it.
 
 **The residual here is the more important finding than the divergence
-figure.** $468k against a $206k total gap means the two isolated drivers,
-added together, would suggest a materially different answer to "how much
-of the gap does fixing these two things close" than what actually happens
-when both are true at once — the drivers interact (contributions stopping
-changes how much surplus is available in years super/pension transitions
-would otherwise capture, and vice versa) rather than adding linearly. Any
-one driver's own isolated contribution should be read as "this is what
-changes if this one thing were modelled correctly, holding everything else
-naive" — not as an independent slice of the total.
+figure.** $908k against a $103k total gap means the three isolated
+drivers, added together, would suggest a far larger correction than what
+actually happens when all three are true at once — the drivers interact
+(contributions stopping changes how much surplus is available in years
+super/pension transitions and the fixed-rate rollover would otherwise
+capture, and vice versa) rather than adding linearly, and the geared
+property's own cashflow only sharpens that interaction. Any one driver's
+own isolated contribution should be read as "this is what changes if this
+one thing were modelled correctly, holding everything else naive" — not
+as an independent slice of the total.
 
 ## Scenario 3 — High earner pre-retirement
 
@@ -176,7 +189,7 @@ overstating the client's own remaining net worth.
 |---|---|---|---|---|
 | Control | — | 0.0% | — | $0 |
 | First home buyer | 54y | +32.1% | Super/pension transitions | $159k vs $499k |
-| Family with a mortgage | 49y | +5.0% | Contributions stopping | $468k vs $206k |
+| Family with a mortgage | 49y | −2.5% | Contributions stopping | $908k vs $103k |
 | High earner pre-retirement | 34y | +7.4% | Contributions stopping | $1.80m vs $373k |
 | Retiree | 17y | +15.7% | Contributions stopping | $82k vs $71k |
 
