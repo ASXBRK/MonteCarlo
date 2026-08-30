@@ -4,7 +4,7 @@ import {
   formerHomeRentTreatment, agedCareAssessableAssets,
   oldRegimeIncomeTestedAmount, oldRegimeAssetsTestedAmount, oldRegimeMeansTestedFee,
   newRegimeIncomeTestedAmount, newRegimeAssetsTestedAmount, newRegimeContributions,
-  agedCareRegimeFor,
+  agedCareRegimeFor, noWorseOffComparison,
 } from "./agedCareMeansTest.js";
 import { agedCareRatesFor } from "./data/agedCare.js";
 
@@ -181,6 +181,31 @@ describe("agedCareMeansTest.js — means testing and former home (spec 29, BBB-s
     });
     it("flags a pre-1 July 2014 entry as its own unmodelled regime", () => {
       expect(agedCareRegimeFor("2013-01-01")).toBe("pre2014");
+    });
+  });
+
+  describe("the two regimes produce DIFFERENT fees on identical circumstances (spec 29 Commit 4)", () => {
+    it("the same income and assets give a different result under each regime", () => {
+      const identical = { assessableIncome: 90000, assessableAssets: 700000, isCouple: false, rates };
+      const oldFee = oldRegimeMeansTestedFee(identical).fee;
+      const newTotal = newRegimeContributions(identical).total;
+      expect(oldFee).not.toBeCloseTo(newTotal, 2);
+    });
+  });
+
+  describe("noWorseOffComparison — pre-1 Nov 2025 entrants may opt in, never migrated silently", () => {
+    it("reports both regimes' figures side by side, and names whichever is cheaper", () => {
+      const result = noWorseOffComparison({ assessableIncome: 90000, assessableAssets: 700000, isCouple: false, rates });
+      expect(typeof result.oldFee).toBe("number");
+      expect(typeof result.newTotal).toBe("number");
+      expect(["old", "new", "same"]).toContain(result.betterUnder);
+      expect(result.betterUnder).toBe(result.oldFee < result.newTotal ? "old" : "new");
+    });
+
+    it("respects the lifetime cap already accrued under the old regime when comparing", () => {
+      const withoutCumulative = noWorseOffComparison({ assessableIncome: 90000, assessableAssets: 700000, isCouple: false, rates });
+      const withCumulative = noWorseOffComparison({ assessableIncome: 90000, assessableAssets: 700000, isCouple: false, rates, lifetimeCumulative: rates.oldRegime.lifetimeCap - 100 });
+      expect(withCumulative.oldFee).toBeLessThanOrEqual(withoutCumulative.oldFee);
     });
   });
 });

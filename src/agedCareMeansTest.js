@@ -177,3 +177,22 @@ export function agedCareRegimeFor(entryDate, optedIn = false) {
   if (d >= new Date(NEW_REGIME_START)) return "new";
   return optedIn ? "new" : "old";
 }
+
+// noWorseOffComparison({ assessableIncome, assessableAssets, isCouple,
+// lifetimeCumulative, rates }) → { oldFee, newTotal, betterUnder } for
+// a PRE-1 NOVEMBER 2025 entrant only — the "no worse off" principle
+// (BBB §3, spec's own Commit 4) lets such a resident stay on the old
+// means-tested fee OR opt in to the new NCCC+Hotelling contributions;
+// this reports BOTH annual figures side by side so the comparison is
+// visible, never picks a winner (`betterUnder` names whichever is
+// CHEAPER for the resident — "old"|"new"|"same" — a factual label, not
+// advice). A 1 Nov 2025+ entrant has no such choice (already on the
+// new regime) and a pre-1 Jul 2014 entrant's old-regime figure isn't
+// modelled at all (agedCareRegimeFor's own "pre2014" flag) — the
+// caller should not call this for either.
+export function noWorseOffComparison({ assessableIncome, assessableAssets, isCouple, lifetimeCumulative = 0, rates }) {
+  const oldFee = oldRegimeMeansTestedFee({ assessableIncome, assessableAssets, isCouple, lifetimeCumulative, rates }).fee;
+  const newTotal = newRegimeContributions({ assessableIncome, assessableAssets, isCouple, rates }).total;
+  const betterUnder = Math.abs(oldFee - newTotal) < 1e-6 ? "same" : (oldFee < newTotal ? "old" : "new");
+  return { oldFee, newTotal, betterUnder };
+}

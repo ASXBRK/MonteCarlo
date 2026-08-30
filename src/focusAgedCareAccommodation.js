@@ -38,8 +38,8 @@
 import { projectPlan } from "./deterministic.js";
 import { firstFyStartYear } from "./schedule.js";
 import { agePensionRatesFor } from "./data/agePension.js";
-import { agedCareRatesFor, basicDailyFeeAnnual, combinationPayment, radRealValueAtYear } from "./data/agedCare.js";
-import { agedCareAssessableAssets, oldRegimeMeansTestedFee, newRegimeContributions, agedCareRegimeFor } from "./agedCareMeansTest.js";
+import { agedCareRatesFor, basicDailyFeeAnnual, combinationPayment, radRealValueAtYear, radRefundOnExit } from "./data/agedCare.js";
+import { agedCareAssessableAssets, oldRegimeMeansTestedFee, newRegimeContributions, agedCareRegimeFor, noWorseOffComparison } from "./agedCareMeansTest.js";
 
 // The three arms — RAD-only and DAP-only are just the two ends of the
 // same combinationPayment() calculation (spec's own framing).
@@ -108,7 +108,7 @@ export function buildAgedCareAccommodationFocus({
     }
     // regime === "pre2014" is flagged, not modelled — contributionAnnual stays 0, disclosed via `regime` on the result.
 
-    const ongoingAnnual = dapAnnual + basicDailyAnnual + contributionAnnual + Math.max(0, extraServiceFeesAnnual);
+    const otherAnnual = basicDailyAnnual + contributionAnnual + Math.max(0, extraServiceFeesAnnual);
 
     const clone = structuredClone(state);
     if (radPaid > 0) {
@@ -120,17 +120,33 @@ export function buildAgedCareAccommodationFocus({
         },
       ];
     }
-    if (ongoingAnnual > 0) {
-      clone.cashflows.expenses = [
-        ...clone.cashflows.expenses,
-        {
-          id: `agedcare-focus-cost-${def.id}`, label: "Aged care costs (Focus estimate)", labelIsDefault: false,
-          category: "other", amount: ongoingAnnual, frequency: "annual",
-          from: { kind: "age", age: entryAge }, to: { kind: "anchor", anchorId: "end" },
-          indexBasis: "cpi", indexExtraPct: 0,
-        },
-      ];
+    const newExpenseRows = [];
+    // DAP indexation is a named 2025-reform mechanic (BBB §4): indexed
+    // with CPI on 20 March/20 September for 1 Nov 2025+ entrants;
+    // NOT indexed at all for earlier entrants — held flat in NOMINAL
+    // dollars, so its REAL value decays (this engine's own "none"
+    // basis, per CLAUDE.md's indexation formula). Split into its own
+    // row so the two mechanics don't share one indexBasis.
+    if (dapAnnual > 0) {
+      newExpenseRows.push({
+        id: `agedcare-focus-dap-${def.id}`, label: "Aged care DAP (Focus estimate)", labelIsDefault: false,
+        category: "other", amount: dapAnnual, frequency: "annual",
+        from: { kind: "age", age: entryAge }, to: { kind: "anchor", anchorId: "end" },
+        indexBasis: regime === "new" ? "cpi" : "none", indexExtraPct: 0,
+      });
     }
+    // Basic daily fee and the means-tested contribution/NCCC+Hotelling
+    // are both genuinely CPI-linked (they derive from CPI/AWOTE-indexed
+    // rates each FY in the real system) regardless of regime.
+    if (otherAnnual > 0) {
+      newExpenseRows.push({
+        id: `agedcare-focus-cost-${def.id}`, label: "Aged care fees (Focus estimate)", labelIsDefault: false,
+        category: "other", amount: otherAnnual, frequency: "annual",
+        from: { kind: "age", age: entryAge }, to: { kind: "anchor", anchorId: "end" },
+        indexBasis: "cpi", indexExtraPct: 0,
+      });
+    }
+    if (newExpenseRows.length > 0) clone.cashflows.expenses = [...clone.cashflows.expenses, ...newExpenseRows];
     return {
       id: def.id, label: def.label, radPaid, unpaidBalance, dapAnnualCost: dapAnnual,
       basicDailyAnnual, contributionAnnual, out: projectPlan(clone),
@@ -175,17 +191,34 @@ export function buildAgedCareAccommodationFocus({
     const finalRow = arm.out.yearly[finalYear];
     // The estate position adds back the RAD refund — money the engine
     // itself has no concept of (it only sees the lump sum LEAVE the
-    // funding asset) but which returns to the estate on exit/death,
-    // fixed in nominal terms and so worth less in today's dollars the
-    // longer it was held. Retention (2025 reforms, new-regime entrants
-    // only) is not modelled in the ESTATE figure here — see
-    // data/agedCare.js's own radRefundOnExit for that calculation,
-    // available to a caller wanting to layer it in separately.
-    estate[arm.id] = finalRow.netAssets + radRealValueAtYear(arm.radPaid, cpi, yearsInCare);
+    // funding asset) but which returns to the estate on exit/death.
+    // Retention (2025 reforms: 2% pa, up to 5 years, new-regime
+    // entrants only) is applied to the NOMINAL amount refunded before
+    // converting to today's real dollars — a RAD held for years is
+    // refunded at a SMALLER nominal amount than paid (retention) which
+    // is ALSO worth less in real terms by then (inflation) — both
+    // effects stack, never offset each other.
+    const { refund } = radRefundOnExit({ radPaid: arm.radPaid, yearsInCare, enteredFrom1Nov2025: regime === "new" });
+    estate[arm.id] = finalRow.netAssets + radRealValueAtYear(refund, cpi, yearsInCare);
+  }
+
+  // "No worse off" comparison (spec 29 Commit 4) — only meaningful for
+  // a genuinely pre-1 Nov 2025 entrant who has an actual CHOICE to opt
+  // in; a 1 Nov 2025+ entrant is already on the new regime with no
+  // alternative, and a pre-2014 entrant's old-regime figure isn't
+  // modelled at all. Computed once, against the RAD-in-full arm's own
+  // assessable assets (the comparison is about the FEE REGIME, not the
+  // accommodation choice, so any arm's own assessable-assets figure
+  // would do — RAD-in-full is used for a single, consistent reference
+  // point across the whole comparison).
+  let noWorseOff = null;
+  if (regime === "old") {
+    const radArmAssets = agedCareAssessableAssets({ otherFinancialAssets: personAssessableAssets, radPaid: accommodationPrice });
+    noWorseOff = noWorseOffComparison({ assessableIncome: personAssessableIncome, assessableAssets: radArmAssets, isCouple, rates: agedCareRates });
   }
 
   return {
-    entryAge, entryYear: entryY, regime,
+    entryAge, entryYear: entryY, regime, noWorseOff,
     arms: arms.map(({ id, label, radPaid, unpaidBalance, dapAnnualCost, basicDailyAnnual, contributionAnnual }) =>
       ({ id, label, radPaid, unpaidBalance, dapAnnualCost, basicDailyAnnual, contributionAnnual })),
     byYear, estate,

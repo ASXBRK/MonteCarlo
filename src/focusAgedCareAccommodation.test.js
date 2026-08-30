@@ -90,6 +90,14 @@ describe("focusAgedCareAccommodation.js — RAD/DAP decision (spec 29 Commit 3)"
     expect(result.byYear[0].age).toBeGreaterThanOrEqual(82);
   });
 
+  it("reports a no-worse-off comparison only for a genuine pre-1 Nov 2025 entrant", () => {
+    const state = fixtureState({ currentAge: 75 }); // entry lands in 2026 -- already the new regime, no choice
+    const assetId = state.assets[0].id;
+    const result = buildAgedCareAccommodationFocus({ state, accommodationPrice: 500000, entryAge: 82, fundingAssetId: assetId });
+    expect(result.regime).toBe("new");
+    expect(result.noWorseOff).toBeNull();
+  });
+
   it("cumulative cost only ever increases (or stays flat) year over year", () => {
     const state = fixtureState();
     const assetId = state.assets[0].id;

@@ -11568,6 +11568,10 @@ function renderFocusAgedCareAccommodationView() {
     ? `<p class="helper-warning">Entry falls before 1 July 2014 — that grandfathered regime is not modelled. No fee is calculated for any arm.</p>`
     : `<p class="helper-text">Entry regime: ${escapeHTML(REGIME_LABELS[f.regime])}.</p>`;
 
+  const noWorseOffHTML = f.noWorseOff ? `
+    <p class="helper-text">"No worse off" — this entry pre-dates 1 November 2025, so the resident may stay on the old means-tested fee or opt in to the new contributions. Old regime: ${fmtMoney(f.noWorseOff.oldFee)}/yr. New regime: ${fmtMoney(f.noWorseOff.newTotal)}/yr. ${f.noWorseOff.betterUnder === "same" ? "Both regimes give the same figure here." : `The ${f.noWorseOff.betterUnder} regime is cheaper for this resident.`} Shown for information — the choice is the resident's, not a recommendation.</p>
+  ` : "";
+
   const armStatsHTML = f.arms.map((a) => `
     <div class="stat"><div class="stat-label">${escapeHTML(a.label)}</div><div class="stat-value">${fmtMoney(a.radPaid * factor(f.entryYear))} RAD</div></div>
   `).join("");
@@ -11588,6 +11592,7 @@ function renderFocusAgedCareAccommodationView() {
       ${inputsHTML}
       <div class="focus-section">
         ${regimeNote}
+        ${noWorseOffHTML}
         <div class="summary-strip">${armStatsHTML}</div>
       </div>
       <div class="focus-section">
