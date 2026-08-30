@@ -3,6 +3,29 @@ import {
   assessableIncome, deductionSums, taxSums, cashReceivedSums, expenseSums, cashflowStatement,
 } from "./cashflowStatement.js";
 import { projectPlan } from "./deterministic.js";
+import {
+  defaultState, clampAllToPlan, createDefinedBenefit, createGift, createAgedCareEntry, flatEducationBlocks,
+} from "./planState.js";
+import { PROFILES } from "./profiles.js";
+
+// Recursively sums every numeric leaf of two objects and compares
+// against the matching leaf of a third — used below to assert Client +
+// Partner = Total across the ENTIRE cashflowStatement() shape, not just
+// the four section totals a hand-picked assertion might happen to
+// cover (the discretionary-expense bug this file's per-owner suite
+// otherwise carries — see the "reconciliation bug fix" tests above —
+// was only found by checking EVERY field, not the section totals).
+function assertReconciles(client, partner, total, path = "") {
+  for (const key of Object.keys(total)) {
+    const p = path ? `${path}.${key}` : key;
+    const t = total[key], c = client[key], pt = partner[key];
+    if (typeof t === "number") {
+      expect(c + pt, `${p}: client (${c}) + partner (${pt}) should equal total (${t})`).toBeCloseTo(t, 4);
+    } else if (t && typeof t === "object") {
+      assertReconciles(c ?? {}, pt ?? {}, t, p);
+    }
+  }
+}
 
 function mkRow(over = {}) {
   return {
@@ -413,6 +436,96 @@ describe("cashflowStatement — integration against a real projectPlan run", () 
     // assessPerson output rather than a hand-built fixture).
     expect(s.tax.total).toBeCloseTo(row.taxDetail.incomeTax + row.taxDetail.div293 + row.taxDetail.div296, 4);
   });
+
+  // Queued during spec 31 Commit 3: "client + partner does not sum to
+  // the household total for a couple, despite the module's own header
+  // comment promising it does." Root cause: expenseSums' own byCat()
+  // filtered every category-based expense row by `r.owner === forOwner`
+  // — but unlike income/deduction rows, an expense row carries NO owner
+  // field at all (planState.js's clampExpenseRow never sets one), so
+  // the filter was false for BOTH named owners while the household
+  // total bypassed it entirely. Every populated expense row therefore
+  // vanished from the Client/Partner split while still counting once
+  // for Total. Fixed in expenseSums (see its own comment); this test
+  // is the reconciliation gate the header comment always claimed to
+  // have — checked over EVERY field of the real statement shape
+  // (assertReconciles walks recursively), for a genuinely populated
+  // couple scenario with income/expenses/deductions for both owners, a
+  // joint property, a joint liability, super for both, a defined
+  // benefit pension, a gift, and an aged care entry — not just the
+  // section totals a narrower assertion could pass by accident.
+  it("Client + Partner reconciles to Total on EVERY field, over a populated couple scenario, every year", () => {
+    let state = defaultState(PROFILES, new Date(2026, 7, 28));
+    state.plan.household = "couple";
+    state.plan.partner = { firstName: "", surname: "", dob: null, sex: "female", currentAge: 42, retirementAge: 65 };
+    state.plan.client.currentAge = 45;
+    state.plan.endAge = 90;
+    state.cashflows.income = [
+      { id: "i1", label: "Client salary", owner: "client", amount: 120000, frequency: "annual",
+        from: { kind: "age", age: 45 }, to: { kind: "anchor", anchorId: "retirement-client" },
+        indexBasis: "cpi", indexExtraPct: 0, category: "salary", incomeType: "employment", sgApplies: true },
+      { id: "i2", label: "Partner salary", owner: "partner", amount: 90000, frequency: "annual",
+        from: { kind: "age", age: 45 }, to: { kind: "anchor", anchorId: "retirement-partner" },
+        indexBasis: "cpi", indexExtraPct: 0, category: "salary", incomeType: "employment", sgApplies: true },
+    ];
+    state.cashflows.expenses = [
+      { id: "e1", label: "Living", category: "discretionary", amount: 3000, frequency: "monthly",
+        from: { kind: "age", age: 45 }, to: { kind: "anchor", anchorId: "end" }, indexBasis: "cpi", indexExtraPct: 0 },
+    ];
+    state.cashflows.deductions = [
+      { id: "d1", label: "Work expense", owner: "client", category: "workingExpense", amount: 2000, frequency: "annual",
+        from: { kind: "age", age: 45 }, to: { kind: "anchor", anchorId: "end" }, indexBasis: "cpi", indexExtraPct: 0 },
+    ];
+    state.properties = [{
+      id: "p1", name: "Unit", owner: "joint", state: "NSW", propertyType: "investment", status: "owned",
+      currentValue: 500000, acquisitionDate: "2020-01-01", costBase: 400000,
+      priceToday: 0, purchaseAt: { kind: "age", age: 45 }, lvrPct: 0,
+      firstHomeBuyer: false, newBuild: false, purchaseCostsPct: 2, dutyOverride: null, growthPct: 0.03,
+      rent: { amount: 20000, indexBasis: "cpi", indexExtraPct: 0 },
+      expenses: { amount: 3000, indexBasis: "cpi", indexExtraPct: 0 },
+      expensesDeductible: true, depreciation: 5000,
+    }];
+    state.liabilities = [{
+      id: "lb1", name: "Margin loan", owner: "joint", balance: 100000, interestRatePct: 6, rateType: "variable",
+      termYears: 10, repaymentType: "interestOnly", deductiblePct: 100, offsetAssetId: null, linkedPropertyId: null,
+    }];
+    state.plan.superAccounts = [
+      { id: "s1", owner: "client", name: "Client Super", balance: 300000, allocation: { mode: "profile", profile: "balanced" },
+        icrPct: 0.7, taxFreeProportion: 0, untaxedProportion: 0 },
+      { id: "s2", owner: "partner", name: "Partner Super", balance: 200000, allocation: { mode: "profile", profile: "balanced" },
+        icrPct: 0.7, taxFreeProportion: 0, untaxedProportion: 0 },
+    ];
+    state.plan.definedBenefits = [createDefinedBenefit(state.plan, [], "partner")];
+    state.plan.definedBenefits[0].annualPension = 20000;
+    state.plan.definedBenefits[0].commenceAt = { kind: "age", age: 46 };
+    state.plan.gifts = [createGift(state.plan, [])];
+    state.plan.gifts[0].amount = 15000;
+    state.plan.gifts[0].at = { kind: "age", age: 50 };
+    state.plan.agedCare = [createAgedCareEntry(state.plan, [], "client")];
+    state.plan.agedCare[0].accommodationPrice = 500000;
+    state.plan.agedCare[0].radAmount = 250000;
+    state.plan.agedCare[0].entryAt = { kind: "age", age: 80 };
+    state = clampAllToPlan(state, PROFILES);
+
+    const out = projectPlan(state);
+    const rt = out.schedule.rowTotals;
+    const ctx0 = {
+      incomeRows: state.cashflows.income, rowTotalsIncome: rt.income,
+      expenseRows: state.cashflows.expenses, rowTotalsExpenses: rt.expenses,
+      deductionRows: state.cashflows.deductions, rowTotalsDeductions: rt.deductions,
+      properties: state.properties, liabilities: state.liabilities, superAccounts: state.plan.superAccounts,
+      educationBlocks: flatEducationBlocks(state.plan), rowTotalsEducation: rt.education,
+      definedBenefits: state.plan.definedBenefits ?? [],
+    };
+    for (let y = 0; y < out.yearly.length; y++) {
+      const ctx = { ...ctx0, y };
+      const row = out.yearly[y];
+      const client = cashflowStatement(row, ctx, "client");
+      const partner = cashflowStatement(row, ctx, "partner");
+      const total = cashflowStatement(row, ctx, null);
+      assertReconciles(client, partner, total, `year ${y}`);
+    }
+  });
 });
 
 describe("cashflowStatement — the four running subtotals", () => {
@@ -511,25 +624,42 @@ describe("per-owner breakdown (Document Set Commit 7 — Snapshot view)", () => 
     expect(partner.medicareLevySurcharge).toBe(400);
   });
 
-  it("Client + Partner reconciles to Total on deductionSums and expenseSums for a joint liability", () => {
+  it("Client + Partner reconciles to Total on deductionSums for a joint liability", () => {
     const row = mkRow({ liabilities: { lb1: { interest: 4000, principal: 2000 } } });
     const liabilities = [{ id: "lb1", owner: "joint", deductible: true }];
     const deductionRows = [];
     const rowTotalsDeductions = {};
-    const expenseRows = [{ id: "e1", category: "discretionary", owner: "client" }];
-    const rowTotalsExpenses = { e1: [5000] };
     const dCtx = { deductionRows, rowTotalsDeductions, liabilities, y: 0 };
-    const eCtx = { expenseRows, rowTotalsExpenses, liabilities, y: 0 };
     const dClient = deductionSums(row, dCtx, "client");
     const dPartner = deductionSums(row, dCtx, "partner");
     const dTotal = deductionSums(row, dCtx, null);
     expect(dClient.investmentPortfolioInterest).toBeCloseTo(2000, 6); // 50% of the joint loan's interest
     expect(dClient.total + dPartner.total).toBeCloseTo(dTotal.total, 6);
+  });
+
+  // Reconciliation bug fix — an expense row carries NO owner field at
+  // all (unlike income/deduction rows, which always have a real
+  // "client"/"partner" owner — planState.js's clampIncomeRow/
+  // clampDeductionRow force one; clampExpenseRow never sets one, and
+  // the input UI never offers one). Every category-based expense row is
+  // therefore a household cost, split 50/50 for a named person exactly
+  // like education/gifts/WCA interest already are — NOT filtered by a
+  // (nonexistent) owner field, which used to silently zero it out of
+  // both the Client and Partner views while still counting it once for
+  // the household Total. Real bug, found over a populated couple
+  // scenario, not a hand-built fixture — see the reconciliation
+  // integration test further down for the full-projection version.
+  it("Client + Partner reconciles to Total on expenseSums — a category row splits 50/50, it is never dropped for having no owner", () => {
+    const row = mkRow();
+    const expenseRows = [{ id: "e1", category: "discretionary" }]; // no `owner` — a real expense row never has one
+    const rowTotalsExpenses = { e1: [5000] };
+    const eCtx = { expenseRows, rowTotalsExpenses, y: 0 };
     const eClient = expenseSums(row, eCtx, "client");
     const ePartner = expenseSums(row, eCtx, "partner");
     const eTotal = expenseSums(row, eCtx, null);
-    expect(eClient.discretionary).toBe(5000);
-    expect(ePartner.discretionary).toBe(0);
+    expect(eClient.discretionary).toBe(2500);
+    expect(ePartner.discretionary).toBe(2500);
+    expect(eTotal.discretionary).toBe(5000);
     expect(eClient.total + ePartner.total).toBeCloseTo(eTotal.total, 6);
   });
 

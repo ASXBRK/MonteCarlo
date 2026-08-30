@@ -29,9 +29,20 @@
 // | omitted/null) — Document Set Commit 7's Snapshot view needs a
 // Client/Partner/Total breakdown of the SAME row vocabulary the
 // Cashflow table already shows only as a household Total. A jointly-
-// owned property or liability splits 50/50; income/expense/deduction
-// rows are never joint (planState.js) so they match their own owner
-// exactly. Two figures have no per-person attribution anywhere in the
+// owned property or liability splits 50/50; income and deduction rows
+// are never joint (planState.js's clampIncomeRow/clampDeductionRow both
+// force a real "client"/"partner" owner) so they match their own owner
+// exactly. EXPENSE rows are the one exception — unlike income/
+// deductions, an expense row carries no owner field at all
+// (clampExpenseRow never sets one; the input UI never offers one —
+// every expense is a household cost by this schema's own design), so
+// every category-based expense row is split 50/50 for a named person,
+// in full for the household, the SAME disclosed-simplification
+// treatment as the other household-only figures below (this was
+// previously a real bug — see expenseSums' own comment — filtering an
+// ownerless row by `r.owner === forOwner` silently dropped it from
+// every per-person view while still counting it for the household).
+// Two other figures have no per-person attribution anywhere in the
 // ledger at all — Working Cash Account interest (a joint cash buffer)
 // and pooled asset cash distributions (summed across every asset
 // regardless of owner) — both also split 50/50, a disclosed
@@ -343,7 +354,22 @@ export function expenseSums(row, ctx, forOwner = null) {
     expenseRows = [], rowTotalsExpenses = {}, properties = [], liabilities = [], y = 0,
     educationBlocks = [], rowTotalsEducation = {},
   } = ctx;
-  const byCat = (cat) => sumByCategory(expenseRows, rowTotalsExpenses, cat, y, forOwner);
+  // Reconciliation bug fix: unlike income/deduction rows (planState.js's
+  // clampIncomeRow/clampDeductionRow both FORCE a real "client"/"partner"
+  // owner), an expense row carries NO owner field at all —
+  // clampExpenseRow never sets one, and the input UI never offers one
+  // (every expense is a household cost by this schema's own design, the
+  // same way gifts/education already are). Passing `forOwner` straight
+  // into `sumByCategory` therefore filtered on `r.owner === forOwner`,
+  // which is false for BOTH "client" and "partner" (undefined equals
+  // neither) while the household total (`forOwner == null`) bypasses the
+  // owner check entirely — every category-based expense row silently
+  // vanished from the per-person split while still counting in full for
+  // the household, breaking Client + Partner = Total for any populated
+  // expense row. Fixed by always summing the FULL category (owner
+  // filter off — pass null) and applying the SAME 50/50 shareOf("joint",
+  // forOwner) split gifts/education/WCA interest already use below.
+  const byCat = (cat) => sumByCategory(expenseRows, rowTotalsExpenses, cat, y, null) * shareOf("joint", forOwner);
   // Education fees are a household cost, not owned by either parent
   // individually (children aren't owned by a specific parent in this
   // model) — split 50/50 for a per-owner view, same disclosed
