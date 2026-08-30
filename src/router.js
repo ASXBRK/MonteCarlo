@@ -14,7 +14,7 @@
 
 export const INPUT_SECTIONS = [
   "setup", "tax-details", "children", "implementation", "income", "deductions", "expenses", "financial-assets", "lifestyle-assets",
-  "property", "super", "pension", "liabilities", "goals", "investment-cashflows", "settings",
+  "property", "super", "pension", "aged-care", "liabilities", "goals", "investment-cashflows", "settings",
 ];
 export const DEFAULT_INPUT_SECTION = "setup";
 

@@ -46,6 +46,7 @@ import {
   createPension, createCommutation,
   createDefinedBenefit,
   createSuperRollover,
+  createAgedCareEntry, clampAgedCareEntry, AGED_CARE_PAYMENT_METHODS, normaliseAgedCare,
   createBond, BOND_TYPES, createBondContribution,
   createGift,
   createEmployer, FBT_TYPES,
@@ -149,6 +150,7 @@ const els = {
   propertySection: $("propertySection"),
   superSection: $("superSection"),
   pensionSection: $("pensionSection"),
+  agedCareSection: $("agedCareSection"),
   addAssetBtn: $("addAssetBtn"),
   incomeSection: $("incomeSection"),
   deductionsSection: $("deductionsSection"),
@@ -487,6 +489,7 @@ const INPUT_NAV = [
   { id: "property", label: "Property" },
   { id: "super", label: "Super" },
   { id: "pension", label: "Pension" },
+  { id: "aged-care", label: "Aged care" },
   { id: "liabilities", label: "Liabilities" },
   { id: "goals", label: "Goals" },
   { id: "investment-cashflows", label: "Investment cashflows" },
@@ -501,7 +504,7 @@ const INPUT_GROUPS = [
   { id: "client", label: "Client", ids: ["setup", "tax-details", "children"] },
   { id: "money-in", label: "Money in", ids: ["income", "deductions"] },
   { id: "money-out", label: "Money out", ids: ["expenses", "goals"] },
-  { id: "assets", label: "Assets", ids: ["financial-assets", "lifestyle-assets", "property", "super", "pension"] },
+  { id: "assets", label: "Assets", ids: ["financial-assets", "lifestyle-assets", "property", "super", "pension", "aged-care"] },
   { id: "debt", label: "Debt", ids: ["liabilities"] },
   { id: "plan", label: "Plan", ids: ["implementation", "investment-cashflows", "settings"] },
 ];
@@ -7460,6 +7463,220 @@ els.pensionSection.addEventListener("click", (e) => {
   saveState();
   refreshOutputs();
   renderPensions();
+});
+
+// --- aged care section (spec 29, Commit 5) -----------------------------------
+//
+// Its own fact-find section (not folded into Pension — the spec's own
+// words treat entry as a distinct life event, not a pension type), but
+// grouped under "Assets" in the sidebar alongside Pension/Super since
+// it shares no dependency on either (mirrors definedBenefits' own
+// "no superAccounts/assets dependency" shape exactly). Same direct-
+// mutate-then-saveState() convention as every other card list in this
+// file — clampAgedCareEntry only runs inside clampPlan(), never per
+// keystroke here.
+
+function findAgedCareEntry(acid) {
+  return (state.plan.agedCare ?? []).find((a) => a.id === acid) || null;
+}
+
+function agedCareCardHTML(ac) {
+  const ownerLabel = ac.owner === "partner" ? partnerName() : clientName();
+  return `
+    <div class="pcard" data-acid="${ac.id}">
+      <div class="pcard-head">
+        <span class="pcard-name">${escapeHTML(ac.name)}</span>
+        <span class="pcard-meta">${ownerLabel}${ac.facility ? ` · ${escapeHTML(ac.facility)}` : ""}</span>
+        <button class="pcard-remove" type="button" data-aged-care-action="remove" data-acid="${ac.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Name</label>
+            <input type="text" maxlength="60" value="${escapeHTML(ac.name)}" data-acid="${ac.id}" data-acfield="name" />
+          </div>
+          ${isCouple() ? `
+            <div class="cf-cell">
+              <label>Owner</label>
+              <select data-acid="${ac.id}" data-acfield="owner">${superOwnerOptions(ac.owner)}</select>
+            </div>
+          ` : ""}
+          <div class="cf-cell">
+            <label>Entry</label>
+            ${dateRefControlHTML(ac.entryAt, "client", `data-acid="${ac.id}" data-acfield="entryAt"`, state.plan.client.currentAge, state.plan.endAge)}
+          </div>
+          <div class="cf-cell">
+            <label>Facility</label>
+            <input type="text" maxlength="200" value="${escapeHTML(ac.facility)}" data-acid="${ac.id}" data-acfield="facility" />
+          </div>
+          <div class="cf-cell">
+            <label>Accommodation price ($, today's)</label>
+            <input type="number" min="0" step="10000" value="${ac.accommodationPrice}" data-acid="${ac.id}" data-acfield="accommodationPrice" />
+          </div>
+          <div class="cf-cell">
+            <label>Payment method</label>
+            <select data-acid="${ac.id}" data-acfield="paymentMethod">
+              <option value="rad"${ac.paymentMethod === "rad" ? " selected" : ""}>RAD in full</option>
+              <option value="dap"${ac.paymentMethod === "dap" ? " selected" : ""}>DAP in full</option>
+              <option value="combination"${ac.paymentMethod === "combination" ? " selected" : ""}>Combination</option>
+            </select>
+          </div>
+          <div class="cf-cell">
+            <label>RAD amount ($)${ac.paymentMethod === "dap" ? " — n/a, paying DAP in full" : ""}</label>
+            <input type="number" min="0" max="${ac.accommodationPrice}" step="10000" value="${ac.radAmount}" data-acid="${ac.id}" data-acfield="radAmount"${ac.paymentMethod === "dap" ? " disabled" : ""} />
+          </div>
+          <div class="cf-cell">
+            <label>Extra service fees ($/yr, today's)</label>
+            <input type="number" min="0" step="500" value="${ac.extraServiceFeesAnnual}" data-acid="${ac.id}" data-acfield="extraServiceFeesAnnual" />
+          </div>
+        </div>
+        <div class="cf-section">
+          <div class="cf-section-title">Former home</div>
+          <label class="cgt-toggle">
+            <input type="checkbox" ${ac.formerHomeOccupiedByProtectedPerson ? "checked" : ""} data-acid="${ac.id}" data-acfield="formerHomeOccupiedByProtectedPerson" />
+            Occupied by a protected person (spouse, dependent child, carer, or qualifying close relative)
+          </label>
+          <p class="helper-text">Capped for the ongoing means test, and fully exempt from it while a protected person lives there — the full market value still applies to the one-off accommodation payment assessment either way.</p>
+        </div>
+        <div class="cf-section">
+          <div class="cf-section-title">Regime</div>
+          <label class="cgt-toggle">
+            <input type="checkbox" ${ac.optedIntoNewRegime ? "checked" : ""} data-acid="${ac.id}" data-acfield="optedIntoNewRegime" />
+            Opt into the post-1 November 2025 rules
+          </label>
+          <p class="helper-text">Anyone entering on or after 1 November 2025 is on the new rules automatically. A pre-1 November 2025 entrant stays on the old rules under the "no worse off" principle unless they explicitly opt in here — never inferred or silently switched.</p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderAgedCare() {
+  const entries = state.plan.agedCare ?? [];
+  const cards = entries.map(agedCareCardHTML).join("");
+  const block = cards === ""
+    ? pageEmptyHTML(
+        "Add an aged care entry — accommodation payment and ongoing fees for a residential aged care admission.",
+        `<button class="add-row-btn" type="button" data-aged-care-action="add">+ Add aged care</button>`
+      )
+    : `
+      <div id="agedCareEntries" class="portfolio-stack">${cards}</div>
+      <div class="portfolio-actions">
+        <button class="btn-text" type="button" data-aged-care-action="add">+ Add aged care</button>
+      </div>
+    `;
+  els.agedCareSection.innerHTML = `
+    <h2 class="section-heading">Aged care</h2>
+    ${block}
+  `;
+}
+
+// Applies a simple (non-structural) field edit to an aged care entry.
+// Returns true when the change needs a full card re-render — a
+// payment-method switch changes the RAD field's relevance/bound, and
+// the price bounds the RAD amount's own max.
+function applyAgedCareEdit(ac, field, el, commit) {
+  switch (field) {
+    case "name":
+      ac.name = commit ? (el.value.trim() || ac.name) : el.value;
+      if (commit) el.value = ac.name;
+      return false;
+    case "owner":
+      if (["client", "partner"].includes(el.value)) ac.owner = el.value;
+      return true;
+    case "facility":
+      ac.facility = commit ? el.value.trim().slice(0, 200) : el.value;
+      if (commit) el.value = ac.facility;
+      return false;
+    case "accommodationPrice":
+      ac.accommodationPrice = clampNumber(el.value, 0);
+      ac.radAmount = Math.min(ac.radAmount, ac.accommodationPrice);
+      if (commit) el.value = ac.accommodationPrice;
+      return true; // RAD field's own max needs to widen/narrow with it
+    case "paymentMethod":
+      if (AGED_CARE_PAYMENT_METHODS.includes(el.value)) {
+        ac.paymentMethod = el.value;
+        if (ac.paymentMethod === "dap") ac.radAmount = 0;
+      }
+      return true; // RAD field enables/disables
+    case "radAmount":
+      ac.radAmount = clampNumber(el.value, 0, ac.accommodationPrice);
+      if (commit) el.value = ac.radAmount;
+      return false;
+    case "extraServiceFeesAnnual":
+      ac.extraServiceFeesAnnual = clampNumber(el.value, 0);
+      if (commit) el.value = ac.extraServiceFeesAnnual;
+      return false;
+    case "formerHomeOccupiedByProtectedPerson":
+      ac.formerHomeOccupiedByProtectedPerson = el.checked;
+      return false;
+    case "optedIntoNewRegime":
+      ac.optedIntoNewRegime = el.checked;
+      return false;
+    default:
+      return false;
+  }
+}
+
+els.agedCareSection.addEventListener("input", (e) => {
+  const acid = e.target.dataset.acid;
+  const field = e.target.dataset.acfield;
+  if (!acid || !field || e.target.dataset.drRole) return; // DateRef control handled on "change" only
+  const ac = findAgedCareEntry(acid);
+  if (!ac) return;
+  applyAgedCareEdit(ac, field, e.target, false);
+  saveState();
+  refreshOutputs();
+});
+
+els.agedCareSection.addEventListener("change", (e) => {
+  const acid = e.target.dataset.acid;
+  const field = e.target.dataset.acfield;
+  if (!acid || !field) return;
+  const ac = findAgedCareEntry(acid);
+  if (!ac) return;
+  if (field === "entryAt" && e.target.dataset.drRole) {
+    if (e.target.dataset.drRole === "anchor") {
+      ac.entryAt = e.target.value === "__age__"
+        ? { kind: "age", age: resolveRef(ac.entryAt, state.plan, projection.schedule, "client").age }
+        : { kind: "anchor", anchorId: e.target.value };
+    } else {
+      ac.entryAt = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
+    }
+    saveState();
+    refreshOutputs();
+    renderAgedCare();
+    return;
+  }
+  if (e.target.type === "checkbox") {
+    applyAgedCareEdit(ac, field, e.target, true);
+    saveState();
+    refreshOutputs();
+    return;
+  }
+  const structural = applyAgedCareEdit(ac, field, e.target, true);
+  saveState();
+  refreshOutputs();
+  if (structural) renderAgedCare();
+});
+
+els.agedCareSection.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-aged-care-action]");
+  if (!btn) return;
+  const action = btn.dataset.agedCareAction;
+  if (action === "add") {
+    const owner = isCouple() && (state.plan.agedCare ?? []).some((a) => a.owner === "client") ? "partner" : "client";
+    state.plan.agedCare = [...(state.plan.agedCare ?? []), createAgedCareEntry(state.plan, state.plan.agedCare ?? [], owner)];
+  } else if (action === "remove") {
+    const ac = findAgedCareEntry(btn.dataset.acid);
+    if (!ac || !window.confirm(`Remove "${ac.name}"?`)) return;
+    state.plan.agedCare = state.plan.agedCare.filter((x) => x.id !== ac.id);
+  } else {
+    return;
+  }
+  saveState();
+  refreshOutputs();
+  renderAgedCare();
 });
 
 // --- liabilities section (D3) --------------------------------------------------
@@ -15722,6 +15939,7 @@ function renderAll() {
   renderProperties();
   renderSuper(); // after refreshOutputs — the cap-headroom display reads the projection
   renderPensions();
+  renderAgedCare();
   renderGoals(); // after refreshOutputs — goalStats read the projection
   renderImplementation(); // after refreshOutputs — the fee cap/shortfall display reads the projection
   // decorateTouchedFields() itself is driven by the canvas-wide
