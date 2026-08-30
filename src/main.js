@@ -86,6 +86,7 @@ import { eligibleDebtRecyclingLoans, buildDebtRecyclingFocus } from "./focusDebt
 import { eligibleEducationFundingChildren, buildEducationFundingFocus } from "./focusEducationFunding.js";
 import { buildApproachComparisonFocus } from "./focusApproachComparison.js";
 import { buildAgedCareAccommodationFocus } from "./focusAgedCareAccommodation.js";
+import { buildAgedCarePlanningFocus } from "./focusAgedCarePlanning.js";
 import {
   computeStampDutyLookup, computeLmiLookup, STATES as FOCUS_LOOKUP_STATES,
   STAMP_DUTY_META, LMI_META, FHBG_META,
@@ -191,11 +192,15 @@ const els = {
   viewFocusDeathBenefits: $("viewFocusDeathBenefits"),
   viewFocusApproachComparison: $("viewFocusApproachComparison"),
   viewFocusAgedCareAccommodation: $("viewFocusAgedCareAccommodation"),
+  viewFocusAgedCarePlanning: $("viewFocusAgedCarePlanning"),
   liabilitiesEntity: $("liabilitiesEntity"),
   liabilitiesTable: $("liabilitiesTable"),
   viewBonds: $("viewBonds"),
   bondsEntity: $("bondsEntity"),
   bondsTable: $("bondsTable"),
+  viewAgedCare: $("viewAgedCare"),
+  agedCareEntity: $("agedCareEntity"),
+  agedCareTable: $("agedCareTable"),
   viewSnapshot: $("viewSnapshot"),
   snapshotYearPicker: $("snapshotYearPicker"),
   snapshotPersonSelector: $("snapshotPersonSelector"),
@@ -524,6 +529,7 @@ const OUTPUT_NAV = {
     { id: "bonds", label: "Bonds" },
     { id: "super", label: "Super" },
     { id: "pension", label: "Pension" },
+    { id: "aged-care", label: "Aged care" },
     { id: "age-pension", label: "Age pension" },
     { id: "death-benefits", label: "Death benefits" },
     { id: "tax", label: "Tax" },
@@ -549,6 +555,7 @@ const OUTPUT_NAV = {
     { id: "focus-death-benefits", label: "Death benefits" },
     { id: "focus-approach-comparison", label: "Approach comparison" },
     { id: "focus-aged-care-accommodation", label: "Aged care accommodation" },
+    { id: "focus-aged-care-planning", label: "Aged care planning" },
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
@@ -8295,6 +8302,7 @@ let superEntity = "all"; // Super view entity selector: "all" | "client" | "part
 let pensionEntity = "all"; // Pension view entity selector: "all" | pension id
 let liabilitiesEntity = "all"; // Liabilities view entity selector: "all" | liability id
 let bondsEntity = "all"; // Bonds view entity selector (spec 25, Commit 2): "all" | bond id
+let agedCareEntity = "all"; // Aged care Tables view entity selector (spec 29, Commit 5): "all" | aged care entry id
 
 // Navigation, View Consolidation, and Simple Charts (spec 17), Commit 3
 // — Client/Partner/Consolidated selectors, one module-level var per
@@ -8412,6 +8420,7 @@ const VIEW_MOUNTS = {
   "death-benefits": () => els.viewDeathBenefits,
   liabilities: () => els.viewLiabilities,
   bonds: () => els.viewBonds,
+  "aged-care": () => els.viewAgedCare,
   snapshot: () => els.viewSnapshot,
   "monte-carlo-table": () => els.viewMonteCarloTable,
   assumptions: () => els.viewAssumptions,
@@ -8427,6 +8436,7 @@ const VIEW_MOUNTS = {
   "focus-death-benefits": () => els.viewFocusDeathBenefits,
   "focus-approach-comparison": () => els.viewFocusApproachComparison,
   "focus-aged-care-accommodation": () => els.viewFocusAgedCareAccommodation,
+  "focus-aged-care-planning": () => els.viewFocusAgedCarePlanning,
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
@@ -8489,6 +8499,7 @@ function renderActiveView() {
   else if (activeView === "age-pension-table") renderAgePensionTableView();
   else if (activeView === "liabilities") renderLiabilitiesView();
   else if (activeView === "bonds") renderBondsView();
+  else if (activeView === "aged-care") renderAgedCareOutputView();
   else if (activeView === "snapshot") renderSnapshotView();
   else if (activeView === "monte-carlo-table") renderMonteCarloTableView();
   else if (activeView === "assumptions") renderAssumptionsView();
@@ -8504,6 +8515,7 @@ function renderActiveView() {
   else if (activeView === "focus-death-benefits") renderFocusDeathBenefitsView();
   else if (activeView === "focus-approach-comparison") renderFocusApproachComparisonView();
   else if (activeView === "focus-aged-care-accommodation") renderFocusAgedCareAccommodationView();
+  else if (activeView === "focus-aged-care-planning") renderFocusAgedCarePlanningView();
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
@@ -10587,6 +10599,20 @@ function buildKeyFiguresGroups(ctx = { state, projection }, entity = "all") {
     // never enabled/drawn (all-zero rows convention — no `always`).
     { label: "HEAS loan balance", cell: (y) => -(yl[y].heasDetail?.closing ?? 0) },
   ];
+  // Aged care (spec 29, Commit 5) — "total cost of care" as its own
+  // cumulative row (RAD lump sum(s) plus every year's ongoing cost,
+  // running from the start of the projection); no separate "estate
+  // position" row is added since that's exactly what NET ASSETS above
+  // already tracks year by year, aged care flows included — a second
+  // row would just repeat it under a different name. Hidden when zero
+  // (no `always`), same as HEAS loan balance just above.
+  let agedCareCostCumulative = 0;
+  const agedCareCostCumulativeByYear = yl.map((row) => {
+    const ongoing = Object.values(row.agedCareDetail ?? {}).reduce((sum, d) => sum + (d.total ?? 0), 0);
+    agedCareCostCumulative += ongoing + (row.agedCareRadPaid ?? 0);
+    return agedCareCostCumulative;
+  });
+  rows.push({ label: "Total cost of aged care (cumulative)", cell: (y) => -agedCareCostCumulativeByYear[y] });
   return [{ title: null, rows }];
 }
 
@@ -11877,6 +11903,105 @@ function wireAgedCareAccommodationInputs() {
   });
 }
 
+// Focus: Aged care planning (spec 29, Commit 5) — "falls out of what
+// already exists" (spec's own words): both arms are the plan's own
+// REAL `plan.agedCare[]` entry and a genuine `plan.gifts[]` entry run
+// through the SAME projectPlan() every other view reads, never a
+// second calculation. Headline figures are lifetime totals summed
+// across many years, so — unlike the accommodation view's own per-year
+// figures — there's no single year's dollars to convert a nominal
+// display into; shown in today's real dollars only (disclosed below
+// the table) rather than pick an arbitrary conversion year.
+let focusAgedCarePlanningInputs = { agedCareEntryId: null, giftAmount: 0, giftYearsBeforeEntry: 6 };
+
+function renderFocusAgedCarePlanningView() {
+  const entries = state.plan.agedCare ?? [];
+  if (entries.length === 0) {
+    els.viewFocusAgedCarePlanning.innerHTML = focusEmptyStateHTML(
+      "Compare the plan as entered against a pre-entry gift — add an aged care entry to see it.",
+      "aged-care"
+    );
+    return;
+  }
+  if (!focusAgedCarePlanningInputs.agedCareEntryId || !entries.some((a) => a.id === focusAgedCarePlanningInputs.agedCareEntryId)) {
+    focusAgedCarePlanningInputs.agedCareEntryId = entries[0].id;
+  }
+  const f = buildAgedCarePlanningFocus({ state, ...focusAgedCarePlanningInputs });
+
+  const entrySelectHTML = entries.length > 1 ? `
+    <div class="cf-cell"><label>Aged care entry
+      <select id="agedCarePlanningEntry">${entries.map((a) => `<option value="${a.id}"${a.id === focusAgedCarePlanningInputs.agedCareEntryId ? " selected" : ""}>${escapeHTML(a.name)}</option>`).join("")}</select>
+    </label></div>
+  ` : "";
+  const inputsHTML = `
+    <div class="focus-section">
+      <p class="helper-text">The plan as entered against a single pre-entry gift, both run through the real projection — gifting (spec 21b), the honest caveat being that a gift caught within the five-year deprivation lookback still counts toward the means test at entry, exactly as the engine already models it.</p>
+      <div class="person-grid">
+        ${entrySelectHTML}
+        <div class="cf-cell"><label>Pre-entry gift amount ($)
+          <input type="number" id="agedCarePlanningGiftAmount" value="${focusAgedCarePlanningInputs.giftAmount}" min="0" step="1000" />
+        </label></div>
+        <div class="cf-cell"><label>Years before entry
+          <input type="number" id="agedCarePlanningGiftYears" value="${focusAgedCarePlanningInputs.giftYearsBeforeEntry}" min="0" max="20" />
+        </label></div>
+      </div>
+    </div>
+  `;
+
+  if (!f) {
+    els.viewFocusAgedCarePlanning.innerHTML = `
+      <h2 class="section-heading">Aged care planning</h2>
+      <div class="focus-panel">
+        ${inputsHTML}
+        <div class="focus-section">${focusEmptyStateHTML("This entry isn't reached within the projection — check its entry date or extend the plan's own end age.", null)}</div>
+      </div>
+    `;
+    wireFocusAgedCarePlanningInputs();
+    return;
+  }
+
+  const giftArm = f.arms.find((a) => a.id === "gift");
+  const deprivationNote = giftArm?.deprivationCaught
+    ? `<p class="helper-warning">This gift is given less than five years before entry — the engine's own deprivation rules (spec 21b) still count it as an assessable asset at entry, so it may not lower the means-tested fee/contribution as much as expected.</p>`
+    : "";
+
+  const tableRows = [
+    { label: "Total cost of aged care", cell: (a) => a.totalCostOfCare, total: true },
+    { label: "Estate position at end of projection", cell: (a) => a.estatePosition, total: true },
+  ];
+
+  els.viewFocusAgedCarePlanning.innerHTML = `
+    <h2 class="section-heading">Aged care planning</h2>
+    <div class="focus-panel">
+      ${inputsHTML}
+      <div class="focus-section">
+        ${deprivationNote}
+        <table class="tl"><thead><tr><th class="tl-label">Figure</th>${f.arms.map((a) => `<th>${escapeHTML(a.label)}</th>`).join("")}</tr></thead><tbody>
+          ${tableRows.map((r) => `<tr${r.total ? ' class="tl-total"' : ""}><td>${escapeHTML(r.label)}</td>${f.arms.map((a) => `<td class="tl-num">${fmtLedgerCell(r.cell(a))}</td>`).join("")}</tr>`).join("")}
+        </tbody></table>
+        <p class="helper-text">Figures are lifetime totals in today's (real) dollars — non-prescriptive: this shows the outcome of each strategy, not which to choose.</p>
+      </div>
+    </div>
+  `;
+  wireFocusAgedCarePlanningInputs();
+}
+
+function wireFocusAgedCarePlanningInputs() {
+  const entryEl = $("agedCarePlanningEntry"), amountEl = $("agedCarePlanningGiftAmount"), yearsEl = $("agedCarePlanningGiftYears");
+  if (entryEl) entryEl.addEventListener("change", (e) => {
+    focusAgedCarePlanningInputs.agedCareEntryId = e.target.value;
+    renderFocusAgedCarePlanningView();
+  });
+  if (amountEl) amountEl.addEventListener("change", (e) => {
+    focusAgedCarePlanningInputs.giftAmount = clampNumber(e.target.value, 0);
+    renderFocusAgedCarePlanningView();
+  });
+  if (yearsEl) yearsEl.addEventListener("change", (e) => {
+    focusAgedCarePlanningInputs.giftYearsBeforeEntry = clampInt(e.target.value, 0, 20);
+    renderFocusAgedCarePlanningView();
+  });
+}
+
 // --- View: Liabilities (fix batch, item 5) ----------------------------------
 
 function liabilityDetailRows(get, opts = {}) {
@@ -12075,6 +12200,98 @@ function renderBondsView() {
     (id) => { bondsEntity = id; renderBondsView(); }
   );
   renderTransposed(els.bondsTable, buildBondsGroups(bondsEntity));
+}
+
+// --- View: Aged care (spec 29, Commit 5) ------------------------------------
+//
+// Per entry per year, straight off row.agedCareDetail — nothing
+// re-derived here (same discipline as Bonds' own table). Basic daily
+// fee/DAP/contribution/extra services/total are per-entry; the
+// cumulative-against-cap figure is the SAME running total the engine
+// itself tracks for whichever regime applies (old regime's lifetime
+// cap, or the new regime's NCCC cap) — suppressed in the combined view
+// since summing two different caps' running totals is meaningless
+// (mirrors Bonds' own "years to maturity" suppression in "all"). The
+// household's one-off RAD payment(s) this FY (row.agedCareRadPaid) has
+// no per-entry breakdown in the engine, so it only appears combined.
+
+function agedCareDetailRows(get, opts = {}) {
+  return [
+    { label: "Basic daily fee", cell: (y) => get(y).basicDailyFee, always: true },
+    { label: "Accommodation payment (DAP)", cell: (y) => get(y).dap },
+    { label: "Means-tested fee / contribution", cell: (y) => get(y).contribution },
+    { label: "Extra service fees", cell: (y) => get(y).extraServices },
+    { label: "Total ongoing cost", cell: (y) => get(y).total, always: true, cls: "tl-total" },
+    ...(opts.combined ? [] : [
+      { label: "Cumulative against the applicable lifetime cap", cell: (y) => get(y).lifetimeCumulative ?? 0 },
+    ]),
+  ];
+}
+
+function agedCareEntryName(id) {
+  return (state.plan.agedCare ?? []).find((a) => a.id === id)?.name ?? "Aged care";
+}
+
+// Unlike Bonds (whose contributions typically start in year 0), an
+// aged care entry's own row.agedCareDetail stays {} in every year
+// BEFORE its resolved entry age — so the ids actually seen must be the
+// UNION across every year, not just year 0 (a real bug this view had
+// until browser verification caught it: an entry firing anywhere but
+// year 0 rendered the empty state, entry and all).
+function agedCareEntryIds() {
+  const ids = new Set();
+  for (const row of projection.yearly) {
+    for (const id of Object.keys(row.agedCareDetail ?? {})) ids.add(id);
+  }
+  return [...ids];
+}
+
+function buildAgedCareOutputGroups(entity) {
+  const yl = projection.yearly;
+  const acIds = agedCareEntryIds();
+  const zero = { basicDailyFee: 0, dap: 0, contribution: 0, extraServices: 0, total: 0, lifetimeCumulative: 0 };
+
+  if (entity === "all") {
+    const combined = agedCareDetailRows((y) => acIds.reduce((s, aid) => {
+      const d = yl[y].agedCareDetail[aid] ?? zero;
+      for (const k in s) s[k] += d[k] ?? 0;
+      return s;
+    }, { ...zero }), { combined: true });
+    combined.push({ label: "RAD paid this FY", cell: (y) => yl[y].agedCareRadPaid ?? 0 });
+    const totalRow = (aid) => ({ label: agedCareEntryName(aid), cell: (y) => yl[y].agedCareDetail[aid]?.total ?? 0 });
+    const byEntry = acIds.map(totalRow);
+    byEntry.push({ label: "Total", cell: (y) => acIds.reduce((s, aid) => s + (yl[y].agedCareDetail[aid]?.total ?? 0), 0), always: true, cls: "tl-total" });
+    return [
+      { title: "Combined", rows: combined },
+      { title: "Total cost by entry", rows: byEntry },
+    ];
+  }
+
+  const name = agedCareEntryName(entity);
+  const rows = agedCareDetailRows((y) => yl[y].agedCareDetail[entity] ?? zero);
+  return [{ title: name, rows }];
+}
+
+function renderAgedCareOutputView() {
+  const acIds = agedCareEntryIds();
+  if (acIds.length === 0) {
+    els.agedCareEntity.innerHTML = "";
+    els.agedCareTable.innerHTML = focusEmptyStateHTML(
+      "Per-entry basic daily fee, accommodation payment, means-tested fee/contribution, extra services and the running total against the applicable lifetime cap — add an aged care entry to see it.",
+      "aged-care"
+    );
+    return;
+  }
+  if (agedCareEntity !== "all" && !acIds.includes(agedCareEntity)) {
+    agedCareEntity = "all"; // entity was removed/excluded
+  }
+  renderEntitySelector(
+    els.agedCareEntity,
+    [{ id: "all", label: "Consolidated" }, ...acIds.map((aid) => ({ id: aid, label: agedCareEntryName(aid) }))],
+    agedCareEntity,
+    (id) => { agedCareEntity = id; renderAgedCareOutputView(); }
+  );
+  renderTransposed(els.agedCareTable, buildAgedCareOutputGroups(agedCareEntity));
 }
 
 // --- View: Snapshot (Document Set Commit 7) -------------------------------
@@ -15420,6 +15637,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "death-benefits") exportDeathBenefitsCSV();
   else if (activeView === "liabilities") exportTransposedCSV("liabilities", buildLiabilitiesGroups(liabilitiesEntity));
   else if (activeView === "bonds") exportTransposedCSV("bonds", buildBondsGroups(bondsEntity));
+  else if (activeView === "aged-care") exportTransposedCSV("aged-care", buildAgedCareOutputGroups(agedCareEntity));
   else if (activeView === "snapshot") exportSnapshotCSV();
   else if (activeView === "monte-carlo-table") exportMonteCarloCSV();
   else if (activeView === "assumptions") exportTransposedCSV("assumptions", buildAssumptionsGroups());

@@ -28,7 +28,7 @@ export const DEFAULT_INPUT_SECTION = "setup";
 // "money-decomposition" fold into Projection's and Net worth's own
 // chart selector (Commit 4) rather than staying separate subjects.
 export const OUTPUT_VIEWS = [
-  "projection", "cashflow", "assets", "liabilities", "bonds", "super", "pension", "age-pension", "death-benefits", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
+  "projection", "cashflow", "assets", "liabilities", "bonds", "super", "pension", "aged-care", "age-pension", "death-benefits", "tax", "net-worth", "allocation", "snapshot", "assumptions", // Output
   "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",                                                            // Focus (docs/specs/12-focus-views.md)
   "focus-equity", "focus-transfer-schedule",                                                                                                                  // Focus (docs/specs/13-implementation-rates-equity-comparison.md)
   "focus-surplus-allocation",                                                                                                                                 // Focus (docs/specs/16-surplus-allocation.md, Commit 3)
@@ -37,6 +37,7 @@ export const OUTPUT_VIEWS = [
   "focus-death-benefits",                                                                                                                                     // Focus (docs/specs/22-death-benefits.md, Commit 3)
   "focus-approach-comparison",                                                                                                                                 // Focus (docs/specs/30-divergence-analysis.md, Commit 3)
   "focus-aged-care-accommodation",                                                                                                                             // Focus (docs/specs/29-aged-care.md, Commit 3)
+  "focus-aged-care-planning",                                                                                                                                  // Focus (docs/specs/29-aged-care.md, Commit 5)
   // Reachability bug found by spec 27's own pre-Commit-1 audit: bonds
   // (spec 25) and both these Focus views (specs 24/25) were already
   // fully BUILT (a complete Bonds table; complete Focus views) but
@@ -72,6 +73,7 @@ export const OUTPUT_SUBJECT_FORMS = {
   bonds: ["table"],
   super: ["chart", "table"],
   pension: ["table"],
+  "aged-care": ["table"],
   "age-pension": ["chart", "table"],
   "death-benefits": ["table"],
   tax: ["table"],

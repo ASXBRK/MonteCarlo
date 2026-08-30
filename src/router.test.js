@@ -169,7 +169,7 @@ describe("known section/view ids", () => {
 
   it("exposes the output view list", () => {
     expect(OUTPUT_VIEWS).toEqual([
-      "projection", "cashflow", "assets", "liabilities", "bonds", "super", "pension", "age-pension", "death-benefits", "tax", "net-worth", "allocation", "snapshot", "assumptions",
+      "projection", "cashflow", "assets", "liabilities", "bonds", "super", "pension", "aged-care", "age-pension", "death-benefits", "tax", "net-worth", "allocation", "snapshot", "assumptions",
       "focus-deposit", "focus-fhsss", "focus-salary-sacrifice", "focus-debt-payoff", "focus-lookups",
       "focus-equity", "focus-transfer-schedule",
       "focus-surplus-allocation",
@@ -178,6 +178,7 @@ describe("known section/view ids", () => {
       "focus-death-benefits",
       "focus-approach-comparison",
       "focus-aged-care-accommodation",
+      "focus-aged-care-planning",
       "focus-debt-recycling",
       "focus-education-funding",
       "monte-carlo", "monte-carlo-table",
@@ -195,6 +196,7 @@ describe("known section/view ids", () => {
       bonds: ["table"],
       super: ["chart", "table"],
       pension: ["table"],
+      "aged-care": ["table"],
       "age-pension": ["chart", "table"],
       "death-benefits": ["table"],
       tax: ["table"],

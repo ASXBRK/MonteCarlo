@@ -1906,6 +1906,113 @@ output/view is untouched).
 
 ---
 
+### Aged care (spec 29, 5 commits)
+The last large domain gap — residential aged care fees, the RAD/DAP
+accommodation decision, the former home's dual treatment, and the 2025
+reforms' permanent dual fee regime. Every dollar figure is user/BBB-
+supplied (Macquarie Big Black Book, a primary source superseding an
+earlier secondary-sourced seed — `23d51de` then `d2f20e9`), stamped with
+its covering period and source, never web-searched, with a staleness
+warning once a projection runs past that period's end.
+
+**Commit 1 — rates module and fee structure** (`23d51de`, superseded
+`d2f20e9`). `src/data/agedCare.js`: `AGED_CARE_RATES_BASE` (old-regime
+means-tested-fee brackets/caps; new-regime NCCC+Hotelling brackets/caps;
+MPIR; accommodation caps), `basicDailyFeeAnnual` DERIVED from the age
+pension's own base rate (85% of the BASIC rate excluding supplements
+÷14 days/fortnight — reproduces BBB's $66.80 to the cent; naively using
+the all-inclusive rate ÷365 gives a materially wrong $72.71),
+`agedCareRatesFor(fyStartYear, ...)` (per-FY bracket/MPIR resolution
+with per-figure overrides), `evaluateTieredAmount` (shared nil/taper/
+flat bracket-walk for both regimes), `agedCareStalenessWarning`.
+
+**Commit 2 — means testing and the former home** (`e4940ea`, folded
+into `d2f20e9`). `src/agedCareMeansTest.js`: two former-home functions
+never conflated — `formerHomeAssessedValueForMeansTest` (capped per
+person, exempt with a protected person in residence) vs.
+`formerHomeValueForAccommodationAssessment` (full market value, same
+asset, different purpose). `agedCareAssessableAssets` adds a RAD back in
+as assessable — the central, easy-to-invert trade-off the spec names
+explicitly (a RAD is Centrelink-exempt but assessable here; a bigger RAD
+INCREASES the ongoing fee).
+
+**Commit 3 — accommodation payments and the RAD/DAP decision**
+(`c0ef334`). `combinationPayment`/`radRefundOnExit`/`radRealValueAtYear`
+(RAD retention, 2025 reforms; nominal refund value decays in real terms
+the longer it's held). `src/focusAgedCareAccommodation.js` — RAD-in-
+full/DAP-in-full/combination side by side, every arm a real
+`projectPlan()` run on a mutated clone (the Focus governing principle),
+non-prescriptive.
+
+**Commit 4 — 2025 reforms and the no-worse-off principle** (`c824a42`).
+`agedCareRegimeFor(entryDate, optedIn)` → `"old" | "new" | "pre2014" |
+null` — a genuine dual fork by entry date, never a migration; a pre-1
+Nov 2025 entrant may explicitly opt in but is never silently switched.
+`newRegimeContributions` (NCCC+Hotelling, NCCC only after Hotelling
+saturates its own max, lifetime cap shared with Support at Home — a
+disclosed narrowing since this engine only tracks aged care on it).
+`noWorseOffComparison`. The old-regime/pre-2014 paths are structurally
+unreachable from any live forward-looking projection (today already
+postdates 1 Nov 2025) — disclosed in comments, covered instead by direct
+unit tests using historical entry dates.
+
+**Commit 5 — first-class engine integration, input, outputs, and
+pre-entry planning** (`279f986`, `2e14150`, this commit). `plan.agedCare[]`
+(`createAgedCareEntry`/`clampAgedCareEntry`/`normaliseAgedCare`, no
+`superAccounts`/`assets` dependency, single-pass — mirrors
+`definedBenefits`' own shape) is now a genuine engine money flow:
+`deterministic.js` resolves each entry's `entryAt` exactly like a
+defined benefit's `commenceAt`, draws the RAD as a one-off through the
+ordinary deficit-funding path, and recomputes the ongoing cost (basic
+daily fee, DAP at the entry-fixed MPIR, the means-tested fee/NCCC
+contribution) EACH YEAR from that year's real per-person assessable
+income/assets — reusing the same figures the Age Pension already
+computed, never a second calculation. `ENGINE_VERSION` bumped to
+`1.1.0` (additive: `agedCareWarnings`, `row.agedCareDetail`,
+`row.agedCareRadPaid`) per spec 31's own contract-versioning rule, with
+`engineContractShape.js`/`engine-api.md` updated in the same commit.
+`conservationCheck.js` gained `agedCareRadPaid`/`agedCareOngoingCost` as
+named leaks, and `randomScenario()`/`THRESHOLD_REGISTRY` gained an
+`agedCare` generator stratified around the three governing thresholds —
+per CLAUDE.md's own mandatory extension rule, and it earned its keep
+immediately: a sign error in `decomposeNetWorthChange()`'s `expenses`
+bucket (mirrored from `oneOffs`' own convention instead of accounting
+for `expenses` being subtracted, not added, by its caller) was caught on
+the very first scenario generated with an active entry — it was silently
+creating money equal to 2× the ongoing cost every active year, fixed and
+re-verified across four full conservation runs.
+
+Input: an "Aged care" fact-find section (name/owner/entry date/facility/
+accommodation price/payment method/RAD amount/extra service fees/
+former-home-protected-person/opt-into-new-regime), grouped under Assets
+alongside Pension — its own life event, not a pension type. Outputs:
+Tables → Aged care (per entry, per year: basic daily fee/DAP/contribution/
+extra services/total/cumulative against the applicable lifetime cap —
+ids read as the UNION across every year, since an entry's own detail
+stays empty before it fires, unlike Bonds' year-0 assumption — a real
+bug this view had until browser verification caught it); Key figures
+gained "Total cost of aged care (cumulative)" (no separate "estate
+position" row — that's exactly what the existing NET ASSETS row already
+tracks). Focus → Aged care planning (`src/focusAgedCarePlanning.js`) —
+unlike Commit 3's ad hoc estimate, both arms are genuine `plan.agedCare[]`
+and `plan.gifts[]` entries run through the real `projectPlan()`: the
+current plan against one pre-entry gift, with the gift's timing relative
+to the entry demonstrating the deprivation caveat directly (move it
+inside five years and the engine's own `gifting.js` deprivation modelling
+— not a hand-rolled re-derivation — still counts it at entry).
+
+Gates: full suite 1784/1784, build green. Browser-verified end to end:
+add an aged care entry, edit every field, payment-method switch (RAD
+disables/zeroes), Tables view populating from the entry's own firing
+year onward, Key figures reconciling exactly to the Focus view's own
+lifetime total, and the Focus planning view's deprivation caveat firing
+correctly for a within-five-years gift and not for a 5+-year one.
+Outstanding, tracked separately per the user's own instruction: the
+`cashflowStatement.js` household-total reconciliation bug flagged during
+spec 31 Commit 3.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
