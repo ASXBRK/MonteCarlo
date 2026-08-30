@@ -2740,6 +2740,18 @@ tr[data-adj-marker] { cursor: pointer; }
 #chart  { width: 100%; height: 520px; }
 #probChart { width: 100%; height: 200px; }
 
+/* Shared height treatment for every Plotly mount that isn't #chart
+   itself — Compare and every Focus/What-if chart are built by
+   assigning innerHTML on a template string (never present in
+   index.html at parse time), so they need the SAME explicit height
+   #chart already gets rather than relying on their .focus-section/
+   .chart-wrap ancestor to establish one — it doesn't, and a Plotly
+   container with no real height at draw time renders present but
+   invisible (content drawn, zero vertical extent). Same responsive
+   breakpoints as #chart below, so every chart in the app resizes the
+   same way. */
+.chart-mount { width: 100%; height: 520px; }
+
 /* --- compare extras (only present in DOM when compare mode is on) --- */
 
 .callout {
@@ -3003,13 +3015,13 @@ dialog.modal::backdrop {
   .scenario-columns { grid-template-columns: 1fr; }
   .scenario-shared { grid-template-columns: 1fr; }
   .summary.single  { grid-template-columns: repeat(2, 1fr); }
-  #chart    { height: 420px; }
+  #chart, .chart-mount { height: 420px; }
 }
 
 @media (max-width: 520px) {
   .scenario-grid { grid-template-columns: 1fr; }
   .summary.single  { grid-template-columns: 1fr; }
-  #chart    { height: 360px; }
+  #chart, .chart-mount { height: 360px; }
   .app      { padding: 16px 14px 32px; }
   .app-header {
     flex-direction: column;

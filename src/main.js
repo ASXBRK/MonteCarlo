@@ -9988,11 +9988,11 @@ function renderFocusAgePensionView() {
     <div class="focus-panel">
       <div class="focus-section">
         <h3>Assessable assets vs thresholds</h3>
-        <div id="focusAgePensionAssetsChart"></div>
+        <div id="focusAgePensionAssetsChart" class="chart-mount"></div>
       </div>
       <div class="focus-section">
         <h3>Assessable income vs thresholds</h3>
-        <div id="focusAgePensionIncomeChart"></div>
+        <div id="focusAgePensionIncomeChart" class="chart-mount"></div>
       </div>
     </div>
     <div class="focus-section">
@@ -10184,7 +10184,7 @@ function renderMoneyDecompositionView() {
       <label>Through
         <select id="moneyDecompositionYearSelect">${yearOptions}</select>
       </label>
-      <div id="moneyDecompositionChart"></div>
+      <div id="moneyDecompositionChart" class="chart-mount"></div>
     </div>
     <div id="moneyDecompositionTable"></div>
   `;
@@ -11683,7 +11683,7 @@ function renderFocusApproachComparisonView() {
       </div>
       <div class="focus-section">
         <h3>Net assets over time</h3>
-        <div id="focusApproachChart"></div>
+        <div id="focusApproachChart" class="chart-mount"></div>
       </div>
       <div class="focus-section">
         <h3>Where the gap comes from</h3>
@@ -11846,7 +11846,7 @@ function renderFocusAgedCareAccommodationView() {
       </div>
       <div class="focus-section">
         <h3>Remaining assets over time</h3>
-        <div id="agedCareChart"></div>
+        <div id="agedCareChart" class="chart-mount"></div>
       </div>
     </div>
   `;
@@ -12906,7 +12906,7 @@ function renderFocusDepositView() {
       </div>
       <div class="focus-section">
         <h3>Accumulating</h3>
-        <div id="focusDepositChart"></div>
+        <div id="focusDepositChart" class="chart-mount"></div>
         ${f.fhsssReleaseAtPurchase > 0 ? `<p class="helper-text">Includes a ${fmtMoney(f.fhsssReleaseAtPurchase * factor(f.target.purchaseYear))} FHSSS release at the purchase date.</p>` : ""}
       </div>
       <div class="focus-section focus-answer">
@@ -13123,7 +13123,7 @@ function renderFocusFhsssView() {
       </div>
       <div class="focus-section">
         <h3>Contributions and associated earnings by year</h3>
-        <div id="focusFhsssChart"></div>
+        <div id="focusFhsssChart" class="chart-mount"></div>
       </div>
       <div class="focus-section">
         <h3>Release</h3>
@@ -13272,7 +13272,7 @@ function renderFocusSalarySacrificeView() {
       </div>
       <div class="focus-section">
         <h3>Net position over time</h3>
-        <div id="focusSacrificeChart"></div>
+        <div id="focusSacrificeChart" class="chart-mount"></div>
       </div>
     </div>
   `;
@@ -13463,7 +13463,7 @@ function renderFocusDebtPayoffView() {
       ${focusDebtPayoffRolloverHTML(f, factor)}
       <div class="focus-section">
         <h3>Balance over time</h3>
-        <div id="focusDebtChart"></div>
+        <div id="focusDebtChart" class="chart-mount"></div>
       </div>
       <div class="focus-section focus-solvers">
         <h3>What if?</h3>
@@ -13621,11 +13621,11 @@ function renderFocusDebtRecyclingView() {
       </div>
       <div class="focus-section">
         <h3>Total loan balance: recycling vs not</h3>
-        <div id="focusDebtRecyclingDebtChart"></div>
+        <div id="focusDebtRecyclingDebtChart" class="chart-mount"></div>
       </div>
       <div class="focus-section">
         <h3>Destination investment: recycling vs not</h3>
-        <div id="focusDebtRecyclingInvestChart"></div>
+        <div id="focusDebtRecyclingInvestChart" class="chart-mount"></div>
       </div>
     </div>
   `;
@@ -13783,11 +13783,11 @@ function renderFocusEducationFundingView() {
       </div>
       <div class="focus-section">
         <h3>Net worth over time, by vehicle</h3>
-        <div id="focusEducationFundingChart"></div>
+        <div id="focusEducationFundingChart" class="chart-mount"></div>
       </div>
       <div class="focus-section">
         <h3>Tax paid along the way (cumulative)</h3>
-        <div id="focusEducationFundingTaxChart"></div>
+        <div id="focusEducationFundingTaxChart" class="chart-mount"></div>
       </div>
     </div>
   `;
@@ -14258,7 +14258,7 @@ function renderFocusEquityView() {
       </div>
       <div class="focus-section">
         <h3>Usable equity over time</h3>
-        <div id="focusEquityChart"></div>
+        <div id="focusEquityChart" class="chart-mount"></div>
       </div>
     </div>
   `;
@@ -14638,7 +14638,7 @@ function renderCompareBody(loaded, scenarios, base) {
     viewHTML = `
       <div class="focus-section">
         <h3>${escapeHTML(COMPARE_SERIES[compareSeries].label)} over time</h3>
-        <div id="compareChart"></div>
+        <div id="compareChart" class="chart-mount"></div>
       </div>
       <div class="focus-section">
         <div class="output-actions">
@@ -14933,7 +14933,7 @@ function renderWhatIfRateShockView() {
       ${whatIfRateShockLens === "cashflow" ? cashflowLensSectionHTML("whatIfRateShock") : `
         <div class="focus-section">
           <h3>Loan balances, base vs shocked</h3>
-          <div id="whatIfRateShockChart"></div>
+          <div id="whatIfRateShockChart" class="chart-mount"></div>
         </div>
       `}
       <div class="focus-section">
@@ -15094,7 +15094,7 @@ function renderWhatIfCrashView() {
       ${whatIfCrashLens === "cashflow" ? cashflowLensSectionHTML("whatIfCrash") : `
         <div class="focus-section">
           <h3>Net assets over time</h3>
-          <div id="whatIfCrashChart"></div>
+          <div id="whatIfCrashChart" class="chart-mount"></div>
         </div>
         <div class="focus-section">
           <h3>End net assets by crash timing</h3>
@@ -15442,7 +15442,7 @@ function renderWhatIfIncomeGapView() {
       ${whatIfIncomeGapLens === "cashflow" ? cashflowLensSectionHTML("whatIfIncomeGap") : `
         <div class="focus-section">
           <h3>Net assets over time</h3>
-          <div id="whatIfIncomeGapChart"></div>
+          <div id="whatIfIncomeGapChart" class="chart-mount"></div>
         </div>
       `}
     </div>
@@ -15541,7 +15541,7 @@ function renderWhatIfExpenseShockView() {
       ${whatIfExpenseShockLens === "cashflow" ? cashflowLensSectionHTML("whatIfExpenseShock") : `
         <div class="focus-section">
           <h3>Net assets over time</h3>
-          <div id="whatIfExpenseShockChart"></div>
+          <div id="whatIfExpenseShockChart" class="chart-mount"></div>
         </div>
       `}
     </div>
