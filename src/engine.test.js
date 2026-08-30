@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { runProjection, validateInput, ENGINE_VERSION, FIGURES_AS_AT } from "./engine.js";
 import { build as buildFamilyWithMortgage } from "./demo/familyWithMortgage.js";
 import { build as buildFirstHomeBuyer } from "./demo/firstHomeBuyer.js";
-import { serialize, hydrate } from "./planState.js";
+import { serialize, hydrate, defaultState, clampAllToPlan } from "./planState.js";
 import { PROFILES } from "./profiles.js";
 import { cashflowStatement } from "./cashflowStatement.js";
 import { buildSnapshotColumns, buildSnapshotTable } from "./snapshot.js";
@@ -220,14 +220,32 @@ describe("engine.js — serialisation and worked integration (spec 31 Commit 3)"
 // happen to use (e.g. familyWithMortgage has no property) as
 // "removed", so this merges the same two fixtures' live shapes the
 // same way before comparing — see mergeShapes's own header.
+// The third fixture engineContractShape.js's own header names —
+// nothing else in this suite has an aged care entry, so this is the
+// ONLY source of a populated `agedCareDetail` in the committed shape.
+function agedCareFixtureState() {
+  let state = defaultState(PROFILES, new Date(2026, 7, 28));
+  state.plan.client.currentAge = 75;
+  state.assets[0].balance = 1_500_000;
+  state.plan.agedCare = [{
+    owner: "client", entryAt: { kind: "age", age: 76 },
+    accommodationPrice: 500000, paymentMethod: "combination", radAmount: 250000,
+    extraServiceFeesAnnual: 5000,
+  }];
+  return clampAllToPlan(state, PROFILES);
+}
+
 function currentLiveShape() {
   const fhb = buildFirstHomeBuyer(new Date(2026, 7, 28)).scenarios[2].state; // "Buy 2030 with FHSSS"
   const fwm = buildFamilyWithMortgage(new Date(2026, 7, 28)).scenarios[0].state; // "Current"
   const r1 = runProjection(fhb);
   const r2 = runProjection(fwm);
+  const r3 = runProjection(agedCareFixtureState());
   const s1 = shapeOf(r1); s1.yearly = ["array", shapeOf(r1.yearly[r1.yearly.length - 1])];
   const s2 = shapeOf(r2); s2.yearly = ["array", shapeOf(r2.yearly[r2.yearly.length - 1])];
-  return mergeShapes(s1, s2);
+  const acYear = r3.yearly.find((row) => Object.keys(row.agedCareDetail ?? {}).length > 0) ?? r3.yearly[r3.yearly.length - 1];
+  const s3 = shapeOf(r3); s3.yearly = ["array", shapeOf(acYear)];
+  return mergeShapes(mergeShapes(s1, s2), s3);
 }
 
 describe("engine.js — contract stability (spec 31 Commit 4)", () => {

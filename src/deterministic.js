@@ -81,6 +81,8 @@ import {
   bondEffectiveTaxRate, bondStartMonthIndex, bondContributionCapCheck, bondHasMatured, bondWithdrawalTax,
   bondMaturityMonth, bondWithdrawalSplit, bondEducationBenefit,
 } from "./bonds.js";
+import { agedCareRatesFor, basicDailyFeeAnnual, combinationPayment, agedCareStalenessWarning } from "./data/agedCare.js";
+import { agedCareAssessableAssets, oldRegimeMeansTestedFee, newRegimeContributions, agedCareRegimeFor } from "./agedCareMeansTest.js";
 
 const toMonthlyReal = (netNominal, cpi) =>
   Math.pow((1 + netNominal) / (1 + cpi), 1 / 12) - 1;
@@ -830,6 +832,60 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const basisRate = dm.indexBasis === "awote" ? wageGrowthAssum : dm.indexBasis === "cpi" ? cpi : 0;
     const g = basisRate + (dm.indexExtraPct ?? 0) / 100;
     return dm.annualPension * Math.pow((1 + g) / (1 + cpi), yearStartIdx(y) / 12);
+  }
+
+  // Aged care (spec 29, Commit 5) — same "fires in July of its
+  // resolved plan year, or never" convention as a defined benefit
+  // pension's own dbCommenceMonth above; no condition-of-release gate
+  // (an aged care entry is a real-world event the client's own
+  // circumstances decide, not a super access rule). Disclosed
+  // simplifications, both matching the pure modules' own headers: the
+  // RAD refund on exit/death is NOT modelled (spec's own Deferred
+  // list — "Refund timing and interest on RAD refunds after death");
+  // a retained former home's value is NOT yet linked into the aged
+  // care assets test (agedCareMeansTest.js's dual former-home
+  // treatment exists, but this build has no way to point an aged care
+  // entry at a specific property) — formerHomeOccupiedByProtectedPerson
+  // is captured on the entry for future use but contributes 0 either way.
+  const agedCareRows = state.plan.agedCare ?? [];
+  const agedCareEntryMonth = {};
+  const agedCareLifetimeCumulative = {}; // old regime's own lifetime cap running total, per entry id
+  const agedCareNcccCumulative = {}; // new regime's NCCC lifetime cap running total, per entry id
+  const agedCareNcccYearsSoFar = {}; // new regime's 4-year NCCC time limit, per entry id
+  const agedCareMpirAtEntry = {}; // MPIR fixed at the resident's own entry FY — never re-indexed for them afterward
+  const agedCareRegime = {}; // resolved once, at entry — "old" | "new" | "pre2014" | null (never fires)
+  for (const ac of agedCareRows) {
+    const y = resolveRef(ac.entryAt, state.plan, schedule, "client").planYear;
+    agedCareEntryMonth[ac.id] = y < schedule.planYears ? julyOf(y) : null;
+    agedCareLifetimeCumulative[ac.id] = 0;
+    agedCareNcccCumulative[ac.id] = 0;
+    agedCareNcccYearsSoFar[ac.id] = 0;
+    agedCareMpirAtEntry[ac.id] = null;
+    agedCareRegime[ac.id] = null;
+  }
+  // The RAD, drawn as a single lump sum in the entry month — folded
+  // into household net cashflow the SAME way a property purchase's own
+  // settlementOut is (flows through the ordinary fundingOrder/deficit
+  // path, per the spec's own words: "funded through the normal
+  // deficit path"). Precomputed by month, same convention as
+  // giftsByMonth just above.
+  const agedCareRadByMonth = {};
+  for (const ac of agedCareRows) {
+    const m = agedCareEntryMonth[ac.id];
+    if (m != null && ac.radAmount > 0) (agedCareRadByMonth[m] ??= []).push(ac);
+  }
+  const agedCareWarnings = [];
+  // Staleness (spec's own words: "A projection that runs past the
+  // loaded period's end must display a staleness warning naming the
+  // period") — checked against the PROJECTION'S OWN final calendar
+  // month, not "today": a projection generated now but running for
+  // 40 years is stale against this rate period from the day it's
+  // produced, regardless of when it's viewed.
+  const agedCareStaleness = agedCareStalenessWarning(
+    new Date(state.plan.start.year, state.plan.start.month - 1 + schedule.months - 1, 1)
+  );
+  if (agedCareRows.length > 0 && agedCareStaleness) {
+    agedCareWarnings.push({ type: "staleness", reason: agedCareStaleness });
   }
 
   // Commutation events (spec 20, Commit 5) — resolved once per
@@ -1846,6 +1902,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // (real $, a liability — see row.netAssets's own subtraction of
     // heasDetail.closing).
     heasDetail: { opening: 0, interest: 0, drawn: 0, mla: 0, securityValue: 0, closing: 0 },
+    // Aged care (spec 29, Commit 5) — set once per FY alongside
+    // agePensionDetail, keyed by aged care entry id (same "detail dict"
+    // convention as superDetail/pensionDetail); {} for a plan with no
+    // aged care entries or none yet entered this year. agedCareRadPaid
+    // is the household's RAD lump sum(s) paid THIS FY (0 most years —
+    // a one-off, like giftsPaid).
+    agedCareDetail: {},
+    agedCareRadPaid: 0,
     // Death benefits (spec 22, Commit 1) — a TERMINAL planning figure
     // only: set on the FINAL projection year's row alone (after the
     // year loop finishes), never per-year — "the tax outcome of the
@@ -1880,6 +1944,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     ongoingFromSuperRequested = 0, ongoingFromSuperShortfall = 0, upfrontFromSuperShortfall = 0,
     agePensionMonthly = 0,
     heasMonthly = 0,
+    agedCareMonthly = 0,
     bonusCredits = {},
   }) {
     const fyStart = fy0 + y;
@@ -3681,7 +3746,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // separately above — see the module header on gifting.js: "the
       // gifted amount leaves the client's assets regardless").
       const giftOut = (giftsByMonth[m] ?? []).reduce((s, g) => s + g.amount, 0);
-      let net = inc - (exp + propExpenseOut + landTaxOut) - tax - loanPayReal - settlementOut - superContribCashOut - bondContribCashOut - adviserFeeCashOut - giftOut;
+      // Aged care RAD (spec 29, Commit 5) — a one-off lump sum at
+      // entry, same treatment as a gift's own one-off amount; the
+      // ONGOING cost (DAP/basic daily fee/contribution/extra services)
+      // is folded into `agedCareMonthly` below instead, mirroring how
+      // agePensionMonthly is an ongoing monthly figure rather than a
+      // one-off.
+      const agedCareRadOut = (agedCareRadByMonth[m] ?? []).reduce((s, ac) => s + ac.radAmount, 0);
+      let net = inc - (exp + propExpenseOut + landTaxOut) - tax - loanPayReal - settlementOut - superContribCashOut - bondContribCashOut - adviserFeeCashOut - giftOut - agedCareRadOut - agedCareMonthly;
       // Goals, surplus-funded: capped at whatever's actually left over
       // this month (a goal can't manufacture cash that doesn't exist,
       // unlike an instructed transaction such as a loan repayment or a
@@ -4369,6 +4441,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const agePensionRatesY = agePensionRatesFor(fyStart, bracketMode, cpi, awoteAssum);
     let agePensionMonthly = 0;
     let agePensionDetailY = null;
+    let agedCareMonthly = 0; // this FY's total aged care cost, spread monthly like agePensionMonthly's own entitlement
+    const agedCareDetailY = {};
     // HEAS (spec 21b, Commit 5) — resolved inside the SAME block as the
     // age pension's own entitlement (paid.client+paid.partner), just
     // below, since the drawdown cap needs it; hoisted here (like
@@ -4399,6 +4473,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     let giftsPaidThisYear = 0;
     for (let m = yearStart(y); m < yearEnd(y); m++) {
       giftsPaidThisYear += (giftsByMonth[m] ?? []).reduce((s, g) => s + g.amount, 0);
+    }
+    // Aged care (spec 29, Commit 5) — the household's RAD lump sum(s)
+    // paid THIS FY, same "sum straight from the resolved one-off
+    // events" convention as giftsPaidThisYear just above (the ongoing
+    // cost is a separate, already-monthly figure — agedCareMonthly —
+    // not summed here).
+    let agedCareRadPaidThisYear = 0;
+    for (let m = yearStart(y); m < yearEnd(y); m++) {
+      agedCareRadPaidThisYear += (agedCareRadByMonth[m] ?? []).reduce((s, ac) => s + ac.radAmount, 0);
     }
     {
       // Financial + lifestyle assets both count toward the assets test
@@ -4605,6 +4688,77 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           workBonusExempt: workBonusExemptByOwner.partner, workBonusBank: workBonusBank.partner ?? 0,
         } : null,
       };
+
+      // Aged care (spec 29, Commit 5) — resolved here, right after the
+      // age pension's own assessableAssets/assessableIncome are known
+      // (a SEPARATE means test, but sharing these two INPUTS per the
+      // spec's own words — never the age pension's own entitlement).
+      // A RAD is EXEMPT from the age pension's own assets/income tests
+      // (BBB §5.6) — realised simply by never being folded into
+      // assessableAssetsTotal/assessableIncomeTotal above, so no
+      // special-casing is needed here to preserve that asymmetry.
+      for (const ac of agedCareRows) {
+        const entryMonth = agedCareEntryMonth[ac.id];
+        if (entryMonth == null || entryMonth > yearStart(y)) continue; // not yet entered, or never fires
+        if (agedCareRegime[ac.id] == null) {
+          // Resolved ONCE, at entry — the entry's own calendar date,
+          // and MPIR fixed for the life of this resident's DAP (both
+          // per the spec's own words; never re-derived in later years).
+          const entryTotalMonths = state.plan.start.month - 1 + entryMonth;
+          const entryCalYear = state.plan.start.year + Math.floor(entryTotalMonths / 12);
+          const entryCalMonth = (entryTotalMonths % 12) + 1;
+          const entryDate = new Date(entryCalYear, entryCalMonth - 1, 1);
+          agedCareRegime[ac.id] = agedCareRegimeFor(entryDate, ac.optedIntoNewRegime);
+          agedCareMpirAtEntry[ac.id] = agedCareRatesFor(fyStart, bracketMode, cpi, state.assumptions.agedCare).mpir;
+        }
+        const regime = agedCareRegime[ac.id];
+        if (regime === "pre2014") {
+          // Flagged, not modelled (spec's own words) — no cost, no
+          // warning spam every year, just once.
+          if (!agedCareWarnings.some((w) => w.entryId === ac.id)) {
+            agedCareWarnings.push({ entryId: ac.id, type: "pre2014NotModelled", reason: `${ac.name}: entry predates 1 July 2014 — that grandfathered regime is not modelled. No fee is calculated.` });
+          }
+          agedCareDetailY[ac.id] = { basicDailyFee: 0, dap: 0, contribution: 0, extraServices: 0, total: 0, regime, lifetimeCumulative: 0 };
+          continue;
+        }
+        const agedCareRatesY = agedCareRatesFor(fyStart, bracketMode, cpi, state.assumptions.agedCare);
+        const isPersonCouple = couple;
+        const personAssessableAssets = isPersonCouple ? assessableAssetsTotal / 2 : assessableAssetsTotal;
+        const personAssessableIncome = isPersonCouple ? assessableIncomeTotal / 2 : assessableIncomeTotal;
+        // Former home value is NOT yet linked to a specific property
+        // here (see this block's own header) — formerHomeOccupiedByProtectedPerson
+        // is captured on the entry for future use but contributes 0
+        // either way in this build.
+        const acAssessableAssets = agedCareAssessableAssets({ otherFinancialAssets: personAssessableAssets, radPaid: ac.radAmount });
+        const basicDailyAnnual = basicDailyFeeAnnual(agePensionRatesY.single.rate);
+        const { dapAnnual } = combinationPayment({ accommodationPrice: ac.accommodationPrice, radPaid: ac.radAmount, mpirAtEntry: agedCareMpirAtEntry[ac.id] });
+
+        let contributionAnnual = 0;
+        if (regime === "old") {
+          const result = oldRegimeMeansTestedFee({
+            assessableIncome: personAssessableIncome, assessableAssets: acAssessableAssets, isCouple: isPersonCouple,
+            lifetimeCumulative: agedCareLifetimeCumulative[ac.id], rates: agedCareRatesY,
+          });
+          contributionAnnual = result.fee;
+          agedCareLifetimeCumulative[ac.id] += contributionAnnual;
+        } else {
+          const result = newRegimeContributions({
+            assessableIncome: personAssessableIncome, assessableAssets: acAssessableAssets, isCouple: isPersonCouple,
+            ncccLifetimeCumulative: agedCareNcccCumulative[ac.id], ncccYearsSoFar: agedCareNcccYearsSoFar[ac.id], rates: agedCareRatesY,
+          });
+          contributionAnnual = result.total;
+          agedCareNcccCumulative[ac.id] = result.ncccCumulative;
+          if (result.nccc > 0) agedCareNcccYearsSoFar[ac.id] += 1;
+        }
+        const extraServicesAnnual = Math.max(0, ac.extraServiceFeesAnnual);
+        const totalAnnual = basicDailyAnnual + dapAnnual + contributionAnnual + extraServicesAnnual;
+        agedCareDetailY[ac.id] = {
+          basicDailyFee: basicDailyAnnual, dap: dapAnnual, contribution: contributionAnnual, extraServices: extraServicesAnnual,
+          total: totalAnnual, regime,
+          lifetimeCumulative: regime === "old" ? agedCareLifetimeCumulative[ac.id] : agedCareNcccCumulative[ac.id],
+        };
+        agedCareMonthly += totalAnnual / (yearEnd(y) - yearStart(y));
+      }
 
       // Home Equity Access Scheme (spec 21b, Commit 5) — resolved here,
       // right after the age pension's own entitlement (paid.client +
@@ -4958,7 +5112,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       taxOut: null, cgtDue, row: null, trackUnfunded: false, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
-      agePensionMonthly, heasMonthly,
+      agePensionMonthly, heasMonthly, agedCareMonthly,
     });
     Object.assign(bal, balSnap);
     pools = poolSnap;
@@ -5498,6 +5652,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.superDetail[split.toId].contributionSplitIn += split.amount;
     }
     row.agePensionDetail = agePensionDetailY;
+    row.agedCareDetail = agedCareDetailY;
+    row.agedCareRadPaid = agedCareRadPaidThisYear;
     row.cshcDetail = cshcDetailY;
     row.heasDetail = heasDetailY;
     row.giftsPaid = giftsPaidThisYear;
@@ -5508,7 +5664,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       taxOut: taxOutArr, cgtDue, row, trackUnfunded: true, superOutcome,
       divReleaseFromSuper, divReleaseAccountId, fhsssRelease,
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
-      agePensionMonthly, heasMonthly, bonusCredits,
+      agePensionMonthly, heasMonthly, agedCareMonthly, bonusCredits,
     });
     // Defined benefit pensions (spec 26, Commit 2) — report the FY's
     // income-cap excess on every one of this owner's DB rows,
@@ -6120,6 +6276,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     accruedRefundAtEnd: pendingRefund.client + pendingRefund.partner,
     superWarnings,
     propertyWarnings,
+    agedCareWarnings,
     drawdownWarnings,
     bondWarnings,
     liabilityRepaymentStats,

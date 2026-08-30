@@ -15,16 +15,20 @@
 // major (removed/renamed) in engine.js in the SAME commit, per the
 // rule above.
 //
-// Generated from TWO demo fixtures, shapes unioned by key (neither
-// alone has everything): "First home buyer"'s "Buy 2030 with FHSSS"
+// Generated from THREE demo fixtures, shapes unioned by key (no one
+// fixture has everything): "First home buyer"'s "Buy 2030 with FHSSS"
 // scenario (src/demo/firstHomeBuyer.js — HELP balance, a property
-// purchase producing a property-linked liability, super, FHSSS) and
+// purchase producing a property-linked liability, super, FHSSS);
 // "Family with a mortgage"'s "Current" scenario (src/demo/
-// familyWithMortgage.js — a couple, a plain liability, super). `yearly`
-// uses each fixture's FINAL year (captures deathBenefitDetail, which
-// is null on every other row). Disclosed gap: neither fixture has
-// bonds, a pension, a defined benefit, or a goal, so `bondDetail`,
-// `pensionDetail`, `definedBenefitDetail`, `goals`, `schedule.bondFlows`,
+// familyWithMortgage.js — a couple, a plain liability, super); and a
+// small hand-built single-person fixture with one aged care entry
+// (defaultState() + a `plan.agedCare` row, spec 29 Commit 5 — its own
+// FIRST year with a non-empty `agedCareDetail`, not necessarily the
+// final year). `yearly` otherwise uses each fixture's FINAL year
+// (captures deathBenefitDetail, which is null on every other row).
+// Disclosed gap: none of the three fixtures has bonds, a pension, a
+// defined benefit, or a goal, so `bondDetail`, `pensionDetail`,
+// `definedBenefitDetail`, `goals`, `schedule.bondFlows`,
 // `schedule.superInsurancePremiums`, `liabilityRepaymentStats`,
 // `goalStats`, and `schedule.rowTotals.deductions` are pinned as
 // empty objects here, not their populated inner shape — those are
@@ -122,6 +126,13 @@ export const COMMITTED_SHAPE ={
   "accruedDiv296AtEnd": "number",
   "accruedRefundAtEnd": "number",
   "accruedUntaxedSuperTaxAtEnd": "number",
+  "agedCareWarnings": [
+    "array",
+    {
+      "reason": "string",
+      "type": "string"
+    }
+  ],
   "bondWarnings": [
     "array",
     "empty"
@@ -428,6 +439,18 @@ export const COMMITTED_SHAPE ={
         "paidFromSuper": "number",
         "requestedFromSuper": "number"
       },
+      "agedCareDetail": {
+        "<id>": {
+          "basicDailyFee": "number",
+          "contribution": "number",
+          "dap": "number",
+          "extraServices": "number",
+          "lifetimeCumulative": "number",
+          "regime": "string",
+          "total": "number"
+        }
+      },
+      "agedCareRadPaid": "number",
       "agePensionDetail": {
         "assessableAssets": "number",
         "assessableIncome": "number",

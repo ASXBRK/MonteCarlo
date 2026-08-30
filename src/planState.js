@@ -411,6 +411,7 @@ export function defaultPlan(now = new Date()) {
     novatedLeases: [],
     pensions: [],
     definedBenefits: [],
+    agedCare: [],
     gifts: [],
     heas: createHeas(),
     workingCash: { balance: 0, minimumBalance: 0, ratePct: null },
@@ -2261,6 +2262,73 @@ export function normaliseDefinedBenefits(rows, plan) {
   return rows.map((db) => clampDefinedBenefit(db, plan));
 }
 
+// --- Aged care (spec 29, Commit 5) ------------------------------------------
+//
+// Residential aged care entry — a one-off event (like a defined
+// benefit's own commencement) with an ongoing cost afterward. No
+// funding-asset field: per the spec's own words the cost "flows into
+// household cashflow... funded through the normal deficit path", the
+// same way any other cashflow row is — never targeted at one specific
+// asset the way a Focus-view estimate might be. Deliberately simpler
+// than `pensions`: no superAccounts dependency, clamped entirely
+// inside clampPlan, same second-collection-inside-clampPlan pattern
+// `definedBenefits` already uses.
+export const AGED_CARE_PAYMENT_METHODS = ["rad", "dap", "combination"];
+export function createAgedCareEntry(plan, existing = [], owner = "client") {
+  const person = owner === "partner" ? plan.partner : plan.client;
+  const label = personDisplayName(person, owner === "partner" ? "Partner" : "Client");
+  return {
+    id: uid("ac"),
+    name: `Aged care — ${label}`,
+    owner,
+    entryAt: anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"),
+    facility: "",
+    accommodationPrice: 0,
+    paymentMethod: "combination",
+    radAmount: 0,
+    extraServiceFeesAnnual: 0,
+    // Commit 2's own field — capped for the ongoing means test, fully
+    // exempt while a protected person lives there; NOT capped for the
+    // one-off accommodation assessment (agedCareMeansTest.js's two
+    // separate functions read this same flag).
+    formerHomeOccupiedByProtectedPerson: false,
+    // "No worse off" (Commit 4) — a genuinely pre-1 Nov 2025 entrant
+    // may explicitly opt in to the new regime; never inferred, never
+    // silently switched (BBB's own words: "model the opt-in as a flag").
+    optedIntoNewRegime: false,
+  };
+}
+
+export function clampAgedCareEntry(ac, plan) {
+  const owner = ac.owner === "partner" && plan.partner ? "partner" : "client";
+  const entryAt = clampDateRef(ac.entryAt ?? anchorRef(owner === "partner" ? "retirement-partner" : "retirement-client"), plan.client.currentAge, plan.endAge, plan);
+  const paymentMethod = AGED_CARE_PAYMENT_METHODS.includes(ac.paymentMethod) ? ac.paymentMethod : "combination";
+  const accommodationPrice = clampNumber(ac.accommodationPrice, 0);
+  // Input integrity: a RAD amount greater than the accommodation price
+  // itself isn't a real combination payment this tool can model — bound
+  // it rather than warn (CLAUDE.md's Input integrity section). A pure
+  // "dap" method pays no RAD at all, regardless of any stored amount.
+  const radAmount = paymentMethod === "dap" ? 0 : clampNumber(ac.radAmount, 0, accommodationPrice);
+  return {
+    id: typeof ac.id === "string" && ac.id ? ac.id : uid("ac"),
+    name: typeof ac.name === "string" && ac.name.trim() ? ac.name : "Aged care",
+    owner,
+    entryAt,
+    facility: typeof ac.facility === "string" ? ac.facility.slice(0, 200) : "",
+    accommodationPrice,
+    paymentMethod,
+    radAmount,
+    extraServiceFeesAnnual: clampNumber(ac.extraServiceFeesAnnual, 0),
+    formerHomeOccupiedByProtectedPerson: ac.formerHomeOccupiedByProtectedPerson === true,
+    optedIntoNewRegime: ac.optedIntoNewRegime === true,
+  };
+}
+
+export function normaliseAgedCare(entries, plan) {
+  if (!Array.isArray(entries)) return [];
+  return entries.map((ac) => clampAgedCareEntry(ac, plan));
+}
+
 // --- Gifting and deprivation (spec 21b, Commit 2) ---------------------------
 //
 // A one-off cash gift, DateRef-anchored like a lump sum or a
@@ -2746,6 +2814,12 @@ export function clampPlan(plan, profiles = {}) {
   // no second hydrate() stage needed — see clampDefinedBenefit's own
   // header.
   const definedBenefits = normaliseDefinedBenefits(plan.definedBenefits, { client, partner, endAge, keyDates });
+  // Aged care (spec 29, Commit 5) — client-anchored like every other
+  // one-off event, so only needs client/partner/endAge/keyDates,
+  // already resolved above; no superAccounts dependency (unlike
+  // pensions) so this resolves in the SAME single pass, no second
+  // hydrate() stage needed.
+  const agedCare = normaliseAgedCare(plan.agedCare, { client, partner, endAge, keyDates });
   // Gifting and deprivation (spec 21b, Commit 2) — client-anchored like
   // every other one-off event, so only needs client/partner/endAge,
   // already resolved above.
@@ -2777,7 +2851,7 @@ export function clampPlan(plan, profiles = {}) {
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
   const planSoFar = {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, novatedLeases, pensions, definedBenefits, gifts, heas, workingCash, children,
+    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, novatedLeases, pensions, definedBenefits, agedCare, gifts, heas, workingCash, children,
     adviserFees, implementation,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,

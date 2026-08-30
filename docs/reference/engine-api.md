@@ -203,7 +203,7 @@ likely to produce a subtly wrong number if assumed otherwise.
 | `accruedUntaxedSuperTaxAtEnd` | number | tax on untaxed super elements accrued but not yet paid |
 | `accruedDiv293AtEnd` / `accruedDiv296AtEnd` | number | as `accruedCgtAtEnd`, for Division 293/296 |
 | `accruedRefundAtEnd` | number | a pending PAYG refund/balancing amount not yet settled |
-| `superWarnings` / `propertyWarnings` / `drawdownWarnings` / `bondWarnings` | array | non-fatal conditions the engine flagged while running (e.g. a contribution cap breach, a rejected FHSSS request) — always present, may be empty |
+| `superWarnings` / `propertyWarnings` / `agedCareWarnings` / `drawdownWarnings` / `bondWarnings` | array | non-fatal conditions the engine flagged while running (e.g. a contribution cap breach, a rejected FHSSS request, a stale aged care rate period) — always present, may be empty |
 | `liabilityRepaymentStats` | object | extra-repayment interest/time-saved figures, keyed by liability id |
 | `liabilityRollovers` | object | fixed-rate rollover events, keyed by liability id |
 | `goalStats` | object | achievement/shortfall detail per goal, keyed by goal id |
@@ -315,6 +315,21 @@ where `client`/`partner` are `{ ageEligible, eligible }`. `heasDetail`
 Scheme in the plan): `{ opening, interest, drawn, mla, securityValue,
 closing }`.
 
+**Aged care** (spec 29) — `agedCareDetail` (keyed by aged care entry id,
+only for an entry that has actually entered care by this year): `{
+basicDailyFee, dap, contribution, extraServices, total, regime, lifetimeCumulative
+}`. `agedCareRadPaid` — the household's RAD lump sum(s) paid THIS FY (a
+plain number, 0 most years — a one-off, like `giftsPaid`). `regime` is `"old"` (pre-1 Nov 2025 means-tested fee), `"new"`
+(1 Nov 2025+ NCCC+Hotelling), or `"pre2014"` (grandfathered, not modelled
+— every other field is `0` and `agedCareWarnings`, §4's summary fields,
+carries a one-off note). `lifetimeCumulative` is the running total against
+whichever lifetime cap applies to that regime. A retained former home's
+value is NOT YET linked into the aged care assets test in this build
+(disclosed gap — `agedCareMeansTest.js`'s dual former-home treatment
+exists and is unit-tested, but no plan-state link from an aged care entry
+to a specific property exists yet); a RAD's refund at exit/death is
+deliberately NOT modelled at all (spec's own Deferred list).
+
 **Working Cash Account** — `wcaDetail`: `{ opening, interest, netFlow,
 sweptToCash, sweptInvested, sweptSpent, closing }`. `wcaClosing`.
 
@@ -345,6 +360,7 @@ the STORED INPUT (the plan state schema; currently 18). Rule:
 | Version | Change |
 |---|---|
 | `1.0.0` | Initial published contract (spec 31, Commit 1). |
+| `1.1.0` | Additive: top-level `agedCareWarnings`, yearly-row `agedCareDetail` (spec 29, Commit 5). |
 
 Any commit that changes the result shape must update `ENGINE_VERSION`,
 this table, and the Commit 4 contract-shape snapshot in the SAME commit

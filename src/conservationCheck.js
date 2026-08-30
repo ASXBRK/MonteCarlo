@@ -145,6 +145,18 @@
 //           become take-home pay and an asset; instead it extinguishes
 //           debt — a real gain `-row.tax` alone doesn't credit back, so
 //           it's added back here, the same shape as `salarySacrificed`)
+//         − agedCareRadPaid − agedCareOngoingCost (spec 29, Commit 5:
+//           TWO leaks. The RAD is a one-off lump sum at entry, the same
+//           shape as giftsPaid above — its eventual refund at exit or
+//           death is deliberately NOT modelled (spec's own Deferred
+//           list), so there is genuinely no offsetting pocket to net
+//           against, unlike an ordinary transfer. The ongoing cost
+//           (basic daily fee + DAP + means-tested contribution/
+//           NCCC+Hotelling + extra services, summed across every entry
+//           via row.agedCareDetail[id].total) is a recurring household
+//           expense with nothing on the other side either — money paid
+//           to a facility, not moved between two pockets this engine
+//           tracks.)
 //
 // Properties (Document Set Commits 3/4): brought into scope
 // specifically to test FHSSS release and LMI, which only ever fire
@@ -572,6 +584,21 @@ export function computeYearFlows(out, y) {
   // can't see, but already reflected in `closingN` via liabilitiesClosing).
   const helpRepayment = row.taxDetail?.helpRepayment ?? 0;
 
+  // --- Aged care (spec 29, Commit 5) — TWO leaks, same shape as
+  // goalSpend/giftsPaid above: agedCareRadPaid is the one-off RAD lump
+  // sum (row.agedCareRadPaid, a plain household total already resolved
+  // the same "sum straight from the resolved one-off events" way
+  // giftsPaid is); agedCareOngoingCost is the recurring basic daily
+  // fee + DAP + means-tested contribution/NCCC+Hotelling + extra
+  // services, summed across every entry's own row.agedCareDetail[id].total
+  // (sumVals, the same helper adviserFeeFromSuper uses above). Both are
+  // pure leaks — nothing on the other side of the ledger receives them
+  // (the RAD's eventual refund at exit/death is deliberately not
+  // modelled — spec's own Deferred list — so there is no offsetting
+  // asset to net against here, unlike a genuine transfer).
+  const agedCareRadPaid = row.agedCareRadPaid ?? 0;
+  const agedCareOngoingCost = sumVals(row.agedCareDetail, "total");
+
   // --- Adviser fees (Implementation/Rates spec, Commit 2) — TWO leaks,
   // one per pocket, exactly the shape divReleaseFromSuper already
   // established: adviserFeeFromSuper is a direct super-balance
@@ -611,6 +638,7 @@ export function computeYearFlows(out, y) {
     helpRepayment,
     adviserFeeFromSuper, adviserFeeCash,
     educationBenefit,
+    agedCareRadPaid, agedCareOngoingCost,
   };
 }
 
@@ -640,7 +668,7 @@ export function checkYearConservation(out, y, ctx) {
     + f.propertyGrowth + f.propertyOneOffCost + f.fhsssRelease - f.fhsssSuperDebit - f.lmiPremium
     - f.propertySaleCosts - f.superInsurancePremium - f.untaxedRolloverTax
     - f.goalSpend - f.giftsPaid - f.heasDrawn - f.heasInterest + f.helpRepayment - f.adviserFeeFromSuper - f.adviserFeeCash
-    + f.educationBenefit;
+    + f.educationBenefit - f.agedCareRadPaid - f.agedCareOngoingCost;
 
   const gap = f.delta - expected;
   const tol = Math.max(0.05, Math.abs(f.closingN) * 1e-6);
@@ -703,9 +731,14 @@ export function decomposeNetWorthChange(out, y) {
     income: f.income + f.sgInflow + f.govSuperInflow + f.educationBenefit - f.heasDrawn,
     growth: f.growth + f.propertyGrowth + f.helpRepayment,
     tax: f.tax + f.contributionsTax + f.divReleaseFromSuper,
-    expenses: f.expenses + f.surplusSpent - f.unfundedCashflow,
+    // agedCareOngoingCost is a POSITIVE magnitude (real expense outflow,
+    // same convention f.expenses/f.surplusSpent/f.unfundedCashflow
+    // already use in this bucket, which the caller SUBTRACTS as a
+    // whole — `-d.expenses` — unlike `oneOffs` below, which the caller
+    // ADDS, so a leak there needs the opposite sign).
+    expenses: f.expenses + f.surplusSpent - f.unfundedCashflow + f.agedCareOngoingCost,
     interest: f.liabilityInterest + f.heasInterest,
     fees: f.lmiPremium + f.adviserFeeFromSuper + f.adviserFeeCash + f.superInsurancePremium + f.untaxedRolloverTax,
-    oneOffs: f.propertyOneOffCost - f.propertySaleCosts - f.goalSpend - f.giftsPaid + f.fhsssRelease - f.fhsssSuperDebit,
+    oneOffs: f.propertyOneOffCost - f.propertySaleCosts - f.goalSpend - f.giftsPaid + f.fhsssRelease - f.fhsssSuperDebit - f.agedCareRadPaid,
   };
 }

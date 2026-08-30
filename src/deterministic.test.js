@@ -2948,6 +2948,15 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     "property.lvr.80", "property.landTax.nsw.1075000",
     // Bonds — the ten-year date, the 125% contribution cap
     "bonds.maturity.120months", "bonds.contributionCap.125pct",
+    // Aged care (spec 29) — assets-test tier boundaries, shared by the
+    // means-tested fee and NCCC+Hotelling contribution ($214,884 is
+    // ALSO the former-home cap, but this generator does not yet link
+    // an entry to a property — see agedCare's own generation comment
+    // for the full disclosed-narrowing note). The regime-fork date and
+    // old-regime/pre-2014 paths are NOT reachable from this generator's
+    // fixed near-2026 planStart — covered directly by
+    // agedCareMeansTest.test.js's own unit tests instead.
+    "agedCare.assetsNil.64500", "agedCare.assetsPlateau.214884", "agedCare.ncccLifetimeCap.137917",
     // Timing — start month. "Exactly one year" is generated too (see
     // degenerateScenarios' own "single-year projection" case) but not
     // registered here: years is a small discrete count with no natural
@@ -3308,6 +3317,43 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           });
         }
       }
+    }
+
+    // Aged care (spec 29, Commit 5) — a genuine new money flow: a
+    // one-off RAD lump sum (a leak — see conservationCheck.js's
+    // agedCareRadPaid) plus a recurring ongoing cost (basic daily fee +
+    // DAP + means-tested contribution/NCCC+Hotelling + extra services
+    // — agedCareOngoingCost, also a leak). Gated behind olderCohort,
+    // same reasoning as definedBenefits just above. Disclosed
+    // narrowing: this generator's own fixed planStart (2026-07)
+    // already postdates the 1 November 2025 regime fork, so EVERY
+    // entry this generator produces resolves to the "new" regime —
+    // the "old" regime and the pre-2014 flag are exercised directly by
+    // agedCareMeansTest.test.js's own unit tests with historical
+    // dates instead, not by this live-projection sweep. The assets-
+    // test tier boundaries ARE reachable and stratified: radAmount
+    // directly moves agedCareAssessableAssets across them.
+    const AGED_CARE_ASSET_THRESHOLDS = [
+      ["agedCare.assetsNil.64500", 64500],
+      ["agedCare.assetsPlateau.214884", 214884],
+      ["agedCare.ncccLifetimeCap.137917", 137917.01],
+    ];
+    const agedCare = [];
+    if (olderCohort && Math.random() < 0.35) {
+      const accommodationPrice = rand(200000, 800000);
+      const [name, threshold] = pick(AGED_CARE_ASSET_THRESHOLDS);
+      const radAmount = Math.min(accommodationPrice, Math.max(0, stratify(name, threshold, { near: threshold * 0.02, span: threshold })));
+      agedCare.push({
+        id: "ac1", name: "Aged care", owner: couple ? pick(["client", "partner"]) : "client",
+        entryAt: { kind: "age", age: randInt(startAge, endAge) },
+        facility: "Random facility",
+        accommodationPrice,
+        paymentMethod: pick(["rad", "dap", "combination"]),
+        radAmount,
+        extraServiceFeesAnnual: pick([0, rand(1000, 10000)]),
+        formerHomeOccupiedByProtectedPerson: Math.random() < 0.3,
+        optedIntoNewRegime: Math.random() < 0.3,
+      });
     }
 
     // Gifting and deprivation (spec 21b, Commit 2; spec 28 Commit 1) —
@@ -4035,7 +4081,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         plan: {
           household: couple ? "couple" : "single",
           client, partner, children,
-          superAccounts, pensions, definedBenefits, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
+          superAccounts, pensions, definedBenefits, agedCare, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments, employers, novatedLeases,
         },
         cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows, bondContributions, superRollovers },
