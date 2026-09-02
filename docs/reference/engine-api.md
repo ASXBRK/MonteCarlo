@@ -222,6 +222,15 @@ balance), `netAssets` (`closingBalance + propertyClosing + superClosing +
 pensionClosing + bondsClosing + wcaClosing − liabilitiesClosing −
 heasDetail.closing`), `income`, `cashDistributions`, `expenses`, `tax`.
 
+**Retirement** (spec 32, Commit 1) — `incomeRequired`: number \| `null`,
+the household's stated Income Required (real $), resolved and indexed
+per `plan.retirement.incomeRequired`; `null` for every plan year before
+the requirement's own `startAt` (a real, active figure is never `0` and
+`null` at once). A REFERENCE line only — it never feeds back into any
+other field on this row. **Interpretation: after-tax income received by
+the household** — compare it against `income − tax` on this SAME row,
+never against gross drawdown.
+
 **Cashflow mechanics**
 `surplusOrDeficit`, `surplusInvested`, `surplusSpent`, `surplusAccumulated`,
 `deficitFundedFromAssets`, `unfundedCashflow`, `contributions`,
@@ -362,6 +371,7 @@ the STORED INPUT (the plan state schema; currently 18). Rule:
 | `1.0.0` | Initial published contract (spec 31, Commit 1). |
 | `1.1.0` | Additive: top-level `agedCareWarnings`, yearly-row `agedCareDetail` (spec 29, Commit 5). |
 | `1.2.0` | No new fields — `goals`, `goalStats`, and `schedule.rowTotals.deductions` were already part of the engine's output but had never been populated by either contract-shape fixture; the demo client set rewrite gave one of them a real goal and deduction row, so the committed shape now captures their actual inner shape instead of pinning them as empty placeholders (docs/reference/build-log.md's own "Demo clients" entry). |
+| `1.3.0` | Additive: yearly-row `incomeRequired` (spec 32, Commit 1) — the household's stated Income Required, real $, resolved and indexed per `plan.retirement.incomeRequired`. A REFERENCE figure only, never fed back into projection arithmetic; `null` for every plan year before the requirement's own `startAt` (defaults to the client's own retirement key date). Compare it against `yearly[y].income - yearly[y].tax` (after-tax household income), never against gross drawdown — see docs/specs/32-retirement-phase-one.md's own "Interpretation to fix and state". |
 
 Any commit that changes the result shape must update `ENGINE_VERSION`,
 this table, and the Commit 4 contract-shape snapshot in the SAME commit

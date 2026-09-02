@@ -2123,6 +2123,74 @@ coverage test above, not a real bug.
 
 ---
 
+### Retirement: income required (spec 32, Commit 1)
+The concept the engine lacked: a stated target retirement income,
+tracked as a REFERENCE line against what the plan actually delivers —
+never a driver. `plan.retirement.incomeRequired` (`planState.js`):
+source (`currentExpenses` default | `custom` — ASFA sources deliberately
+excluded from `INCOME_REQUIRED_SOURCES` until Commit 2 gives them
+something to resolve against, per CLAUDE.md's Input integrity rule),
+`indexBasis`/`indexExtraPct`, `startAt` (a DateRef, defaults to the
+`retirement-client` key date), and an optional step-down age/percentage.
+New pure module `src/retirement.js`'s `resolveIncomeRequired` reuses
+`schedule.js`'s own canonical `realAmountAt` indexation ratio (treating
+"months since startAt" as the reference point, rather than literal plan
+start — the ratio formula is reference-point-agnostic) and reads
+`currentExpenses` from the schedule's own household expense rows at the
+resolved start year, not `deterministic.js`'s richer post-property
+`row.expenses`. Defensively falls back to the same schema default when
+`plan.retirement` is absent entirely (a hand-built fixture that never
+went through `clampPlan`), matching `keyDates.js`'s own convention for a
+missing `retirementAge` — this is what keeps every pre-existing
+`mkState()`-style test in the whole suite behaviour-identical without
+individually updating them.
+
+`deterministic.js` writes the resolved figure onto every yearly row as
+`row.incomeRequired` (`null` before the requirement's own start year —
+never `0`, the same null-means-not-yet-applicable convention as the
+aged-care work) via a post-pass once `yearly` is built; nothing else on
+any row changes, verified directly (two full projections, one with a
+non-default retirement config, differ ONLY in `incomeRequired` once
+stripped). `ENGINE_VERSION` bumped `1.2.0` → `1.3.0` (additive);
+`engineContractShape.js`'s `COMMITTED_SHAPE` and `engine-api.md`'s
+version table/Output reference updated in the same commit.
+
+**Interpretation fixed and stated, per the spec's own explicit
+requirement:** Income Required is after-tax income received by the
+household — compare it against `income − tax` on the same row, never
+against gross drawdown. Stated on the Settings input (a new "Income
+Required" block — no other input section fit; the same reasoning gifts/
+HEAS already used) and in a new Parameters-modal section
+(`#retirement-income-required`), reached via a "More on this" link using
+the same `openModal(scrollToId)` mechanism the Monte Carlo view's
+volatility-drag link already established, generalised into a reusable
+`modalLinkHTML()` since this is dynamically-rendered content (a fixed-id
+listener, `openModal`'s own original pattern, would be orphaned on
+re-render).
+
+One test fixture fallout, fixed in the same commit: `deterministic.
+test.js`'s v5→v6 migration-equivalence gate compares a `hydrate()`ed
+plan against a hand-built "native" one that "bypasses hydrate/clamp
+entirely" by design — its `retirementAge` had never been set explicitly
+because nothing before this commit ever resolved the `retirement-client`
+anchor unconditionally for every projected plan. Fixed by setting it
+explicitly to the same effective value `clampPerson` derives for the
+migrated side, with a comment explaining why.
+
+Tests: `src/retirement.test.js` (11 — both sources, three indexation
+bases, step-down before/at/after the trigger age, the no-retirement-
+block fallback) plus `planState.test.js` additions (clamp bounds, the
+ASFA-source rejection, `clampPlan` always populating the block) plus two
+engine-integration tests (reference-only — no other field changes;
+regression gate — a bare plan projects bit-identically to one with the
+explicit default). Full suite 1872/1872, build green. Browser-verified:
+the Settings block renders, source toggle reveals the custom-amount
+field, the step-down toggle reveals its fields, and the modal link opens
+Parameters scrolled to the new section — zero console errors beyond the
+sandbox's own pre-existing Plotly-CDN-blocked network failure.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

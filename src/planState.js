@@ -419,6 +419,7 @@ export function defaultPlan(now = new Date()) {
     implementation: defaultImplementation(),
     children: [],
     adjustments: [],
+    retirement: { incomeRequired: createIncomeRequired() },
   };
 }
 
@@ -2402,6 +2403,53 @@ export function refineHeasProperty(heas, properties) {
   };
 }
 
+// --- Retirement: Income Required (spec 32, Commit 1) -----------------------
+//
+// A reference line, not a driver, in this commit — see src/retirement.js's
+// header. Client-anchored like every other one-off/ongoing arrangement
+// (aged care, gifts) — no superAccounts dependency, so this resolves in
+// the SAME single pass as clampPlan's other client-anchored fields, no
+// second hydrate() stage needed.
+//
+// ASFA sources are deferred to Commit 2 (they carry a data dependency
+// that doesn't exist yet) — INCOME_REQUIRED_SOURCES deliberately
+// excludes them until then, per CLAUDE.md's Input integrity section: an
+// option with nothing to resolve against must not be enterable.
+export const INCOME_REQUIRED_SOURCES = ["currentExpenses", "custom"];
+
+export function createIncomeRequired() {
+  return {
+    source: "currentExpenses",
+    customAmount: 0,
+    indexBasis: "cpi",
+    indexExtraPct: 0,
+    startAt: anchorRef("retirement-client"),
+    stepDownAtAge: null,
+    stepDownPct: 80,
+  };
+}
+
+export function clampIncomeRequired(raw, plan) {
+  const source = INCOME_REQUIRED_SOURCES.includes(raw?.source) ? raw.source : "currentExpenses";
+  const { indexBasis, indexExtraPct } = clampIndexation(raw);
+  const stepDownAtAge = raw?.stepDownAtAge == null
+    ? null
+    : clampInt(raw.stepDownAtAge, plan.client.currentAge, plan.endAge);
+  return {
+    source,
+    customAmount: clampNumber(raw?.customAmount, 0),
+    indexBasis,
+    indexExtraPct,
+    startAt: clampDateRef(raw?.startAt ?? anchorRef("retirement-client"), plan.client.currentAge, plan.endAge, plan),
+    stepDownAtAge,
+    stepDownPct: clampNumber(raw?.stepDownPct ?? 80, 0, 100),
+  };
+}
+
+export function normaliseRetirement(raw, plan) {
+  return { incomeRequired: clampIncomeRequired(raw?.incomeRequired, plan) };
+}
+
 function nextAssetNumber(existing) {
   let max = 0;
   for (const a of existing) {
@@ -2850,9 +2898,14 @@ export function clampPlan(plan, profiles = {}) {
   // threshold is now derived per FY from each child's own DOB (see
   // dependentChildrenCountInFY, used in deterministic.js).
   const children = normaliseChildren(plan.children, start);
+  // Retirement: Income Required (spec 32, Commit 1) — client-anchored
+  // like agedCare/gifts above, no superAccounts dependency, same
+  // single-pass reasoning.
+  const planForRetirement = { household, client, partner, endAge, endBasis, start, keyDates };
+  const retirement = normaliseRetirement(plan.retirement, planForRetirement);
   const planSoFar = {
     household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, novatedLeases, pensions, definedBenefits, agedCare, gifts, heas, workingCash, children,
-    adviserFees, implementation,
+    adviserFees, implementation, retirement,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,
   // since a person-scoped adjustment's window anchors to ownerWindow(),

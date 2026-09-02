@@ -51,6 +51,7 @@ import {
   createGift,
   createEmployer, FBT_TYPES,
   PACKAGING_TYPES, BONUS_DESTINATION_TYPES,
+  normaliseRetirement,
 } from "./planState.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { resolveGiftDeprivation, GIFT_ANNUAL_LIMIT, GIFT_FIVE_YEAR_LIMIT } from "./gifting.js";
@@ -4390,6 +4391,60 @@ function commitSurplusPeriods(periods) {
   renderSettings();
 }
 
+// Retirement: Income Required (spec 32, Commit 1) — field dispatch,
+// mirroring onSurplusPeriodChange's shape immediately below for the
+// same reason (a nested plan object, not a row list, so no id lookup
+// is needed — just read-modify-clamp-write the one object).
+function onIncomeRequiredChange(el, field) {
+  const ir = state.plan.retirement.incomeRequired;
+  if (field === "irSource") {
+    commitIncomeRequired({ ...ir, source: el.value });
+  } else if (field === "irCustomAmount") {
+    commitIncomeRequired({ ...ir, customAmount: clampNumber(el.value, 0) });
+  } else if (field === "irIndexBasis") {
+    commitIncomeRequired({ ...ir, indexBasis: el.value });
+  } else if (field === "irIndexExtraPct") {
+    commitIncomeRequired({ ...ir, indexExtraPct: clampNumber(el.value, -10, 10) });
+  } else if (field === "irStartAt") {
+    let startAt;
+    if (el.dataset.drRole === "anchor") {
+      startAt = el.value === "__age__"
+        ? { kind: "age", age: resolveRef(ir.startAt, state.plan, projection.schedule, "client").age }
+        : { kind: "anchor", anchorId: el.value };
+    } else {
+      const age = clampInt(el.value, state.plan.client.currentAge, state.plan.endAge);
+      startAt = { kind: "age", age };
+      flagIfClamped(el, age);
+    }
+    commitIncomeRequired({ ...ir, startAt });
+  } else if (field === "irStepDownEnabled") {
+    // Enabling defaults to a sensible mid-retirement age (10 years past
+    // the requirement's own current startAt age, clamped into range) —
+    // never an enabled toggle with a null age underneath it (the same
+    // "no half-configured election" rule HEAS's own enable handler
+    // follows above).
+    const startAge = resolveRef(ir.startAt, state.plan, projection.schedule, "client").age;
+    const defaultAge = clampInt(startAge + 10, state.plan.client.currentAge, state.plan.endAge);
+    commitIncomeRequired({ ...ir, stepDownAtAge: el.checked ? defaultAge : null });
+  } else if (field === "irStepDownAge") {
+    commitIncomeRequired({ ...ir, stepDownAtAge: clampInt(el.value, state.plan.client.currentAge, state.plan.endAge) });
+  } else if (field === "irStepDownPct") {
+    commitIncomeRequired({ ...ir, stepDownPct: clampNumber(el.value, 0, 100) });
+  }
+}
+
+// Retirement: Income Required (spec 32, Commit 1) — re-clamps through
+// clampIncomeRequired (needs the plan's own client/endAge/keyDates for
+// startAt's DateRef and the stepDownAtAge bound), the same "commit via
+// the real clamp function, never a raw assignment" convention every
+// other settings field on this panel follows.
+function commitIncomeRequired(next) {
+  state.plan.retirement = normaliseRetirement({ incomeRequired: next }, state.plan);
+  saveState();
+  refreshOutputs();
+  renderSettings();
+}
+
 // "Resolved effect" line (spec's own worked example: "$2,340/month:
 // $1,400 to Home loan, $600 to Super, $340 to Cash") — read from the
 // period's own FIRST covered plan year, using whatever the engine
@@ -4560,6 +4615,7 @@ function renderSettings() {
         </div>
         <p class="helper-text">If the account would fall below its minimum, the shortfall is drawn from the deficit funding order below. Leave the rate blank to use the firm's Cash profile return.</p>
       </div>
+      ${incomeRequiredSectionHTML()}
       ${giftsSectionHTML()}
       ${heasSectionHTML()}
       ${surplusPeriodsSectionHTML()}
@@ -4667,6 +4723,74 @@ function giftsSectionHTML() {
 // "Sale" toggle's own shape (a checkbox gating a dependent select,
 // propertyCardHTML) — disabled/hidden with an explanatory note when the
 // household has no property at all to secure it against.
+// A link that opens the Parameters modal scrolled to a given section —
+// same idea as index.html's static #mcVolatilityDragLink, but for
+// content re-rendered via innerHTML: a listener attached to a specific
+// element would be orphaned on the next render, so this is dispatched
+// through the settingsPanel's own delegated click handler instead (see
+// data-action === "open-modal" below).
+function modalLinkHTML(scrollToId, text) {
+  return `<button type="button" class="link-inline" data-action="open-modal" data-modal-scroll-to="${scrollToId}">${escapeHTML(text)}</button>`;
+}
+
+// --- Retirement: Income Required (spec 32, Commit 1) -----------------------
+//
+// A household-wide target, not tied to any one asset or person — the
+// same "no natural section, so Settings" reasoning as gifts/HEAS above.
+function incomeRequiredSectionHTML() {
+  const ir = state.plan.retirement.incomeRequired;
+  const isCustom = ir.source === "custom";
+  const drAttrs = `data-settings-field="irStartAt"`;
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Income Required</div>
+      <p class="helper-text">A target retirement income, tracked alongside the projection as a reference line — it never changes what's actually drawn (that's still governed by the pension/drawdown settings elsewhere). <strong>Interpretation: this is the household's after-tax income — compare it against net income after tax, not against gross pension/asset drawdown.</strong> ${modalLinkHTML("retirement-income-required", "More on this")}</p>
+      <div class="person-grid">
+        <div class="cf-cell">
+          <label>Source</label>
+          <select data-settings-field="irSource">
+            <option value="currentExpenses"${!isCustom ? " selected" : ""}>Current expenses (total household living expenses, at retirement)</option>
+            <option value="custom"${isCustom ? " selected" : ""}>Custom amount</option>
+          </select>
+        </div>
+        ${isCustom ? `
+        <div class="cf-cell">
+          <label>Amount ($, today's dollars)</label>
+          <input type="number" min="0" step="1000" value="${ir.customAmount}" data-settings-field="irCustomAmount" />
+        </div>` : ""}
+        <div class="cf-cell">
+          <label>Starts at</label>
+          ${dateRefControlHTML(ir.startAt, "client", drAttrs, state.plan.client.currentAge, state.plan.endAge)}
+        </div>
+      </div>
+      <div class="cf-cell-index">
+        <label>Indexation</label>
+        <div class="cf-index-pair">
+          <select data-settings-field="irIndexBasis" aria-label="Index basis">
+            <option value="none"${ir.indexBasis === "none" ? " selected" : ""}>None</option>
+            <option value="cpi"${ir.indexBasis === "cpi" ? " selected" : ""}>CPI</option>
+            <option value="awote"${ir.indexBasis === "awote" ? " selected" : ""}>Wages</option>
+          </select>
+          <input type="number" min="-10" max="10" step="0.1" value="${ir.indexExtraPct}" aria-label="Additional %" data-settings-field="irIndexExtraPct" />
+        </div>
+      </div>
+      <label class="ptg-check"><input type="checkbox"${ir.stepDownAtAge != null ? " checked" : ""} data-settings-field="irStepDownEnabled" /><span>Step down from a later age</span></label>
+      ${ir.stepDownAtAge != null ? `
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>From age</label>
+            <input type="number" min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1" value="${ir.stepDownAtAge}" data-settings-field="irStepDownAge" />
+          </div>
+          <div class="cf-cell">
+            <label>Step down to (% of the requirement)</label>
+            <input type="number" min="0" max="100" step="5" value="${ir.stepDownPct}" data-settings-field="irStepDownPct" />
+          </div>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
 function heasSectionHTML() {
   const heas = state.plan.heas ?? { enabled: false, propertyId: null };
   const properties = state.properties ?? [];
@@ -4724,6 +4848,7 @@ els.settingsPanel.addEventListener("change", (e) => {
   if (pid) { onSurplusPeriodChange(e.target, pid); return; }
   const field = e.target.dataset.settingsField;
   if (!field) return;
+  if (field.startsWith("ir")) { onIncomeRequiredChange(e.target, field); return; }
   if (field === "wcaBalance") {
     state.plan.workingCash = clampWorkingCash({ ...state.plan.workingCash, balance: clampNumber(e.target.value, 0) });
   } else if (field === "wcaMinimum") {
@@ -4850,6 +4975,7 @@ els.settingsPanel.addEventListener("click", (e) => {
   if (!btn) return;
   const { action, paction, pid, said } = btn.dataset;
   if (paction) { onSurplusPeriodAction(paction, pid, said); return; }
+  if (action === "open-modal") { openModal(btn.dataset.modalScrollTo); return; }
   if (action !== "order-up" && action !== "order-down") return;
   const order = [...state.settings.fundingOrder];
   const i = order.indexOf(btn.dataset.aid);

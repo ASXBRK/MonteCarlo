@@ -560,6 +560,7 @@ export const COMMITTED_SHAPE ={
         "securityValue": "number"
       },
       "income": "number",
+      "incomeRequired": "number",
       "liabilities": {
         "<id>": {
           "closing": "number",

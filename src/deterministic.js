@@ -42,6 +42,7 @@
 import { PROFILES, DEFENSIVE_PROFILE, impliedFrankingPct } from "./profiles.js";
 import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
+import { resolveIncomeRequired } from "./retirement.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
 import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance, debitTransferBalance } from "./pensionTba.js";
@@ -1588,6 +1589,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // per termination event that fired this FY.
     termination: [],
     surplusOrDeficit: 0,
+    // Retirement: Income Required (spec 32, Commit 1) — a REFERENCE
+    // figure only, filled in by a post-pass once `yearly` is complete
+    // (resolveIncomeRequired needs nothing this row doesn't already
+    // have, but is computed once for the whole projection rather than
+    // per-row). null for every year before the requirement's own
+    // startAt (never 0 — see src/retirement.js's header) or when the
+    // plan has no retirement block configured at all.
+    incomeRequired: null,
     surplusInvested: 0,
     // FY-end sweep of WCA surplus above minimumBalance (Working Cash
     // Account fix), per settings.surplus.mode. surplusInvested (above)
@@ -6248,6 +6257,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       partner: couple ? computeDeathBenefitForPerson("partner", state.plan.partner, superAccounts, pensionRows, finalRow, couple, tba) : null,
     };
   }
+
+  // Retirement: Income Required (spec 32, Commit 1) — a REFERENCE line
+  // only; resolved once here against the finished schedule/plan and
+  // written onto every yearly row. Never touches income/tax/expenses
+  // or any other projection arithmetic above — see src/retirement.js's
+  // header for the after-tax interpretation and the null-before-startAt
+  // convention.
+  const incomeRequiredAt = resolveIncomeRequired(state.plan, schedule, cpi, wageGrowthAssum);
+  yearly.forEach((row, y) => { row.incomeRequired = incomeRequiredAt(y); });
 
   return {
     schedule,

@@ -29,7 +29,7 @@ import { PROFILES } from "./profiles.js";
 // nothing at all. Any commit that changes the result shape must update
 // this constant, docs/reference/engine-api.md's version history, and
 // the Commit 4 contract snapshot in the SAME commit — see CLAUDE.md.
-export const ENGINE_VERSION = "1.2.0";
+export const ENGINE_VERSION = "1.3.0";
 
 // The period the embedded figures (tax brackets, super caps, age
 // pension thresholds, CMA profile returns — see

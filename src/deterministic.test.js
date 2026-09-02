@@ -567,6 +567,18 @@ describe("Key Dates — v5 → v6 migration gate", () => {
         plan: {
           client: {
             currentAge: 40,
+            // Retirement: Income Required (spec 32, Commit 1) resolves
+            // its default startAt against the "retirement-client"
+            // anchor, which needs a real retirementAge to mean anything
+            // — clampPerson defaults+clamps the migrated side's missing
+            // retirementAge to endAge (55, see the comment on
+            // migrated.plan.client.retirementAge above); native must
+            // match that EFFECTIVE value explicitly, since it bypasses
+            // clampPerson entirely and would otherwise fall back to
+            // resolveOwnerAge's OWN default (current age, i.e. plan
+            // year 0) — a silent divergence nothing surfaced before
+            // this commit gave the anchor its first unconditional use.
+            retirementAge: 55,
             taxProfile: { residency: "resident", medicareExempt: false, centrelinkEligible: false, centrelinkEligibleIsDefault: false, openingCapitalLosses: 0 },
           },
         },

@@ -43,6 +43,7 @@ import {
   createDrawdown, clampDrawdown, DRAWDOWN_PURPOSES, REPAYMENT_ALLOCATIONS,
   createBond, clampBond, normaliseBonds, BOND_TYPES,
   createBondContribution, clampBondContribution, normaliseBondContributions,
+  INCOME_REQUIRED_SOURCES, createIncomeRequired, clampIncomeRequired, normaliseRetirement,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2240,6 +2241,68 @@ describe("clampPlan — centrelinkEligible smart default (spec 21a, Commit 3)", 
     expect(p.endAge).toBe(70);
     expect(p.client.taxProfile.centrelinkEligible).toBe(true); // 65 → 70 within the projection
     expect(p.partner.taxProfile.centrelinkEligible).toBe(false); // 30 → 35 within the same 5-year window
+  });
+});
+
+describe("Retirement: Income Required (spec 32, Commit 1): plan model", () => {
+  it("createIncomeRequired defaults to currentExpenses from the client's own retirement key date, no step-down", () => {
+    const c = createIncomeRequired();
+    expect(c.source).toBe("currentExpenses");
+    expect(c.customAmount).toBe(0);
+    expect(c.indexBasis).toBe("cpi");
+    expect(c.indexExtraPct).toBe(0);
+    expect(c.startAt).toEqual({ kind: "anchor", anchorId: "retirement-client" });
+    expect(c.stepDownAtAge).toBeNull();
+    expect(c.stepDownPct).toBe(80);
+  });
+
+  it("clampIncomeRequired restricts source to the two resolvable values — an ASFA value (deferred to Commit 2) falls back to currentExpenses, not silently accepted", () => {
+    const plan = { client: { currentAge: 55 }, partner: null, endAge: 90, keyDates: [] };
+    expect(clampIncomeRequired({ source: "custom" }, plan).source).toBe("custom");
+    expect(clampIncomeRequired({ source: "asfaComfortable" }, plan).source).toBe("currentExpenses");
+    expect(clampIncomeRequired({ source: "nonsense" }, plan).source).toBe("currentExpenses");
+    expect(INCOME_REQUIRED_SOURCES).not.toContain("asfaComfortable");
+    expect(INCOME_REQUIRED_SOURCES).not.toContain("asfaModest");
+  });
+
+  it("clampIncomeRequired clamps customAmount to non-negative and stepDownPct to [0,100]", () => {
+    const plan = { client: { currentAge: 55 }, partner: null, endAge: 90, keyDates: [] };
+    expect(clampIncomeRequired({ customAmount: -500 }, plan).customAmount).toBe(0);
+    expect(clampIncomeRequired({ customAmount: "12000" }, plan).customAmount).toBe(12000);
+    expect(clampIncomeRequired({ stepDownPct: 150 }, plan).stepDownPct).toBe(100);
+    expect(clampIncomeRequired({ stepDownPct: -10 }, plan).stepDownPct).toBe(0);
+  });
+
+  it("clampIncomeRequired clamps stepDownAtAge into [currentAge, endAge], and leaves it null when unset", () => {
+    const plan = { client: { currentAge: 55 }, partner: null, endAge: 90, keyDates: [] };
+    expect(clampIncomeRequired({ stepDownAtAge: null }, plan).stepDownAtAge).toBeNull();
+    expect(clampIncomeRequired({ stepDownAtAge: 40 }, plan).stepDownAtAge).toBe(55); // below currentAge
+    expect(clampIncomeRequired({ stepDownAtAge: 200 }, plan).stepDownAtAge).toBe(90); // above endAge
+    expect(clampIncomeRequired({ stepDownAtAge: 70 }, plan).stepDownAtAge).toBe(70);
+  });
+
+  it("clampIncomeRequired defaults startAt to the retirement key date, and keeps a valid explicit anchor/age", () => {
+    const plan = { client: { currentAge: 55 }, partner: null, endAge: 90, keyDates: [] };
+    expect(clampIncomeRequired({}, plan).startAt).toEqual({ kind: "anchor", anchorId: "retirement-client" });
+    expect(clampIncomeRequired({ startAt: { kind: "age", age: 67 } }, plan).startAt).toEqual({ kind: "age", age: 67 });
+    // An unknown anchor id (e.g. a deleted key date) falls back to an
+    // explicit age via clampDateRef's own shape-only guard, same as
+    // every other DateRef field in this schema.
+    expect(clampIncomeRequired({ startAt: { kind: "anchor", anchorId: "deleted-kd" } }, plan).startAt)
+      .toEqual({ kind: "age", age: 55 });
+  });
+
+  it("normaliseRetirement wraps clampIncomeRequired under the retirement.incomeRequired key, defaulting a missing block entirely", () => {
+    const plan = { client: { currentAge: 55 }, partner: null, endAge: 90, keyDates: [] };
+    expect(normaliseRetirement(undefined, plan).incomeRequired).toEqual(createIncomeRequired());
+    expect(normaliseRetirement({ incomeRequired: { source: "custom", customAmount: 90000 } }, plan).incomeRequired.source).toBe("custom");
+  });
+
+  it("clampPlan always populates plan.retirement, even for a plan that never mentioned it", () => {
+    const raw = couplePlan();
+    const p = clampPlan(raw, PROFILES);
+    expect(p.retirement.incomeRequired.source).toBe("currentExpenses");
+    expect(p.retirement.incomeRequired.startAt).toEqual({ kind: "anchor", anchorId: "retirement-client" });
   });
 });
 
