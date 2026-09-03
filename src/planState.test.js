@@ -2256,16 +2256,17 @@ describe("Retirement: Income Required (spec 32, Commits 1-2): plan model", () =>
     expect(c.stepDownPct).toBe(80);
   });
 
-  it("clampIncomeRequired restricts source to the four resolvable values — an unrecognised value falls back to currentExpenses, not silently accepted", () => {
+  it("clampIncomeRequired restricts source to the five resolvable values — an unrecognised value falls back to currentExpenses, not silently accepted", () => {
     const plan = { client: { currentAge: 55 }, partner: null, endAge: 90, keyDates: [] };
     expect(clampIncomeRequired({ source: "custom" }, plan).source).toBe("custom");
     expect(clampIncomeRequired({ source: "asfaComfortable" }, plan).source).toBe("asfaComfortable");
     expect(clampIncomeRequired({ source: "asfaModest" }, plan).source).toBe("asfaModest");
+    // asfaModestRenter is the spec's own explicit override for
+    // asfaModest's derived homeowner/renter status (src/retirement.js's
+    // deriveHomeownerStatus) — a real, selectable source, not disclosed
+    // reference data only.
+    expect(clampIncomeRequired({ source: "asfaModestRenter" }, plan).source).toBe("asfaModestRenter");
     expect(clampIncomeRequired({ source: "nonsense" }, plan).source).toBe("currentExpenses");
-    // asfaModestRenter deliberately has no source value at all (spec 32,
-    // Commit 2) — the renter figure is disclosed reference data only,
-    // never itself selectable as the resolved target.
-    expect(INCOME_REQUIRED_SOURCES).not.toContain("asfaModestRenter");
   });
 
   it("clampIncomeRequired clamps customAmount to non-negative and stepDownPct to [0,100]", () => {

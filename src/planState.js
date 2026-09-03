@@ -2415,8 +2415,11 @@ export function refineHeasProperty(heas, properties) {
 // src/data/asfaStandards.js, so the enum widens from Commit 1's
 // ["currentExpenses","custom"] — per CLAUDE.md's Input integrity
 // section, extending it happens in the SAME commit that gives the new
-// values something to resolve against, never before.
-export const INCOME_REQUIRED_SOURCES = ["currentExpenses", "custom", "asfaComfortable", "asfaModest"];
+// values something to resolve against, never before. asfaModestRenter
+// is the spec's own "provide an override" mechanism for asfaModest's
+// derived homeowner/renter status (src/retirement.js's
+// deriveHomeownerStatus) — a distinct source, not a boolean flag.
+export const INCOME_REQUIRED_SOURCES = ["currentExpenses", "custom", "asfaComfortable", "asfaModest", "asfaModestRenter"];
 
 export function createIncomeRequired() {
   return {

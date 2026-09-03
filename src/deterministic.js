@@ -6259,13 +6259,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     };
   }
 
-  // Retirement: Income Required (spec 32, Commit 1) — a REFERENCE line
-  // only; resolved once here against the finished schedule/plan and
-  // written onto every yearly row. Never touches income/tax/expenses
-  // or any other projection arithmetic above — see src/retirement.js's
-  // header for the after-tax interpretation and the null-before-startAt
-  // convention.
-  const incomeRequiredAt = resolveIncomeRequired(state.plan, schedule, cpi, wageGrowthAssum);
+  // Retirement: Income Required (spec 32, Commits 1-2) — a REFERENCE
+  // line only; resolved once here against the finished schedule/plan
+  // AND the now-complete `yearly` ledger (asfaModest's own derived
+  // homeowner status needs the projected loan balance at the
+  // retirement year, which only exists once every row above is built)
+  // and written onto every yearly row. Never touches income/tax/
+  // expenses or any other projection arithmetic above — see
+  // src/retirement.js's header for the after-tax interpretation and
+  // the null-before-startAt convention.
+  const incomeRequiredAt = resolveIncomeRequired(state.plan, schedule, cpi, wageGrowthAssum, {
+    properties: state.properties, liabilities: state.liabilities, yearly,
+  });
   yearly.forEach((row, y) => { row.incomeRequired = incomeRequiredAt(y); });
 
   // ASFA staleness (spec 32, Commit 2) — same convention as

@@ -2274,6 +2274,78 @@ Age Pension cross-check — zero new console errors.
 
 ---
 
+### Retirement: ASFA renter standard and derived homeowner status (spec 32, Commit 2 gap-fill)
+The user rewrote `docs/specs/32-retirement-phase-one.md` after supplying
+the Commit 2 figures and hadn't pushed the update yet when Commit 2
+landed — the version this repo had at the time genuinely lacked the
+renter-source and derived-homeowner-status requirements (confirmed by
+re-reading the file, same "stop and say so" protocol as the earlier
+figures-location question). Once the current spec landed, closed the
+gap before starting Commit 3, since Commit 3 doesn't depend on it but
+leaving it unresolved risked compounding.
+
+**Homeowner status derived, not asked** (the spec's own heading) —
+`src/retirement.js`'s new `deriveHomeownerStatus(properties, liabilities,
+retirementYearRow)`: a household owns outright at the Retirement key
+date only if it has a `propertyType: "ppr"` property, already purchased
+by that plan year, with no balance remaining on any liability whose
+`linkedAssetId` points at it. Read from the engine's OWN projected
+`yearly` ledger at that year (never re-derived from today's loan terms —
+extra repayments, an offset account, and rate changes all move the real
+payoff date). No principal residence, or no data at all, defaults to
+"renter" — the spec's own stated default, and what every pre-existing
+bare test fixture in the suite now resolves to for `asfaModest` (a real,
+if narrow, behaviour change from the original Commit 2 landing, where
+ASFA sources always assumed homeowner unconditionally).
+
+`INCOME_REQUIRED_SOURCES` widens again to include `asfaModestRenter` —
+not disclosed-only reference data as originally built, but the spec's
+own "provide an override" mechanism: `asfaModest` auto-derives;
+`asfaModestRenter` forces the renter figure regardless, a deliberate
+adviser choice expressed as a distinct source value rather than a second
+boolean field. `asfaComfortable` is untouched — there is no
+Comfortable-renter figure in the firm's own source table, so it never
+derives anything.
+
+`resolveIncomeRequired` gained an optional `ctx` parameter
+(`{properties, liabilities, yearly}`) — only `asfaModest`'s own
+derivation consults it; every other source (and every pre-existing
+caller that doesn't pass it) is unaffected. `deterministic.js` threads
+`state.properties`/`state.liabilities`/the now-complete `yearly` array
+through at the same post-pass call site Commit 1 already established.
+
+Staleness window corrected to match the CURRENT spec's own wording
+("more than two quarters old", not Commit 2's original one-quarter
+guess) — `ASFA_STANDARDS_BASE.periodEnd` moved from 2026-06-01 to
+2026-09-01.
+
+UI: the Settings block's Source dropdown gained the renter option,
+labelled "— derived"/"— override" so an adviser can see at a glance
+which of the two ASFA-Modest entries is the smart one; a new disclosure
+line states the plan's own derived status in plain language, computed
+via the SAME exported `deriveHomeownerStatus` the engine itself uses
+(main.js calls it directly against `state.properties`/`state.liabilities`
+and the real `projection.yearly`, so the UI can never show an answer
+that disagrees with what the engine actually resolved). The Parameters
+modal's ASFA section gained a paragraph on the derivation mechanism and
+the corrected two-quarter staleness wording.
+
+Tests: a new `deriveHomeownerStatus` describe block (7 cases — no PPR,
+no data, not-yet-purchased, no loan, loan outstanding, loan paid off,
+a loan linked to an unrelated asset); a `resolveIncomeRequired` describe
+block covering the same cases through the full resolution+indexation
+path; two REAL engine-integration tests using `createProperty`/
+`createLiability` and a genuine `projectPlan()` run (not a hand-built
+yearly row) to prove the derivation threads correctly end-to-end from
+`deterministic.js`. Two pre-existing Commit 2 tests updated to reflect
+the corrected (spec-accurate) behaviour — a bare fixture's `asfaModest`
+now resolves the renter figure, not the old always-homeowner assumption.
+Full suite 1904/1904, build green. Browser-verified: the dropdown's
+five options, the derived-status disclosure text, zero new console
+errors.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

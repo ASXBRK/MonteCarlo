@@ -19,14 +19,12 @@
 //      (<household>, homeowner)".
 export const ASFA_STANDARDS_BASE = Object.freeze({
   quarter: "March quarter 2026",
-  // ASFA republishes quarterly; no firm-confirmed release date for the
-  // next (June) quarter's figures was supplied, so the validity window
-  // is assumed to be one quarter (~3 months) from the stamped quarter's
-  // own start — see asfaStalenessWarning() below. Confirm the actual
-  // release cadence against ASFA's own publication schedule before
-  // relying on this window for anything beyond "warn eventually".
+  // Warn once the stamped quarter is MORE THAN TWO QUARTERS old (spec
+  // 32, Commit 2's own words) — March quarter + 2 quarters = the
+  // September quarter's own start, six months on. See
+  // asfaStalenessWarning() below.
   periodStart: "2026-03-01",
-  periodEnd: "2026-06-01",
+  periodEnd: "2026-09-01",
   source: "ASFA Retirement Standard, supplied by the firm, March quarter 2026.",
 
   // Annual figures, real (today's) dollars at the stamped quarter.

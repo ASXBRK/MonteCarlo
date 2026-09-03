@@ -65,6 +65,7 @@ import { nominalFactor, firstFyStartYear } from "./schedule.js";
 import {
   ASFA_STANDARDS_BASE, asfaAnnual, asfaStandardLabel, asfaStalenessWarning, ASFA_HOMEOWNER_ASSUMPTION_NOTE,
 } from "./data/asfaStandards.js";
+import { deriveHomeownerStatus } from "./retirement.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
@@ -4741,6 +4742,16 @@ function modalLinkHTML(scrollToId, text) {
 // A household-wide target, not tied to any one asset or person — the
 // same "no natural section, so Settings" reasoning as gifts/HEAS above.
 //
+// Homeowner status derived, not asked (Commit 2's own heading) — reuses
+// the SAME pure deriveHomeownerStatus the engine itself resolves
+// asfaModest against, fed the household's own properties/liabilities
+// and the projected yearly row at the Retirement key date, so the UI
+// can never show a different answer than what the engine actually used.
+function derivedHomeownerStatus() {
+  const { planYear } = resolveRef({ kind: "anchor", anchorId: "retirement-client" }, state.plan, projection.schedule, "client");
+  return deriveHomeownerStatus(state.properties, state.liabilities, projection.yearly[planYear]);
+}
+
 // ASFA reference figures (Commit 2) render UNCONDITIONALLY, not just
 // when picked as the source — the spec's own "show the assumption
 // wherever the figure appears" requirement, so a household comparing
@@ -4748,6 +4759,7 @@ function modalLinkHTML(scrollToId, text) {
 // disclosure right alongside them either way.
 function asfaReferenceBlockHTML() {
   const household = isCouple() ? "couple" : "single";
+  const status = derivedHomeownerStatus();
   const row = (standard) => `<div class="asfa-ref-row"><span>${escapeHTML(asfaStandardLabel(standard, household))}</span><span>${fmtMoney(asfaAnnual(standard, household) ?? 0)}/yr</span></div>`;
   const staleness = asfaStalenessWarning(new Date());
   return `
@@ -4756,6 +4768,7 @@ function asfaReferenceBlockHTML() {
       ${row("comfortable")}${row("modest")}
       <div class="asfa-ref-row"><span>ASFA Modest (${household}, renter)</span><span>${fmtMoney(asfaAnnual("modestRenter", household) ?? 0)}/yr</span></div>
       <p class="helper-text">${escapeHTML(ASFA_HOMEOWNER_ASSUMPTION_NOTE)}</p>
+      <p class="helper-text">Derived from this plan: at the Retirement key date this household is treated as a <strong>${status}</strong>${status === "renter" ? " (no principal residence, or a mortgage still owing on it, at that date)" : " (the principal residence is owned outright by then)"} — "ASFA Modest" below resolves that figure automatically; "ASFA Modest (renter)" forces the renter figure regardless.</p>
       ${staleness ? `<p class="helper-warning">${escapeHTML(staleness)}</p>` : ""}
     </div>
   `;
@@ -4765,6 +4778,9 @@ function incomeRequiredSectionHTML() {
   const ir = state.plan.retirement.incomeRequired;
   const isCustom = ir.source === "custom";
   const household = isCouple() ? "couple" : "single";
+  const modestDerivedLabel = derivedHomeownerStatus() === "renter"
+    ? `${asfaStandardLabel("modestRenter", household)} — derived`
+    : `${asfaStandardLabel("modest", household)} — derived`;
   const drAttrs = `data-settings-field="irStartAt"`;
   return `
     <div class="cf-section">
@@ -4777,7 +4793,8 @@ function incomeRequiredSectionHTML() {
             <option value="currentExpenses"${ir.source === "currentExpenses" ? " selected" : ""}>Current expenses (total household living expenses, at retirement)</option>
             <option value="custom"${isCustom ? " selected" : ""}>Custom amount</option>
             <option value="asfaComfortable"${ir.source === "asfaComfortable" ? " selected" : ""}>${escapeHTML(asfaStandardLabel("comfortable", household))}</option>
-            <option value="asfaModest"${ir.source === "asfaModest" ? " selected" : ""}>${escapeHTML(asfaStandardLabel("modest", household))}</option>
+            <option value="asfaModest"${ir.source === "asfaModest" ? " selected" : ""}>${escapeHTML(modestDerivedLabel)}</option>
+            <option value="asfaModestRenter"${ir.source === "asfaModestRenter" ? " selected" : ""}>${escapeHTML(asfaStandardLabel("modestRenter", household))} — override</option>
           </select>
         </div>
         ${isCustom ? `

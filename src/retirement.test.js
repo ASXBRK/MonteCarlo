@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { buildSchedules } from "./schedule.js";
-import { resolveIncomeRequired, INCOME_REQUIRED_SOURCES } from "./retirement.js";
+import { resolveIncomeRequired, INCOME_REQUIRED_SOURCES, deriveHomeownerStatus } from "./retirement.js";
 import { projectPlan } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
+import { createProperty, createLiability } from "./planState.js";
 
 // Minimal v3-shaped state factory, same shape as schedule.test.js's own
 // mkState — this module is pure and only needs a built schedule, not the
@@ -84,11 +85,11 @@ describe("resolveIncomeRequired — sources", () => {
     expect(at(5)).toBeCloseTo(50000, 2);
   });
 
-  it("INCOME_REQUIRED_SOURCES includes both ASFA sources (Commit 2), but no asfaModestRenter value", () => {
-    expect(INCOME_REQUIRED_SOURCES).toEqual(["currentExpenses", "custom", "asfaComfortable", "asfaModest"]);
+  it("INCOME_REQUIRED_SOURCES includes all three ASFA sources (Commit 2) — asfaModestRenter is the derivation's own override, not omitted", () => {
+    expect(INCOME_REQUIRED_SOURCES).toEqual(["currentExpenses", "custom", "asfaComfortable", "asfaModest", "asfaModestRenter"]);
   });
 
-  it("asfaComfortable and asfaModest resolve the ASFA figure for the household's own single/couple status, ignoring customAmount and expense rows entirely", () => {
+  it("asfaComfortable resolves the household's own single/couple figure directly, ignoring customAmount, expense rows, and homeowner status entirely (no renter variant exists for Comfortable)", () => {
     const single = mkState({ clientAge: 60, endAge: 70, retirementAge: 60, expenses: [expenseRow(9999)] });
     single.plan.retirement = {
       incomeRequired: {
@@ -102,10 +103,9 @@ describe("resolveIncomeRequired — sources", () => {
     expect(atSingle(0)).toBeCloseTo(55923, 2); // ASFA Comfortable, single, March quarter 2026
 
     const couple = { ...single, plan: { ...single.plan, household: "married", partner: { currentAge: 60 } } };
-    couple.plan.retirement = { incomeRequired: { ...single.plan.retirement.incomeRequired, source: "asfaModest" } };
     const scheduleCouple = buildSchedules(couple);
     const atCouple = resolveIncomeRequired(couple.plan, scheduleCouple, couple.assumptions.cpi, couple.assumptions.wageGrowth);
-    expect(atCouple(0)).toBeCloseTo(52473, 2); // ASFA Modest, couple, March quarter 2026
+    expect(atCouple(0)).toBeCloseTo(78566, 2); // ASFA Comfortable, couple
   });
 
   it("an ASFA-sourced requirement still indexes forward and steps down like any other source", () => {
@@ -126,6 +126,99 @@ describe("resolveIncomeRequired — sources", () => {
     expect(at(3)).toBeCloseTo(expectedY3, 2);
     const expectedY5 = base * Math.pow((1 + wageGrowth) / (1 + cpi), 5) * 0.5;
     expect(at(5)).toBeCloseTo(expectedY5, 2); // age 65 — step-down applies on top of indexation
+  });
+});
+
+// --- Homeowner status derived, not asked (spec 32, Commit 2) ---------------
+
+describe("deriveHomeownerStatus", () => {
+  it("no principal residence at all → renter, the spec's own stated default", () => {
+    expect(deriveHomeownerStatus([], [], { properties: {}, liabilities: {} })).toBe("renter");
+  });
+
+  it("no data at all (a bare fixture, or no retirement-year row yet) → renter", () => {
+    expect(deriveHomeownerStatus(undefined, undefined, undefined)).toBe("renter");
+  });
+
+  it("a principal residence not yet purchased by the retirement year (projected value still 0) → renter", () => {
+    const properties = [{ id: "p1", propertyType: "ppr" }];
+    const row = { properties: { p1: { value: 0 } }, liabilities: {} };
+    expect(deriveHomeownerStatus(properties, [], row)).toBe("renter");
+  });
+
+  it("an owned principal residence with no linked loan at all → homeowner", () => {
+    const properties = [{ id: "p1", propertyType: "ppr" }];
+    const row = { properties: { p1: { value: 900000 } }, liabilities: {} };
+    expect(deriveHomeownerStatus(properties, [], row)).toBe("homeowner");
+  });
+
+  it("an owned principal residence whose linked loan still carries a projected balance at the retirement year → renter", () => {
+    const properties = [{ id: "p1", propertyType: "ppr" }];
+    const liabilities = [{ id: "l1", linkedAssetId: "p1" }];
+    const row = { properties: { p1: { value: 900000 } }, liabilities: { l1: { closing: 120000 } } };
+    expect(deriveHomeownerStatus(properties, liabilities, row)).toBe("renter");
+  });
+
+  it("an owned principal residence whose linked loan is fully paid off by the retirement year → homeowner", () => {
+    const properties = [{ id: "p1", propertyType: "ppr" }];
+    const liabilities = [{ id: "l1", linkedAssetId: "p1" }];
+    const row = { properties: { p1: { value: 900000 } }, liabilities: { l1: { closing: 0 } } };
+    expect(deriveHomeownerStatus(properties, liabilities, row)).toBe("homeowner");
+  });
+
+  it("a loan linked to some OTHER asset (not the PPR) is irrelevant to the PPR's own status", () => {
+    const properties = [{ id: "p1", propertyType: "ppr" }];
+    const liabilities = [{ id: "l1", linkedAssetId: "some-other-asset" }];
+    const row = { properties: { p1: { value: 900000 } }, liabilities: { l1: { closing: 500000 } } };
+    expect(deriveHomeownerStatus(properties, liabilities, row)).toBe("homeowner");
+  });
+});
+
+describe("resolveIncomeRequired — asfaModest derives homeowner/renter; asfaModestRenter overrides it", () => {
+  const irCfg = (source) => ({
+    incomeRequired: {
+      source, customAmount: 0, indexBasis: "cpi", indexExtraPct: 0,
+      startAt: anchorRef("retirement-client"), stepDownAtAge: null, stepDownPct: 80,
+    },
+  });
+
+  it("with no property data at all, asfaModest derives renter and resolves the renter figure — never silently falls back to the homeowner assumption", () => {
+    const state = mkState({ clientAge: 55, endAge: 65, retirementAge: 60 });
+    const schedule = buildSchedules(state);
+    state.plan.retirement = irCfg("asfaModest");
+    const at = resolveIncomeRequired(state.plan, schedule, state.assumptions.cpi, state.assumptions.wageGrowth); // no ctx supplied
+    expect(at(5)).toBeCloseTo(51164, 2); // single, ASFA Modest (renter)
+  });
+
+  it("with an owned, mortgage-free PPR, asfaModest derives homeowner and resolves the homeowner figure", () => {
+    const state = mkState({ clientAge: 55, endAge: 65, retirementAge: 60 });
+    const schedule = buildSchedules(state);
+    state.plan.retirement = irCfg("asfaModest");
+    const properties = [{ id: "p1", propertyType: "ppr" }];
+    const yearly = []; yearly[5] = { properties: { p1: { value: 900000 } }, liabilities: {} };
+    const at = resolveIncomeRequired(state.plan, schedule, state.assumptions.cpi, state.assumptions.wageGrowth, { properties, liabilities: [], yearly });
+    expect(at(5)).toBeCloseTo(36434, 2); // single, ASFA Modest (homeowner)
+  });
+
+  it("with an owned PPR but a mortgage still owing at the retirement year, asfaModest derives renter", () => {
+    const state = mkState({ clientAge: 55, endAge: 65, retirementAge: 60 });
+    const schedule = buildSchedules(state);
+    state.plan.retirement = irCfg("asfaModest");
+    const properties = [{ id: "p1", propertyType: "ppr" }];
+    const liabilities = [{ id: "l1", linkedAssetId: "p1" }];
+    const yearly = []; yearly[5] = { properties: { p1: { value: 900000 } }, liabilities: { l1: { closing: 150000 } } };
+    const at = resolveIncomeRequired(state.plan, schedule, state.assumptions.cpi, state.assumptions.wageGrowth, { properties, liabilities, yearly });
+    expect(at(5)).toBeCloseTo(51164, 2); // still paying it off — renter comparison
+  });
+
+  it("asfaModestRenter is the spec's own explicit override — forces the renter figure even when derivation would say homeowner", () => {
+    const state = mkState({ clientAge: 55, endAge: 65, retirementAge: 60 });
+    const schedule = buildSchedules(state);
+    state.plan.retirement = irCfg("asfaModestRenter");
+    const properties = [{ id: "p1", propertyType: "ppr" }];
+    const yearly = []; yearly[5] = { properties: { p1: { value: 900000 } }, liabilities: {} }; // mortgage-free → would derive homeowner
+    const at = resolveIncomeRequired(state.plan, schedule, state.assumptions.cpi, state.assumptions.wageGrowth, { properties, liabilities: [], yearly });
+    expect(at(5)).toBeCloseTo(51164, 2); // forced renter regardless of the derived answer
   });
 });
 
@@ -231,7 +324,7 @@ describe("resolveIncomeRequired — no retirement block configured", () => {
 
 // --- Engine integration: reference-only, no side effects -------------------
 
-function mkEngineState({ retirement } = {}) {
+function mkEngineState({ retirement, properties = [], liabilities = [] } = {}) {
   return {
     plan: {
       household: "single",
@@ -255,8 +348,8 @@ function mkEngineState({ retirement } = {}) {
       expenses: [expenseRow(3000)],
       contributions: [], withdrawals: [], lumpSums: [], bondContributions: [],
     },
-    liabilities: [],
-    properties: [],
+    liabilities,
+    properties,
     settings: {
       surplus: { periods: [{ from: ageRef(55), to: ageRef(120), mode: "spend", assetId: null }] },
       fundingOrder: ["a1"],
@@ -343,5 +436,26 @@ describe("engine integration — retirementWarnings (spec 32, Commit 2)", () => 
     expect(result.retirementWarnings).toHaveLength(1);
     expect(result.retirementWarnings[0].type).toBe("staleness");
     expect(result.retirementWarnings[0].reason).toContain("March quarter 2026");
+  });
+});
+
+describe("engine integration — asfaModest derives homeowner/renter from a REAL projected property and loan", () => {
+  const irCfg = {
+    source: "asfaModest", customAmount: 0, indexBasis: "cpi", indexExtraPct: 0,
+    startAt: anchorRef("retirement-client"), stepDownAtAge: null, stepDownPct: 80,
+  };
+  const tinyPlan = { client: { currentAge: 55 } };
+
+  it("a PPR with no loan at all resolves the HOMEOWNER modest figure through the real engine wiring (state.properties/state.liabilities threaded from deterministic.js into resolveIncomeRequired)", () => {
+    const home = { ...createProperty(tinyPlan, [], 4), name: "Home", currentValue: 900000, acquisitionDate: "2000-01-01", costBase: 300000 };
+    const result = projectPlan(mkEngineState({ retirement: { incomeRequired: irCfg }, properties: [home] }), PROFILES);
+    expect(result.yearly[5].incomeRequired).toBeCloseTo(36434, 2); // single, ASFA Modest homeowner
+  });
+
+  it("a PPR with a 25-year loan not yet paid off by year 5 (retirement) resolves the RENTER modest figure — read from the loan's own PROJECTED closing balance, not its opening one", () => {
+    const home = { ...createProperty(tinyPlan, [], 4), name: "Home", currentValue: 900000, acquisitionDate: "2000-01-01", costBase: 300000 };
+    const loan = { ...createLiability(tinyPlan, []), name: "Mortgage", balance: 500000, termYears: 25, linkedAssetId: home.id };
+    const result = projectPlan(mkEngineState({ retirement: { incomeRequired: irCfg }, properties: [home], liabilities: [loan] }), PROFILES);
+    expect(result.yearly[5].incomeRequired).toBeCloseTo(51164, 2); // single, ASFA Modest renter — still paying it off
   });
 });

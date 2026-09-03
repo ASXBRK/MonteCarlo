@@ -44,25 +44,58 @@ function livingExpensesForYear(schedule, y) {
   return total;
 }
 
+// Homeowner status derived, not asked (spec 32, Commit 2's own
+// heading). The household owns outright at the Retirement key date
+// only if it has a principal residence (propertyType "ppr"), ALREADY
+// purchased by that plan year, with no balance remaining on any loan
+// linked to it. Read from the engine's OWN projected yearly ledger at
+// that year — never re-derived from today's loan terms, since extra
+// repayments, an offset account, and rate changes all move the real
+// payoff date away from a naive amortisation calculation.
+//
+// No principal residence, or no data at all (a bare test fixture, or
+// a plan not yet given a property) → "renter", the spec's own stated
+// default ("the honest comparison is the renter standard").
+export function deriveHomeownerStatus(properties, liabilities, retirementYearRow) {
+  const ppr = (properties ?? []).find((p) => p.propertyType === "ppr");
+  if (!ppr || !retirementYearRow) return "renter";
+  const owned = (retirementYearRow.properties?.[ppr.id]?.value ?? 0) > 0;
+  if (!owned) return "renter"; // not yet purchased by the retirement year
+  const loan = (liabilities ?? []).find((l) => l.linkedAssetId === ppr.id);
+  if (!loan) return "homeowner"; // no linked mortgage at all
+  const closing = retirementYearRow.liabilities?.[loan.id]?.closing ?? 0;
+  return closing > 0 ? "renter" : "homeowner";
+}
+
 // The un-indexed base figure for `cfg.source`, resolved at `startYear`
 // — indexation/step-down are applied uniformly afterwards regardless
-// of source (see resolveIncomeRequired below). ASFA sources (spec 32,
-// Commit 2) always resolve the HOMEOWNER figure — asfaAnnual() has no
-// "renter" argument for asfaModest, matching the schema's own literal
-// enum (INCOME_REQUIRED_SOURCES has no asfaModestRenter value; the
-// renter figure exists in asfaStandards.js purely as disclosed
-// reference data, never as a selectable source).
-function incomeRequiredBaseAmount(cfg, plan, schedule, startYear) {
+// of source (see resolveIncomeRequired below).
+//
+// `asfaModest` auto-derives homeowner vs renter (above) and resolves
+// the matching figure; `asfaModestRenter` is the spec's own "provide
+// an override" mechanism — it forces the renter figure regardless of
+// what's derived, a deliberate adviser choice rather than a second
+// boolean field bolted on. `asfaComfortable` has no renter variant in
+// the firm's own source table, so it never derives anything.
+function incomeRequiredBaseAmount(cfg, plan, schedule, startYear, ctx) {
   if (cfg.source === "custom") return cfg.customAmount;
-  if (cfg.source === "asfaComfortable" || cfg.source === "asfaModest") {
-    const household = isCoupleHousehold(plan.household) ? "couple" : "single";
-    const standard = cfg.source === "asfaComfortable" ? "comfortable" : "modest";
-    return asfaAnnual(standard, household) ?? 0;
+  const household = isCoupleHousehold(plan.household) ? "couple" : "single";
+  if (cfg.source === "asfaComfortable") return asfaAnnual("comfortable", household) ?? 0;
+  if (cfg.source === "asfaModestRenter") return asfaAnnual("modestRenter", household) ?? 0;
+  if (cfg.source === "asfaModest") {
+    const { planYear: retirementYear } = resolveRef({ kind: "anchor", anchorId: "retirement-client" }, plan, schedule, "client");
+    const status = deriveHomeownerStatus(ctx.properties, ctx.liabilities, ctx.yearly?.[retirementYear]);
+    return asfaAnnual(status === "renter" ? "modestRenter" : "modest", household) ?? 0;
   }
   return livingExpensesForYear(schedule, startYear); // currentExpenses, and any unrecognised value
 }
 
-// resolveIncomeRequired(plan, schedule, cpi, wageGrowth) → (y) => amount|null
+// resolveIncomeRequired(plan, schedule, cpi, wageGrowth, ctx?) → (y) => amount|null
+//
+// `ctx` ({ properties, liabilities, yearly }) is only consulted for
+// `asfaModest`'s own derivation above; every other source ignores it
+// entirely, so omitting it is safe for any caller not exercising that
+// one source (defaults derive "renter" — see deriveHomeownerStatus).
 //
 // The returned accessor gives the resolved, indexed, step-down-applied
 // Income Required figure for plan year `y` — real $, after-tax
@@ -71,7 +104,7 @@ function incomeRequiredBaseAmount(cfg, plan, schedule, startYear) {
 // value once the requirement is actually active; null means "not yet
 // applicable", the same convention used elsewhere in this codebase for
 // pre-commencement figures).
-export function resolveIncomeRequired(plan, schedule, cpi, wageGrowth) {
+export function resolveIncomeRequired(plan, schedule, cpi, wageGrowth, ctx = {}) {
   // A plan that never went through clampPlan (a hand-built test
   // fixture, mostly) has no `retirement` block at all — fall back to
   // the same schema default clampPlan itself would have supplied,
@@ -81,7 +114,7 @@ export function resolveIncomeRequired(plan, schedule, cpi, wageGrowth) {
   // retirementAge).
   const cfg = plan.retirement?.incomeRequired ?? createIncomeRequired();
   const { planYear: startYear } = resolveRef(cfg.startAt, plan, schedule, "client");
-  const baseAmount = incomeRequiredBaseAmount(cfg, plan, schedule, startYear);
+  const baseAmount = incomeRequiredBaseAmount(cfg, plan, schedule, startYear, ctx);
   // A pseudo cashflow-row shape so this reuses schedule.js's OWN
   // canonical indexation ratio (realAmountAt) rather than
   // re-deriving it — the ratio formula is reference-point-agnostic:

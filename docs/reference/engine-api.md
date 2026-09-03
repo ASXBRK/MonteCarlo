@@ -230,12 +230,18 @@ before the requirement's own `startAt` (a real, active figure is never
 into any other field on this row. **Interpretation: after-tax income
 received by the household** — compare it against `income − tax` on this
 SAME row, never against gross drawdown. Its `source` resolves one of
-four ways: `currentExpenses` (the household's own living-expense rows at
+five ways: `currentExpenses` (the household's own living-expense rows at
 the requirement's start year), `custom` (a stated $ figure),
-`asfaComfortable`/`asfaModest` (the ASFA Retirement Standard's own
-published figure for the household's single/couple status —
-`src/data/asfaStandards.js`, sourced directly from the firm, never
-web-searched). A stale ASFA quarter surfaces as a top-level
+`asfaComfortable` (the ASFA Comfortable figure for the household's
+single/couple status), `asfaModest` (as Comfortable, but AUTOMATICALLY
+choosing between the homeowner and renter figure — homeowner status
+derived from whether the household has a principal residence with no
+loan balance remaining at the Retirement key date, read from the
+engine's own projected ledger; see `deriveHomeownerStatus` in
+`src/retirement.js`), and `asfaModestRenter` (an explicit override that
+always resolves the renter figure regardless of what's derived).
+`src/data/asfaStandards.js`'s figures are sourced directly from the
+firm, never web-searched. A stale ASFA quarter surfaces as a top-level
 `retirementWarnings` entry, not on this row.
 
 **Cashflow mechanics**
