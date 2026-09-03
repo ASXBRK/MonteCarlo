@@ -62,6 +62,9 @@ import { fhbgPriceCapExceeded, FHBG_PRICE_CAPS } from "./data/fhbgCaps.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
 import { nominalFactor, firstFyStartYear } from "./schedule.js";
+import {
+  ASFA_STANDARDS_BASE, asfaAnnual, asfaStandardLabel, asfaStalenessWarning, ASFA_HOMEOWNER_ASSUMPTION_NOTE,
+} from "./data/asfaStandards.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
@@ -4733,13 +4736,35 @@ function modalLinkHTML(scrollToId, text) {
   return `<button type="button" class="link-inline" data-action="open-modal" data-modal-scroll-to="${scrollToId}">${escapeHTML(text)}</button>`;
 }
 
-// --- Retirement: Income Required (spec 32, Commit 1) -----------------------
+// --- Retirement: Income Required (spec 32, Commits 1-2) ---------------------
 //
 // A household-wide target, not tied to any one asset or person — the
 // same "no natural section, so Settings" reasoning as gifts/HEAS above.
+//
+// ASFA reference figures (Commit 2) render UNCONDITIONALLY, not just
+// when picked as the source — the spec's own "show the assumption
+// wherever the figure appears" requirement, so a household comparing
+// its own custom target against the ASFA figures sees the homeowner
+// disclosure right alongside them either way.
+function asfaReferenceBlockHTML() {
+  const household = isCouple() ? "couple" : "single";
+  const row = (standard) => `<div class="asfa-ref-row"><span>${escapeHTML(asfaStandardLabel(standard, household))}</span><span>${fmtMoney(asfaAnnual(standard, household) ?? 0)}/yr</span></div>`;
+  const staleness = asfaStalenessWarning(new Date());
+  return `
+    <div class="asfa-ref-block">
+      <p class="helper-text"><strong>ASFA Retirement Standard</strong> (${escapeHTML(ASFA_STANDARDS_BASE.quarter)}) — for comparison, not a recommendation:</p>
+      ${row("comfortable")}${row("modest")}
+      <div class="asfa-ref-row"><span>ASFA Modest (${household}, renter)</span><span>${fmtMoney(asfaAnnual("modestRenter", household) ?? 0)}/yr</span></div>
+      <p class="helper-text">${escapeHTML(ASFA_HOMEOWNER_ASSUMPTION_NOTE)}</p>
+      ${staleness ? `<p class="helper-warning">${escapeHTML(staleness)}</p>` : ""}
+    </div>
+  `;
+}
+
 function incomeRequiredSectionHTML() {
   const ir = state.plan.retirement.incomeRequired;
   const isCustom = ir.source === "custom";
+  const household = isCouple() ? "couple" : "single";
   const drAttrs = `data-settings-field="irStartAt"`;
   return `
     <div class="cf-section">
@@ -4749,8 +4774,10 @@ function incomeRequiredSectionHTML() {
         <div class="cf-cell">
           <label>Source</label>
           <select data-settings-field="irSource">
-            <option value="currentExpenses"${!isCustom ? " selected" : ""}>Current expenses (total household living expenses, at retirement)</option>
+            <option value="currentExpenses"${ir.source === "currentExpenses" ? " selected" : ""}>Current expenses (total household living expenses, at retirement)</option>
             <option value="custom"${isCustom ? " selected" : ""}>Custom amount</option>
+            <option value="asfaComfortable"${ir.source === "asfaComfortable" ? " selected" : ""}>${escapeHTML(asfaStandardLabel("comfortable", household))}</option>
+            <option value="asfaModest"${ir.source === "asfaModest" ? " selected" : ""}>${escapeHTML(asfaStandardLabel("modest", household))}</option>
           </select>
         </div>
         ${isCustom ? `
@@ -4763,6 +4790,7 @@ function incomeRequiredSectionHTML() {
           ${dateRefControlHTML(ir.startAt, "client", drAttrs, state.plan.client.currentAge, state.plan.endAge)}
         </div>
       </div>
+      ${asfaReferenceBlockHTML()}
       <div class="cf-cell-index">
         <label>Indexation</label>
         <div class="cf-index-pair">

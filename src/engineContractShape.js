@@ -33,6 +33,11 @@
 // pinned as empty objects here, not their populated inner shape — those
 // are still exercised (for correctness, not shape-pinning) by their own
 // dedicated test files (bonds.test.js, pensionTba.test.js, etc.).
+// `retirementWarnings` (spec 32, Commit 2) is pinned `["array","empty"]`
+// for the same reason: none of the three fixtures selects an ASFA
+// source, so it's never populated here — its one populated shape
+// (`{type, reason}`, identical to `agedCareWarnings`') is exercised by
+// deterministic.test.js/retirement.test.js directly.
 // `goals`, `goalStats`, and `schedule.rowTotals.deductions` WERE on
 // this same disclosed-gap list until the demo client set rewrite gave
 // "Family with a mortgage" a real goal and a real deduction row (salary
@@ -190,6 +195,10 @@ export const COMMITTED_SHAPE ={
     ]
   },
   "propertyWarnings": [
+    "array",
+    "empty"
+  ],
+  "retirementWarnings": [
     "array",
     "empty"
   ],

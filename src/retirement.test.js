@@ -84,8 +84,48 @@ describe("resolveIncomeRequired — sources", () => {
     expect(at(5)).toBeCloseTo(50000, 2);
   });
 
-  it("INCOME_REQUIRED_SOURCES deliberately excludes the ASFA sources until Commit 2 gives them something to resolve against", () => {
-    expect(INCOME_REQUIRED_SOURCES).toEqual(["currentExpenses", "custom"]);
+  it("INCOME_REQUIRED_SOURCES includes both ASFA sources (Commit 2), but no asfaModestRenter value", () => {
+    expect(INCOME_REQUIRED_SOURCES).toEqual(["currentExpenses", "custom", "asfaComfortable", "asfaModest"]);
+  });
+
+  it("asfaComfortable and asfaModest resolve the ASFA figure for the household's own single/couple status, ignoring customAmount and expense rows entirely", () => {
+    const single = mkState({ clientAge: 60, endAge: 70, retirementAge: 60, expenses: [expenseRow(9999)] });
+    single.plan.retirement = {
+      incomeRequired: {
+        source: "asfaComfortable", customAmount: 1,
+        indexBasis: "cpi", indexExtraPct: 0,
+        startAt: ageRef(60), stepDownAtAge: null, stepDownPct: 80,
+      },
+    };
+    const scheduleSingle = buildSchedules(single);
+    const atSingle = resolveIncomeRequired(single.plan, scheduleSingle, single.assumptions.cpi, single.assumptions.wageGrowth);
+    expect(atSingle(0)).toBeCloseTo(55923, 2); // ASFA Comfortable, single, March quarter 2026
+
+    const couple = { ...single, plan: { ...single.plan, household: "married", partner: { currentAge: 60 } } };
+    couple.plan.retirement = { incomeRequired: { ...single.plan.retirement.incomeRequired, source: "asfaModest" } };
+    const scheduleCouple = buildSchedules(couple);
+    const atCouple = resolveIncomeRequired(couple.plan, scheduleCouple, couple.assumptions.cpi, couple.assumptions.wageGrowth);
+    expect(atCouple(0)).toBeCloseTo(52473, 2); // ASFA Modest, couple, March quarter 2026
+  });
+
+  it("an ASFA-sourced requirement still indexes forward and steps down like any other source", () => {
+    const cpi = 0.025, wageGrowth = 0.04;
+    const state = mkState({ clientAge: 60, endAge: 70, retirementAge: 60, cpi, wageGrowth });
+    const schedule = buildSchedules(state);
+    state.plan.retirement = {
+      incomeRequired: {
+        source: "asfaComfortable", customAmount: 0,
+        indexBasis: "awote", indexExtraPct: 0,
+        startAt: ageRef(60), stepDownAtAge: 65, stepDownPct: 50,
+      },
+    };
+    const at = resolveIncomeRequired(state.plan, schedule, cpi, wageGrowth);
+    const base = 55923;
+    expect(at(0)).toBeCloseTo(base, 2);
+    const expectedY3 = base * Math.pow((1 + wageGrowth) / (1 + cpi), 3);
+    expect(at(3)).toBeCloseTo(expectedY3, 2);
+    const expectedY5 = base * Math.pow((1 + wageGrowth) / (1 + cpi), 5) * 0.5;
+    expect(at(5)).toBeCloseTo(expectedY5, 2); // age 65 — step-down applies on top of indexation
   });
 });
 
@@ -274,5 +314,34 @@ describe("engine integration — Income Required is reference-only", () => {
     const b = projectPlan(explicit, PROFILES);
     expect(a.yearly).toEqual(b.yearly);
     expect(Array.from(a.monthly.combined)).toEqual(Array.from(b.monthly.combined));
+  });
+});
+
+// This fixture's own plan (start 2026-07, endAge 65 from client age 55 —
+// 10 plan years) runs its final month well past ASFA_STANDARDS_BASE's
+// own periodEnd (2026-06-01), so any ASFA-sourced run here is
+// unconditionally past the assumed validity window — the point of these
+// tests is the GATING (only warn when an ASFA source is actually
+// selected), not the date arithmetic itself (already covered in
+// data/asfaStandards.test.js).
+describe("engine integration — retirementWarnings (spec 32, Commit 2)", () => {
+  it("is empty when no ASFA source is selected, even on a projection that runs well past the loaded ASFA quarter", () => {
+    const result = projectPlan(mkEngineState(), PROFILES); // default source: currentExpenses
+    expect(result.retirementWarnings).toEqual([]);
+  });
+
+  it("carries a staleness entry once an ASFA source is selected and the projection runs past the loaded quarter", () => {
+    const result = projectPlan(mkEngineState({
+      retirement: {
+        incomeRequired: {
+          source: "asfaComfortable", customAmount: 0,
+          indexBasis: "cpi", indexExtraPct: 0,
+          startAt: anchorRef("retirement-client"), stepDownAtAge: null, stepDownPct: 80,
+        },
+      },
+    }), PROFILES);
+    expect(result.retirementWarnings).toHaveLength(1);
+    expect(result.retirementWarnings[0].type).toBe("staleness");
+    expect(result.retirementWarnings[0].reason).toContain("March quarter 2026");
   });
 });

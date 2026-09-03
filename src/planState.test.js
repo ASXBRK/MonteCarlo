@@ -2244,7 +2244,7 @@ describe("clampPlan — centrelinkEligible smart default (spec 21a, Commit 3)", 
   });
 });
 
-describe("Retirement: Income Required (spec 32, Commit 1): plan model", () => {
+describe("Retirement: Income Required (spec 32, Commits 1-2): plan model", () => {
   it("createIncomeRequired defaults to currentExpenses from the client's own retirement key date, no step-down", () => {
     const c = createIncomeRequired();
     expect(c.source).toBe("currentExpenses");
@@ -2256,13 +2256,16 @@ describe("Retirement: Income Required (spec 32, Commit 1): plan model", () => {
     expect(c.stepDownPct).toBe(80);
   });
 
-  it("clampIncomeRequired restricts source to the two resolvable values — an ASFA value (deferred to Commit 2) falls back to currentExpenses, not silently accepted", () => {
+  it("clampIncomeRequired restricts source to the four resolvable values — an unrecognised value falls back to currentExpenses, not silently accepted", () => {
     const plan = { client: { currentAge: 55 }, partner: null, endAge: 90, keyDates: [] };
     expect(clampIncomeRequired({ source: "custom" }, plan).source).toBe("custom");
-    expect(clampIncomeRequired({ source: "asfaComfortable" }, plan).source).toBe("currentExpenses");
+    expect(clampIncomeRequired({ source: "asfaComfortable" }, plan).source).toBe("asfaComfortable");
+    expect(clampIncomeRequired({ source: "asfaModest" }, plan).source).toBe("asfaModest");
     expect(clampIncomeRequired({ source: "nonsense" }, plan).source).toBe("currentExpenses");
-    expect(INCOME_REQUIRED_SOURCES).not.toContain("asfaComfortable");
-    expect(INCOME_REQUIRED_SOURCES).not.toContain("asfaModest");
+    // asfaModestRenter deliberately has no source value at all (spec 32,
+    // Commit 2) — the renter figure is disclosed reference data only,
+    // never itself selectable as the resolved target.
+    expect(INCOME_REQUIRED_SOURCES).not.toContain("asfaModestRenter");
   });
 
   it("clampIncomeRequired clamps customAmount to non-negative and stepDownPct to [0,100]", () => {

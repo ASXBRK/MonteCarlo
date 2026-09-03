@@ -423,6 +423,18 @@ html, body {
   background: #fdf2f2;
 }
 
+/* ASFA reference figures (spec 32, Commit 2) — a plain label/value row,
+   the same idea as .order-item but without a border, since these are
+   read-only reference lines, not editable/reorderable rows. */
+.asfa-ref-block { margin-top: 8px; }
+.asfa-ref-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12.5px;
+  padding: 2px 0;
+}
+.asfa-ref-row span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
+
 /* --- breadcrumb + page navigation (A.5) --- */
 
 .breadcrumb {

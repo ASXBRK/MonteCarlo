@@ -2411,11 +2411,12 @@ export function refineHeasProperty(heas, properties) {
 // the SAME single pass as clampPlan's other client-anchored fields, no
 // second hydrate() stage needed.
 //
-// ASFA sources are deferred to Commit 2 (they carry a data dependency
-// that doesn't exist yet) — INCOME_REQUIRED_SOURCES deliberately
-// excludes them until then, per CLAUDE.md's Input integrity section: an
-// option with nothing to resolve against must not be enterable.
-export const INCOME_REQUIRED_SOURCES = ["currentExpenses", "custom"];
+// ASFA sources (spec 32, Commit 2): now resolvable against
+// src/data/asfaStandards.js, so the enum widens from Commit 1's
+// ["currentExpenses","custom"] — per CLAUDE.md's Input integrity
+// section, extending it happens in the SAME commit that gives the new
+// values something to resolve against, never before.
+export const INCOME_REQUIRED_SOURCES = ["currentExpenses", "custom", "asfaComfortable", "asfaModest"];
 
 export function createIncomeRequired() {
   return {

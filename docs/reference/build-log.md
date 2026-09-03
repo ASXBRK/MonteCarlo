@@ -2191,6 +2191,89 @@ sandbox's own pre-existing Plotly-CDN-blocked network failure.
 
 ---
 
+### Retirement: ASFA benchmark standards (spec 32, Commit 2)
+`src/data/asfaStandards.js` — the ASFA Retirement Standard, comfortable
+and modest (single and couple), plus a modest-renter variant, figures
+supplied DIRECTLY by the firm for the March quarter 2026 in this
+session's chat (not web-searched — same protocol as aged care/state
+duty). **Note on the spec itself:** the user initially pointed to a
+"Figures — supplied by the firm, March quarter 2026" subsection of
+`docs/specs/32-retirement-phase-one.md`'s Commit 2 as already containing
+these figures; re-reading the spec on disk found no such subsection —
+only the sourcing INSTRUCTION to ask the user, no figures. Reported back
+per CLAUDE.md's "stop and say so" rule rather than silently using the
+figures anyway; the user then supplied them directly in chat, which is
+what Commit 2 actually needed either way. The spec file itself was not
+edited (out of scope for this commit; the user said they'd fix it
+separately).
+
+`INCOME_REQUIRED_SOURCES` (planState.js) widens from Commit 1's
+`[currentExpenses, custom]` to include `asfaComfortable`/`asfaModest` —
+extended in this SAME commit, the one that gives them something to
+resolve against, per CLAUDE.md's Input integrity rule.
+`retirement.js`'s own re-exported copy was removed in favour of
+importing the single source of truth from planState.js (a duplication
+from Commit 1, caught and fixed here). `resolveIncomeRequired`'s base-
+amount resolution gained a third branch: ASFA sources look up
+`asfaAnnual(standard, household)` for the plan's own single/couple
+status, then index forward through the SAME formula as every other
+source — no special-casing beyond the base figure itself.
+
+**The two disclosures the spec requires "not buried":** the homeowner-
+no-mortgage assumption and the "these are ASFA's own terms, not this
+firm's judgement" framing render UNCONDITIONALLY in a new Settings
+block (`asfaReferenceBlockHTML()`) — comfortable/modest/modest-renter
+figures, the household's own single/couple status, always visible
+whether or not an ASFA source is actually selected — and again, with
+the concrete $ figures, in a new Parameters-modal section
+(`#retirement-asfa-standard`). The Source dropdown's own two new options
+render as `asfaStandardLabel()`'s exact wording ("ASFA Comfortable
+(couple, homeowner)"), matching the spec's own worked example verbatim.
+
+**Ten-category lifestyle descriptor table** — reproduced VERBATIM from
+the firm's supplied text (comfortable/modest/modest-renter/age-pension-
+only columns), stored in `ASFA_LIFESTYLE_DESCRIPTORS`; a committed test
+spot-checks two entries against the exact supplied wording rather than
+re-deriving or paraphrasing it. The "home" category is the one place the
+renter column describes a different dwelling rather than a degree of
+the homeowner column's own repair capacity — ASFA's own framing,
+reproduced as given, called out in both the code comment and a
+dedicated test.
+
+**Age Pension cross-check, reported not reconciled** (spec's own
+instruction): the ASFA source's own quoted maximum Age Pension figures
+($31,223 single, $47,070 couple, incl. supplements) are compared
+directly against `data/agePension.js`'s independently-sourced
+`AGE_PENSION_RATES_BASE` in a dedicated test — **no mismatch found**:
+`1200.90 × 26 = $31,223.40` and `2 × 905.20 × 26 = $47,070.40`, both
+rounding to the exact firm-supplied figures.
+
+**Staleness** — `asfaStalenessWarning()` mirrors `agedCareStalenessWarning()`'s
+own convention exactly (checked against the projection's own final
+calendar month, not "today"); surfaced as a new top-level
+`retirementWarnings` array, gated on an ASFA source actually being
+selected (never raised for a household that never quotes ASFA at all).
+`ENGINE_VERSION` bumped `1.3.0` → `1.4.0` (additive); contract shape and
+`engine-api.md` updated in the same commit. No new money flow and no
+new threshold the engine branches on (ASFA sources swap in a different
+FIXED base figure, nothing more) — `randomScenario()`/
+`conservationCheck.js` deliberately untouched, same reasoning as
+Commit 1.
+
+Tests: `src/data/asfaStandards.test.js` (15 — both household types, the
+homeowner-label wording, staleness in/out of window, all ten lifestyle
+categories present with four columns each, the age pension cross-check)
+plus `retirement.test.js` additions (ASFA sources resolving and
+indexing/stepping-down correctly; `retirementWarnings` gating) plus a
+`planState.test.js` update (the widened enum). Full suite 1891/1891,
+build green. Browser-verified: the Source dropdown carries all four
+options with the exact disclosure wording, the reference block and its
+staleness warning render in Settings, and the Parameters modal's new
+section shows the full comfortable/modest/modest-renter table and the
+Age Pension cross-check — zero new console errors.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

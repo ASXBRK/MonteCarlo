@@ -203,7 +203,7 @@ likely to produce a subtly wrong number if assumed otherwise.
 | `accruedUntaxedSuperTaxAtEnd` | number | tax on untaxed super elements accrued but not yet paid |
 | `accruedDiv293AtEnd` / `accruedDiv296AtEnd` | number | as `accruedCgtAtEnd`, for Division 293/296 |
 | `accruedRefundAtEnd` | number | a pending PAYG refund/balancing amount not yet settled |
-| `superWarnings` / `propertyWarnings` / `agedCareWarnings` / `drawdownWarnings` / `bondWarnings` | array | non-fatal conditions the engine flagged while running (e.g. a contribution cap breach, a rejected FHSSS request, a stale aged care rate period) — always present, may be empty |
+| `superWarnings` / `propertyWarnings` / `agedCareWarnings` / `drawdownWarnings` / `bondWarnings` / `retirementWarnings` | array | non-fatal conditions the engine flagged while running (e.g. a contribution cap breach, a rejected FHSSS request, a stale aged care rate period, a stale ASFA benchmark quarter) — always present, may be empty |
 | `liabilityRepaymentStats` | object | extra-repayment interest/time-saved figures, keyed by liability id |
 | `liabilityRollovers` | object | fixed-rate rollover events, keyed by liability id |
 | `goalStats` | object | achievement/shortfall detail per goal, keyed by goal id |
@@ -222,14 +222,21 @@ balance), `netAssets` (`closingBalance + propertyClosing + superClosing +
 pensionClosing + bondsClosing + wcaClosing − liabilitiesClosing −
 heasDetail.closing`), `income`, `cashDistributions`, `expenses`, `tax`.
 
-**Retirement** (spec 32, Commit 1) — `incomeRequired`: number \| `null`,
-the household's stated Income Required (real $), resolved and indexed
-per `plan.retirement.incomeRequired`; `null` for every plan year before
-the requirement's own `startAt` (a real, active figure is never `0` and
-`null` at once). A REFERENCE line only — it never feeds back into any
-other field on this row. **Interpretation: after-tax income received by
-the household** — compare it against `income − tax` on this SAME row,
-never against gross drawdown.
+**Retirement** (spec 32, Commits 1-2) — `incomeRequired`: number \|
+`null`, the household's stated Income Required (real $), resolved and
+indexed per `plan.retirement.incomeRequired`; `null` for every plan year
+before the requirement's own `startAt` (a real, active figure is never
+`0` and `null` at once). A REFERENCE line only — it never feeds back
+into any other field on this row. **Interpretation: after-tax income
+received by the household** — compare it against `income − tax` on this
+SAME row, never against gross drawdown. Its `source` resolves one of
+four ways: `currentExpenses` (the household's own living-expense rows at
+the requirement's start year), `custom` (a stated $ figure),
+`asfaComfortable`/`asfaModest` (the ASFA Retirement Standard's own
+published figure for the household's single/couple status —
+`src/data/asfaStandards.js`, sourced directly from the firm, never
+web-searched). A stale ASFA quarter surfaces as a top-level
+`retirementWarnings` entry, not on this row.
 
 **Cashflow mechanics**
 `surplusOrDeficit`, `surplusInvested`, `surplusSpent`, `surplusAccumulated`,
@@ -372,6 +379,7 @@ the STORED INPUT (the plan state schema; currently 18). Rule:
 | `1.1.0` | Additive: top-level `agedCareWarnings`, yearly-row `agedCareDetail` (spec 29, Commit 5). |
 | `1.2.0` | No new fields — `goals`, `goalStats`, and `schedule.rowTotals.deductions` were already part of the engine's output but had never been populated by either contract-shape fixture; the demo client set rewrite gave one of them a real goal and deduction row, so the committed shape now captures their actual inner shape instead of pinning them as empty placeholders (docs/reference/build-log.md's own "Demo clients" entry). |
 | `1.3.0` | Additive: yearly-row `incomeRequired` (spec 32, Commit 1) — the household's stated Income Required, real $, resolved and indexed per `plan.retirement.incomeRequired`. A REFERENCE figure only, never fed back into projection arithmetic; `null` for every plan year before the requirement's own `startAt` (defaults to the client's own retirement key date). Compare it against `yearly[y].income - yearly[y].tax` (after-tax household income), never against gross drawdown — see docs/specs/32-retirement-phase-one.md's own "Interpretation to fix and state". |
+| `1.4.0` | Additive: top-level `retirementWarnings` (spec 32, Commit 2) — ASFA benchmark staleness, raised only when `plan.retirement.incomeRequired.source` is `asfaComfortable`/`asfaModest` AND the projection's own final calendar month falls past the loaded ASFA quarter's assumed validity window (same convention as `agedCareWarnings`' own staleness entry). `incomeRequired`'s own `source` enum widens to include `asfaComfortable`/`asfaModest`, now resolvable against `src/data/asfaStandards.js`. |
 
 Any commit that changes the result shape must update `ENGINE_VERSION`,
 this table, and the Commit 4 contract-shape snapshot in the SAME commit

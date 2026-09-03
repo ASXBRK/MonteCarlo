@@ -43,6 +43,7 @@ import { PROFILES, DEFENSIVE_PROFILE, impliedFrankingPct } from "./profiles.js";
 import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
 import { resolveIncomeRequired } from "./retirement.js";
+import { asfaStalenessWarning } from "./data/asfaStandards.js";
 import { superRatesFor, superReleaseAge } from "./data/superRates.js";
 import { minDrawdownAmount, TTR_MAX_DRAWDOWN_PCT } from "./data/pensionRates.js";
 import { createTransferBalanceAccount, indexTransferBalanceCap, creditTransferBalance, debitTransferBalance } from "./pensionTba.js";
@@ -6267,6 +6268,20 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const incomeRequiredAt = resolveIncomeRequired(state.plan, schedule, cpi, wageGrowthAssum);
   yearly.forEach((row, y) => { row.incomeRequired = incomeRequiredAt(y); });
 
+  // ASFA staleness (spec 32, Commit 2) — same convention as
+  // agedCareStalenessWarning above: checked against the PROJECTION'S
+  // OWN final calendar month, not "today", and only raised when the
+  // feature is actually in use (an ASFA source selected) — a household
+  // never quoting ASFA figures at all has nothing to warn about.
+  const retirementWarnings = [];
+  const irCfg = state.plan.retirement?.incomeRequired;
+  if (irCfg?.source === "asfaComfortable" || irCfg?.source === "asfaModest") {
+    const staleness = asfaStalenessWarning(
+      new Date(state.plan.start.year, state.plan.start.month - 1 + schedule.months - 1, 1)
+    );
+    if (staleness) retirementWarnings.push({ type: "staleness", reason: staleness });
+  }
+
   return {
     schedule,
     monthly: { combined, perAsset: series, wca: wcaSeries },
@@ -6297,6 +6312,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     agedCareWarnings,
     drawdownWarnings,
     bondWarnings,
+    retirementWarnings,
     liabilityRepaymentStats,
     liabilityRollovers,
     goalStats,
