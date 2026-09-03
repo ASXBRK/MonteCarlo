@@ -2346,6 +2346,78 @@ errors.
 
 ---
 
+### Retirement: analytics summary (spec 32, Commit 3)
+`src/retirementAnalytics.js` (pure, tested) — five to seven numbers
+answering what the client actually asked; none surfaced as a headline,
+per the spec's own instruction. `computeRetirementAnalytics(state,
+result)` returns: `retirement` (the Retirement key date's own plan
+year/age), `firstShortfallAge` (the existing household-wide unfunded-
+cashflow measure — passed through, stated explicitly as different from
+Midwinter's super-only "Age ABP Runs Out"), `superPensionExhaustionAge`
+(Midwinter's own headline, computed separately: the first plan year the
+combined super+pension balance drops to zero after genuinely having
+been positive), `capitalAtRetirement`, and two identically-shaped
+windows `le`/`lePlus5` (capitalAtLE, averageRetirementIncome,
+averageAgePension, averageAgePensionPctOfIncome, sustainableIncomeToLE)
+plus a `materialLEDifference` flag comparing the two.
+
+**Life expectancy handling.** The LE anchor reuses `resolveEndBasis`'s
+own `{mode:"le"}` calculation — the SAME one `endBasis:{mode:"le"}`
+uses for the projection's own end — as a pure REPORTING anchor,
+independent of whatever endBasis a given plan actually ends on (a plan
+fixed to age 95 still wants "capital at LE" reported against the
+client's actual life expectancy). LE+5 is the same calculation at
+`offset:5`.
+
+**Sustainable income to LE** is the one figure that couldn't be a
+straight pass-through — genuinely needs new trial projections for a
+spend level nobody has entered. The spec says "uses the existing
+solveFor machinery"; built with `bisectScalar`/`solveFor` targeting net
+assets at LE = 0 first, per that literal wording, then found — verified
+empirically, not assumed — that net assets at LE PLATEAUS above zero
+once spend exceeds what's fundable (assets floor at 0, the excess goes
+unfunded, per this engine's own convention), making zero an
+UNREACHABLE root for bisection. Switched to `findMinimumThreshold`
+instead — also "the existing machinery" in `solve.js`, and the
+primitive its own header names for exactly this plateau shape — solving
+"the smallest spend that first triggers a shortfall by LE," minus a $1
+safety margin so the reported figure is confirmed on the safe side, not
+sitting on the boundary that fails. `solve.js` gained a new
+`"syntheticExpense"` vary kind — the first that APPENDS a new household
+expense row to the cloned state rather than editing one, since there's
+no real row to vary (a hypothetical retirement spend, not something the
+client has entered).
+
+Tests: `superPensionExhaustionAge`/`meanOverWindow`/
+`isMaterialLEDifference` exported and hand-verified directly against
+synthetic yearly-row arrays (no engine run needed — exact, fast);
+`solve.test.js` covers the new vary kind; `retirementAnalytics.test.js`
+covers the full pipeline through real `projectPlan()` runs — LE/LE+5
+plan-year resolution checked against `remainingLE(65,'male')=20.22`'s
+own hand-verified figure (from `lifeTables.test.js`), capital-at-
+retirement at a genuinely mid-projection retirement age, average-
+income/average-pension cross-checked by independently re-summing
+`result.yearly` in the test itself, first-shortfall-age matched exactly
+against `result.shortfall`, and — the spec's own required test —
+applying the solved sustainable income back as a real expense row and
+confirming the plan lasts to LE with no shortfall. Full suite
+1928/1928, build green. (One pre-existing, unrelated flake observed and
+confirmed not caused by this commit: `deterministic.test.js`'s
+randomized threshold-coverage sweep occasionally misses the narrow
+`pension.minDrawdown.90.at` stratum by chance across its fixed sample
+size — nothing in `randomScenario()` or pension code was touched here.)
+
+**Scope note:** the spec's "rendered as a summary card at the top of
+the retirement view" describes forward-looking consumption, not a
+Commit 3 deliverable — no "Retirement" output view exists yet to host
+one (Commits 1–2 only touched the Settings input and Parameters modal),
+the commit is explicitly named `(pure, tested)`, and its own Tests line
+lists computational checks only. Treated as scope for whichever later
+commit actually builds that view, same as Commit 1's own reasoning for
+deferring ASFA sources to Commit 2.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

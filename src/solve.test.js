@@ -251,6 +251,20 @@ describe("applyVary", () => {
     expect(state.properties[0].purchaseAt).toEqual({ kind: "age", age: 46 });
   });
 
+  it("syntheticExpense APPENDS a new expense row rather than editing one (retirement analytics has no real row to vary)", () => {
+    const state = mkState({ cashflows: { expenses: [{ id: "e1", amount: 100 }] } });
+    const from = { kind: "age", age: 65 }, to = { kind: "age", age: 90 };
+    applyVary(state, { kind: "syntheticExpense", from, to }, 42000);
+    expect(state.cashflows.expenses).toHaveLength(2);
+    const synthetic = state.cashflows.expenses[1];
+    expect(synthetic.amount).toBe(42000);
+    expect(synthetic.from).toEqual(from);
+    expect(synthetic.to).toEqual(to);
+    expect(synthetic.frequency).toBe("annual");
+    expect(synthetic.indexBasis).toBe("cpi");
+    expect(state.cashflows.expenses[0]).toEqual({ id: "e1", amount: 100 }); // untouched
+  });
+
   it("an unknown vary.kind throws rather than silently no-op-ing", () => {
     expect(() => applyVary(mkState(), { kind: "bogus", id: "x" }, 1)).toThrow();
   });

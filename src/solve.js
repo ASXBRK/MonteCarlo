@@ -207,6 +207,25 @@ export function applyVary(clonedState, vary, x) {
       property.purchaseAt = { kind: "age", age: x };
       return;
     }
+    // Retirement analytics (spec 32, Commit 3) — "Sustainable income to
+    // LE" has no existing row to vary (it's a hypothetical household
+    // spend level, not something the client has entered), so this ADDS
+    // a brand-new household expense row to the clone rather than
+    // editing one — the ONLY vary kind that inserts instead of finding.
+    // `vary.from`/`vary.to` are DateRefs (the caller's own retirement-
+    // to-LE window); a fixed id is fine since the clone is discarded
+    // after this one evaluation.
+    case "syntheticExpense": {
+      clonedState.cashflows.expenses = [
+        ...(clonedState.cashflows.expenses ?? []),
+        {
+          id: "retirement-analytics-synthetic-expense", label: "Sustainable income (solved)",
+          amount: x, frequency: "annual", from: vary.from, to: vary.to,
+          indexBasis: "cpi", indexExtraPct: 0,
+        },
+      ];
+      return;
+    }
     default:
       throw new Error(`solve.js: unknown vary.kind "${vary.kind}"`);
   }
