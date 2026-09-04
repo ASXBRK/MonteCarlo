@@ -10224,3 +10224,238 @@ describe("Investment and education bonds (spec 25, Commit 3): education withdraw
     expect(withField.yearly[2].netAssets).toBeCloseTo(withoutField.yearly[2].netAssets, 6);
   });
 });
+
+// --- Glide paths and income-driven drawdown (spec 32, Commit 4) -----------
+
+describe("Glide paths (spec 32, Commit 4): engine integration", () => {
+  const GP = {
+    id: "gp1", name: "Glide", rebalance: "annual",
+    steps: [{ fromAge: 40, profile: "High Growth – Capital" }, { fromAge: 44, profile: "Cash" }],
+  };
+
+  it("a glide-pathed financial asset at its FIRST step's own age is bit-identical to an ordinary profile-mode asset using that same profile", () => {
+    // Annual rebalance resolves to EXACTLY the age-implied target every
+    // year (glidePaths.js's own header) — at age 40 == the first step's
+    // own fromAge, that target is 100% "High Growth – Capital", so this
+    // is a genuine equality, not an approximation.
+    const glide = projectPlan(mkState({
+      endAge: 41,
+      plan: { glidePaths: [GP] },
+      assets: [mkAsset({ allocation: { mode: "glidePath", glidePathId: "gp1" }, balance: 500000, distributions: "reinvest" })],
+    }));
+    const plain = projectPlan(mkState({
+      endAge: 41,
+      assets: [mkAsset({ allocation: { mode: "profile", profile: "High Growth – Capital" }, balance: 500000, distributions: "reinvest" })],
+    }));
+    expect(glide.yearly[0].growth).toBeCloseTo(plain.yearly[0].growth, 6);
+  });
+
+  it("a glide-pathed financial asset at its LAST step's own age is bit-identical to an ordinary profile-mode asset using THAT profile", () => {
+    // Starting the client directly AT the last step's own age (44) —
+    // rather than reading year 4 of a longer run — isolates the RATE
+    // comparison from the fact that the two runs would otherwise have
+    // accumulated different balances over the preceding years (glide
+    // path earning High Growth first, "plain" earning Cash throughout),
+    // which would make their absolute dollar growth diverge even with
+    // an identical rate at year 4.
+    const glide = projectPlan(mkState({
+      plan: { client: { currentAge: 44 }, glidePaths: [GP] },
+      endAge: 45,
+      assets: [mkAsset({ allocation: { mode: "glidePath", glidePathId: "gp1" }, balance: 500000, distributions: "reinvest" })],
+    }));
+    const plain = projectPlan(mkState({
+      plan: { client: { currentAge: 44 } },
+      endAge: 45,
+      assets: [mkAsset({ allocation: { mode: "profile", profile: "Cash" }, balance: 500000, distributions: "reinvest" })],
+    }));
+    expect(glide.yearly[0].growth).toBeCloseTo(plain.yearly[0].growth, 6);
+  });
+
+  it("the growth rate genuinely moves year to year across the ramp — not pinned to one profile throughout", () => {
+    const out = projectPlan(mkState({
+      endAge: 45,
+      plan: { glidePaths: [GP] },
+      assets: [mkAsset({ allocation: { mode: "glidePath", glidePathId: "gp1" }, balance: 500000, distributions: "reinvest" })],
+    }));
+    // High Growth – Capital's total return is well above Cash's, so
+    // growth should be strictly decreasing across the ramp.
+    expect(out.yearly[0].growth).toBeGreaterThan(out.yearly[2].growth);
+    expect(out.yearly[2].growth).toBeGreaterThan(out.yearly[4].growth);
+  });
+
+  it("a super account glide path is anchored to the OWNER's own age, not the client's — a couple's two accounts on the SAME glide path diverge when the owners' ages differ", () => {
+    const state = mkState({
+      endAge: 44,
+      plan: {
+        client: { currentAge: 40 }, partner: { currentAge: 44 }, household: "married",
+        glidePaths: [GP],
+        superAccounts: [
+          superAcct({ id: "su1", owner: "client", balance: 500000, allocation: { mode: "glidePath", glidePathId: "gp1" } }),
+          superAcct({ id: "su2", owner: "partner", balance: 500000, allocation: { mode: "glidePath", glidePathId: "gp1" } }),
+        ],
+      },
+    });
+    const out = projectPlan(state, PROFILES);
+    // Year 0: client is 40 (the glide path's own first step — 100% High
+    // Growth) while the partner is ALREADY 44 (the glide path's own last
+    // step — 100% Cash). If the anchor were wrongly shared, both
+    // accounts would show identical earnings; anchored correctly, the
+    // client's account (still fully growth) earns materially more.
+    expect(out.yearly[0].superDetail.su1.earnings).toBeGreaterThan(out.yearly[0].superDetail.su2.earnings);
+  });
+
+  it("a pension glide path is anchored to the owner's own age and its own retirement-phase (untaxed) growth still reads from the SAME precomputed per-year rate", () => {
+    const glide = projectPlan(mkState({
+      endAge: 41,
+      plan: {
+        client: { currentAge: 40, retirementAge: 40 },
+        glidePaths: [GP],
+        superAccounts: [superAcct({ balance: 500000, allocation: { mode: "glidePath", glidePathId: "gp1" } })],
+        pensions: [pensionRow({ allocation: { mode: "glidePath", glidePathId: "gp1" } })],
+      },
+    }));
+    const plain = projectPlan(mkState({
+      endAge: 41,
+      plan: {
+        client: { currentAge: 40, retirementAge: 40 },
+        superAccounts: [superAcct({ balance: 500000, allocation: { mode: "profile", profile: "High Growth – Capital" } })],
+        pensions: [pensionRow({ allocation: { mode: "profile", profile: "High Growth – Capital" } })],
+      },
+    }));
+    // Year 0 = age 40 = the glide path's own first step — an ABP is in
+    // retirement phase from commencement (spec 20, Commit 3), so this
+    // exercises the untaxed grossRate branch specifically.
+    expect(glide.yearly[0].pensionDetail.pn1.earnings).toBeCloseTo(plain.yearly[0].pensionDetail.pn1.earnings, 0);
+  });
+
+  it("drift diverges from annual rebalance partway through the ramp — the engine actually distinguishes the two modes, not just glidePaths.js in isolation", () => {
+    const runWith = (rebalance) => projectPlan(mkState({
+      endAge: 45,
+      plan: { glidePaths: [{ ...GP, rebalance }] },
+      assets: [mkAsset({ allocation: { mode: "glidePath", glidePathId: "gp1" }, balance: 500000, distributions: "reinvest" })],
+    }));
+    const annual = runWith("annual");
+    const drift = runWith("drift");
+    // Mid-ramp (year 2, age 42): drift has been carrying High Growth's
+    // outperformance forward, so it should show MORE growth than annual
+    // rebalance's fresh age-implied target at the same year.
+    expect(drift.yearly[2].growth).toBeGreaterThan(annual.yearly[2].growth);
+  });
+
+  it("regression gate: an ordinary profile-mode holding is bit-identical whether or not the plan has unrelated glide paths defined", () => {
+    const withoutGP = projectPlan(mkState({ endAge: 43 }));
+    const withGP = projectPlan(mkState({ endAge: 43, plan: { glidePaths: [GP] } }));
+    expect(withGP.yearly[2].netAssets).toBeCloseTo(withoutGP.yearly[2].netAssets, 6);
+  });
+
+  it("a dangling glidePathId (no matching entry in plan.glidePaths) never throws — it resolves EXACTLY like any other unresolvable allocation reference", () => {
+    // Zero nominal return components (assetReturnComponents's own
+    // fallback) is NOT the same as zero growth — deflated to real terms
+    // it's a small negative real return, identical to what an unknown
+    // "profile"-mode key already produces (never a special case, never
+    // a throw).
+    const dangling = projectPlan(mkState({
+      endAge: 41,
+      assets: [mkAsset({ allocation: { mode: "glidePath", glidePathId: "no-such-id" }, balance: 500000, distributions: "reinvest" })],
+    }));
+    const unknownProfile = projectPlan(mkState({
+      endAge: 41,
+      assets: [mkAsset({ allocation: { mode: "profile", profile: "Not A Real Profile" }, balance: 500000, distributions: "reinvest" })],
+    }));
+    expect(dangling.yearly[0].growth).toBeCloseTo(unknownProfile.yearly[0].growth, 6);
+  });
+
+  it("conservation holds for glide-pathed assets, super, and pensions together", () => {
+    const out = projectPlan(mkState({
+      endAge: 44,
+      plan: {
+        client: { currentAge: 40, retirementAge: 40 },
+        glidePaths: [GP],
+        superAccounts: [superAcct({ balance: 300000, allocation: { mode: "glidePath", glidePathId: "gp1" } })],
+        pensions: [pensionRow({ allocation: { mode: "glidePath", glidePathId: "gp1" } })],
+      },
+      assets: [mkAsset({ allocation: { mode: "glidePath", glidePathId: "gp1" }, balance: 200000, distributions: "reinvest" })],
+    }));
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `glide path year ${y}`);
+  });
+});
+
+describe("Income-driven drawdown (spec 32, Commit 4)", () => {
+  const baseSingle = (overPlan = {}) => mkState({
+    endAge: 62,
+    plan: {
+      client: { currentAge: 60, retirementAge: 60 },
+      superAccounts: [superAcct({ balance: 500000, allocation: zeroRealSuperAlloc() })],
+      pensions: [pensionRow({ drawdownOption: "expenditure" })],
+      workingCash: { balance: 500000, minimumBalance: 0, ratePct: 0 }, // no deficit ever, isolates the FY-end top-up
+      ...overPlan,
+    },
+  });
+
+  const incomeRequiredCfg = (customAmount) => ({
+    incomeRequired: {
+      source: "custom", customAmount, indexBasis: "none", indexExtraPct: 0,
+      startAt: { kind: "age", age: 60 }, stepDownAtAge: null, stepDownPct: 80,
+    },
+  });
+
+  it("OFF (default, or the field simply absent): behaves exactly like before this commit — pays only the statutory minimum", () => {
+    const out = projectPlan(baseSingle({ retirement: incomeRequiredCfg(200000) })); // a huge target, deliberately — must be ignored
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(500000 * 0.04, 0);
+  });
+
+  it("ON, but the target is BELOW the statutory minimum: the minimum still wins (\"floored at the statutory minimum\", the spec's own words)", () => {
+    const out = projectPlan(baseSingle({
+      retirement: { ...incomeRequiredCfg(1000), incomeDrivenDrawdown: true },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(500000 * 0.04, 0);
+  });
+
+  it("ON, target above the minimum: the pension tops up toward Income Required, not just the compliance floor", () => {
+    const out = projectPlan(baseSingle({
+      retirement: { ...incomeRequiredCfg(60000), incomeDrivenDrawdown: true },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeCloseTo(60000, 0);
+  });
+
+  it("two 'expenditure' pensions share ONE household target — the target is met once, never doubled, though each STILL owes its own separate statutory minimum", () => {
+    const out = projectPlan(mkState({
+      endAge: 62,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [
+          superAcct({ id: "su1", balance: 500000, allocation: zeroRealSuperAlloc() }),
+          superAcct({ id: "su2", balance: 500000, allocation: zeroRealSuperAlloc() }),
+        ],
+        pensions: [
+          pensionRow({ id: "pn1", sourceAccountId: "su1", drawdownOption: "expenditure" }),
+          pensionRow({ id: "pn2", sourceAccountId: "su2", drawdownOption: "expenditure" }),
+        ],
+        workingCash: { balance: 500000, minimumBalance: 0, ratePct: 0 },
+        retirement: { ...incomeRequiredCfg(60000), incomeDrivenDrawdown: true },
+      },
+    }));
+    const pn1Paid = out.yearly[0].pensionDetail.pn1.payments;
+    const pn2Paid = out.yearly[0].pensionDetail.pn2.payments;
+    // pn1 (processed first, in plan order) absorbs the whole household
+    // target — 60,000, comfortably clearing its own 20,000 (4% of
+    // 500,000) statutory minimum along the way.
+    expect(pn1Paid).toBeCloseTo(60000, 0);
+    // pn2's own compliance minimum is a SEPARATE legal obligation on
+    // THAT pension — it is never waived just because another pension
+    // already met the household's income target — so it still pays its
+    // own 20,000 floor, on top.
+    expect(pn2Paid).toBeCloseTo(20000, 0);
+    // The one thing this design exists to prevent: pn2 does NOT also
+    // chase the full 60,000 target a second time (which would total
+    // 120,000 combined) — it only ever tops up by what's genuinely
+    // still owed after pn1's own contribution.
+    const combined = pn1Paid + pn2Paid;
+    expect(combined).toBeLessThan(60000 * 2);
+  });
+
+  it("conservation holds with income-driven drawdown on", () => {
+    const out = projectPlan(baseSingle({ retirement: { ...incomeRequiredCfg(60000), incomeDrivenDrawdown: true } }));
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `income-driven drawdown year ${y}`);
+  });
+});

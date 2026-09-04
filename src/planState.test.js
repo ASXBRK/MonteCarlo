@@ -44,6 +44,7 @@ import {
   createBond, clampBond, normaliseBonds, BOND_TYPES,
   createBondContribution, clampBondContribution, normaliseBondContributions,
   INCOME_REQUIRED_SOURCES, createIncomeRequired, clampIncomeRequired, normaliseRetirement,
+  GLIDE_PATH_REBALANCE_MODES, createGlidePath, createGlidePathStep, clampGlidePathStep, clampGlidePath, normaliseGlidePaths,
 } from "./planState.js";
 import { remainingLE } from "./data/lifeTables.js";
 import { PROFILES, impliedFrankingPct } from "./profiles.js";
@@ -2307,6 +2308,131 @@ describe("Retirement: Income Required (spec 32, Commits 1-2): plan model", () =>
     const p = clampPlan(raw, PROFILES);
     expect(p.retirement.incomeRequired.source).toBe("currentExpenses");
     expect(p.retirement.incomeRequired.startAt).toEqual({ kind: "anchor", anchorId: "retirement-client" });
+  });
+
+  it("incomeDrivenDrawdown (spec 32, Commit 4) defaults to false and is preserved verbatim (never re-derived) once true", () => {
+    const plan = { client: { currentAge: 55 }, partner: null, endAge: 90, keyDates: [] };
+    expect(normaliseRetirement(undefined, plan).incomeDrivenDrawdown).toBe(false);
+    expect(normaliseRetirement({ incomeDrivenDrawdown: true }, plan).incomeDrivenDrawdown).toBe(true);
+    // Anything other than a literal boolean true is treated as off — no
+    // half-configured truthy value silently turns household drawdown
+    // behaviour on.
+    expect(normaliseRetirement({ incomeDrivenDrawdown: "yes" }, plan).incomeDrivenDrawdown).toBe(false);
+  });
+
+  it("clampPlan defaults incomeDrivenDrawdown to false for a plan that never mentioned it", () => {
+    const p = clampPlan(couplePlan(), PROFILES);
+    expect(p.retirement.incomeDrivenDrawdown).toBe(false);
+  });
+});
+
+describe("Glide paths (spec 32, Commit 4): plan model", () => {
+  const resolved = (plan) => ({ client: plan.client, partner: plan.partner, endAge: plan.endAge });
+
+  it("createGlidePathStep is a bare {fromAge, profile} pair", () => {
+    expect(createGlidePathStep(45, "Balanced")).toEqual({ fromAge: 45, profile: "Balanced" });
+  });
+
+  it("createGlidePath defaults to a single step at the client's own current age, never an empty step list", () => {
+    const plan = { client: { currentAge: 42 } };
+    const gp = createGlidePath(plan, [], PROFILES);
+    expect(gp.steps).toHaveLength(1);
+    expect(gp.steps[0].fromAge).toBe(42);
+    expect(Object.keys(PROFILES)).toContain(gp.steps[0].profile);
+    expect(gp.rebalance).toBe("annual");
+    expect(gp.name).toBe("Glide path 1");
+  });
+
+  it("createGlidePath numbers sequential unnamed glide paths from the existing list's own length", () => {
+    const plan = { client: { currentAge: 42 } };
+    const gp = createGlidePath(plan, [{ id: "gp1" }, { id: "gp2" }], PROFILES);
+    expect(gp.name).toBe("Glide path 3");
+  });
+
+  it("clampGlidePathStep clamps fromAge into [ageMin, ageMax] and falls an unknown profile back to the first known key", () => {
+    const step = clampGlidePathStep({ fromAge: 200, profile: "Nonexistent" }, Object.keys(PROFILES), 30, 90);
+    expect(step.fromAge).toBe(90);
+    expect(step.profile).toBe(Object.keys(PROFILES)[0]);
+  });
+
+  it("clampGlidePath sorts steps ascending by fromAge regardless of input order", () => {
+    const plan = resolved({ client: { currentAge: 30 }, partner: null, endAge: 90 });
+    const gp = clampGlidePath({
+      steps: [{ fromAge: 70, profile: "Balanced" }, { fromAge: 40, profile: "High Growth – Capital" }],
+    }, plan, PROFILES);
+    expect(gp.steps.map((s) => s.fromAge)).toEqual([40, 70]);
+  });
+
+  it("clampGlidePath supplies a default single step when given none at all — never an empty, unusable glide path", () => {
+    const plan = resolved({ client: { currentAge: 30 }, partner: null, endAge: 90 });
+    const gp = clampGlidePath({ steps: [] }, plan, PROFILES);
+    expect(gp.steps.length).toBeGreaterThan(0);
+  });
+
+  it("clampGlidePath restricts rebalance to the two known modes, defaulting to annual", () => {
+    const plan = resolved({ client: { currentAge: 30 }, partner: null, endAge: 90 });
+    expect(clampGlidePath({ rebalance: "drift" }, plan, PROFILES).rebalance).toBe("drift");
+    expect(clampGlidePath({ rebalance: "nonsense" }, plan, PROFILES).rebalance).toBe("annual");
+    expect(GLIDE_PATH_REBALANCE_MODES).toEqual(["annual", "drift"]);
+  });
+
+  it("clampGlidePath truncates an overlong name and gives an unset one a sensible default", () => {
+    const plan = resolved({ client: { currentAge: 30 }, partner: null, endAge: 90 });
+    expect(clampGlidePath({ name: "x".repeat(100) }, plan, PROFILES).name).toHaveLength(60);
+    expect(clampGlidePath({ name: "" }, plan, PROFILES).name).toBe("Glide path");
+  });
+
+  it("clampGlidePath preserves a valid id, and mints one when missing", () => {
+    const plan = resolved({ client: { currentAge: 30 }, partner: null, endAge: 90 });
+    expect(clampGlidePath({ id: "gp-fixed" }, plan, PROFILES).id).toBe("gp-fixed");
+    expect(clampGlidePath({}, plan, PROFILES).id).toMatch(/^gp/);
+  });
+
+  it("normaliseGlidePaths maps every entry through clampGlidePath, and is [] for anything not an array", () => {
+    const plan = resolved({ client: { currentAge: 30 }, partner: null, endAge: 90 });
+    expect(normaliseGlidePaths(undefined, plan, PROFILES)).toEqual([]);
+    expect(normaliseGlidePaths(null, plan, PROFILES)).toEqual([]);
+    const out = normaliseGlidePaths([{ id: "gp1", steps: [{ fromAge: 40, profile: "Balanced" }] }], plan, PROFILES);
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe("gp1");
+  });
+
+  it("clampAllocation resolves a glidePath-mode allocation whose id is present in the list, unchanged", () => {
+    const gps = [{ id: "gp1" }];
+    const out = clampAllocation({ mode: "glidePath", glidePathId: "gp1" }, PROFILES, gps);
+    expect(out).toEqual({ mode: "glidePath", glidePathId: "gp1" });
+  });
+
+  it("clampAllocation falls a DANGLING glidePathId back to profile mode, never lingers as an impossible reference", () => {
+    const out = clampAllocation({ mode: "glidePath", glidePathId: "deleted-gp" }, PROFILES, []);
+    expect(out.mode).toBe("profile");
+    expect(Object.keys(PROFILES)).toContain(out.profile);
+  });
+
+  it("clampPlan resolves plan.glidePaths BEFORE super accounts/pensions, so their own glidePath-mode allocations validate against the SAME final list", () => {
+    const raw = {
+      ...couplePlan(),
+      glidePaths: [{ id: "gp1", steps: [{ fromAge: 40, profile: "Balanced" }] }],
+      superAccounts: [{ id: "su1", owner: "client", balance: 1000, allocation: { mode: "glidePath", glidePathId: "gp1" } }],
+    };
+    const p = clampPlan(raw, PROFILES);
+    expect(p.glidePaths).toHaveLength(1);
+    expect(p.superAccounts[0].allocation).toEqual({ mode: "glidePath", glidePathId: "gp1" });
+  });
+
+  it("clampPlan drops a super account's reference to a glide path that was ALSO removed in the same edit — falls back to profile mode, not a dangling id", () => {
+    const raw = {
+      ...couplePlan(),
+      glidePaths: [], // the glide path this account referenced no longer exists
+      superAccounts: [{ id: "su1", owner: "client", balance: 1000, allocation: { mode: "glidePath", glidePathId: "gp1" } }],
+    };
+    const p = clampPlan(raw, PROFILES);
+    expect(p.superAccounts[0].allocation.mode).toBe("profile");
+  });
+
+  it("defaultState starts with an empty glidePaths list", () => {
+    const s = defaultState(PROFILES, NOW);
+    expect(s.plan.glidePaths).toEqual([]);
   });
 });
 

@@ -406,6 +406,7 @@ export function defaultPlan(now = new Date()) {
     endBasis,
     start,
     keyDates: [],
+    glidePaths: [],
     superAccounts: [],
     employers: [],
     novatedLeases: [],
@@ -419,7 +420,7 @@ export function defaultPlan(now = new Date()) {
     implementation: defaultImplementation(),
     children: [],
     adjustments: [],
-    retirement: { incomeRequired: createIncomeRequired() },
+    retirement: { incomeRequired: createIncomeRequired(), incomeDrivenDrawdown: false },
   };
 }
 
@@ -1579,7 +1580,7 @@ export function clampSuperAccount(sa, plan, profiles = {}) {
     taxedStatus: sa.taxedStatus === "untaxed" ? "untaxed" : "taxed",
     // Taxable component = balance − taxFreeComponent; never negative.
     taxFreeComponent: clampNumber(sa.taxFreeComponent, 0, balance),
-    allocation: clampAllocation(sa.allocation, profiles),
+    allocation: clampAllocation(sa.allocation, profiles, plan.glidePaths),
     icrPct: clampNumber(sa.icrPct, 0, 100),
     include: sa.include !== false,
     insurancePremium: clampInsurancePremium(sa.insurancePremium),
@@ -2181,7 +2182,7 @@ export function clampPension(pn, plan, superAccounts = [], profiles = {}) {
     // silently kept (CLAUDE.md's Input integrity section).
     reversionary: pn.reversionary === true && !!plan.partner,
     taxFreeProportion: null,
-    allocation: clampAllocation(pn.allocation, profiles),
+    allocation: clampAllocation(pn.allocation, profiles, plan.glidePaths),
     icrPct: clampNumber(pn.icrPct, 0, 100),
     drawdownOption,
     fixedAmount: clampNumber(pn.fixedAmount, 0),
@@ -2450,8 +2451,21 @@ export function clampIncomeRequired(raw, plan) {
   };
 }
 
+// incomeDrivenDrawdown (spec 32, Commit 4) — the toggle deferred from
+// Commit 1: OFF (default) leaves Income Required a pure reference line,
+// pension drawdown following each pension's own drawdownOption exactly
+// as before this commit (bit-identical). ON retargets every
+// "expenditure"-mode pension's FY-end reconciliation from "top up to the
+// statutory minimum only" to "top up toward the household's own Income
+// Required figure, floored at the statutory minimum" — see
+// deterministic.js's own FY-end pension top-up block for the shared,
+// depleting-target mechanism that keeps two expenditure pensions from
+// each independently chasing the whole household figure.
 export function normaliseRetirement(raw, plan) {
-  return { incomeRequired: clampIncomeRequired(raw?.incomeRequired, plan) };
+  return {
+    incomeRequired: clampIncomeRequired(raw?.incomeRequired, plan),
+    incomeDrivenDrawdown: raw?.incomeDrivenDrawdown === true,
+  };
 }
 
 function nextAssetNumber(existing) {
@@ -2780,10 +2794,25 @@ export function clampNumber(v, lo = 0, hi = Infinity) {
 
 export const ALLOC_PCT_MAX = 30;
 
-export function clampAllocation(alloc, profiles) {
+// `glidePaths` (spec 32, Commit 4) — the plan's own glidePaths list,
+// needed only to validate a "glidePath"-mode allocation's own
+// glidePathId; every other caller (and every pre-Commit-4 allocation)
+// omits it and is unaffected. A dangling/unknown id (a deleted glide
+// path whose reference was never converted) falls back to "profile"
+// mode rather than lingering as an impossible reference — the same
+// convention every other stale-id field in this schema already uses.
+export function clampAllocation(alloc, profiles, glidePaths = []) {
   const keys = Object.keys(profiles);
   const fallback = keys.length ? keys[Math.floor((keys.length - 1) / 2)] : null;
-  if (!alloc || alloc.mode !== "custom") {
+  if (alloc?.mode === "glidePath") {
+    const validIds = new Set(glidePaths.map((gp) => gp.id));
+    if (typeof alloc.glidePathId === "string" && validIds.has(alloc.glidePathId)) {
+      return { mode: "glidePath", glidePathId: alloc.glidePathId };
+    }
+    // Unknown/dangling id — falls through to the ordinary "profile"
+    // fallback below, same as any other invalid allocation.
+  }
+  if (alloc?.mode !== "custom") {
     const profile = keys.includes(alloc?.profile) ? alloc.profile : fallback;
     return { mode: "profile", profile };
   }
@@ -2794,6 +2823,66 @@ export function clampAllocation(alloc, profiles) {
     ? alloc.volBasis
     : nearestVolBasis(profiles, incomePct + growthPct);
   return { mode: "custom", incomePct, growthPct, frankingPct, volBasis };
+}
+
+// --- Glide paths (spec 32, Commit 4) ----------------------------------------
+//
+// plan.glidePaths — an ordered list of {fromAge, profile} steps,
+// assignable to a super account, pension, or financial asset in place
+// of a fixed profile (allocation.mode === "glidePath", above). The
+// actual age-interpolation and rebalance/drift mechanics live in
+// src/glidePaths.js (pure, engine/chart-facing); this module only owns
+// the STORED SHAPE and its validation.
+export const GLIDE_PATH_REBALANCE_MODES = ["annual", "drift"];
+
+export function createGlidePathStep(fromAge, profile) {
+  return { fromAge, profile };
+}
+
+// A brand-new glide path defaults to a single step at the client's own
+// current age, using whichever profile clampAllocation's own fallback
+// would pick — never an empty step list (an empty glide path resolves
+// to nothing at every age, an impossible-to-use state the UI should
+// never be able to create in the first place).
+export function createGlidePath(plan, existing = [], profiles = {}) {
+  const keys = Object.keys(profiles);
+  const fallback = keys.length ? keys[Math.floor((keys.length - 1) / 2)] : "Balanced";
+  return {
+    id: uid("gp"),
+    name: `Glide path ${existing.length + 1}`,
+    steps: [createGlidePathStep(plan.client.currentAge, fallback)],
+    rebalance: "annual",
+  };
+}
+
+export function clampGlidePathStep(step, profileKeys, ageMin, ageMax) {
+  return {
+    fromAge: clampInt(step?.fromAge, ageMin, ageMax),
+    profile: profileKeys.includes(step?.profile) ? step.profile : profileKeys[0],
+  };
+}
+
+// Sorted ascending by fromAge — src/glidePaths.js's own interpolation
+// (glidePathWindow) assumes this order; sorting here means every
+// consumer gets it for free, never re-deriving or re-checking it.
+export function clampGlidePath(gp, plan, profiles = {}) {
+  const profileKeys = Object.keys(profiles);
+  const ageMin = plan.client.currentAge, ageMax = plan.endAge;
+  const rawSteps = Array.isArray(gp?.steps) && gp.steps.length > 0 ? gp.steps : [{ fromAge: ageMin, profile: profileKeys[0] }];
+  const steps = profileKeys.length
+    ? rawSteps.map((s) => clampGlidePathStep(s, profileKeys, ageMin, ageMax)).sort((a, b) => a.fromAge - b.fromAge)
+    : [];
+  return {
+    id: typeof gp?.id === "string" && gp.id ? gp.id : uid("gp"),
+    name: typeof gp?.name === "string" && gp.name.trim() ? gp.name.trim().slice(0, 60) : "Glide path",
+    steps,
+    rebalance: GLIDE_PATH_REBALANCE_MODES.includes(gp?.rebalance) ? gp.rebalance : "annual",
+  };
+}
+
+export function normaliseGlidePaths(raw, plan, profiles = {}) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((gp) => clampGlidePath(gp, plan, profiles));
 }
 
 // `profiles` is only needed to re-validate super accounts' allocation
@@ -2836,11 +2925,19 @@ export function clampPlan(plan, profiles = {}) {
   // (normaliseKeyDates itself falls a partner-basis date back to
   // client when there's no partner), so this order is safe either way.
   const keyDates = normaliseKeyDates(plan.keyDates, { client, partner });
+  // Glide paths (spec 32, Commit 4) — resolved BEFORE super accounts/
+  // pensions/financial assets, all three of which can reference one by
+  // id in their own allocation; no dependency of its own beyond
+  // client/endAge (a step's fromAge bound), so this is safe to resolve
+  // in this same single pass, no second hydrate() stage needed — same
+  // reasoning agedCare/heas already use for their own no-dependency
+  // fields.
+  const glidePaths = normaliseGlidePaths(plan.glidePaths, { client, partner, endAge }, profiles);
   // Super accounts (Tier 1.2) live on the plan, alongside client/
   // partner — they are always person-owned, never joint, so they
   // belong with identity rather than with the joint-ownable financial
   // asset list.
-  const superAccounts = normaliseSuperAccounts(plan.superAccounts, { client, partner }, profiles);
+  const superAccounts = normaliseSuperAccounts(plan.superAccounts, { client, partner, glidePaths }, profiles);
   // Employers (spec 23, Commit 1) — a first-class concept: SG and the
   // maximum contribution base apply PER EMPLOYER, not to a person's
   // aggregated income (a second job's SG shouldn't be capped by the
@@ -2858,7 +2955,7 @@ export function clampPlan(plan, profiles = {}) {
   // and the now-final client/partner retirementAge (the condition-of-
   // release gate depends on it), same ordering reason as adviserFees
   // below.
-  const pensions = normalisePensions(plan.pensions, { client, partner, endAge, keyDates }, superAccounts, profiles);
+  const pensions = normalisePensions(plan.pensions, { client, partner, endAge, keyDates, glidePaths }, superAccounts, profiles);
   // Defined benefit pensions (spec 26, Commit 2) — unlike `pensions`,
   // no superAccounts dependency at all (a DB pension is a scheme
   // entitlement the client's own statement states, not drawn from a
@@ -2908,7 +3005,7 @@ export function clampPlan(plan, profiles = {}) {
   const planForRetirement = { household, client, partner, endAge, endBasis, start, keyDates };
   const retirement = normaliseRetirement(plan.retirement, planForRetirement);
   const planSoFar = {
-    household, client, partner, endAge, endBasis, start, keyDates, superAccounts, employers, novatedLeases, pensions, definedBenefits, agedCare, gifts, heas, workingCash, children,
+    household, client, partner, endAge, endBasis, start, keyDates, glidePaths, superAccounts, employers, novatedLeases, pensions, definedBenefits, agedCare, gifts, heas, workingCash, children,
     adviserFees, implementation, retirement,
   };
   // Adjustment rows (spec 18) — validated here, not in clampAllToPlan,
@@ -3850,7 +3947,7 @@ export function hydrate(json, profiles = {}) {
     if (!raw.plan || !Array.isArray(raw.assets) || raw.assets.length === 0) return null;
 
     const plan = clampPlan(raw.plan, profiles);
-    const assets = raw.assets.map((a, i) => hydrateAsset(a, i, profiles));
+    const assets = raw.assets.map((a, i) => hydrateAsset(a, i, profiles, plan.glidePaths));
     // Cashflow rows may only target FINANCIAL assets (D2 validation);
     // rows pointing at lifestyle assets drop on hydrate.
     const assetIds = new Set(assets.filter(isFinancial).map((a) => a.id));
@@ -3961,7 +4058,7 @@ export function hydrate(json, profiles = {}) {
   }
 }
 
-function hydrateAsset(a, i, profiles) {
+function hydrateAsset(a, i, profiles, glidePaths = []) {
   const balance = clampNumber(a.balance, 0);
   // Migration (D2): assets without a class are financial.
   if (a.class === "lifestyle") {
@@ -3984,7 +4081,7 @@ function hydrateAsset(a, i, profiles) {
     owner: ["client", "partner", "joint"].includes(a.owner) ? a.owner : "client",
     distributions: a.distributions === "cash" ? "cash" : "reinvest",
     balance,
-    allocation: clampAllocation(a.allocation, profiles),
+    allocation: clampAllocation(a.allocation, profiles, glidePaths),
     icrPct: clampNumber(a.icrPct, 0, 100),
     cgtAsset,
     costBase: cgtAsset

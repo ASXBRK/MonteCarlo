@@ -24,6 +24,7 @@
 // which the chart surfaces as a footnote.
 
 import { ASSET_CLASS_KEYS } from "./profiles.js";
+import { precomputeGlideYearly } from "./glidePaths.js";
 
 // The profile object a given allocation resolves to: the selected
 // profile directly ("profile" mode), or the volatility-basis profile a
@@ -47,31 +48,75 @@ function zeroTotals() {
   return t;
 }
 
-// allocationSeries(yearly, assets, superAccounts, profiles, bonds) →
+// allocationSeries(yearly, assets, superAccounts, profiles, bonds, glidePaths, ages) →
 //   { perYear: [{ total, byClass: {key: $}, weightPct: {key: %} }, ...],
 //     usesCustom: boolean }
 //
 // byClass/weightPct are always present for every key in
 // ASSET_CLASS_KEYS (zero where nothing contributes). weightPct is null
 // (rather than a divide-by-zero NaN) for a year with zero total.
-export function allocationSeries(yearly, assets, superAccounts, profiles, bonds = []) {
+//
+// `glidePaths`/`ages` (spec 32, Commit 4) are this module's OWN
+// independent read of plan.glidePaths — never sourced from the engine's
+// result (which carries no glide-path field at all: adding one would be
+// an engine-contract-shape change for a figure this chart can derive
+// itself from plan state alone). Both this chart and deterministic.js
+// call the SAME pure precomputeGlideYearly with the SAME inputs, so the
+// two can never show a different glide position for the same plan — the
+// "one source of truth" glidePaths.js's own header promises. `ages` is
+// `{ client, partner }` FULL, absolute-plan-year age arrays (schedule.
+// clientAges/partnerAges — never pre-sliced to a period selection: see
+// `yearIndexOf` below for why) — financial assets anchor to the client
+// (the schema's default anchor for a joint-ownable row), super accounts
+// to their own owner, matching deterministic.js's own anchor choice
+// exactly.
+//
+// `yearIndexOf(y)` maps a `yearly`-array index to its ABSOLUTE plan year
+// (identity by default, for a caller passing the full, unsliced yearly
+// array). A caller under a period selector passes a pre-sliced/reordered
+// `yearly` (main.js's own `yearIdxs.map(y => projection.yearly[y])`) —
+// `ages` must stay UNSLICED and indexed via this mapping instead of
+// slicing it the same way, because "drift" rebalance mode carries state
+// year over year (glidePaths.js's own header): slicing the age array
+// would restart that carried state at the selection's own first year,
+// silently changing what "drift" reports for a period view. Rebalance
+// mode "annual" is unaffected either way (it never carries state), so
+// this only matters for drift — but there is no way to know which mode a
+// referenced glide path uses without already having resolved it, so the
+// full-range precompute is used unconditionally.
+export function allocationSeries(yearly, assets, superAccounts, profiles, bonds = [], glidePaths = [], ages = {}, yearIndexOf = (y) => y) {
+  const glidePathById = (id) => (glidePaths ?? []).find((gp) => gp.id === id) ?? null;
   const holdings = [
     ...assets.filter((a) => a.include && a.class !== "lifestyle")
-      .map((a) => ({ id: a.id, allocation: a.allocation, balanceOf: (row) => row.perAssetClosing[a.id] ?? 0 })),
+      .map((a) => ({ id: a.id, allocation: a.allocation, ownerAges: ages.client, balanceOf: (row) => row.perAssetClosing[a.id] ?? 0 })),
     ...(superAccounts ?? []).filter((sa) => sa.include)
-      .map((sa) => ({ id: sa.id, allocation: sa.allocation, balanceOf: (row) => row.superDetail?.[sa.id]?.closing ?? 0 })),
+      .map((sa) => ({ id: sa.id, allocation: sa.allocation, ownerAges: sa.owner === "partner" ? ages.partner : ages.client, balanceOf: (row) => row.superDetail?.[sa.id]?.closing ?? 0 })),
     ...(bonds ?? []).filter((b) => b.include)
-      .map((b) => ({ id: b.id, allocation: b.allocation, balanceOf: (row) => row.bondDetail?.[b.id]?.closing ?? 0 })),
+      .map((b) => ({ id: b.id, allocation: b.allocation, ownerAges: null, balanceOf: (row) => row.bondDetail?.[b.id]?.closing ?? 0 })),
   ];
   const usesCustom = holdings.some((h) => h.allocation?.mode === "custom");
 
-  const perYear = yearly.map((row) => {
+  // Per-holding, per-plan-year class weights for every glidePath-mode
+  // holding, precomputed ONCE (not per year inside the loop below) —
+  // same "resolve once, index by year" shape deterministic.js's own
+  // meta[id].glideYearly uses. A dangling glidePathId or a holding whose
+  // owner has no age array (bonds — out of scope for glide paths, see
+  // this module's own header) contributes nothing, same as an unknown
+  // profile reference already does below.
+  const glideWeightsById = {};
+  for (const h of holdings) {
+    if (h.allocation?.mode !== "glidePath" || !h.ownerAges) continue;
+    const gp = glidePathById(h.allocation.glidePathId);
+    if (gp) glideWeightsById[h.id] = precomputeGlideYearly(gp, h.ownerAges, profiles).map((gy) => gy.classWeights);
+  }
+
+  const perYear = yearly.map((row, y) => {
     const byClass = zeroTotals();
     let total = 0;
     for (const h of holdings) {
       const balance = h.balanceOf(row);
       if (!balance) continue;
-      const weights = classWeightsForAllocation(h.allocation, profiles);
+      const weights = glideWeightsById[h.id] ? glideWeightsById[h.id][yearIndexOf(y)] : classWeightsForAllocation(h.allocation, profiles);
       if (!weights) continue; // stale/unknown profile reference — contributes nothing rather than throwing
       total += balance;
       for (const k of ASSET_CLASS_KEYS) byClass[k] += balance * (weights[k] / 100);

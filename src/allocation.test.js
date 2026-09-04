@@ -124,4 +124,79 @@ describe("allocationSeries", () => {
     const { perYear } = allocationSeries(yearly, [], [], PROFILES, bonds);
     expect(perYear[0].total).toBe(0);
   });
+
+  // --- Glide paths (spec 32, Commit 4) ------------------------------------
+
+  describe("glide paths", () => {
+    const GP = {
+      id: "gp1", rebalance: "annual",
+      steps: [{ fromAge: 40, profile: "High Growth – Capital" }, { fromAge: 42, profile: "Cash" }],
+    };
+
+    it("a glide-pathed asset at its first step's own age reproduces that profile's classWeights exactly", () => {
+      const assets = [{ id: "a1", include: true, class: "financial", allocation: { mode: "glidePath", glidePathId: "gp1" } }];
+      const yearly = [row({ a1: 100000 })];
+      const { perYear } = allocationSeries(yearly, assets, [], PROFILES, [], [GP], { client: [40] });
+      const hg = PROFILES["High Growth – Capital"].classWeights;
+      for (const k of Object.keys(hg)) expect(perYear[0].weightPct[k]).toBeCloseTo(hg[k], 6);
+    });
+
+    it("the class mix moves year to year across the ramp, ending at the last step's own profile", () => {
+      const assets = [{ id: "a1", include: true, class: "financial", allocation: { mode: "glidePath", glidePathId: "gp1" } }];
+      const yearly = [row({ a1: 100000 }), row({ a1: 100000 }), row({ a1: 100000 })]; // ages 40, 41, 42
+      const { perYear } = allocationSeries(yearly, assets, [], PROFILES, [], [GP], { client: [40, 41, 42] });
+      const cash = PROFILES["Cash"].classWeights;
+      // year 0 (age 40) is 100% High Growth — Cash carries no ausEquity
+      // at all, so High Growth's own (well above zero) ausEquity weight
+      // is the clean divergence to check.
+      expect(perYear[0].weightPct.ausEquity).toBeGreaterThan(0);
+      // year 2 (age 42, the last step) is 100% Cash.
+      for (const k of Object.keys(cash)) expect(perYear[2].weightPct[k]).toBeCloseTo(cash[k], 6);
+      // year 1 sits strictly between the two.
+      expect(perYear[1].weightPct.ausEquity).toBeGreaterThan(perYear[2].weightPct.ausEquity);
+      expect(perYear[1].weightPct.ausEquity).toBeLessThan(perYear[0].weightPct.ausEquity);
+    });
+
+    it("a super account's glide path anchors to ITS OWN owner's age, not the client's", () => {
+      const superAccounts = [{ id: "su1", include: true, owner: "partner", allocation: { mode: "glidePath", glidePathId: "gp1" } }];
+      const yearly = [row({}, { su1: { closing: 100000 } })];
+      // Client is 30 (well before the glide path even starts); the
+      // OWNER (partner) is 42 (the last step) — the result must follow
+      // the partner's own age, not the client's.
+      const { perYear } = allocationSeries(yearly, [], superAccounts, PROFILES, [], [GP], { client: [30], partner: [42] });
+      const cash = PROFILES["Cash"].classWeights;
+      for (const k of Object.keys(cash)) expect(perYear[0].weightPct[k]).toBeCloseTo(cash[k], 6);
+    });
+
+    it("a period-sliced yearly array still resolves against the FULL, unsliced age array via yearIndexOf — never restarting the glide at the selection's own first year", () => {
+      const assets = [{ id: "a1", include: true, class: "financial", allocation: { mode: "glidePath", glidePathId: "gp1" } }];
+      const fullYearly = [row({ a1: 100000 }), row({ a1: 100000 }), row({ a1: 100000 })]; // ages 40, 41, 42
+      const fullAges = [40, 41, 42];
+      const sliceIdxs = [2]; // only the last year selected (age 42)
+      const sliced = sliceIdxs.map((y) => fullYearly[y]);
+      const { perYear } = allocationSeries(
+        sliced, assets, [], PROFILES, [], [GP], { client: fullAges }, (i) => sliceIdxs[i]
+      );
+      const cash = PROFILES["Cash"].classWeights;
+      // Without yearIndexOf, index 0 of the SLICED array would
+      // (wrongly) look up age 40 (100% High Growth) instead of the
+      // true absolute year 2 (age 42, 100% Cash).
+      for (const k of Object.keys(cash)) expect(perYear[0].weightPct[k]).toBeCloseTo(cash[k], 6);
+    });
+
+    it("a dangling glidePathId contributes nothing, same as an unknown profile reference", () => {
+      const assets = [{ id: "a1", include: true, class: "financial", allocation: { mode: "glidePath", glidePathId: "no-such-id" } }];
+      const yearly = [row({ a1: 100000 })];
+      const { perYear } = allocationSeries(yearly, assets, [], PROFILES, [], [GP], { client: [40] });
+      expect(perYear[0].total).toBe(0);
+    });
+
+    it("regression gate: an ordinary profile-mode holding is unaffected by unrelated glide paths being passed in", () => {
+      const assets = [{ id: "a1", include: true, class: "financial", allocation: { mode: "profile", profile: "Balanced" } }];
+      const yearly = [row({ a1: 100000 })];
+      const withoutGP = allocationSeries(yearly, assets, [], PROFILES);
+      const withGP = allocationSeries(yearly, assets, [], PROFILES, [], [GP], { client: [40] });
+      expect(withGP.perYear[0].weightPct).toEqual(withoutGP.perYear[0].weightPct);
+    });
+  });
 });

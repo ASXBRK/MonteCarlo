@@ -52,7 +52,9 @@ import {
   createEmployer, FBT_TYPES,
   PACKAGING_TYPES, BONUS_DESTINATION_TYPES,
   normaliseRetirement,
+  GLIDE_PATH_REBALANCE_MODES, createGlidePath, clampGlidePath, createGlidePathStep,
 } from "./planState.js";
+import { singleStepGlidePathPreset, gradualGlidePathPreset } from "./glidePaths.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { resolveGiftDeprivation, GIFT_ANNUAL_LIMIT, GIFT_FIVE_YEAR_LIMIT } from "./gifting.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -2986,20 +2988,57 @@ function ownerOptions(selected) {
   ).join("");
 }
 
+// Third allocation mode alongside profile/custom (spec 32, Commit 4) —
+// shared across the three holding types glide paths are assignable to
+// (financial assets, super accounts, pensions; bonds are out of scope,
+// matching glidePaths.js's own header). Disabled, with an explanatory
+// title, when the plan has no glide path yet — never a selectable
+// option with nothing behind it. `actionAttr`/`dataAttr`/`fieldAttr` are
+// the id-carrying data-* attribute names each holding type's own click/
+// change handlers already key off (assets: action/aid/field; super:
+// super-action/said/sfield; pensions: pension-action/pid/pfield).
+function allocModeSegHTML(mode, actionAttr, dataAttr, id) {
+  const hasGlidePaths = (state.plan.glidePaths ?? []).length > 0;
+  const opt = (m, label) => `
+    <button class="seg-option${mode === m ? " active" : ""}" type="button"
+            data-${actionAttr}="alloc-mode" data-${dataAttr}="${id}" data-mode="${m}"
+            aria-pressed="${mode === m}"${m === "glidePath" && !hasGlidePaths ? ' disabled title="Add a glide path in Settings first"' : ""}>${label}</button>`;
+  return `
+    <div class="seg-toggle" role="radiogroup" aria-label="Allocation mode">
+      ${opt("profile", "Firm profile")}${opt("custom", "Custom")}${opt("glidePath", "Glide path")}
+    </div>
+  `;
+}
+
+function glidePathAllocGridHTML(alloc, dataAttr, id, fieldAttr) {
+  const gps = state.plan.glidePaths ?? [];
+  return `
+    <div class="alloc-grid alloc-grid-profile">
+      <div class="cf-cell">
+        <label>Glide path</label>
+        <select data-${dataAttr}="${id}" data-${fieldAttr}="alloc.glidePathId">
+          ${gps.map((gp) => `<option value="${gp.id}"${gp.id === alloc.glidePathId ? " selected" : ""}>${escapeHTML(gp.name)}</option>`).join("")}
+        </select>
+      </div>
+    </div>
+  `;
+}
+
 function allocationSectionHTML(a) {
   const alloc = a.allocation;
   const isCustom = alloc.mode === "custom";
-  const seg = `
-    <div class="seg-toggle" role="radiogroup" aria-label="Allocation mode">
-      <button class="seg-option${!isCustom ? " active" : ""}" type="button"
-              data-action="alloc-mode" data-aid="${a.id}" data-mode="profile"
-              aria-pressed="${!isCustom}">Firm profile</button>
-      <button class="seg-option${isCustom ? " active" : ""}" type="button"
-              data-action="alloc-mode" data-aid="${a.id}" data-mode="custom"
-              aria-pressed="${isCustom}">Custom</button>
-    </div>
-  `;
+  const isGlidePath = alloc.mode === "glidePath";
+  const seg = allocModeSegHTML(alloc.mode, "action", "aid", a.id);
 
+  if (isGlidePath) {
+    return `
+      <div class="cf-section">
+        <div class="cf-section-title">Asset allocation</div>
+        ${seg}
+        ${glidePathAllocGridHTML(alloc, "aid", a.id, "field")}
+      </div>
+    `;
+  }
   if (!isCustom) {
     return `
       <div class="cf-section">
@@ -4434,6 +4473,15 @@ function onIncomeRequiredChange(el, field) {
     commitIncomeRequired({ ...ir, stepDownAtAge: clampInt(el.value, state.plan.client.currentAge, state.plan.endAge) });
   } else if (field === "irStepDownPct") {
     commitIncomeRequired({ ...ir, stepDownPct: clampNumber(el.value, 0, 100) });
+  } else if (field === "irIncomeDrivenDrawdown") {
+    // A sibling of incomeRequired under plan.retirement (spec 32,
+    // Commit 4) — not part of the incomeRequired object itself, so this
+    // commits directly through normaliseRetirement rather than
+    // commitIncomeRequired (which only ever touches incomeRequired).
+    state.plan.retirement = normaliseRetirement({ incomeRequired: ir, incomeDrivenDrawdown: el.checked }, state.plan);
+    saveState();
+    refreshOutputs();
+    renderSettings();
   }
 }
 
@@ -4620,6 +4668,7 @@ function renderSettings() {
         <p class="helper-text">If the account would fall below its minimum, the shortfall is drawn from the deficit funding order below. Leave the rate blank to use the firm's Cash profile return.</p>
       </div>
       ${incomeRequiredSectionHTML()}
+      ${glidePathsSectionHTML()}
       ${giftsSectionHTML()}
       ${heasSectionHTML()}
       ${surplusPeriodsSectionHTML()}
@@ -4832,6 +4881,110 @@ function incomeRequiredSectionHTML() {
           </div>
         </div>
       ` : ""}
+      <label class="ptg-check"><input type="checkbox"${state.plan.retirement.incomeDrivenDrawdown ? " checked" : ""} data-settings-field="irIncomeDrivenDrawdown" /><span>Income-driven drawdown — target this figure from pension drawdown</span></label>
+      <p class="helper-text">Off (default): Income Required stays a reference line only — drawdown still follows each pension's own settings below. On: every pension set to "Fund expenditure shortfall" also tops up, at each financial year's end, toward this household figure (still floored at the statutory minimum) — shared across every such pension so two of them never each chase the whole figure.</p>
+    </div>
+  `;
+}
+
+// --- Glide paths (spec 32, Commit 4) ----------------------------------------
+//
+// A household-wide, referenced-by-id list — no natural single owning
+// section (a glide path can be assigned to a financial asset, a super
+// account, or a pension), so this lives in Settings alongside the other
+// plan-wide elections, the same reasoning gifts/HEAS/Income Required
+// above already use.
+function findGlidePath(gpid) {
+  return (state.plan.glidePaths ?? []).find((gp) => gp.id === gpid) ?? null;
+}
+
+function commitGlidePaths(next) {
+  const plan = clampPlan({ ...state.plan, glidePaths: next }, PROFILES);
+  // Financial assets aren't touched by clampPlan (they're a sibling of
+  // `plan`, validated separately at hydrate() time — see that
+  // function's own two-stage shape); super accounts and pensions ARE
+  // already re-validated above (clampPlan itself calls clampAllocation
+  // for both against this same, now-current glidePaths list). A dangling
+  // glidePathId (a glide path edited away or removed outright) falls
+  // back to a firm profile here — clampAllocation's own convention for
+  // any impossible allocation reference — never left silently earning a
+  // zero return (assetReturnComponents's own glide-path branch returns
+  // zero for an unresolvable id, which would otherwise be a wrong
+  // projection accepted silently, the exact thing CLAUDE.md's Input
+  // integrity section forbids).
+  const assets = state.assets.map((a) =>
+    a.allocation?.mode === "glidePath" ? { ...a, allocation: clampAllocation(a.allocation, PROFILES, plan.glidePaths) } : a
+  );
+  state = { ...state, plan, assets };
+  saveState();
+  refreshOutputs();
+  renderSettings();
+  // Assets/super/pensions each render their OWN "Glide path" seg-toggle
+  // option (enabled/disabled by whether any glide path exists at all)
+  // and, once assigned, a live dropdown of glide path NAMES — both
+  // depend on the CURRENT plan.glidePaths list, unlike every other
+  // commit function on this panel (whose own edits never affect a
+  // section besides their own). Without these, an already-mounted
+  // asset/super/pension card would keep showing a stale "no glide path
+  // yet" state until the next full page/route mount.
+  renderAssets();
+  renderSuper();
+  renderPensions();
+}
+
+function glidePathStepRowHTML(gp, step, i) {
+  return `
+    <div class="person-grid" data-gpid="${gp.id}" data-step-idx="${i}">
+      <div class="cf-cell">
+        <label>From age</label>
+        <input type="number" min="${state.plan.client.currentAge}" max="${state.plan.endAge}" step="1" value="${step.fromAge}"
+               data-gp-field="fromAge" data-gpid="${gp.id}" data-step-idx="${i}" />
+      </div>
+      <div class="cf-cell">
+        <label>Profile</label>
+        <select data-gp-field="profile" data-gpid="${gp.id}" data-step-idx="${i}">${profileOptions(step.profile)}</select>
+      </div>
+      <div class="cf-cell">
+        <label>&nbsp;</label>
+        <button class="btn-text list-danger" type="button" data-gp-action="remove-step" data-gpid="${gp.id}" data-step-idx="${i}"${gp.steps.length <= 1 ? " disabled" : ""}>Remove step</button>
+      </div>
+    </div>
+  `;
+}
+
+function glidePathCardHTML(gp) {
+  return `
+    <div class="pcard" data-gpid="${gp.id}">
+      <div class="pcard-head">
+        <input type="text" class="pcard-name-input" maxlength="60" value="${escapeHTML(gp.name)}" data-gp-field="name" data-gpid="${gp.id}" />
+        <button class="pcard-remove" type="button" data-gp-action="remove" data-gpid="${gp.id}">Remove</button>
+      </div>
+      <div class="pcard-body">
+        <div class="cf-cell">
+          <label>Rebalance ${tooltipHTML("Annual (default): resets to the age-implied target every year, the same way a managed portfolio actually does. Drift: never rebalanced — whichever step's own return outperforms grows its share beyond the age-implied target, which always overstates the growth allocation over time.")}</label>
+          <select data-gp-field="rebalance" data-gpid="${gp.id}">
+            ${GLIDE_PATH_REBALANCE_MODES.map((m) => `<option value="${m}"${gp.rebalance === m ? " selected" : ""}>${m === "annual" ? "Annual (default)" : "Drift"}</option>`).join("")}
+          </select>
+        </div>
+        <div class="cf-section-title" style="margin-top:0.5em">Steps (ordered by age)</div>
+        ${gp.steps.map((s, i) => glidePathStepRowHTML(gp, s, i)).join("")}
+        <button class="btn-text" type="button" data-gp-action="add-step" data-gpid="${gp.id}">+ Add step</button>
+      </div>
+    </div>
+  `;
+}
+
+function glidePathsSectionHTML() {
+  const gps = state.plan.glidePaths ?? [];
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Glide paths ${tooltipHTML("An ordered set of age-based steps between firm profiles, interpolated by age so the shift is gradual rather than a cliff — assignable to a financial asset, super account, or pension in place of a single fixed profile. The firm already does this lifecycle-investing shift by hand.")}</div>
+      ${gps.length ? `<div class="portfolio-stack">${gps.map(glidePathCardHTML).join("")}</div>` : `<p class="helper-text">None yet — add one below, or start from a preset.</p>`}
+      <div class="modal-actions">
+        <button class="btn-text" type="button" data-gp-action="add">+ Add glide path</button>
+        <button class="btn-text" type="button" data-gp-action="add-preset-single">+ Preset: High Growth → Balanced at retirement</button>
+        <button class="btn-text" type="button" data-gp-action="add-preset-gradual">+ Preset: gradual step-down</button>
+      </div>
     </div>
   `;
 }
@@ -4862,6 +5015,28 @@ function heasSectionHTML() {
 }
 
 els.settingsPanel.addEventListener("change", (e) => {
+  const gpid = e.target.dataset.gpid;
+  const gpField = e.target.dataset.gpField;
+  if (gpid && gpField) {
+    const gp = findGlidePath(gpid);
+    if (!gp) return;
+    const next = (state.plan.glidePaths ?? []).map((x) => x.id === gpid ? { ...x, steps: x.steps.map((s) => ({ ...s })) } : x);
+    const target = next.find((x) => x.id === gpid);
+    if (gpField === "name") {
+      target.name = e.target.value.trim().slice(0, 60) || target.name;
+    } else if (gpField === "rebalance") {
+      target.rebalance = GLIDE_PATH_REBALANCE_MODES.includes(e.target.value) ? e.target.value : "annual";
+    } else if (gpField === "fromAge" || gpField === "profile") {
+      const i = Number(e.target.dataset.stepIdx);
+      if (!target.steps[i]) return;
+      if (gpField === "fromAge") target.steps[i].fromAge = clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge);
+      else target.steps[i].profile = e.target.value;
+    } else {
+      return;
+    }
+    commitGlidePaths(next);
+    return;
+  }
   const gid = e.target.dataset.gid;
   const gfield = e.target.dataset.gfield;
   if (gid && gfield) {
@@ -5014,6 +5189,48 @@ els.settingsPanel.addEventListener("click", (e) => {
     saveState();
     refreshOutputs();
     renderSettings();
+    return;
+  }
+  const gpBtn = e.target.closest("[data-gp-action]");
+  if (gpBtn) {
+    const gpAction = gpBtn.dataset.gpAction;
+    const gps = state.plan.glidePaths ?? [];
+    if (gpAction === "add") {
+      commitGlidePaths([...gps, createGlidePath(state.plan, gps, PROFILES)]);
+    } else if (gpAction === "add-preset-single") {
+      commitGlidePaths([...gps, clampGlidePath(singleStepGlidePathPreset(state.plan), state.plan, PROFILES)]);
+    } else if (gpAction === "add-preset-gradual") {
+      commitGlidePaths([...gps, clampGlidePath(gradualGlidePathPreset(state.plan), state.plan, PROFILES)]);
+    } else if (gpAction === "remove") {
+      const gp = findGlidePath(gpBtn.dataset.gpid);
+      if (!gp) return;
+      const inUse = [
+        ...state.assets.filter((a) => a.allocation?.mode === "glidePath" && a.allocation.glidePathId === gp.id),
+        ...(state.plan.superAccounts ?? []).filter((s) => s.allocation?.mode === "glidePath" && s.allocation.glidePathId === gp.id),
+        ...(state.plan.pensions ?? []).filter((p) => p.allocation?.mode === "glidePath" && p.allocation.glidePathId === gp.id),
+      ];
+      const msg = inUse.length > 0
+        ? `Remove "${gp.name}"? It is assigned to ${inUse.length} holding(s) — they will fall back to a firm profile.`
+        : `Remove "${gp.name}"?`;
+      if (!window.confirm(msg)) return;
+      commitGlidePaths(gps.filter((x) => x.id !== gp.id));
+    } else if (gpAction === "add-step") {
+      const gp = findGlidePath(gpBtn.dataset.gpid);
+      if (!gp) return;
+      const lastAge = gp.steps[gp.steps.length - 1]?.fromAge ?? state.plan.client.currentAge;
+      const lastProfile = gp.steps[gp.steps.length - 1]?.profile ?? PROFILE_KEYS[0];
+      const nextAge = clampInt(lastAge + 5, state.plan.client.currentAge, state.plan.endAge);
+      const next = gps.map((x) => x.id === gp.id ? { ...x, steps: [...x.steps, createGlidePathStep(nextAge, lastProfile)] } : x);
+      commitGlidePaths(next);
+    } else if (gpAction === "remove-step") {
+      const gp = findGlidePath(gpBtn.dataset.gpid);
+      if (!gp || gp.steps.length <= 1) return;
+      const i = Number(gpBtn.dataset.stepIdx);
+      const next = gps.map((x) => x.id === gp.id ? { ...x, steps: x.steps.filter((_, k) => k !== i) } : x);
+      commitGlidePaths(next);
+    } else {
+      return;
+    }
     return;
   }
   const btn = e.target.closest("[data-action], [data-paction]");
@@ -5195,6 +5412,11 @@ function applyAssetEdit(a, field, el, commit) {
     case "alloc.profile":
       if (a.allocation.mode === "profile" && PROFILE_KEYS.includes(el.value)) {
         a.allocation.profile = el.value;
+      }
+      return false;
+    case "alloc.glidePathId":
+      if (a.allocation.mode === "glidePath" && (state.plan.glidePaths ?? []).some((gp) => gp.id === el.value)) {
+        a.allocation.glidePathId = el.value;
       }
       return false;
     case "alloc.incomePct":
@@ -5718,7 +5940,7 @@ function onAssetSectionClick(e) {
       break;
     }
     case "alloc-mode": {
-      switchAllocMode(a, target.dataset.mode === "custom" ? "custom" : "profile");
+      switchAllocMode(a, ["custom", "glidePath"].includes(target.dataset.mode) ? target.dataset.mode : "profile");
       saveState();
       renderAssets();
       refreshOutputs();
@@ -5807,6 +6029,18 @@ function switchAllocMode(a, mode) {
         frankingPct: p.classWeights ? Math.round(impliedFrankingPct(p.classWeights, p.incomeReturn ?? 0)) : 0,
         volBasis: a.allocation.profile,
       }, PROFILES);
+    }
+  } else if (mode === "glidePath") {
+    // spec 32, Commit 4 — a third allocation mode alongside profile/
+    // custom. Defaults to the plan's own first glide path (there must be
+    // at least one for this option to have been reachable at all — see
+    // each allocationSectionHTML's own "Glide path" radio, disabled
+    // when the list is empty).
+    if (mem.glidePath && (state.plan.glidePaths ?? []).some((gp) => gp.id === mem.glidePath.glidePathId)) {
+      a.allocation = mem.glidePath;
+    } else {
+      const firstGp = (state.plan.glidePaths ?? [])[0];
+      a.allocation = clampAllocation({ mode: "glidePath", glidePathId: firstGp?.id ?? null }, PROFILES, state.plan.glidePaths);
     }
   } else {
     a.allocation = mem.profile || clampAllocation({ mode: "profile", profile: null }, PROFILES);
@@ -6420,16 +6654,17 @@ function superAccountHeadMeta(sa) {
 function superAllocationSectionHTML(sa) {
   const alloc = sa.allocation;
   const isCustom = alloc.mode === "custom";
-  const seg = `
-    <div class="seg-toggle" role="radiogroup" aria-label="Allocation mode">
-      <button class="seg-option${!isCustom ? " active" : ""}" type="button"
-              data-super-action="alloc-mode" data-said="${sa.id}" data-mode="profile"
-              aria-pressed="${!isCustom}">Firm profile</button>
-      <button class="seg-option${isCustom ? " active" : ""}" type="button"
-              data-super-action="alloc-mode" data-said="${sa.id}" data-mode="custom"
-              aria-pressed="${isCustom}">Custom</button>
-    </div>
-  `;
+  const isGlidePath = alloc.mode === "glidePath";
+  const seg = allocModeSegHTML(alloc.mode, "super-action", "said", sa.id);
+  if (isGlidePath) {
+    return `
+      <div class="cf-section">
+        <div class="cf-section-title">Allocation</div>
+        ${seg}
+        ${glidePathAllocGridHTML(alloc, "said", sa.id, "sfield")}
+      </div>
+    `;
+  }
   if (!isCustom) {
     return `
       <div class="cf-section">
@@ -6846,6 +7081,11 @@ function applySuperAccountEdit(sa, field, el, commit) {
     case "alloc.profile":
       sa.allocation = clampAllocation({ mode: "profile", profile: el.value }, PROFILES);
       return false;
+    case "alloc.glidePathId":
+      if (sa.allocation.mode === "glidePath" && (state.plan.glidePaths ?? []).some((gp) => gp.id === el.value)) {
+        sa.allocation.glidePathId = el.value;
+      }
+      return false;
     case "alloc.incomePct":
       sa.allocation.incomePct = clampNumber(el.value, 0, ALLOC_PCT_MAX);
       if (commit) el.value = sa.allocation.incomePct;
@@ -6980,7 +7220,7 @@ els.superSection.addEventListener("click", (e) => {
       break;
     }
     case "alloc-mode": {
-      switchAllocMode(sa, btn.dataset.mode === "custom" ? "custom" : "profile");
+      switchAllocMode(sa, ["custom", "glidePath"].includes(btn.dataset.mode) ? btn.dataset.mode : "profile");
       saveState();
       renderSuper();
       refreshOutputs();
@@ -7013,16 +7253,17 @@ function pensionHeadMeta(pn) {
 function pensionAllocationSectionHTML(pn) {
   const alloc = pn.allocation;
   const isCustom = alloc.mode === "custom";
-  const seg = `
-    <div class="seg-toggle" role="radiogroup" aria-label="Allocation mode">
-      <button class="seg-option${!isCustom ? " active" : ""}" type="button"
-              data-pension-action="alloc-mode" data-pid="${pn.id}" data-mode="profile"
-              aria-pressed="${!isCustom}">Firm profile</button>
-      <button class="seg-option${isCustom ? " active" : ""}" type="button"
-              data-pension-action="alloc-mode" data-pid="${pn.id}" data-mode="custom"
-              aria-pressed="${isCustom}">Custom</button>
-    </div>
-  `;
+  const isGlidePath = alloc.mode === "glidePath";
+  const seg = allocModeSegHTML(alloc.mode, "pension-action", "pid", pn.id);
+  if (isGlidePath) {
+    return `
+      <div class="cf-section">
+        <div class="cf-section-title">Allocation</div>
+        ${seg}
+        ${glidePathAllocGridHTML(alloc, "pid", pn.id, "pfield")}
+      </div>
+    `;
+  }
   if (!isCustom) {
     return `
       <div class="cf-section">
@@ -7325,6 +7566,11 @@ function applyPensionEdit(pn, field, el, commit) {
       return false;
     case "alloc.profile":
       pn.allocation = clampAllocation({ mode: "profile", profile: el.value }, PROFILES);
+      return false;
+    case "alloc.glidePathId":
+      if (pn.allocation.mode === "glidePath" && (state.plan.glidePaths ?? []).some((gp) => gp.id === el.value)) {
+        pn.allocation.glidePathId = el.value;
+      }
       return false;
     case "alloc.incomePct":
       pn.allocation.incomePct = clampNumber(el.value, 0, ALLOC_PCT_MAX);
@@ -7630,7 +7876,7 @@ els.pensionSection.addEventListener("click", (e) => {
     if (!window.confirm(`Remove "${pn.name}"?`)) return;
     state.plan.pensions = state.plan.pensions.filter((x) => x.id !== pid);
   } else if (action === "alloc-mode") {
-    switchAllocMode(pn, btn.dataset.mode === "custom" ? "custom" : "profile");
+    switchAllocMode(pn, ["custom", "glidePath"].includes(btn.dataset.mode) ? btn.dataset.mode : "profile");
   } else if (action === "add-commutation") {
     pn.commutations = [...(pn.commutations ?? []), createCommutation(state.plan, pn.commutations ?? [])];
   } else if (action === "remove-commutation") {
@@ -9225,7 +9471,9 @@ function renderAssetAllocationChart() {
   const filteredSuper = forOwner == null ? (state.plan.superAccounts ?? []) : (state.plan.superAccounts ?? []).filter((s) => s.owner === forOwner);
   const filteredBonds = forOwner == null ? (state.bonds ?? []) : (state.bonds ?? []).filter((b) => b.owner === forOwner || b.owner === "joint");
   const { perYear, usesCustom } = allocationSeries(
-    yearIdxs.map((y) => projection.yearly[y]), filteredAssets, filteredSuper, PROFILES, filteredBonds
+    yearIdxs.map((y) => projection.yearly[y]), filteredAssets, filteredSuper, PROFILES, filteredBonds,
+    state.plan.glidePaths, { client: projection.schedule.clientAges, partner: projection.schedule.partnerAges },
+    (i) => yearIdxs[i]
   );
   const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#d97b2f"];
 

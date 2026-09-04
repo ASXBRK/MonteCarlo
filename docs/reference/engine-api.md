@@ -226,12 +226,14 @@ heasDetail.closing`), `income`, `cashDistributions`, `expenses`, `tax`.
 `null`, the household's stated Income Required (real $), resolved and
 indexed per `plan.retirement.incomeRequired`; `null` for every plan year
 before the requirement's own `startAt` (a real, active figure is never
-`0` and `null` at once). A REFERENCE line only — it never feeds back
-into any other field on this row. **Interpretation: after-tax income
-received by the household** — compare it against `income − tax` on this
-SAME row, never against gross drawdown. Its `source` resolves one of
-five ways: `currentExpenses` (the household's own living-expense rows at
-the requirement's start year), `custom` (a stated $ figure),
+`0` and `null` at once). A REFERENCE line by default — it never feeds
+back into any other field on this row UNLESS `plan.retirement.
+incomeDrivenDrawdown` is on (Commit 4; see below), in which case it also
+drives pension drawdown. **Interpretation: after-tax income received by
+the household** — compare it against `income − tax` on this SAME row,
+never against gross drawdown. Its `source` resolves one of five ways:
+`currentExpenses` (the household's own living-expense rows at the
+requirement's start year), `custom` (a stated $ figure),
 `asfaComfortable` (the ASFA Comfortable figure for the household's
 single/couple status), `asfaModest` (as Comfortable, but AUTOMATICALLY
 choosing between the homeowner and renter figure — homeowner status
@@ -243,6 +245,29 @@ always resolves the renter figure regardless of what's derived).
 `src/data/asfaStandards.js`'s figures are sourced directly from the
 firm, never web-searched. A stale ASFA quarter surfaces as a top-level
 `retirementWarnings` entry, not on this row.
+
+**Glide paths and income-driven drawdown** (spec 32, Commit 4) —
+`plan.glidePaths`: an ordered list of `{id, name, steps: [{fromAge,
+profile}], rebalance: "annual" | "drift"}`, assignable in place of a
+fixed profile to a financial asset's, super account's, or pension's own
+`allocation` (`{mode: "glidePath", glidePathId}`). Interpolated by age
+between the two surrounding steps (`src/glidePaths.js`'s
+`glidePathWindow`); "annual" (default) resets to the age-implied target
+every year, "drift" never resets, so whichever step's own return
+currently dominates grows its share beyond the age-implied target.
+Financial assets anchor to the client's own age (the schema's default
+anchor for a joint-ownable row); super accounts and pensions anchor to
+their OWN owner's age. Not a new result field — the allocation-over-time
+chart (`src/allocation.js`) resolves the same glide path independently,
+from `plan.glidePaths` directly, never from anything on this row.
+`plan.retirement.incomeDrivenDrawdown` (boolean, default `false`): when
+on, every pension with `drawdownOption: "expenditure"` also tops up, at
+each FY's end, toward the household's own Income Required figure (still
+floored at each pension's own statutory minimum) — a single, shared,
+depleting target across every such pension, so two of them split ONE
+household figure rather than each independently chasing the whole
+amount (each pension's own statutory-minimum floor still applies
+separately, on top, regardless of what the shared target already met).
 
 **Cashflow mechanics**
 `surplusOrDeficit`, `surplusInvested`, `surplusSpent`, `surplusAccumulated`,

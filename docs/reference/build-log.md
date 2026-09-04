@@ -2471,6 +2471,101 @@ build unaffected (test-only change).
 
 ---
 
+### Retirement: glide paths and income-driven drawdown (spec 32, Commit 4)
+`plan.glidePaths` — an ordered `{fromAge, profile}` step list, assignable
+in place of a fixed profile to a financial asset's, super account's, or
+pension's own allocation (`{mode: "glidePath", glidePathId}`). New pure
+module `src/glidePaths.js`: `glidePathWindow` (age-interpolation between
+the two surrounding steps — a cliff only when two steps sit at adjacent
+ages), `precomputeGlideYearly` (the per-plan-year rate/franking/class-
+weight array both the engine and the allocation chart consume — one
+source of truth, so the two can never diverge), `blendAtAge` (a single-
+age snapshot for display), two presets (`singleStepGlidePathPreset`,
+`gradualGlidePathPreset`).
+
+**Rebalance vs drift, the modelling constraint.** `profiles.js` only
+publishes WHOLE-PORTFOLIO total returns, never per-asset-class returns —
+genuine per-class drift is impossible without fabricating data. Modelled
+instead as a dollar-notional split between the TWO SURROUNDING STEPS'
+own profiles: "annual" (default) resets to the age-implied target every
+year; "drift" never resets — whichever step's own return currently
+outperforms grows its own share beyond the age-implied target, carrying
+forward as the new starting point when age crosses into a different
+window (never reset to that window's own fresh target on drift). This
+reproduces "drift always overstates the growth allocation" (the spec's
+own words) using only real published data.
+
+**Engine integration** (`deterministic.js`): a glide-pathed holding's
+per-year rate is precomputed ONCE, up front, outside the measurement/
+real two-pass replay (the module's own architecture requires this — see
+its header) and indexed by plan year at the four existing rate-
+consumption points (asset growth, bond growth — bonds are OUT OF SCOPE,
+super growth, pension growth); every ordinary fixed-profile/custom
+holding is untouched, bit-identical. Financial assets anchor the glide
+path to the CLIENT's own age (the schema's default anchor for a joint-
+ownable row); super accounts and pensions — always person-owned, never
+joint — anchor to their OWN owner's age instead, so a couple's two
+accounts on the same glide path diverge correctly when the owners'
+ages differ.
+
+**Allocation chart** (`allocation.js`): resolves the SAME glide path
+independently, from `plan.glidePaths` directly — never from a new engine
+result field (adding one would be a contract-shape change for a figure
+the chart can derive itself). A period-selector's sliced `yearly` array
+is matched with a `yearIndexOf` mapping back to the FULL, unsliced age
+array, so a period selection never restarts a "drift" glide path's own
+carried state at the selection's own first year.
+
+**Income-driven drawdown toggle** (`plan.retirement.incomeDrivenDrawdown`,
+boolean, default `false`, deferred from Commit 1): OFF leaves Income
+Required a pure reference line — bit-identical. ON retargets every
+"expenditure"-drawdown pension's existing FY-end compliance top-up from
+"pay the statutory minimum" to "pay toward the household's own Income
+Required figure, floored at the statutory minimum" (the spec's own
+words) — resolved via the SAME `resolveIncomeRequired` accessor the
+result's own `incomeRequired` field uses, computed up front (`yearly`
+omitted from its `ctx`, since it doesn't exist yet at this point in the
+projection — a disclosed simplification: `asfaModest`'s own derived-
+homeowner-status falls back to "renter" whenever this drawdown-facing
+accessor is consulted, the same shape as this engine's other same-FY
+circularities, e.g. the measurement pass's PAYG tax estimate). **Two
+pensions sharing this toggle never double the household's own target**
+— a single shared, depleting `remainingTarget` (computed once per FY,
+decremented as each expenditure pension is processed in plan order) caps
+the collective top-up at the ONE figure; each pension's own statutory
+minimum is still a SEPARATE, non-waivable legal floor on top of whatever
+the shared target already covered.
+
+**UI** (`main.js`): a "Glide paths" management section in Settings (add/
+remove/edit steps, rebalance mode, two preset quick-add buttons; removing
+a glide path re-validates every asset/super/pension referencing it,
+falling back to a firm profile rather than leaving a dangling reference —
+financial assets aren't touched by `clampPlan` itself, so this is handled
+explicitly in the commit path). A third "Glide path" allocation-mode
+option (alongside Firm profile/Custom) on financial assets, super
+accounts, and pensions — disabled when the plan has no glide path yet.
+An income-driven-drawdown checkbox in the Income Required section.
+
+Not a result-contract change (no new field on `projectPlan`'s own
+return) — `ENGINE_VERSION` unchanged. Not a new money flow (both
+mechanisms reuse existing channels — asset/super/pension growth, pension
+payments — at existing amounts computed differently) — `randomScenario()`
+and `conservationCheck.js` unchanged.
+
+Tests: `glidePaths.test.js` (interpolation, annual-vs-drift divergence,
+presets), `allocation.test.js` (chart resolution, owner anchoring, the
+`yearIndexOf` period-slicing fix, dangling-id fallback), `planState.test.js`
+(schema/clamp, dangling-reference fallback, `clampPlan`'s own return
+gap), `deterministic.test.js` (engine integration — bit-identical to
+plain profile mode at each step's own age, owner anchoring, drift
+divergence, income-driven drawdown floor and the two-pension sharing
+fix, conservation). Full suite 1981/1981, build green.
+
+**Scope note.** Bonds are out of scope for glide paths (the spec's own
+words: "assignable to a super account, pension or financial asset").
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

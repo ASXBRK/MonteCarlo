@@ -40,6 +40,7 @@
 // scaling. No DOM knowledge anywhere.
 
 import { PROFILES, DEFENSIVE_PROFILE, impliedFrankingPct } from "./profiles.js";
+import { precomputeGlideYearly, blendAtAge } from "./glidePaths.js";
 import { buildSchedules, firstFyStartYear, superContributionAllowed } from "./schedule.js";
 import { resolveRef } from "./keyDates.js";
 import { resolveIncomeRequired } from "./retirement.js";
@@ -91,7 +92,19 @@ const toMonthlyReal = (netNominal, cpi) =>
 
 // Nominal return components + franking level for an asset. Lifestyle
 // assets (D2) have a bare growth rate and nothing else.
-export function assetReturnComponents(asset, profiles = PROFILES) {
+//
+// `glidePaths`/`age` (spec 32, Commit 4) are a SINGLE-SNAPSHOT fallback
+// for a glidePath-mode allocation — a display figure (main.js's
+// Assumptions view) or a test that only wants one number, resolved via
+// glidePaths.js's own blendAtAge (age-implied target, no drift memory).
+// The engine's own monthly rate NEVER uses this path — it needs the full
+// per-year array (precomputeGlideYearly), precomputed once per holding in
+// projectPlan's own setup below, so drift mode's carried-forward share is
+// visible year over year. Omitting glidePaths/age (every pre-Commit-4
+// caller) leaves a glidePath-mode allocation resolving to the same zero
+// fallback as an unknown profile id always has — never a behaviour change
+// for a caller that hasn't been updated to pass them.
+export function assetReturnComponents(asset, profiles = PROFILES, glidePaths = [], age = null) {
   if (asset.class === "lifestyle") {
     return { incomeNominal: 0, growthNominal: (asset.growthPct ?? 0) / 100, frankingPct: 0 };
   }
@@ -101,6 +114,13 @@ export function assetReturnComponents(asset, profiles = PROFILES) {
       growthNominal: asset.allocation.growthPct / 100,
       frankingPct: asset.allocation.frankingPct ?? 0,
     };
+  }
+  if (asset.allocation.mode === "glidePath") {
+    const gp = age != null ? glidePaths.find((g) => g.id === asset.allocation.glidePathId) : null;
+    const blend = gp ? blendAtAge(gp.steps, age, profiles) : null;
+    return blend
+      ? { incomeNominal: blend.incomeNominal, growthNominal: blend.growthNominal, frankingPct: blend.frankingPct }
+      : { incomeNominal: 0, growthNominal: 0, frankingPct: 0 };
   }
   const p = profiles[asset.allocation.profile];
   return {
@@ -319,15 +339,25 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const couple = !!state.plan.partner;
   const persons = couple ? ["client", "partner"] : ["client"];
 
+  // Glide paths (spec 32, Commit 4) — resolved once per holding, not
+  // once per plan (each holding can reference a different glide path,
+  // or none at all). Financial assets are joint-ownable, so — like
+  // every other joint-ownable row in this schema — the glide path is
+  // anchored to the CLIENT's own age, the default anchor CLAUDE.md
+  // names for anything not identity-scoped (super/pension anchor to
+  // their own OWNER instead — see those setup blocks below).
+  const glidePaths = state.plan.glidePaths ?? [];
+  const glidePathById = (id) => glidePaths.find((gp) => gp.id === id) ?? null;
+
   const meta = {};
   for (const a of included) {
-    const { incomeNominal, growthNominal, frankingPct } = assetReturnComponents(a, profiles);
+    const { incomeNominal, growthNominal, frankingPct } = assetReturnComponents(a, profiles, glidePaths, schedule.clientAges[0]);
     const icr = a.class === "lifestyle" ? 0 : a.icrPct / 100;
     const payout = a.class !== "lifestyle" && a.distributions === "cash";
+    const rateOf = (inc, gro) => (payout ? toMonthlyReal(gro - icr, cpi) : toMonthlyReal(inc + gro - icr, cpi));
+    const glidePath = a.allocation?.mode === "glidePath" ? glidePathById(a.allocation.glidePathId) : null;
     meta[a.id] = {
-      rate: payout
-        ? toMonthlyReal(growthNominal - icr, cpi)
-        : toMonthlyReal(incomeNominal + growthNominal - icr, cpi),
+      rate: rateOf(incomeNominal, growthNominal),
       incomeNominal,
       frankingPct,
       icr,
@@ -335,6 +365,20 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       cgt: a.class !== "lifestyle" && a.cgtAsset === true,
       lifestyle: a.class === "lifestyle",
       shares: ownerShares(a, couple),
+      // Per-plan-year {rate, incomeNominal, frankingPct}, precomputed
+      // ONCE here from glidePaths.js's own precomputeGlideYearly — never
+      // re-derived inside the monthly loop (see that module's own header
+      // on why: the measurement/real two-pass replay needs identical
+      // values on both passes). `null` for every ordinary fixed-profile/
+      // custom asset, which keeps reading the static fields above —
+      // bit-identical to before this commit.
+      glideYearly: glidePath
+        ? precomputeGlideYearly(glidePath, schedule.clientAges, profiles).map((gy) => ({
+            rate: rateOf(gy.incomeNominal, gy.growthNominal),
+            incomeNominal: gy.incomeNominal,
+            frankingPct: gy.frankingPct,
+          }))
+        : null,
     };
   }
 
@@ -364,9 +408,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // simplification: real funds realise gains irregularly, not smoothly.
   const superAccounts = (state.plan.superAccounts ?? []).filter((s) => s.include);
   const superIds = superAccounts.map((s) => s.id);
+  // Glide path age anchor for super/pensions (spec 32, Commit 4) — unlike
+  // financial assets, these are always person-owned, never joint (this
+  // module's own header note), so the glide path anchors to that OWNER's
+  // own age — the same "income rows anchor to the owner" convention
+  // CLAUDE.md already applies elsewhere, not the client-default fallback
+  // financial assets use above.
+  const ageArrayFor = (owner) => (owner === "partner" ? schedule.partnerAges : schedule.clientAges);
+
   const superMeta = {};
   for (const s of superAccounts) {
-    const { incomeNominal, growthNominal } = assetReturnComponents(s, profiles);
+    const ownerAges = ageArrayFor(s.owner);
+    const { incomeNominal, growthNominal } = assetReturnComponents(s, profiles, glidePaths, ownerAges?.[0]);
     const icr = s.icrPct / 100;
     const rates = superRatesFor(fy0, bracketMode, cpi); // flat rates — FY-invariant, safe to fix once
     const growthTaxRate = rates.earningsTaxRate * (2 / 3);
@@ -380,14 +433,28 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // since netGrowth already equals grossGrowth when rate === grossRate.
     const untaxed = s.taxedStatus === "untaxed";
     const grossRate = toMonthlyReal(incomeNominal + growthNominal - icr, cpi);
+    const netRateOf = (inc, gro) => untaxed
+      ? toMonthlyReal(inc + gro - icr, cpi)
+      : toMonthlyReal(inc * (1 - rates.earningsTaxRate) + gro * (1 - growthTaxRate) - icr, cpi);
+    const glidePath = s.allocation?.mode === "glidePath" ? glidePathById(s.allocation.glidePathId) : null;
     superMeta[s.id] = {
       // Actual compounding rate: both components taxed, THEN combined
       // and Fisher-converted — same structure assetMonthlyRate uses.
-      rate: untaxed ? grossRate : toMonthlyReal(incomeNominal * (1 - rates.earningsTaxRate) + growthNominal * (1 - growthTaxRate) - icr, cpi),
+      rate: netRateOf(incomeNominal, growthNominal),
       // Pre-tax rate, for the earnings/earnings-tax reporting split only.
       grossRate,
       owner: s.owner,
       taxedStatus: untaxed ? "untaxed" : "taxed",
+      // Per-plan-year {rate, grossRate}, precomputed once — see the
+      // financial-asset meta block above for why this is precomputed
+      // rather than resolved inline. `null` for every ordinary
+      // fixed-profile/custom super account.
+      glideYearly: glidePath && ownerAges
+        ? precomputeGlideYearly(glidePath, ownerAges, profiles).map((gy) => ({
+            rate: netRateOf(gy.incomeNominal, gy.growthNominal),
+            grossRate: toMonthlyReal(gy.incomeNominal + gy.growthNominal - icr, cpi),
+          }))
+        : null,
     };
   }
   const superBal = {};
@@ -523,14 +590,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const pensionIds = pensionRows.map((pn) => pn.id);
   const pensionMeta = {};
   for (const pn of pensionRows) {
-    const { incomeNominal, growthNominal } = assetReturnComponents(pn, profiles);
+    const ownerAges = ageArrayFor(pn.owner);
+    const { incomeNominal, growthNominal } = assetReturnComponents(pn, profiles, glidePaths, ownerAges?.[0]);
     const icr = pn.icrPct / 100;
     const rates = superRatesFor(fy0, bracketMode, cpi);
     const growthTaxRate = rates.earningsTaxRate * (2 / 3);
     const ownerPerson = pn.owner === "partner" ? state.plan.partner : state.plan.client;
+    const taxedRateOf = (inc, gro) => toMonthlyReal(inc * (1 - rates.earningsTaxRate) + gro * (1 - growthTaxRate) - icr, cpi);
+    const grossRateOf = (inc, gro) => toMonthlyReal(inc + gro - icr, cpi);
+    const glidePath = pn.allocation?.mode === "glidePath" ? glidePathById(pn.allocation.glidePathId) : null;
     pensionMeta[pn.id] = {
-      taxedRate: toMonthlyReal(incomeNominal * (1 - rates.earningsTaxRate) + growthNominal * (1 - growthTaxRate) - icr, cpi),
-      grossRate: toMonthlyReal(incomeNominal + growthNominal - icr, cpi),
+      taxedRate: taxedRateOf(incomeNominal, growthNominal),
+      grossRate: grossRateOf(incomeNominal, growthNominal),
       // Irrelevant for an ABP (always in retirement phase, from
       // commencement) — computed for every pension uniformly anyway,
       // cheap and side-effect-free.
@@ -550,6 +621,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       grandfathered: pn.grandfathered === true,
       grandfatheredPurchasePrice: pn.grandfatheredPurchasePrice ?? 0,
       grandfatheredLifeExpectancyYears: pn.grandfatheredLifeExpectancyYears ?? null,
+      // Per-plan-year {taxedRate, grossRate}, precomputed once — see the
+      // financial-asset meta block above for why. `null` for every
+      // ordinary fixed-profile/custom pension.
+      glideYearly: glidePath && ownerAges
+        ? precomputeGlideYearly(glidePath, ownerAges, profiles).map((gy) => ({
+            taxedRate: taxedRateOf(gy.incomeNominal, gy.growthNominal),
+            grossRate: grossRateOf(gy.incomeNominal, gy.growthNominal),
+          }))
+        : null,
     };
   }
   const pensionBal = {};
@@ -769,6 +849,23 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // see each call site's own comment for which one it uses and why.
   const awoteAssum = state.assumptions.awote ?? 0.032;
   const wageGrowthAssum = state.assumptions.wageGrowth ?? 0.027;
+  // Income-driven drawdown (spec 32, Commit 4) — resolved once, up front,
+  // via the SAME resolveIncomeRequired accessor the post-pass below
+  // attaches to every yearly row (retirement.js's own header). `yearly`
+  // is deliberately omitted from ctx here — it doesn't exist yet at this
+  // point in the projection — so `asfaModest`'s own derived-homeowner
+  // status (retirement.js's deriveHomeownerStatus) falls back to
+  // "renter" whenever this accessor is consulted DURING the loop, a
+  // disclosed simplification of the same shape as every other same-FY
+  // circularity this engine already resolves with a stated approximation
+  // (pensionFixedProportion's live-vs-fixed split, the measurement
+  // pass's PAYG tax estimate). The post-pass's own accessor (built later,
+  // against the finished `yearly`) is unaffected and still reports the
+  // fully-derived figure on every row — only the DRAWDOWN target itself
+  // uses this simplified one.
+  const incomeRequiredForDrawdown = resolveIncomeRequired(state.plan, schedule, cpi, wageGrowthAssum, {
+    properties: state.properties, liabilities: state.liabilities,
+  });
   const props = (state.properties ?? []).filter((p) =>
     p.status === "owned" ? p.currentValue > 0 : p.priceToday > 0);
   // HEAS (spec 21b, Commit 5) — the secured property, resolved once. A
@@ -2203,7 +2300,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // disclosed simplification: real-world income yields are far
         // more stable than capital values, which is where this rate
         // already concentrates the shock.
-        const rate = meta[id].rate + shockFor(id, m);
+        const rate = (meta[id].glideYearly ? meta[id].glideYearly[y].rate : meta[id].rate) + shockFor(id, m);
         const offsetting = offsetLoansByAsset[id];
         if (offsetting) {
           const loanReal = offsetting.reduce((s, lid) => s + loanBal[lid], 0) / inflAt(m);
@@ -2626,8 +2723,9 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           // header comment above — so there's no measurement/real
           // replay concern here the way there is for asset growth).
           const shock = shockFor(id, m);
-          const grossGrowth = superBal[id] * (sm.grossRate + shock);
-          const netGrowth = superBal[id] * (sm.rate + shock);
+          const gy = sm.glideYearly ? sm.glideYearly[y] : null;
+          const grossGrowth = superBal[id] * ((gy ? gy.grossRate : sm.grossRate) + shock);
+          const netGrowth = superBal[id] * ((gy ? gy.rate : sm.rate) + shock);
           superBal[id] += netGrowth;
           row.superDetail[id].earnings += grossGrowth;
           row.superDetail[id].earningsTax += grossGrowth - netGrowth;
@@ -2665,9 +2763,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               });
             }
           }
-          const netRate = inRetirementPhase ? pm.grossRate : pm.taxedRate;
+          const pgy = pm.glideYearly ? pm.glideYearly[y] : null;
+          const grossRate = pgy ? pgy.grossRate : pm.grossRate;
+          const netRate = inRetirementPhase ? grossRate : (pgy ? pgy.taxedRate : pm.taxedRate);
           const shock = shockFor(id, m);
-          const grossGrowth = pensionBal[id] * (pm.grossRate + shock);
+          const grossGrowth = pensionBal[id] * (grossRate + shock);
           const netGrowth = pensionBal[id] * (netRate + shock);
           pensionBal[id] += netGrowth;
           row.pensionDetail[id].earnings += grossGrowth;
@@ -3157,9 +3257,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       let cashDist = 0;
       for (const id of ids) {
         const mt = meta[id];
-        if (mt.incomeNominal > 0 && bal[id] > 0) {
-          const dist = bal[id] * mt.incomeNominal / 12;
-          const franked = dist * mt.frankingPct / 100;
+        // Glide path (spec 32, Commit 4): incomeNominal/frankingPct also
+        // move year to year for a glide-pathed asset — same precomputed
+        // array the growth step above reads `.rate` from.
+        const gy = mt.glideYearly ? mt.glideYearly[y] : null;
+        const incomeNominal = gy ? gy.incomeNominal : mt.incomeNominal;
+        if (incomeNominal > 0 && bal[id] > 0) {
+          const dist = bal[id] * incomeNominal / 12;
+          const franked = dist * (gy ? gy.frankingPct : mt.frankingPct) / 100;
           for (const p of persons) {
             const s = mt.shares[p];
             if (!s) continue;
@@ -4018,11 +4123,33 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // FY's last month. Real-pass only, same reason as the deficit-
       // funding draw above.
       if (row && m === last - 1) {
+        // Income-driven drawdown (spec 32, Commit 4) — the household
+        // toggle deferred from Commit 1: OFF leaves the loop below
+        // exactly as it always was (compliance-minimum top-up only,
+        // bit-identical). ON adds a SHARED, DEPLETING household target —
+        // "pension drawdown [collectively] targets Income Required,
+        // floored at the statutory minimum" (the spec's own words) — so
+        // two expenditure pensions split the one household gap instead
+        // of each independently chasing the whole figure, the same
+        // shape fundingOrder's own running shortfall already uses for
+        // its sequence of funding sources.
+        const incomeDriven = state.plan.retirement?.incomeDrivenDrawdown === true;
+        let remainingTarget = 0;
+        if (incomeDriven) {
+          const target = incomeRequiredForDrawdown(y) ?? 0;
+          let paidSoFar = 0;
+          for (const pn of pensionRows) {
+            if (pensionMeta[pn.id].drawdownOption === "expenditure") paidSoFar += pensionPaidYtd[pn.id];
+          }
+          remainingTarget = Math.max(0, target - paidSoFar);
+        }
         for (const pn of pensionRows) {
           if (!pensionCommenced[pn.id] || pensionMeta[pn.id].drawdownOption !== "expenditure") continue;
-          const owed = pensionMinThisYear[pn.id] - pensionPaidYtd[pn.id];
+          let owed = pensionMinThisYear[pn.id] - pensionPaidYtd[pn.id];
+          if (incomeDriven) owed = Math.max(owed, remainingTarget);
           if (owed <= 0) continue;
           const paid = withdrawFromPension(pn.id, owed);
+          if (incomeDriven) remainingTarget = Math.max(0, remainingTarget - paid);
           if (paid <= 0) continue;
           wcaBal += paid;
           const pm = pensionMeta[pn.id];
