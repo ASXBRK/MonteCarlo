@@ -51,6 +51,7 @@ the suggested walkthrough order.
 | Aged care planning (pre-entry) | Comprehensive pre-retiree — Current | The only client with a real aged care entry to plan against |
 | Debt recycling | Family with a mortgage — Debt recycling | The purpose-built scenario for this exact view |
 | Education funding | Family with a mortgage — Current | The only client with school-age children |
+| Retirement | Modest retiree — Current | Already retired, age pension binding, and modestly placed on the ASFA scale — the exhibit this view exists for |
 
 ## What if
 

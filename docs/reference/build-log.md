@@ -2566,6 +2566,101 @@ words: "assignable to a super account, pension or financial asset").
 
 ---
 
+### Retirement: goal versus position chart and lifestyle band (spec 32, Commit 5)
+New Focus view (`focus-retirement`, "Retirement") — the first place any
+of spec 32's retirement-phase work actually surfaces as a page, so it
+also hosts the Commit 3 analytics summary card (left unbuilt in Commit 3
+itself, since no retirement view existed yet to put it in) above the
+Commit 5 goal-versus-position chart and lifestyle band. All three read
+the SAME already-run projection (spec 12's own governing principle).
+
+**5a — goal versus position** (`src/goalVsPosition.js`, new pure
+module). Household income by source, five buckets, each read straight
+off an already-labelled ledger sub-total (never re-derived): employment
+(`schedule.employmentIncomeByOwner`), pension drawdown
+(`row.pensionDetail[*].payments`), investment income
+(`row.cashDistributions`), age pension
+(`retirementAnalytics.js`'s own `agePensionPaid`, now exported), asset
+drawdown (`row.deficitFundedFromAssets` + `row.withdrawals` + every
+super account's own `row.superDetail[*].withdrawals` — bonds
+deliberately excluded, since a bond's own deficit sells are already
+counted once inside `deficitFundedFromAssets`, and adding
+`bondDetail[*].withdrawals` on top would double it). Bars are GROSS by
+source — apportioning one household tax bill back to five income
+streams has no basis in an engine that assesses tax on TOTAL taxable
+income, never per-stream; `deliveredIncome` (gross total less that
+year's own tax) is the one net figure this module produces, and it's
+what the Income Required line, the crossover annotation, and the
+generated sentence all compare against — the apples-to-apples
+comparison, disclosed on the chart itself ("bars are gross by source;
+the line is after tax").
+
+**5b — the lifestyle band** (`src/lifestyleBand.js`, new pure module).
+Places Commit 3's own average retirement income to LE on the ASFA
+scale ("a single year would mislead" — the spec's own words) and names
+the descriptors for its band and the one above. Only two published
+per-household dollar figures exist (Modest/Modest-renter and
+Comfortable), so a below-the-floor case uses `agePensionOnly`'s own
+descriptors (general reference content, never the cross-check-only
+dollar figure) as its "current level," with no invented dollar amount.
+
+**The "home" nuance — handled deliberately, per the user's own
+instruction.** Nine of ASFA's ten lifestyle categories read as a
+ladder (more or less of the same thing across standards); "home" does
+not — at the renter standard it describes the DWELLING ("a modest one
+or two bedroom apartment"), while every other standard describes
+REPAIR CAPACITY for a home already owned. Composing a delta line
+("reaching Comfortable buys you...") uniformly across all ten
+categories would, for a renter, present a rental unit and a repair
+allowance as two points on the same scale — incoherent, since becoming
+a homeowner is a capital/structural decision, not something more
+income buys. **Chosen fix: exclude "home" from the delta composition**
+whenever modestRenter is either side of the comparison (current
+standard in the "between" case, or the delta's own target in
+"belowLower") — never silently: `resolveLifestyleBand` returns a
+`homeExcludedFromDelta` flag, and the UI renders a one-line disclosure
+naming why whenever it fires. The alternative (rendering "home" as its
+own separate statement) was rejected — it would need bespoke wording
+for exactly one category on exactly one tenure, adding a special case
+to what the spec asks to stay simple. "home" still renders normally in
+the CURRENT-level list either way (describing one band, not comparing
+two) and in a homeowner's own delta (both standards there describe
+repair capacity — a coherent ladder step).
+
+**UI** (`main.js`): a stacked-bar-plus-line Plotly chart (age x-axis,
+the household's own nominal/real toggle, optional dashed ASFA
+reference lines, a vertical dashed annotation at the first shortfall
+year) and the generated sentence beneath it; the lifestyle band as
+plain prose, always in today's dollars regardless of the site's
+nominal/real toggle (ASFA's own figures are stated the same way —
+scaling one side of that comparison would make it wrong, not just
+differently displayed). Registered in `router.js`'s `OUTPUT_VIEWS` and
+`main.js`'s Focus nav group; no chart/table toggle (Focus views have
+none).
+
+Not a result-contract change (`ENGINE_VERSION` unchanged) — both new
+modules read the projection's existing output, nothing new on
+`yearly[y]`.
+
+Tests: `goalVsPosition.test.js` (bucket composition, crossover
+detection, the null-before-startAt convention, real-engine
+integration), `lifestyleBand.test.js` (the spec's own worked example
+reproduced exactly, the below-floor/at-or-above-top edges, and six
+tests specifically on the "home" nuance — exclusion in both the
+between and below-floor renter cases, inclusion for a homeowner, and
+that the current-level list is unaffected either way).
+`demo/coverage.test.js` and `router.test.js` extended for the new view
+id. Full suite 2013/2013, build green, browser-verified against real
+demo clients: a renter scenario (Client 1, no PPR) confirmed the
+"home" exclusion and its disclosure render correctly in the delta
+line; a couple/homeowner scenario (Modest retiree) confirmed "home" IS
+included there, plus a real generated sentence, a fully-populated
+summary card, and a graceful "Plotly failed to load" fallback (this
+sandbox blocks the CDN — the same pre-existing, disclosed limitation
+every other chart in this app already has).
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

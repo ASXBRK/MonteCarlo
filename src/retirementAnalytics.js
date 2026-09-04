@@ -109,7 +109,9 @@ export function meanOverWindow(yearly, fromYear, toYear, selector) {
 // household has only "client"; a couple has both). agePensionDetail is
 // always present (spec 21a's own convention), so this never throws on
 // a plan with no age pension entitlement at all — it just sums to 0.
-function agePensionPaid(row) {
+// Exported — goalVsPosition.js's own age-pension bucket reuses this
+// exact figure rather than re-deriving it.
+export function agePensionPaid(row) {
   const d = row.agePensionDetail;
   return (d?.client?.paid ?? 0) + (d?.partner?.paid ?? 0);
 }

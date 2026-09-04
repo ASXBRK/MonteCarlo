@@ -68,6 +68,9 @@ import {
   ASFA_STANDARDS_BASE, asfaAnnual, asfaStandardLabel, asfaStalenessWarning, ASFA_HOMEOWNER_ASSUMPTION_NOTE,
 } from "./data/asfaStandards.js";
 import { deriveHomeownerStatus } from "./retirement.js";
+import { computeRetirementAnalytics } from "./retirementAnalytics.js";
+import { goalVsPositionSummary } from "./goalVsPosition.js";
+import { resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors } from "./lifestyleBand.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
@@ -302,6 +305,7 @@ const els = {
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
   viewFocusDebtRecycling: $("viewFocusDebtRecycling"),
   viewFocusEducationFunding: $("viewFocusEducationFunding"),
+  viewFocusRetirement: $("viewFocusRetirement"),
   viewFocusSurplusAllocation: $("viewFocusSurplusAllocation"),
   viewFocusPprExemption: $("viewFocusPprExemption"),
   viewFocusAgePension: $("viewFocusAgePension"),
@@ -566,6 +570,7 @@ const OUTPUT_NAV = {
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
+    { id: "focus-retirement", label: "Retirement" },
     // Compare scenarios relocated to its own client-level Compare page
     // (Clients > client > Compare) — no longer a workspace Focus view.
   ],
@@ -8857,6 +8862,7 @@ const VIEW_MOUNTS = {
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
+  "focus-retirement": () => els.viewFocusRetirement,
   "whatif-rate-shock": () => els.viewWhatIfRateShock,
   "whatif-crash": () => els.viewWhatIfCrash,
   "whatif-income-gap": () => els.viewWhatIfIncomeGap,
@@ -8936,6 +8942,7 @@ function renderActiveView() {
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
+  else if (activeView === "focus-retirement") renderFocusRetirementView();
   else if (activeView === "whatif-rate-shock") renderWhatIfRateShockView();
   else if (activeView === "whatif-crash") renderWhatIfCrashView();
   else if (activeView === "whatif-income-gap") renderWhatIfIncomeGapView();
@@ -14833,6 +14840,229 @@ function renderFocusTransferScheduleView() {
     transferScheduleCadence,
     (id) => { transferScheduleCadence = id; renderFocusTransferScheduleView(); }
   );
+}
+
+// --- Retirement (spec 32, Commit 5): analytics summary, goal-versus-
+// position chart, lifestyle band ---------------------------------------
+//
+// Hosts the Commit 3 analytics summary card (retirementAnalytics.js) —
+// left unbuilt in Commit 3 itself, since no retirement view existed yet
+// to put it in — above the Commit 5 goal-versus-position chart and
+// lifestyle band, all reading the SAME already-run projection (spec
+// 12's own governing principle for every Focus view: never a separate
+// calculation).
+function retirementStatHTML(label, value, headline = false) {
+  return `
+    <div class="stat${headline ? " stat-headline" : ""}">
+      <div class="stat-label">${escapeHTML(label)}</div>
+      <div class="stat-value">${escapeHTML(String(value))}</div>
+    </div>
+  `;
+}
+
+function retirementSummaryHTML(analytics) {
+  const moneyAt = (v, y) => (v == null ? "—" : fmtMoney(v * displayFactor(endMonthOfYear(y))));
+  const ageOrDash = (v) => (v == null ? "—" : Math.round(v));
+  const pctOrDash = (v) => (v == null ? "—" : `${v.toFixed(0)}%`);
+  const le = analytics.le, lePlus5 = analytics.lePlus5;
+  const stats = [
+    retirementStatHTML("Retirement age", analytics.retirement.age, true),
+    retirementStatHTML("Capital at retirement", moneyAt(analytics.capitalAtRetirement, analytics.retirement.planYear)),
+    // First shortfall age (household-wide) is DELIBERATELY reported
+    // separately from super/pension exhaustion (Midwinter's own
+    // headline) — the two can differ materially; see
+    // retirementAnalytics.js's own header on why neither substitutes
+    // for the other.
+    retirementStatHTML("First shortfall age", ageOrDash(analytics.firstShortfallAge)),
+    retirementStatHTML("Super/pension exhaustion age", ageOrDash(analytics.superPensionExhaustionAge)),
+    retirementStatHTML(`Capital at LE (age ${le.age})`, moneyAt(le.capitalAtLE, le.planYear)),
+    retirementStatHTML("Average retirement income to LE", moneyAt(le.averageRetirementIncome, le.planYear)),
+    retirementStatHTML("Average age pension to LE", moneyAt(le.averageAgePension, le.planYear)),
+    retirementStatHTML("Age pension % of income to LE", pctOrDash(le.averageAgePensionPctOfIncome)),
+    retirementStatHTML("Sustainable income to LE", le.sustainableIncomeConverged ? moneyAt(le.sustainableIncomeToLE, le.planYear) : "—"),
+    retirementStatHTML(`Sustainable income to LE+5 (age ${lePlus5.age})`, lePlus5.sustainableIncomeConverged ? moneyAt(lePlus5.sustainableIncomeToLE, lePlus5.planYear) : "—"),
+  ].join("");
+  // "Where the two differ materially, that difference is itself worth
+  // showing" (spec 32, Commit 3's own words) — checked on sustainable
+  // income specifically (isMaterialLEDifference's own header).
+  const warning = analytics.materialLEDifference
+    ? `<p class="helper-warning">Sustainable income to LE and LE+5 differ by more than 10% — outliving the average life expectancy materially changes what's sustainable, so both are shown rather than one headline figure.</p>`
+    : "";
+  return `<div class="summary-strip">${stats}</div>${warning}`;
+}
+
+// Household after-tax income by source (spec 32, Commit 5a) — the
+// "chart most conversations need... two axes at most, four colours,
+// one sentence beneath." Bars are gross by source (goalVsPosition.js's
+// own header explains why tax is never apportioned per source); the
+// Income Required LINE, and the generated sentence's own numbers, use
+// deliveredIncome (gross total less that year's tax) — the one
+// apples-to-apples comparison this module makes, since Income Required
+// is itself an after-tax figure (retirement.js's own interpretation).
+const GOAL_CHART_SEGMENTS = [
+  { key: "employment", name: "Employment", color: "#1c5ab4" },
+  { key: "pensionDrawdown", name: "Pension drawdown", color: "#6b8e23" },
+  { key: "investmentIncome", name: "Investment income", color: "#2e8a8a" },
+  { key: "agePension", name: "Age pension", color: "#dc5a28" },
+  { key: "assetDrawdown", name: "Asset drawdown", color: "#5e60ce" },
+];
+
+function renderFocusRetirementGoalChart(analytics, household, tenure) {
+  const el = $("focusRetirementGoalChart");
+  const sentenceEl = $("focusRetirementSentence");
+  if (!el) return;
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const reqByYear = projection.yearly.map((row) => row.incomeRequired);
+  const targetY = analytics.retirement.planYear;
+  const target = projection.yearly[targetY]?.incomeRequired ?? null;
+  const summary = goalVsPositionSummary(projection.yearly, projection.schedule, reqByYear, target);
+
+  if (sentenceEl) {
+    sentenceEl.textContent = target == null
+      ? "No Income Required target is active for this plan yet."
+      : summary.crossoverYear == null
+        ? `Your ${fmtMoney(target * factor(targetY))} target is met throughout the projection.`
+        : `Your ${fmtMoney(target * factor(targetY))} target is met until ${summary.crossoverAge}, then falls to ${fmtMoney(summary.deliveredAtCrossover * factor(summary.crossoverYear))}.`;
+  }
+
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+
+  const traces = [];
+  for (const seg of GOAL_CHART_SEGMENTS) {
+    const vals = yearIdxs.map((y) => summary.series[y][seg.key] * factor(y));
+    if (seriesIsAllZero(vals)) continue;
+    traces.push({
+      x: ages, y: vals, name: seg.name, type: "bar", marker: { color: seg.color },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
+    });
+  }
+  const reqSeries = yearIdxs.map((y) => (reqByYear[y] != null ? reqByYear[y] * factor(y) : null));
+  if (reqSeries.some((v) => v != null)) {
+    traces.push({
+      x: ages, y: reqSeries, name: "Income Required", type: "scatter", mode: "lines",
+      line: { color: "#c1121f", width: 2 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Income Required</extra>",
+    });
+  }
+  // Optional ASFA standard lines (spec's own "optional lines") — the
+  // tenure-appropriate lower standard plus Comfortable, flat reference
+  // lines at each figure's own real-dollar value (scaled by the same
+  // nominal/real toggle as everything else on this chart).
+  const asfaLowerStandard = tenure === "renter" ? "modestRenter" : "modest";
+  for (const std of [asfaLowerStandard, "comfortable"]) {
+    const amt = asfaAnnual(std, household);
+    if (amt == null) continue;
+    traces.push({
+      x: ages, y: yearIdxs.map((y) => amt * factor(y)), name: asfaStandardLabel(std, household),
+      type: "scatter", mode: "lines", line: { color: "#888", width: 1, dash: "dot" },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(asfaStandardLabel(std, household))}</extra>`,
+    });
+  }
+
+  // Annotate the year delivered income first falls below the
+  // requirement (the spec's own instruction) — same vertical-line-plus-
+  // rotated-label shape the Projection view's own goal markers use.
+  const crossoverShapes = summary.crossoverYear != null ? [{
+    type: "line", xref: "x", x0: summary.crossoverAge, x1: summary.crossoverAge, yref: "paper", y0: 0, y1: 1,
+    line: { color: "rgba(180, 40, 40, 0.55)", width: 1.5, dash: "dash" },
+  }] : [];
+  const crossoverAnnotations = summary.crossoverYear != null ? [{
+    x: summary.crossoverAge, y: 1, xref: "x", yref: "paper", yanchor: "bottom", xanchor: "left",
+    text: "First shortfall", showarrow: false, textangle: -90,
+    font: { size: 9, color: "rgba(180, 40, 40, 0.85)" },
+  }] : [];
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    barmode: "stack", hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.3, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Income (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    shapes: crossoverShapes,
+    annotations: crossoverAnnotations,
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Lifestyle band (spec 32, Commit 5b) — "the client-facing artefact,
+// and better than any chart for this purpose." Always real (today's)
+// dollars regardless of the site's nominal/real toggle — the ASFA
+// figures it compares against are themselves stated in today's
+// dollars, so scaling one side would make the comparison wrong, not
+// just differently displayed.
+function retirementBandHTML(analytics, household, tenure) {
+  const avgIncome = analytics.le.averageRetirementIncome;
+  const band = resolveLifestyleBand(avgIncome, household, tenure);
+  if (!band) {
+    return `<p class="helper-text">Not enough of a projection past retirement to place an average income on the ASFA scale.</p>`;
+  }
+  const bulletLine = (descs) => descs.map((d) => escapeHTML(d.text)).join(" · ");
+  const currentLabel = band.currentStandard === "agePensionOnly"
+    ? "the ASFA Age Pension-only benchmark"
+    : asfaStandardLabel(band.currentStandard, household);
+  const nextLabel = band.nextStandard ? asfaStandardLabel(band.nextStandard, household) : null;
+
+  const positionSentence = band.position === "atOrAboveTop"
+    ? `Your projected retirement income of ${fmtMoney(avgIncome)} is at or above ${currentLabel} (${fmtMoney(band.currentAmount)}).`
+    : band.position === "belowLower"
+      ? `Your projected retirement income of ${fmtMoney(avgIncome)} sits below ${nextLabel} (${fmtMoney(band.nextAmount)}).`
+      : `Your projected retirement income of ${fmtMoney(avgIncome)} sits between ${currentLabel} (${fmtMoney(band.currentAmount)}) and ${nextLabel} (${fmtMoney(band.nextAmount)}) for a ${escapeHTML(household)}.`;
+
+  const currentDescs = currentLevelDescriptors(band);
+  const deltaDescs = deltaDescriptors(band);
+  const currentLine = currentDescs.length
+    ? `<p>At ${band.position === "belowLower" ? currentLabel : "this level"} you would expect: ${bulletLine(currentDescs)}.</p>`
+    : "";
+  // "home" excluded from the delta whenever tenure is "renter" (see
+  // lifestyleBand.js's own header for why) — disclosed here, never
+  // silently dropped.
+  const homeNote = band.homeExcludedFromDelta
+    ? ` ("Home" is left out of this list — at the renter standard it describes the dwelling itself, not repair capacity, so it isn't a coherent step in an income-only comparison.)`
+    : "";
+  const deltaLine = band.nextStandard
+    ? `<p>Reaching ${nextLabel} would require an additional ${fmtMoney(band.gap)} a year, which buys: ${bulletLine(deltaDescs)}.${homeNote}</p>`
+    : "";
+
+  return `
+    <p>${positionSentence}</p>
+    ${currentLine}
+    ${deltaLine}
+    <p class="helper-text">${escapeHTML(ASFA_HOMEOWNER_ASSUMPTION_NOTE)}</p>
+    <p class="helper-text">Placed using average retirement income to LE (Commit 3's own figure — a single year would mislead) and shown in today's dollars regardless of the nominal/real display toggle above, since ASFA's own figures are stated the same way.</p>
+  `;
+}
+
+function renderFocusRetirementView() {
+  const analytics = computeRetirementAnalytics(state, projection);
+  const household = isCouple() ? "couple" : "single";
+  const tenure = derivedHomeownerStatus();
+
+  els.viewFocusRetirement.innerHTML = `
+    <h2 class="section-heading">Retirement</h2>
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>Summary</h3>
+        ${retirementSummaryHTML(analytics)}
+      </div>
+      <div class="focus-section">
+        <h3>Goal versus position</h3>
+        <p class="helper-text">Household after-tax income by source, against your stated Income Required. Bars are gross by source; the line is after tax — compare the shapes, not the exact gap, in a year tax is material.</p>
+        <div id="focusRetirementGoalChart" class="chart-mount"></div>
+        <p id="focusRetirementSentence" class="helper-text"></p>
+      </div>
+      <div class="focus-section">
+        <h3>Lifestyle band</h3>
+        ${retirementBandHTML(analytics, household, tenure)}
+      </div>
+    </div>
+  `;
+  renderFocusRetirementGoalChart(analytics, household, tenure);
 }
 
 function transferScheduleToHTML(f, factor) {
