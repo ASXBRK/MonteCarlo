@@ -2418,6 +2418,59 @@ deferring ASFA sources to Commit 2.
 
 ---
 
+### Fix: flaky threshold-coverage test (spec 28 hardening)
+`deterministic.test.js`'s "coverage report: every registered threshold
+is exercised in every stratum" was failing roughly 1 run in 5 —
+confirmed by the user across 5 consecutive runs, then reproduced
+directly: 25 repeated runs turned up a failure with a DIFFERENT
+`pension.minDrawdown.*` cell zeroed each time, confirming variance, not
+one broken threshold.
+
+**Cause.** `pick(AGE_THRESHOLDS)` (11 entries, itself gated behind a
+25% `boundaryAgeCohort` coin flip) then `stratify()`'s own `pick()` of
+5 strata are both plain i.i.d. draws. Two nested random choices,
+sharing a thin outer gate across 11 sibling thresholds, compound into
+a genuinely rare combined event for any ONE specific (threshold,
+stratum) cell — Poisson variance on an already-thin expected count
+occasionally reads zero, even across a 2,000-run sweep. Exactly the
+failure mode spec 28 exists to prevent, and — per CLAUDE.md's own words
+on this — a guard that erodes stops guarding; a test failing 1-in-5
+would be ignored within a fortnight, at which point the coverage
+guarantee is gone.
+
+**Fix: the generation, not the assertion** (widening the stratum,
+loosening the assertion, or raising the scenario count were all
+explicitly ruled out — each weakens the guard while looking like a
+fix). Replaced the plain i.i.d. `pick()` calls that feed the threshold
+registry with a new `pickFair(key, list)` — a shuffled-bag round-robin
+that cycles through every item of `list` exactly once (freshly
+reshuffled each cycle) before any item repeats, keyed by `key` so
+different call sites never share a cycle position. Applied to BOTH
+layers of the compound randomness: which named threshold to stratify
+(the six `*_THRESHOLDS` lists — `AGE_THRESHOLDS`, `INCOME_THRESHOLDS`,
+`ASSET_BALANCE_THRESHOLDS`, `SUPER_BALANCE_THRESHOLDS`,
+`AGED_CARE_ASSET_THRESHOLDS`, `GIFT_THRESHOLDS`) AND which of the 5
+strata (`stratify()`/`stratifyInt()`'s own internal choice, keyed by
+threshold name, plus the two hand-inlined stratum picks —
+`pension.commencement.julyVsJune`, `timing.startMonth.julyVsOther` —
+converted for the same robustness even though their own volume was
+already ample). This is a MATHEMATICAL guarantee, not a statistical
+improvement: any threshold drawn ≥5 times across a sweep now visits
+every stratum at least once, by construction — verified directly in
+the coverage report's own printed counts (`pension.minDrawdown.90:
+wellBelow=5 justBelow=6 at=7 justAbove=5 wellAbove=7` — never zero,
+across dozens of repeated runs) — while still reshuffling each cycle,
+so consecutive draws stay unpredictable; only the VARIANCE that let a
+registered cell go unvisited is removed, not the randomness of the
+generator's output.
+
+Verified: 25 repeated runs of the coverage-report test, 15 of the
+"produces every stratum" test, and 3 full-suite runs, all clean — up
+from a confirmed ~1-in-5 failure rate beforehand. Full suite 1928/1928,
+build unaffected (test-only change).
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

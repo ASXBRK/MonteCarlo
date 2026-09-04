@@ -2890,6 +2890,58 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   const randInt = (min, max) => Math.floor(rand(min, max + 1));
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
+  // --- Guaranteed-coverage stratified sampling (spec 28 hardening) ----------
+  //
+  // A plain i.i.d. pick(), used TWICE in sequence — which named
+  // threshold out of a list, then which of 5 strata — compounds into a
+  // genuinely rare combined event for any threshold sharing its own
+  // outer gate with many siblings (e.g. AGE_THRESHOLDS' 11 entries, all
+  // gated behind the SAME 25% boundaryAgeCohort coin flip): Poisson
+  // variance on an already-thin expected count occasionally reads zero
+  // for one specific (name, stratum) cell, even across a 2,000-run
+  // sweep — confirmed empirically while diagnosing this (repeated runs
+  // of the coverage-report test below turned up zero counts on
+  // DIFFERENT pension.minDrawdown.* cells each time, not one fixed
+  // culprit — the whole family shares the thin pathway). This is
+  // exactly the failure mode spec 28 exists to prevent: "the guard only
+  // guards what the generator generates," and probabilistic coverage of
+  // a registry this size will eventually miss a cell by chance,
+  // however large N gets, unless N grows in an unbounded, wasteful way.
+  //
+  // Fix: replace independent i.i.d. draws with a SHUFFLED-BAG round-
+  // robin — each call cycles through every item exactly once (in a
+  // freshly reshuffled order) before any item repeats, so N calls
+  // sharing the same key visit every item at least floor(N / length)
+  // times, never zero once N >= length. Two independent families use
+  // this: pickFair() below for "which named threshold from a list"
+  // (keyed by the list's own name), and stratify()/stratifyInt()'s own
+  // internal stratum choice (keyed by threshold NAME, so two different
+  // thresholds never share a cycle position). Each cycle is freshly
+  // shuffled, so consecutive draws still look random — this removes
+  // the VARIANCE that let a registered cell go unvisited, not the
+  // randomness of the generator's output.
+  const STRATA = ["wellBelow", "justBelow", "at", "justAbove", "wellAbove"];
+  const fairBags = new Map(); // key → { items: shuffled array, i: next cursor }
+  function shuffled(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+  // pickFair(key, list) → like pick(list), but guarantees every element
+  // of `list` is drawn at least once every `list.length` consecutive
+  // calls sharing the same `key`.
+  function pickFair(key, list) {
+    let bag = fairBags.get(key);
+    if (!bag || bag.i >= bag.items.length) {
+      bag = { items: shuffled(list), i: 0 };
+      fairBags.set(key, bag);
+    }
+    return bag.items[bag.i++];
+  }
+
   // --- Threshold-aware generation (spec 28, Commit 1) -----------------------
   //
   // docs/specs/28-generator-boundary-coverage.md: "the guard only
@@ -3001,7 +3053,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   function stratify(name, threshold, opts = {}) {
     const near = opts.near ?? Math.max(1, threshold * 0.01);
     const span = opts.span ?? Math.max(near * 4, threshold * 0.6);
-    const stratum = pick(["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]);
+    const stratum = pickFair(name, STRATA);
     recordStratum(name, stratum);
     switch (stratum) {
       case "wellBelow": return Math.max(0, threshold - rand(near * 3, span));
@@ -3016,7 +3068,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   function stratifyInt(name, threshold, opts = {}) {
     const near = opts.near ?? 2;
     const span = opts.span ?? Math.max(near * 3, 10);
-    const stratum = pick(["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]);
+    const stratum = pickFair(name, STRATA);
     recordStratum(name, stratum);
     switch (stratum) {
       case "wellBelow": return threshold - randInt(near + 1, span);
@@ -3049,7 +3101,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   ];
   const randomAsset = (id, i = 1) => {
     const balance = i === 0 && Math.random() < 0.4
-      ? Math.max(0, stratify(...pick(ASSET_BALANCE_THRESHOLDS)))
+      ? Math.max(0, stratify(...pickFair("ASSET_BALANCE_THRESHOLDS", ASSET_BALANCE_THRESHOLDS)))
       : rand(0, 200000);
     const cgtAsset = Math.random() < 0.5;
     return mkAsset({
@@ -3079,7 +3131,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     ["tax.div293.250000", 250000],
   ];
   const randomIncome = () => {
-    const [name, threshold] = pick(INCOME_THRESHOLDS);
+    const [name, threshold] = pickFair("INCOME_THRESHOLDS", INCOME_THRESHOLDS);
     return Math.max(1000, stratify(name, threshold));
   };
 
@@ -3113,7 +3165,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       ["pension.minDrawdown.85", 85], ["pension.minDrawdown.90", 90], ["pension.minDrawdown.95", 95],
     ];
     const boundaryAgeCohort = Math.random() < 0.25;
-    const [boundaryAgeName, boundaryAgeThreshold] = pick(AGE_THRESHOLDS);
+    const [boundaryAgeName, boundaryAgeThreshold] = pickFair("AGE_THRESHOLDS", AGE_THRESHOLDS);
     // Pension phase (spec 20, Commit 1) can only ever fire within
     // superReleaseAge's 60-65 window — unreachable from the ORIGINAL
     // fixed age-40 start over a 2-4 year projection. Stratified, not
@@ -3167,7 +3219,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       const r = Math.random();
       if (r < 0.3) return 0;
       if (r < 0.6) return rand(0, 200000);
-      const [name, threshold] = pick(SUPER_BALANCE_THRESHOLDS);
+      const [name, threshold] = pickFair("SUPER_BALANCE_THRESHOLDS", SUPER_BALANCE_THRESHOLDS);
       return Math.max(0, stratify(name, threshold));
     };
 
@@ -3255,7 +3307,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
             // commencement; anchoring to "start" instead does, whenever
             // this run's own randomStartMonth() landed on June.
             commenceAt: (() => {
-              const stratum = pick(["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]);
+              const stratum = pickFair("pension.commencement.julyVsJune", STRATA);
               recordStratum("pension.commencement.julyVsJune", stratum);
               return stratum === "at" || stratum === "justBelow"
                 ? { kind: "anchor", anchorId: "start" }
@@ -3353,7 +3405,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const agedCare = [];
     if (olderCohort && Math.random() < 0.35) {
       const accommodationPrice = rand(200000, 800000);
-      const [name, threshold] = pick(AGED_CARE_ASSET_THRESHOLDS);
+      const [name, threshold] = pickFair("AGED_CARE_ASSET_THRESHOLDS", AGED_CARE_ASSET_THRESHOLDS);
       const radAmount = Math.min(accommodationPrice, Math.max(0, stratify(name, threshold, { near: threshold * 0.02, span: threshold })));
       agedCare.push({
         id: "ac1", name: "Aged care", owner: couple ? pick(["client", "partner"]) : "client",
@@ -3377,7 +3429,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // together) five-year-limit-breached cases all in the same sweep.
     const GIFT_THRESHOLDS = [["agePension.gifting.10000", 10000], ["agePension.gifting.30000", 30000]];
     const gifts = Array.from({ length: randInt(0, 3) }, (_, i) => {
-      const [name, threshold] = pick(GIFT_THRESHOLDS);
+      const [name, threshold] = pickFair("GIFT_THRESHOLDS", GIFT_THRESHOLDS);
       return {
         id: `gift${i}`, owner: couple ? pick(["client", "partner", "joint"]) : "client",
         amount: Math.max(0, stratify(name, threshold, { near: threshold * 0.1, span: threshold })),
@@ -3844,7 +3896,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // partial-first-year length it produces) was never exercised here
     // at all.
     function randomStartMonth() {
-      const stratum = pick(["wellBelow", "justBelow", "at", "justAbove", "wellAbove"]);
+      const stratum = pickFair("timing.startMonth.julyVsOther", STRATA);
       recordStratum("timing.startMonth.julyVsOther", stratum);
       switch (stratum) {
         case "wellBelow": return randInt(1, 4);   // Jan-Apr: long partial first year
@@ -4258,16 +4310,24 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   it("coverage report: every registered threshold is exercised in every stratum across a real sweep", () => {
     resetThresholdCoverage();
     // 2,000 — the same N Commit 1's own "produces every stratum" test
-    // uses. The rarest combination in the registry (the boundary-age
-    // cohort, itself gated at 25%, landing on one specific age
-    // threshold out of eleven, in one specific stratum out of five) is
-    // roughly 1-in-220 per run; 300 runs (this file's original sweep
-    // size) would make that specific cell flaky, occasionally reading
-    // zero by chance rather than by an actual regression.
+    // uses. This USED to be a probabilistic guarantee only — the
+    // rarest combination in the registry (the boundary-age cohort,
+    // itself gated at 25%, landing on one specific age threshold out
+    // of eleven, in one specific stratum out of five) was roughly
+    // 1-in-220 per run, and even 2,000 runs' worth of plain i.i.d.
+    // draws left enough variance to occasionally read zero on some
+    // pension.minDrawdown.* cell by chance, not by an actual
+    // regression (observed directly: repeated runs turned up a
+    // DIFFERENT zeroed cell each time, confirming it was variance, not
+    // one broken threshold). pickFair()/stratify()'s own shuffled-bag
+    // round-robin (this describe block's own header) turned that into
+    // a MATHEMATICAL guarantee instead — every registered cell is
+    // visited at least once every (list length) or 5 calls
+    // respectively, never left to chance — so this sweep size is now
+    // about realistic-scenario diversity, not coverage odds.
     const failures = runConservationSweep(2000, "coverage-report sweep");
     expect(failures, `conservation failures during the coverage sweep:\n${failures.join("\n")}`).toEqual([]);
 
-    const STRATA = ["wellBelow", "justBelow", "at", "justAbove", "wellAbove"];
     const lines = ["Threshold coverage report (2,000-scenario sweep + every degenerate state):"];
     const unexercised = [];
     for (const name of THRESHOLD_REGISTRY) {
