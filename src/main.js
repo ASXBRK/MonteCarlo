@@ -51,7 +51,7 @@ import {
   createGift,
   createEmployer, FBT_TYPES,
   PACKAGING_TYPES, BONUS_DESTINATION_TYPES,
-  normaliseRetirement,
+  normaliseRetirement, INCOME_REQUIRED_SOURCES,
   GLIDE_PATH_REBALANCE_MODES, createGlidePath, clampGlidePath, createGlidePathStep,
 } from "./planState.js";
 import { singleStepGlidePathPreset, gradualGlidePathPreset } from "./glidePaths.js";
@@ -63,11 +63,20 @@ import { lmiPremium } from "./data/lmiRates.js";
 import { fhbgPriceCapExceeded, FHBG_PRICE_CAPS } from "./data/fhbgCaps.js";
 import { renderBellCurves } from "./chart.js";
 import { projectPlan, assetReturnComponents } from "./deterministic.js";
-import { nominalFactor, firstFyStartYear } from "./schedule.js";
+import { nominalFactor, firstFyStartYear, buildSchedules } from "./schedule.js";
 import {
   ASFA_STANDARDS_BASE, asfaAnnual, asfaStandardLabel, asfaStalenessWarning, ASFA_HOMEOWNER_ASSUMPTION_NOTE,
 } from "./data/asfaStandards.js";
-import { deriveHomeownerStatus } from "./retirement.js";
+import { deriveHomeownerStatus, resolveIncomeRequired } from "./retirement.js";
+import {
+  retirementFields, clientSuperAccount, findOtherInvestmentsAsset,
+  setFirstName as rsSetFirstName, setDob as rsSetDob, setRetirementAge as rsSetRetirementAge,
+  setSuperBalance as rsSetSuperBalance, setSuperAllocation as rsSetSuperAllocation,
+  setSalary as rsSetSalary, setConcessionalContributions as rsSetConcessionalContributions,
+  setIncomeRequired as rsSetIncomeRequired,
+  setOtherInvestments as rsSetOtherInvestments, setOtherInvestmentsAllocation as rsSetOtherInvestmentsAllocation,
+  setOtherRetirementIncome as rsSetOtherRetirementIncome, setIncludeAgePension as rsSetIncludeAgePension,
+} from "./retirementStandalone.js";
 import { computeRetirementAnalytics } from "./retirementAnalytics.js";
 import { goalVsPositionSummary } from "./goalVsPosition.js";
 import { resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors } from "./lifestyleBand.js";
@@ -149,6 +158,7 @@ const els = {
   pageClients: $("pageClients"),
   pageClient: $("pageClient"),
   pageCompare: $("pageCompare"),
+  pageRetirement: $("pageRetirement"),
   pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
   taxDetailsSection: $("taxDetailsSection"),
@@ -418,6 +428,7 @@ function showPage(name) {
   els.pageClients.hidden = name !== "clients";
   els.pageClient.hidden = name !== "client";
   els.pageCompare.hidden = name !== "compare";
+  els.pageRetirement.hidden = name !== "retirement";
   els.pageWorkspace.hidden = name !== "workspace";
 }
 
@@ -455,6 +466,7 @@ function handleRoute() {
   if (route.page === "clients") { renderClientsPage(); return; }
   if (route.page === "client") { renderClientPage(route.clientId); return; }
   if (route.page === "compare") { renderComparePage(route.clientId, route.scenarioIds); return; }
+  if (route.page === "retirement") { renderRetirementPage(route.clientId, route.scenarioId); return; }
 
   // workspace
   if (mountedScenarioId !== route.scenarioId) mountWorkspace(route.clientId, route.scenarioId);
@@ -489,6 +501,258 @@ function mountWorkspace(clientId, scenarioId) {
   syncBracketModeInputs();
   els.chartTreatmentSelects.forEach((sel) => { sel.value = state.display.chartTreatment[sel.dataset.treatment]; });
 }
+
+// --- Retirement Projection — Standalone Surface (docs/specs/33-
+// retirement-standalone.md, Commit 1) ---------------------------------
+//
+// "A page where you type nine numbers and get a retirement projection."
+// A client-level page, no input sidebar — same pattern as Compare
+// (renderComparePage/loadScenarioFullState above): its own local
+// `retirementPageState`/`retirementPageScenarioId`, never the workspace-
+// scoped `state`/`mountedScenarioId` globals, since this route is reached
+// WITHOUT mounting the comprehensive workspace at all.
+//
+// Every field writes to an EXISTING state path via retirementStandalone.js
+// (createSuperAccount/createAsset/createIncomeRow/createSuperContribution
+// — the SAME factories the comprehensive workspace's own "+ Add..."
+// buttons call) — never a parallel shape. Each change: apply the pure
+// setter, clampAllToPlan (the same "mutate, then clamp once" convention
+// every other commit function in this file already uses), save via the
+// same writeRaw/scenarioKey/serialize primitives "New scenario" uses,
+// then re-render from the freshly-clamped state so the form always shows
+// what was actually accepted (a clamped value, not the raw keystroke).
+let retirementPageClientId = null;
+let retirementPageScenarioId = null;
+let retirementPageState = null;
+
+function renderRetirementPage(clientId, scenarioId) {
+  retirementPageClientId = clientId;
+  retirementPageScenarioId = scenarioId;
+  retirementPageState = loadScenarioFullState(scenarioId);
+  renderRetirementPageBody();
+}
+
+function commitRetirementPageState(next) {
+  retirementPageState = clampAllToPlan(next, PROFILES);
+  writeRaw(scenarioKey(retirementPageScenarioId), serialize(retirementPageState));
+  workspace = touchScenario(workspace, retirementPageScenarioId, Date.now());
+  saveWorkspace();
+  renderRetirementPageBody();
+}
+
+// A blend of profiles.js's own keys and any glide paths already defined
+// on this plan (created via the comprehensive workspace — this page
+// never creates one of its own; see retirementStandalone.js's own
+// header on why the page stays single-person, existing-shape-only).
+// The middle profile key — createSuperAccount/createAsset's own default
+// for a brand-new account/asset (planState.js: `keys[Math.floor((keys.
+// length - 1) / 2)]`). Reused here so a not-yet-created super account
+// (nothing typed into any of its fields yet) shows the SAME allocation
+// its own creation would actually pick, rather than the browser's
+// default "nothing selected, so show the first option" behaviour —
+// which would otherwise silently show "Cash" (alphabetically first)
+// while a real edit creates a middle-of-the-road profile underneath it.
+function retirementDefaultProfileKey() {
+  return PROFILE_KEYS[Math.floor((PROFILE_KEYS.length - 1) / 2)] ?? null;
+}
+
+function retirementAllocationOptionsHTML(allocation) {
+  const resolved = allocation ?? { mode: "profile", profile: retirementDefaultProfileKey() };
+  const isGlidePath = resolved.mode === "glidePath";
+  const glidePaths = retirementPageState.plan.glidePaths ?? [];
+  const profileOpts = PROFILE_KEYS.map((k) =>
+    `<option value="profile:${k}"${!isGlidePath && resolved.profile === k ? " selected" : ""}>${escapeHTML(k)}</option>`
+  ).join("");
+  const glideOpts = glidePaths.map((gp) =>
+    `<option value="glidePath:${gp.id}"${isGlidePath && resolved.glidePathId === gp.id ? " selected" : ""}>${escapeHTML(gp.name)} (glide path)</option>`
+  ).join("");
+  return profileOpts + glideOpts;
+}
+
+function parseRetirementAllocationValue(value) {
+  const [mode, key] = value.split(":");
+  return mode === "glidePath" ? { mode: "glidePath", glidePathId: key } : { mode: "profile", profile: key };
+}
+
+// The one-line assumption summary (spec's own "not buried in a modal —
+// the whole point of the comparison is that assumptions are legible"),
+// read off the SAME super allocation the form itself is editing — a
+// glide path has no single return figure (it varies by age), so that
+// case names the glide path instead of a number.
+function retirementAssumptionSummaryHTML() {
+  const sa = clientSuperAccount(retirementPageState);
+  const cpi = retirementPageState.assumptions.cpi;
+  const icrPct = sa?.icrPct ?? 0;
+  // No super account exists until the user edits ANY of its own fields
+  // (retirementStandalone.js's own ensureClientSuperAccount) — resolve
+  // what allocation WOULD be created (the same middle-profile default
+  // createSuperAccount itself picks) so this summary never shows a
+  // different assumption than the one about to be saved.
+  const allocation = sa?.allocation ?? { mode: "profile", profile: retirementDefaultProfileKey() };
+  let returnText;
+  if (allocation.mode === "glidePath") {
+    const gp = (retirementPageState.plan.glidePaths ?? []).find((g) => g.id === allocation.glidePathId);
+    returnText = `Return: glide path "${escapeHTML(gp?.name ?? "unknown")}" (varies by age)`;
+  } else {
+    const profile = PROFILES[allocation.profile];
+    const grossNominal = profile ? (profile.incomeReturn + profile.growthReturn) * 100 : 0;
+    const netReal = profile ? ((1 + profile.incomeReturn + profile.growthReturn - icrPct / 100) / (1 + cpi) - 1) * 100 : 0;
+    returnText = `Return: ${escapeHTML(allocation.profile ?? "—")} — ${grossNominal.toFixed(1)}% p.a. nominal (${netReal.toFixed(1)}% real net of fees)`;
+  }
+  return `
+    <p class="helper-text retirement-assumption-summary">
+      ${returnText} · Fee: ${icrPct.toFixed(2)}% p.a. · Inflation: ${(cpi * 100).toFixed(1)}% p.a.
+      · Glide path: ${allocation.mode === "glidePath" ? "applies" : "none"}
+    </p>
+  `;
+}
+
+// "Every derived default labelled" (the spec's own second required
+// bullet) — resolved via the SAME resolveIncomeRequired accessor the
+// engine itself calls, at year 0, so the figure shown here can never
+// disagree with what a real projection would report for the same
+// input. `yearly` is omitted from ctx (no projection has run on this
+// page in Commit 1) — asfaModest's own derived-homeowner-status falls
+// back to "renter" in that case, the same disclosed simplification
+// deterministic.js's own income-driven-drawdown resolution already
+// uses for the identical reason (see that module's own comment).
+function retirementIncomeRequiredLabelHTML() {
+  const plan = retirementPageState.plan;
+  const cfg = plan.retirement?.incomeRequired;
+  const schedule = buildSchedules(retirementPageState);
+  const accessor = resolveIncomeRequired(plan, schedule, retirementPageState.assumptions.cpi, retirementPageState.assumptions.wageGrowth ?? 0.027, {
+    properties: retirementPageState.properties, liabilities: retirementPageState.liabilities,
+  });
+  const amount = accessor(0);
+  const sourceLabel = {
+    currentExpenses: "current expenses",
+    custom: "a custom amount",
+    asfaComfortable: asfaStandardLabel("comfortable", "single"),
+    asfaModest: asfaStandardLabel("modest", "single") + " — derived",
+    asfaModestRenter: asfaStandardLabel("modestRenter", "single"),
+  }[cfg?.source] ?? "current expenses";
+  return amount == null
+    ? `<p class="helper-text">Income required: not yet active (starts at retirement).</p>`
+    : `<p class="helper-text">Income required: ${fmtMoney(amount)} — derived from ${escapeHTML(sourceLabel)}</p>`;
+}
+
+function renderRetirementPageBody() {
+  const f = retirementFields(retirementPageState);
+  const sa = clientSuperAccount(retirementPageState);
+  const asset = findOtherInvestmentsAsset(retirementPageState);
+  const clientName = f.firstName || "Client";
+
+  els.pageRetirement.innerHTML = `
+    <header class="page-head">
+      <h1>Retirement projection — ${escapeHTML(clientName)}</h1>
+      <div class="page-actions">
+        <a class="btn-text" href="${escapeHTML(formatRoute({ page: "workspace", clientId: retirementPageClientId, scenarioId: retirementPageScenarioId }))}">Open in comprehensive workspace</a>
+        <a class="btn-text" href="${escapeHTML(formatRoute({ page: "client", clientId: retirementPageClientId }))}">Back to scenarios</a>
+      </div>
+    </header>
+    ${retirementAssumptionSummaryHTML()}
+    <div class="focus-panel">
+      <div class="focus-section">
+        <h3>About</h3>
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>First name</label>
+            <input type="text" maxlength="60" value="${escapeHTML(f.firstName)}" data-rp-field="firstName" />
+          </div>
+          <div class="cf-cell">
+            <label>Date of birth</label>
+            <input type="date" value="${escapeHTML(f.dob ?? "")}" data-rp-field="dob" />
+          </div>
+          <div class="cf-cell">
+            <label>Retirement age</label>
+            <input type="number" min="18" max="120" step="1" value="${f.retirementAge}" data-rp-field="retirementAge" />
+          </div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Superannuation</h3>
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Current super balance ($)</label>
+            <input type="number" min="0" step="1000" value="${f.superBalance}" data-rp-field="superBalance" />
+          </div>
+          <div class="cf-cell">
+            <label>Salary ($ p.a.)</label>
+            <input type="number" min="0" step="1000" value="${f.salary}" data-rp-field="salary" />
+          </div>
+          <div class="cf-cell">
+            <label>Concessional contributions beyond SG ($ p.a.)</label>
+            <input type="number" min="0" step="500" value="${f.concessionalContributions}" data-rp-field="concessionalContributions" />
+          </div>
+          <div class="cf-cell">
+            <label>Risk profile / glide path</label>
+            <select data-rp-field="superAllocation">${retirementAllocationOptionsHTML(sa?.allocation)}</select>
+          </div>
+        </div>
+      </div>
+      <div class="focus-section">
+        <h3>Household</h3>
+        <div class="person-grid">
+          <div class="cf-cell">
+            <label>Income required — source</label>
+            <select data-rp-field="incomeRequiredSource">
+              ${INCOME_REQUIRED_SOURCES.map((s) => `<option value="${s}"${f.incomeRequired.source === s ? " selected" : ""}>${escapeHTML(INCOME_REQUIRED_SOURCE_LABELS[s] ?? s)}</option>`).join("")}
+            </select>
+          </div>
+          ${f.incomeRequired.source === "custom" ? `
+          <div class="cf-cell">
+            <label>Income required — custom amount ($ p.a.)</label>
+            <input type="number" min="0" step="1000" value="${f.incomeRequired.customAmount}" data-rp-field="incomeRequiredCustomAmount" />
+          </div>` : ""}
+          <div class="cf-cell">
+            <label>Other investments — lump sum ($)</label>
+            <input type="number" min="0" step="1000" value="${f.otherInvestments}" data-rp-field="otherInvestments" />
+          </div>
+          <div class="cf-cell">
+            <label>Other investments — risk profile</label>
+            <select data-rp-field="otherInvestmentsAllocation">${retirementAllocationOptionsHTML(asset?.allocation)}</select>
+          </div>
+          <div class="cf-cell">
+            <label>Other retirement income ($ p.a., indexed, from retirement)</label>
+            <input type="number" min="0" step="500" value="${f.otherRetirementIncome}" data-rp-field="otherRetirementIncome" />
+          </div>
+        </div>
+        ${retirementIncomeRequiredLabelHTML()}
+        <label class="ptg-check"><input type="checkbox"${f.includeAgePension ? " checked" : ""} data-rp-field="includeAgePension" /><span>Include age pension</span></label>
+      </div>
+    </div>
+  `;
+}
+
+const INCOME_REQUIRED_SOURCE_LABELS = {
+  currentExpenses: "Current expenses",
+  custom: "Custom amount",
+  asfaComfortable: "ASFA Comfortable",
+  asfaModest: "ASFA Modest — derived (homeowner/renter)",
+  asfaModestRenter: "ASFA Modest (renter) — override",
+};
+
+els.pageRetirement.addEventListener("change", (e) => {
+  const field = e.target.dataset.rpField;
+  if (!field) return;
+  const v = e.target.value;
+  let next = retirementPageState;
+  if (field === "firstName") next = rsSetFirstName(next, v);
+  else if (field === "dob") next = rsSetDob(next, v);
+  else if (field === "retirementAge") next = rsSetRetirementAge(next, clampInt(v, 18, 120));
+  else if (field === "superBalance") next = rsSetSuperBalance(next, clampNumber(v, 0), PROFILES);
+  else if (field === "superAllocation") next = rsSetSuperAllocation(next, parseRetirementAllocationValue(v), PROFILES);
+  else if (field === "salary") next = rsSetSalary(next, clampNumber(v, 0));
+  else if (field === "concessionalContributions") next = rsSetConcessionalContributions(next, clampNumber(v, 0), PROFILES);
+  else if (field === "incomeRequiredSource") next = rsSetIncomeRequired(next, { source: v });
+  else if (field === "incomeRequiredCustomAmount") next = rsSetIncomeRequired(next, { customAmount: clampNumber(v, 0) });
+  else if (field === "otherInvestments") next = rsSetOtherInvestments(next, clampNumber(v, 0), PROFILES);
+  else if (field === "otherInvestmentsAllocation") next = rsSetOtherInvestmentsAllocation(next, parseRetirementAllocationValue(v), PROFILES);
+  else if (field === "otherRetirementIncome") next = rsSetOtherRetirementIncome(next, clampNumber(v, 0));
+  else if (field === "includeAgePension") next = rsSetIncludeAgePension(next, e.target.checked);
+  else return;
+  commitRetirementPageState(next);
+});
 
 // --- sidebar navigation: one section per page (Sidebar nav) -----------------
 
@@ -1270,6 +1534,7 @@ function renderClientPage(clientId) {
     `
     : `
       <button class="btn-text" type="button" data-action="new-scenario">+ New scenario</button>
+      <button class="btn-text" type="button" data-action="new-retirement-projection">+ New retirement projection</button>
       <button class="btn-text" type="button" data-action="enter-compare" ${canCompare ? "" : "disabled"}
               title="${canCompare ? "Select scenarios to compare" : "Add another scenario to compare"}">Compare</button>
     `;
@@ -1303,6 +1568,21 @@ els.pageClient.addEventListener("click", (e) => {
       workspace = r.index;
       saveWorkspace();
       navigate({ page: "workspace", clientId, scenarioId: r.scenarioId });
+      break;
+    }
+    // Retirement Projection — Standalone Surface (docs/specs/33-
+    // retirement-standalone.md, Commit 1): an ordinary scenario, same
+    // defaultState() every "New scenario" creates — only the LANDING
+    // route differs (the standalone page instead of the comprehensive
+    // workspace's own Setup section). Nothing about the state it holds
+    // is special; opening it via "New scenario" later, or this button on
+    // an existing scenario, shows exactly the same data either way.
+    case "new-retirement-projection": {
+      const r = newScenario(workspace, clientId, Date.now(), "Retirement projection");
+      writeRaw(scenarioKey(r.scenarioId), serialize(defaultState(PROFILES)));
+      workspace = r.index;
+      saveWorkspace();
+      navigate({ page: "retirement", clientId, scenarioId: r.scenarioId });
       break;
     }
     case "rename": {

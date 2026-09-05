@@ -22,6 +22,7 @@ const output = (clientId, scenarioId, section, form) => {
   return r;
 };
 const compare = (clientId, scenarioIds) => ({ page: "compare", clientId, scenarioIds });
+const retirement = (clientId, scenarioId) => ({ page: "retirement", clientId, scenarioId });
 
 describe("parseRoute", () => {
   it("parses the clients and client route shapes", () => {
@@ -52,6 +53,10 @@ describe("parseRoute", () => {
     expect(parseRoute("#/clients/cl-1/compare?s=")).toEqual(compare("cl-1", []));
   });
 
+  it("parses the standalone retirement page route (spec 33, Commit 1)", () => {
+    expect(parseRoute("#/clients/cl-1/scenarios/sc-2/retirement")).toEqual(retirement("cl-1", "sc-2"));
+  });
+
   it("tolerates missing # and trailing slash", () => {
     expect(parseRoute("/clients/")).toEqual({ page: "clients" });
     expect(parseRoute("clients/cl-1")).toEqual({ page: "client", clientId: "cl-1" });
@@ -67,6 +72,8 @@ describe("parseRoute", () => {
     expect(parseRoute("#/clients/cl-1/scenarios/sc-1/bogusArea/setup")).toBeNull();
     expect(parseRoute("#/clients/cl-1/scenarios/sc-1/input/setup/extra")).toBeNull();
     expect(parseRoute("#/clients/cl-1/compare/extra")).toBeNull();
+    expect(parseRoute("#/clients/cl-1/scenarios/sc-1/retirement/extra")).toBeNull();
+    expect(parseRoute("#/clients/cl-1/scenarios/sc-1/bogus")).toBeNull();
   });
 
   it("round-trips through formatRoute, including encoding", () => {
@@ -78,6 +85,8 @@ describe("parseRoute", () => {
       output("cl-1", "sc-2", "assumptions"),
       compare("cl-1", ["sc-1", "sc-2"]),
       compare("cl a", ["sc/1", "sc 2"]),
+      retirement("cl-1", "sc-2"),
+      retirement("cl a", "sc/1"),
     ]) {
       expect(parseRoute(formatRoute(r))).toEqual(r);
     }
@@ -114,6 +123,16 @@ describe("resolveRoute", () => {
 
   it("rejects a compare route for an unknown client, same as any other page", () => {
     expect(resolveRoute("#/clients/nope/compare?s=sc-1", index)).toBeNull();
+  });
+
+  it("accepts a retirement route whose scenario exists (spec 33, Commit 1)", () => {
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-2/retirement", index)).toEqual(retirement("cl-1", "sc-2"));
+  });
+
+  it("rejects a retirement route for an unknown scenario, or one belonging to a different client", () => {
+    expect(resolveRoute("#/clients/cl-1/scenarios/nope/retirement", index)).toBeNull();
+    // sc-3 belongs to cl-2, not cl-1.
+    expect(resolveRoute("#/clients/cl-1/scenarios/sc-3/retirement", index)).toBeNull();
   });
 
   it("an invalid section falls back to input/setup without rejecting the route", () => {

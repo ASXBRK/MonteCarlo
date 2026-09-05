@@ -11,6 +11,16 @@
 //                                                       resolves the landing section)
 //   #/clients/<cid>/scenarios/<sid>/input/<section>   → an input fact-find page
 //   #/clients/<cid>/scenarios/<sid>/output/<view>     → an output graph or table
+//   #/clients/<cid>/scenarios/<sid>/retirement         → Retirement Projection
+//                                                       standalone page (client-level,
+//                                                       no input sidebar — docs/specs/
+//                                                       33-retirement-standalone.md,
+//                                                       Commit 1). The scenario it
+//                                                       addresses is an ORDINARY one
+//                                                       (same CLIENT state, same
+//                                                       engine) — this route only
+//                                                       changes what's SHOWN, never
+//                                                       the state shape underneath.
 
 export const INPUT_SECTIONS = [
   "setup", "tax-details", "children", "implementation", "income", "deductions", "expenses", "financial-assets", "lifestyle-assets",
@@ -109,6 +119,8 @@ export function formatRoute(route) {
       const ids = (route.scenarioIds ?? []).map(encodeURIComponent).join(",");
       return `#/clients/${encodeURIComponent(route.clientId)}/compare?s=${ids}`;
     }
+    case "retirement":
+      return `#/clients/${encodeURIComponent(route.clientId)}/scenarios/${encodeURIComponent(route.scenarioId)}/retirement`;
     case "workspace": {
       const base = `#/clients/${encodeURIComponent(route.clientId)}/scenarios/${encodeURIComponent(route.scenarioId)}`;
       if (route.area === "input" || route.area === "output") {
@@ -148,6 +160,9 @@ export function parseRoute(hash) {
   if (parts.length === 4 && parts[2] === "scenarios") {
     return { page: "workspace", clientId: parts[1], scenarioId: parts[3], area: null, section: null };
   }
+  if (parts.length === 5 && parts[2] === "scenarios" && parts[4] === "retirement") {
+    return { page: "retirement", clientId: parts[1], scenarioId: parts[3] };
+  }
   if (parts.length === 6 && parts[2] === "scenarios" && (parts[4] === "input" || parts[4] === "output")) {
     const route = { page: "workspace", clientId: parts[1], scenarioId: parts[3], area: parts[4], section: parts[5] };
     if (parts[4] === "output") {
@@ -180,6 +195,7 @@ export function resolveRoute(hash, index) {
     return { ...r, scenarioIds };
   }
   if (!client.scenarios.some((s) => s.id === r.scenarioId)) return null;
+  if (r.page === "retirement") return r;
   if (r.area == null) return r; // bare — caller resolves the landing section
 
   if (r.area === "input") {

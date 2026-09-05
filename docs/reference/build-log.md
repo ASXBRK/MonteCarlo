@@ -2659,6 +2659,78 @@ summary card, and a graceful "Plotly failed to load" fallback (this
 sandbox blocks the CDN — the same pre-existing, disclosed limitation
 every other chart in this app already has).
 
+### Retirement: standalone page and input set (spec 33, Commit 1)
+A client-level "no input sidebar" page (`#/clients/<cid>/scenarios/<sid>/retirement`),
+the second of its kind after the existing Compare page — both bypass
+`mountWorkspace()`/the global `state`, loading scenario state directly
+via `loadScenarioFullState`. Built from a new "+ New retirement
+projection" button on the client page, which creates an ordinary
+scenario (via the same `newScenario`/`defaultState` path every other
+scenario uses) and routes straight to it.
+
+**No new state shape — the commit's own governing constraint.** Every
+one of the page's 11 fields (first name, DOB, retirement age; super
+balance, salary, concessional contributions beyond SG, super risk
+profile/glide path; Income Required source, other-investments lump
+sum + risk profile, other retirement income, include-age-pension)
+writes to an EXISTING plan-state field via the SAME factory functions
+(`createSuperAccount`, `createAsset`, `createIncomeRow`,
+`createSuperContribution`) the comprehensive workspace's own "+ Add..."
+buttons call (`src/retirementStandalone.js`, new pure module — no DOM).
+SG itself needs no explicit contribution row (schedule.js already
+derives it from any employment income row); only contributions BEYOND
+SG get one. The single "other retirement income" row is found
+structurally — `category === "otherIncome" && from.anchorId ===
+"retirement-client"` — rather than tagged with a marker field, so as
+to add zero new fields anywhere (a deliberate, disclosed limit: this
+reaches only the first such row). Verified with a `hydrate(serialize(
+clampAllToPlan(state)))` round-trip test — the exact function real
+scenario loads use — confirming a scenario built entirely through this
+page's setters opens in the comprehensive workspace as a true no-op,
+plus a projects-cleanly-through-the-real-engine smoke test and two
+integration tests proving the age-pension toggle actually gates
+`agePensionDetail.client.paid` in real engine output, not just the
+stored flag.
+
+**Single-person only.** No partner UI at all in this commit — the
+spec's own field list reads as "per person," never doubled for a
+couple, and Commit 4's fixture is explicitly a single person. The one
+Centrelink-eligibility flag on the page (`plan.client.taxProfile
+.centrelinkEligible`) is genuinely per-person in the schema, not a
+household toggle — for a single-person page the two coincide.
+
+**Routing** (`router.js`): new `retirement` page id,
+`#/clients/<cid>/scenarios/<sid>/retirement`, validated the same way
+as every other scenario-scoped route (unknown scenario / cross-client
+→ null).
+
+**UI** (`main.js`): three cards (About, Superannuation, Household), an
+assumptions summary line above them (return/fee/inflation/glide-path,
+resolved from the SAME super account and `assumptions.cpi` the engine
+itself reads — never a hard-coded list), "Open in comprehensive
+workspace" and "Back to scenarios" links. A cosmetic bug caught during
+browser verification: the risk-profile `<select>` for a not-yet-created
+super account rendered no field `selected`, so the browser defaulted
+to "Cash" (alphabetically first) rather than the middle-profile
+default `createSuperAccount` itself would actually assign — fixed with
+a `retirementDefaultProfileKey()` helper mirroring that same formula,
+resolved before rendering both the select and the summary line.
+
+Not a result-contract change, no new plan-state fields, no engine
+changes. Outputs (Commit 2), the assumptions panel and comparison
+support (Commit 3), and the comparison fixture (Commit 4) are still to
+come.
+
+Tests: `retirementStandalone.test.js` (24 tests — per-field write/read,
+double-call idempotence, the state-shape and round-trip tests above),
+`router.test.js` extended for the new route. Full suite 2040/2040,
+build green, browser-verified: all 11 fields filled and confirmed to
+persist across a reload, then confirmed to appear identically in the
+comprehensive workspace's Setup, Super, Income, Financial assets, and
+Settings sections — same balance, same allocation, same salary row,
+same Income Required source, same funding order — with zero console
+errors throughout.
+
 ---
 
 ## WHERE WE'RE GOING
