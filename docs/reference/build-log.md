@@ -2766,6 +2766,122 @@ client's own untouched figures, and the Income Required label
 resolving distinct ASFA couple/single wording — zero console errors
 throughout.
 
+### Retirement: standalone page outputs (spec 33, Commit 2)
+Mounts what phase one already built on top of Commit 1's inputs — the
+analytics summary card (`retirementAnalytics.js`), the goal-versus-
+position chart and sentence (`goalVsPosition.js`), the lifestyle band
+(`lifestyleBand.js`) — plus two new pieces the spec named but nothing
+built yet: a super-and-pension balance chart, and a year-by-year table.
+All five read the SAME projection, run fresh on every keystroke (no
+recalculate button, per the spec's own "everything updates live").
+
+**Pension auto-provisioning — a decision made with the user before
+writing any of this, not silently.** Commit 1's nine fields have no
+pension-commencement input, and the engine only ever draws super down
+through an explicit `plan.pensions` entry (confirmed by reading
+`deterministic.js`'s own `resolvePensionThisYear`) — left alone, this
+page's own "retirement projection" would show super accumulating
+forever, untouched, and Commit 2's own headline chart ("accumulation
+through drawdown") would show a flat line. Asked the user; chosen fix:
+`ensureRetirementPensions` (`retirementStandalone.js`) silently
+provisions ONE pension per person who already has a super account (via
+the SAME `createPension` factory the comprehensive workspace's own
+"+ Add pension" button calls — still "no new state shape"), set to
+`drawdownOption: "expenditure"` ("Fund expenditure shortfall"), and —
+only the FIRST time any such pension is created — switches on
+`plan.retirement.incomeDrivenDrawdown` (spec 32 Commit 4's own
+mechanism) so the pension actively tops up toward the page's own Income
+Required figure rather than merely reacting to the literal expense
+shortfall. Never re-forced once pensions exist, so an adviser who later
+turns income-driven drawdown off in the comprehensive workspace keeps
+that choice on every subsequent visit here. `setHousehold("single")`
+was extended to also strip the partner's own pension (the same
+owner:"partner"→"client" reassignment risk Commit 1's own scope-fix
+already closed for super accounts/income/contributions applies
+identically to pensions).
+
+**A real, pre-existing bug found and fixed while building this — not
+introduced by it, but newly VISIBLE because of it.** Once pensions were
+auto-provisioned, the Summary card's "Average retirement income to LE"
+and the Goal-versus-position chart disagreed on the same household by
+roughly the full pension payment, every year — a page whose whole
+purpose is trustworthy numbers shipping two contradictory numbers on
+one screen. Root cause: `retirementAnalytics.js`'s own
+`averageRetirementIncome`/`averageGrossIncome` (spec 32 Commit 3) used
+`row.income`, which deliberately excludes account-based pension
+payments (non-assessable non-exempt income for someone past
+preservation age — correctly excluded from the TAX-relevant figure it
+tracks) — but "average retirement income" is a CASH concept, and a
+pension is typically retirement's largest cash inflow.
+`goalVsPosition.js` (spec 32 Commit 5a) already avoided this by
+reconstructing its own total from five named buckets, including
+pension payments; `retirementAnalytics.js` never did. Fix: a new
+exported `householdCashIncome(row)` (row.income + every pension's own
+payments this row), used in place of raw `row.income` in both
+selectors — closing the whole class within that module (the only two
+places it used `row.income` as a stand-in for total cash income).
+Deliberately NOT extended to `outputSeries.js`/`chartSeries.js`'s own,
+different uses of `row.income` (a different stated purpose each,
+unverified as wrong for their own use — extending the fix there without
+evidence would be unjustified scope creep, not closing a confirmed
+class). New tests in `retirementAnalytics.test.js` cross-check the
+fixed figure against a hand-summed `row.income + pension payments`
+total and confirm it is NOT close to the old (broken) figure.
+
+**Real (today's) dollars throughout, no toggle of its own.** The spec
+names no nominal/real control for this page, and the engine's own
+native unit already is real terms (CLAUDE.md: "Real terms everywhere in
+the engine; nominal is display-time scaling") — not scaling gives
+exactly that. `lifestyleBand.js`'s own renderer already worked this way
+unconditionally; a new `retirementPageSummaryHTML` mirrors the Focus
+view's own summary card but reads plain `fmtMoney` instead of the
+comprehensive workspace's global `displayFactor()`/`isNominal()` (which
+read the MOUNTED workspace scenario — wrong scenario, or a crash, from
+a route that never mounts one). Chart/table element ids are prefixed
+`rp` and never reused elsewhere — the standalone page and the
+comprehensive workspace's own Focus > Retirement view can both exist in
+the DOM at once (one hidden via CSS), so a shared id risked `$()`
+grabbing the wrong, hidden element.
+
+**The balance chart and year-by-year table** (new): total household
+super (`row.superClosing`) and pension (`row.pensionClosing`) balances,
+stacked; the table's columns are the spec's own list (age, super,
+pension, drawdown, age pension, other income, total income, income
+required), with drawdown/age-pension/total-income all read straight off
+`goalVsPositionSummary`'s own per-year series — the SAME numbers the
+chart's bars sum to, so the two can never disagree (the spec's own test
+requirement). Row selection reuses `defaultReportPeriod`/
+`thinnedYearIndices` — the app's own existing "sensible default"
+period, not a bespoke one.
+
+Not a result-contract change (no new yearly-row fields; `ENGINE_VERSION`
+unchanged). Performance note, disclosed rather than silently accepted:
+`computeRetirementAnalytics`'s own sustainable-income search (pre-
+existing, spec 32 Commit 3) costs ~370ms versus ~30ms for `projectPlan`
+itself, making a keystroke-to-render round trip ~1s in a browser
+measurement — acceptable on the comprehensive workspace's Focus view
+(one visit at a time) but a poorer fit for a page whose own spec claims
+"immediate feedback." Flagged as a follow-up task rather than fixed
+here (a search-algorithm change to a shared, already-tested module is
+its own piece of work, not part of mounting Commit 2's outputs).
+
+Tests: `retirementAnalytics.test.js` extended (+3: `householdCashIncome`
+unit tests, and an integration test with a real paying pension proving
+the fixed figure). No new tests added directly against the standalone
+page's new rendering functions (`renderRetirementPageBody` and its
+Plotly-chart helpers are DOM-composition code, consistent with how
+`renderFocusRetirementGoalChart` and this file's other chart functions
+are exercised — browser verification, not unit tests) — full suite
+2064/2064, build green, browser-verified for both household types:
+zero console errors; the year-by-year table's own drawdown/total-income
+columns cross-checked directly against the engine's `pensionDetail`
+figures for a client retiring mid-projection (super rolls to pension at
+retirement, pension pays exactly the Income Required figure every year
+after, index-adjusted); the Lifestyle Band and Summary card now agree
+with the Goal-versus-position chart on the same household's own average
+income; the couple case shows combined two-person super/pension
+balances and correctly resolves the couple ASFA standard.
+
 ---
 
 ## WHERE WE'RE GOING

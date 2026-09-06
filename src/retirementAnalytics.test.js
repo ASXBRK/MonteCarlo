@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   computeRetirementAnalytics, superPensionExhaustionAge, meanOverWindow, isMaterialLEDifference,
+  householdCashIncome,
 } from "./retirementAnalytics.js";
 import { projectPlan } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
 import { remainingLE } from "./data/lifeTables.js";
+import { defaultState, clampAllToPlan, createSuperAccount, createPension } from "./planState.js";
 
 const ageRef = (age) => ({ kind: "age", age });
 const anchorRef = (anchorId) => ({ kind: "anchor", anchorId });
@@ -191,6 +193,67 @@ describe("computeRetirementAnalytics — retirement/LE/LE+5 anchor resolution", 
     expect(a.le.averageRetirementIncome).toBeCloseTo(sumAfterTax / n, 6);
     expect(a.le.averageAgePension).toBeCloseTo(sumPension / n, 6);
     expect(a.le.averageAgePensionPctOfIncome).toBeCloseTo((sumPension / n) / (sumGross / n) * 100, 6);
+  });
+});
+
+// Bug found while building spec 33 Commit 2 (the standalone retirement
+// page): row.income (deterministic.js's own accumulator) deliberately
+// excludes account-based pension payments — non-assessable non-exempt
+// income for someone past preservation age, correctly left out of the
+// TAX-relevant figure it tracks — but "Average retirement income to LE"
+// is a CASH concept, and a pension is typically retirement's single
+// largest cash inflow. householdCashIncome(row) is the fix: row.income
+// PLUS every pension's own payments this row.
+describe("householdCashIncome", () => {
+  it("equals row.income when there is no pension at all (the common case this module's OTHER tests already exercise)", () => {
+    expect(householdCashIncome({ income: 42000 })).toBe(42000);
+    expect(householdCashIncome({ income: 42000, pensionDetail: {} })).toBe(42000);
+  });
+
+  it("adds every pension's own payments on top of row.income", () => {
+    const row = { income: 10000, pensionDetail: { p1: { payments: 30000 }, p2: { payments: 12000 } } };
+    expect(householdCashIncome(row)).toBe(10000 + 30000 + 12000);
+  });
+});
+
+describe("computeRetirementAnalytics — average retirement income folds in pension payments (bug fix, closes the whole class within this module)", () => {
+  it("averageRetirementIncome/averageAgePensionPctOfIncome reconcile against row.income + pension payments — re-summed from result.yearly directly, not re-derived logic — and are NOT close to the old (broken) row.income-only figure", () => {
+    // Retiring mid-projection (currentAge well below retirementAge), not
+    // in the plan's own opening year — a client retiring in plan year 0
+    // hits an unrelated commencement edge case (retirement-client
+    // resolves inside a partial first year) where the pension never
+    // actually commences at all, orthogonal to the bug under test here.
+    let state = defaultState(PROFILES);
+    state = { ...state, plan: { ...state.plan, client: { ...state.plan.client, dob: "1970-01-01", retirementAge: 65 } } };
+    state = clampAllToPlan(state, PROFILES); // resolve currentAge from dob BEFORE createPension reads it
+    const sa = { ...createSuperAccount(state.plan, [], PROFILES, "client"), balance: 600000 };
+    state = { ...state, plan: { ...state.plan, superAccounts: [sa] } };
+    const pn = { ...createPension(state.plan, [], state.plan.superAccounts, "client"), drawdownOption: "minimum" };
+    state = { ...state, plan: { ...state.plan, pensions: [pn] } };
+    state = clampAllToPlan(state, PROFILES);
+
+    const result = projectPlan(state, PROFILES);
+    const a = computeRetirementAnalytics(state, result);
+    const from = a.retirement.planYear, to = a.le.planYear;
+
+    let sumCash = 0, sumAfterTaxOld = 0, pensionEverPaid = false, n = 0;
+    for (let y = from; y <= to; y++) {
+      const row = result.yearly[y];
+      let pensionPaid = 0;
+      for (const id of Object.keys(row.pensionDetail ?? {})) pensionPaid += row.pensionDetail[id]?.payments ?? 0;
+      if (pensionPaid > 0) pensionEverPaid = true;
+      sumCash += row.income + pensionPaid - row.tax;
+      sumAfterTaxOld += row.income - row.tax;
+      n++;
+    }
+    expect(pensionEverPaid).toBe(true); // sanity: the fixture genuinely exercises a paying pension
+    expect(a.le.averageRetirementIncome).toBeCloseTo(sumCash / n, 6);
+    // The bug this fix closes: the OLD formula (row.income - row.tax alone)
+    // would have reported a materially smaller figure — pension payments
+    // are the dominant cash flow in this fixture (drawdownOption
+    // "minimum" against a $600k+ balance).
+    expect(a.le.averageRetirementIncome).not.toBeCloseTo(sumAfterTaxOld / n, 0);
+    expect(a.le.averageRetirementIncome).toBeGreaterThan((sumAfterTaxOld / n) * 2);
   });
 });
 

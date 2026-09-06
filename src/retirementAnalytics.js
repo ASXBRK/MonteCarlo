@@ -116,6 +116,30 @@ export function agePensionPaid(row) {
   return (d?.client?.paid ?? 0) + (d?.partner?.paid ?? 0);
 }
 
+// Total household CASH income received this row, including every
+// account-based pension's own payment. row.income (deterministic.js's
+// own accumulator) deliberately excludes these — an account-based
+// pension payment to someone past preservation age is non-assessable
+// non-exempt income, correctly left out of the TAX-relevant "income"
+// figure it otherwise tracks — but "average retirement income" is a
+// CASH concept, not a tax concept, and a pension is typically the
+// LARGEST single cash inflow in retirement. Bug found while building
+// spec 33 Commit 2 (the standalone retirement page): its goal-versus-
+// position chart (spec 32 Commit 5a's own goalVsPosition.js, which
+// already folds pension payments in via its own pensionDrawdown
+// bucket) and this module's own "Average retirement income to LE"
+// figure disagreed on the SAME household by roughly the pension
+// payment itself, every single year post-retirement — an internal
+// contradiction on one page, not a hypothetical. Exported so
+// goalVsPosition.js/main.js could reuse it too, though neither
+// currently needs to (goalVsPosition.js already computes its own
+// equivalent total from its five named buckets).
+export function householdCashIncome(row) {
+  let pensionPayments = 0;
+  for (const id of Object.keys(row.pensionDetail ?? {})) pensionPayments += row.pensionDetail[id]?.payments ?? 0;
+  return (row.income ?? 0) + pensionPayments;
+}
+
 // A single trial: clone `state`, add the synthetic retirement-to-LE
 // expense at `x`, re-clamp (the same "never hand a mutated object
 // straight to the engine" discipline solveFor's own evaluate() uses),
@@ -185,9 +209,9 @@ export function computeRetirementAnalytics(state, result) {
   const capitalAtRetirement = yearly[retirementRef.planYear]?.netAssets ?? null;
 
   const windowFigures = (leRef) => {
-    const averageRetirementIncome = meanOverWindow(yearly, retirementRef.planYear, leRef.planYear, (r) => r.income - r.tax);
+    const averageRetirementIncome = meanOverWindow(yearly, retirementRef.planYear, leRef.planYear, (r) => householdCashIncome(r) - r.tax);
     const averageAgePension = meanOverWindow(yearly, retirementRef.planYear, leRef.planYear, agePensionPaid);
-    const averageGrossIncome = meanOverWindow(yearly, retirementRef.planYear, leRef.planYear, (r) => r.income);
+    const averageGrossIncome = meanOverWindow(yearly, retirementRef.planYear, leRef.planYear, householdCashIncome);
     const averageAgePensionPctOfIncome = averageAgePension != null && averageGrossIncome
       ? (averageAgePension / averageGrossIncome) * 100
       : null;

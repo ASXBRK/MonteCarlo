@@ -35,7 +35,7 @@
 
 import {
   createSuperAccount, createAsset, createIncomeRow, createSuperContribution, createIncomeRequired,
-  isCoupleHousehold,
+  createPension, isCoupleHousehold,
 } from "./planState.js";
 
 const RETIREMENT_CLIENT_ANCHOR = { kind: "anchor", anchorId: "retirement-client" };
@@ -75,6 +75,10 @@ function findOtherRetirementIncomeRow(state) {
 
 export function findOtherInvestmentsAsset(state) {
   return (state.assets ?? [])[0] ?? null;
+}
+
+export function pensionFor(state, owner) {
+  return (state.plan.pensions ?? []).find((p) => p.owner === owner) ?? null;
 }
 
 function personRetirementFields(state, owner) {
@@ -133,16 +137,17 @@ export function partnerHasData(state) {
 // --- Household toggle ---------------------------------------------------
 
 // target: "single" | "couple". Couple → single strips every partner-
-// owned row THIS PAGE creates (super account, salary row, concessional-
-// contribution row) before nulling plan.partner — otherwise clampPlan's
-// own generic behaviour (every owner:"partner" row silently reassigned
-// to "client" once plan.partner is null — see clampSuperAccount/
-// clampIncomeRow/clampSuperContribution) would merge the partner's
-// balance/salary into the client's own figures with no visible change,
-// rather than actually removing them. main.js is responsible for
-// confirming with the user first when partnerHasData(state) is true —
-// this setter itself is unconditional once called, same "pure, no
-// dialog" convention as every other setter in this module.
+// owned row THIS PAGE creates (super account, pension, salary row,
+// concessional-contribution row) before nulling plan.partner —
+// otherwise clampPlan's own generic behaviour (every owner:"partner"
+// row silently reassigned to "client" once plan.partner is null — see
+// clampSuperAccount/clampPension/clampIncomeRow/clampSuperContribution)
+// would merge the partner's balance/salary/pension into the client's
+// own figures with no visible change, rather than actually removing
+// them. main.js is responsible for confirming with the user first when
+// partnerHasData(state) is true — this setter itself is unconditional
+// once called, same "pure, no dialog" convention as every other setter
+// in this module.
 export function setHousehold(state, target) {
   if (target === "couple") {
     if (isCoupleHousehold(state.plan.household)) return state;
@@ -156,11 +161,12 @@ export function setHousehold(state, target) {
     };
   }
   const superAccounts = (state.plan.superAccounts ?? []).filter((s) => s.owner !== "partner");
+  const pensions = (state.plan.pensions ?? []).filter((p) => p.owner !== "partner");
   const income = (state.cashflows.income ?? []).filter((r) => r.owner !== "partner");
   const superContributions = (state.cashflows.superContributions ?? []).filter((c) => c.owner !== "partner");
   return {
     ...state,
-    plan: { ...state.plan, household: "single", partner: null, superAccounts },
+    plan: { ...state.plan, household: "single", partner: null, superAccounts, pensions },
     cashflows: { ...state.cashflows, income, superContributions },
   };
 }
@@ -343,4 +349,51 @@ export function setIncludeAgePension(state, included) {
     ? { ...state.plan.partner, taxProfile: { ...state.plan.partner.taxProfile, ...patch } }
     : state.plan.partner;
   return { ...state, plan: { ...state.plan, client, partner } };
+}
+
+// --- Retirement drawdown provisioning (Commit 2) -------------------------
+//
+// Commit 1's nine fields have no "commence a pension" input — but
+// without an explicit plan.pensions entry the engine never draws super
+// down at all (only a pension converts a balance into retirement
+// income; see deterministic.js's own resolvePensionThisYear). Left
+// alone, a "retirement projection" built from just these nine numbers
+// would show super accumulating forever, untouched, which is not a
+// retirement projection — decided with the user before building
+// Commit 2's outputs on top of it (see chat).
+//
+// ensureRetirementPensions silently creates ONE pension per person who
+// already has a super account (client always once touched; partner too,
+// in a couple), via the SAME createPension factory the comprehensive
+// workspace's own "+ Add pension" button calls — still "no new state
+// shape", just an existing shape this page now also provisions. Each
+// pension is set to drawdownOption "expenditure" ("Fund expenditure
+// shortfall" — deterministic.js resolves its payment dynamically each
+// month to cover whatever the household needs, floored at the
+// statutory minimum), and — the FIRST time any such pension is created
+// — plan.retirement.incomeDrivenDrawdown is switched on, so the
+// combined pensions actively top up toward the page's own Income
+// Required figure at each FY's end (spec 32 Commit 4's existing
+// mechanism) rather than merely reacting to whatever the raw literal
+// expense shortfall happens to be. Only touched on FIRST creation — an
+// adviser who later opens the comprehensive workspace and deliberately
+// turns income-driven drawdown off keeps that choice on every
+// subsequent visit to this page; ensureRetirementPensions never
+// re-forces it once pensions already exist.
+export function ensureRetirementPensions(state, profiles) {
+  const owners = isCoupleHousehold(state.plan.household) ? ["client", "partner"] : ["client"];
+  let next = state;
+  let created = false;
+  for (const owner of owners) {
+    if (!superAccountFor(next, owner)) continue; // nothing to draw from yet
+    if (pensionFor(next, owner)) continue; // already provisioned
+    const pn = {
+      ...createPension(next.plan, next.plan.pensions ?? [], next.plan.superAccounts ?? [], owner),
+      drawdownOption: "expenditure",
+    };
+    next = { ...next, plan: { ...next.plan, pensions: [...(next.plan.pensions ?? []), pn] } };
+    created = true;
+  }
+  if (!created) return next;
+  return { ...next, plan: { ...next.plan, retirement: { ...next.plan.retirement, incomeDrivenDrawdown: true } } };
 }

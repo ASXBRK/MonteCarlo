@@ -53,7 +53,7 @@ import {
   PACKAGING_TYPES, BONUS_DESTINATION_TYPES,
   normaliseRetirement, INCOME_REQUIRED_SOURCES,
   GLIDE_PATH_REBALANCE_MODES, createGlidePath, clampGlidePath, createGlidePathStep,
-  isCoupleHousehold,
+  isCoupleHousehold, defaultReportPeriod,
 } from "./planState.js";
 import { singleStepGlidePathPreset, gradualGlidePathPreset } from "./glidePaths.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
@@ -70,7 +70,8 @@ import {
 } from "./data/asfaStandards.js";
 import { deriveHomeownerStatus, resolveIncomeRequired } from "./retirement.js";
 import {
-  retirementFields, superAccountFor, findOtherInvestmentsAsset, partnerHasData,
+  retirementFields, superAccountFor, findOtherInvestmentsAsset, partnerHasData, pensionFor,
+  ensureRetirementPensions,
   setHousehold as rsSetHousehold,
   setFirstName as rsSetFirstName, setDob as rsSetDob, setRetirementAge as rsSetRetirementAge,
   setSuperBalance as rsSetSuperBalance, setSuperAllocation as rsSetSuperAllocation,
@@ -527,15 +528,28 @@ let retirementPageClientId = null;
 let retirementPageScenarioId = null;
 let retirementPageState = null;
 
+// Both entry points route through ensureRetirementPensions (Commit 2) —
+// silently provisioning the pension(s) that make super/drawdown actually
+// show something (see that function's own header) — so a scenario
+// loaded straight from storage (edited only in the comprehensive
+// workspace since its last visit here) gets the same treatment as one
+// edited on this page.
 function renderRetirementPage(clientId, scenarioId) {
   retirementPageClientId = clientId;
   retirementPageScenarioId = scenarioId;
-  retirementPageState = loadScenarioFullState(scenarioId);
-  renderRetirementPageBody();
+  const loaded = loadScenarioFullState(scenarioId);
+  const withPensions = ensureRetirementPensions(loaded, PROFILES);
+  if (withPensions !== loaded) {
+    commitRetirementPageState(withPensions);
+  } else {
+    retirementPageState = loaded;
+    renderRetirementPageBody();
+  }
 }
 
 function commitRetirementPageState(next) {
-  retirementPageState = clampAllToPlan(next, PROFILES);
+  const withPensions = ensureRetirementPensions(next, PROFILES);
+  retirementPageState = clampAllToPlan(withPensions, PROFILES);
   writeRaw(scenarioKey(retirementPageScenarioId), serialize(retirementPageState));
   workspace = touchScenario(workspace, retirementPageScenarioId, Date.now());
   saveWorkspace();
@@ -689,6 +703,222 @@ function retirementPersonCardsHTML(owner, personLabel, pf) {
   `;
 }
 
+// --- Retirement Projection — Standalone Surface: outputs (spec 33,
+// Commit 2) -----------------------------------------------------------
+//
+// Mounts what phase one already built — retirementAnalytics.js,
+// goalVsPosition.js, lifestyleBand.js — reading the SAME already-run
+// projection every output on this page shares (spec 12's own governing
+// principle: never a separate calculation per output). Plus a new
+// super/pension balance chart and a year-by-year table, both derived
+// the same way. "Everything updates live as inputs change" (the spec's
+// own words) falls out for free: renderRetirementPageBody already
+// re-runs on every edit, and this page's own projectPlan() call is the
+// only one anywhere touching retirementPageState.
+//
+// Real (today's) dollars throughout, no nominal/real toggle of this
+// page's own — the spec names none, and the engine's own native unit
+// already IS real terms (CLAUDE.md: "Real terms everywhere in the
+// engine; nominal is display-time scaling") — so simply not scaling
+// gives exactly that. retirementBandHTML (lifestyleBand.js's own
+// renderer, imported already) already works this way unconditionally;
+// retirementPageSummaryHTML below is a deliberate near-duplicate of the
+// Focus view's own retirementSummaryHTML for the SAME reason — that
+// one's own moneyAt() closes over the comprehensive workspace's global
+// displayFactor()/isNominal(), which read the MOUNTED workspace
+// scenario, not retirementPageState; reusing it here would silently
+// display the wrong scenario's units (or throw, if no workspace is
+// mounted in this navigation at all — this route never mounts one).
+//
+// Element ids are prefixed "rp" and never reused anywhere else in this
+// file — pageRetirement and the comprehensive workspace's own
+// Focus > Retirement view (focusRetirementGoalChart etc.) can both
+// exist in the DOM at once (only one hidden via CSS, see showPage), so
+// a shared id would risk $() grabbing the wrong, hidden element.
+
+function retirementPageSummaryHTML(analytics) {
+  const money = (v) => (v == null ? "—" : fmtMoney(v));
+  const ageOrDash = (v) => (v == null ? "—" : Math.round(v));
+  const pctOrDash = (v) => (v == null ? "—" : `${v.toFixed(0)}%`);
+  const le = analytics.le, lePlus5 = analytics.lePlus5;
+  const stats = [
+    retirementStatHTML("Retirement age", analytics.retirement.age, true),
+    retirementStatHTML("Capital at retirement", money(analytics.capitalAtRetirement)),
+    retirementStatHTML("First shortfall age", ageOrDash(analytics.firstShortfallAge)),
+    retirementStatHTML("Super/pension exhaustion age", ageOrDash(analytics.superPensionExhaustionAge)),
+    retirementStatHTML(`Capital at LE (age ${le.age})`, money(le.capitalAtLE)),
+    retirementStatHTML("Average retirement income to LE", money(le.averageRetirementIncome)),
+    retirementStatHTML("Average age pension to LE", money(le.averageAgePension)),
+    retirementStatHTML("Age pension % of income to LE", pctOrDash(le.averageAgePensionPctOfIncome)),
+    retirementStatHTML("Sustainable income to LE", le.sustainableIncomeConverged ? money(le.sustainableIncomeToLE) : "—"),
+    retirementStatHTML(`Sustainable income to LE+5 (age ${lePlus5.age})`, lePlus5.sustainableIncomeConverged ? money(lePlus5.sustainableIncomeToLE) : "—"),
+  ].join("");
+  const warning = analytics.materialLEDifference
+    ? `<p class="helper-warning">Sustainable income to LE and LE+5 differ by more than 10% — outliving the average life expectancy materially changes what's sustainable, so both are shown rather than one headline figure.</p>`
+    : "";
+  return `<div class="summary-strip">${stats}</div>${warning}`;
+}
+
+// Adapted from renderFocusRetirementGoalChart (spec 32, Commit 5a) —
+// same segments, same crossover annotation, same optional ASFA
+// reference lines — but reading explicit params instead of the
+// comprehensive workspace's globals, and with no nominal/real scaling
+// (see this section's own header).
+function renderRetirementGoalChart(yearIdxs, ages, summary, reqByYear, household, tenure) {
+  const el = $("rpGoalChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+
+  const traces = [];
+  for (const seg of GOAL_CHART_SEGMENTS) {
+    const vals = yearIdxs.map((y) => summary.series[y][seg.key]);
+    if (seriesIsAllZero(vals)) continue;
+    traces.push({
+      x: ages, y: vals, name: seg.name, type: "bar", marker: { color: seg.color },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
+    });
+  }
+  const reqSeries = yearIdxs.map((y) => reqByYear[y]);
+  if (reqSeries.some((v) => v != null)) {
+    traces.push({
+      x: ages, y: reqSeries, name: "Income Required", type: "scatter", mode: "lines",
+      line: { color: "#c1121f", width: 2 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Income Required</extra>",
+    });
+  }
+  const asfaLowerStandard = tenure === "renter" ? "modestRenter" : "modest";
+  for (const std of [asfaLowerStandard, "comfortable"]) {
+    const amt = asfaAnnual(std, household);
+    if (amt == null) continue;
+    traces.push({
+      x: ages, y: yearIdxs.map(() => amt), name: asfaStandardLabel(std, household),
+      type: "scatter", mode: "lines", line: { color: "#888", width: 1, dash: "dot" },
+      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(asfaStandardLabel(std, household))}</extra>`,
+    });
+  }
+
+  const crossoverShapes = summary.crossoverYear != null ? [{
+    type: "line", xref: "x", x0: summary.crossoverAge, x1: summary.crossoverAge, yref: "paper", y0: 0, y1: 1,
+    line: { color: "rgba(180, 40, 40, 0.55)", width: 1.5, dash: "dash" },
+  }] : [];
+  const crossoverAnnotations = summary.crossoverYear != null ? [{
+    x: summary.crossoverAge, y: 1, xref: "x", yref: "paper", yanchor: "bottom", xanchor: "left",
+    text: "First shortfall", showarrow: false, textangle: -90,
+    font: { size: 9, color: "rgba(180, 40, 40, 0.85)" },
+  }] : [];
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 60 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    barmode: "stack", hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.3, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: "Income (today's dollars)", standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    shapes: crossoverShapes,
+    annotations: crossoverAnnotations,
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// The chart the spec's own Commit 2 text names as the one "the
+// comparison tool leads with" — household-wide super (accumulation)
+// and pension (drawdown) balances, stacked so the combined height
+// reads as total retirement capital, the same shape renderSuperBalances
+// Chart already uses for the comprehensive workspace's own per-account
+// breakdown, but collapsed to the two aggregate figures every yearly
+// row already carries (row.superClosing/pensionClosing — see
+// retirementAnalytics.js's own superPensionExhaustionAge, which reads
+// the identical two fields).
+function renderRetirementBalanceChart(projection, yearIdxs) {
+  const el = $("rpBalanceChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const superSeries = yearIdxs.map((y) => projection.yearly[y].superClosing ?? 0);
+  const pensionSeries = yearIdxs.map((y) => projection.yearly[y].pensionClosing ?? 0);
+
+  const traces = [];
+  if (!seriesIsAllZero(superSeries)) {
+    traces.push({
+      x: ages, y: superSeries, name: "Super (accumulation)", type: "scatter", mode: "lines",
+      stackgroup: "balance", fill: "tonexty", line: { color: "#1c5ab4", width: 1 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Super</extra>",
+    });
+  }
+  if (!seriesIsAllZero(pensionSeries)) {
+    traces.push({
+      x: ages, y: pensionSeries, name: "Pension (drawdown)", type: "scatter", mode: "lines",
+      stackgroup: "balance", fill: "tonexty", line: { color: "#6b8e23", width: 1 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Pension</extra>",
+    });
+  }
+  if (traces.length === 0) {
+    el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Nothing to show yet — enter a super balance above to see it here.</p>`;
+    return;
+  }
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: "Balance (today's dollars)", standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Age · super · pension · drawdown · age pension · other income · total
+// income · income required — the spec's own column list. "Drawdown",
+// "age pension" and "total income" (grossTotal) are read straight off
+// goalVsPositionSummary's own per-year series — the SAME numbers the
+// goal-versus-position chart's own bars sum to, so the two can never
+// disagree (the spec's own test requirement: "the table's totals match
+// the chart"). "Other income" collapses the remaining three chart
+// buckets (employment, investment income, asset drawdown) into one
+// column, since the spec's own table doesn't ask for them separately.
+function retirementYearTableHTML(projection, summary, yearIdxs) {
+  const rows = yearIdxs.map((y) => {
+    const row = projection.yearly[y];
+    const s = summary.series[y];
+    const otherIncome = s.employment + s.investmentIncome + s.assetDrawdown;
+    return `
+      <tr>
+        <td>${projection.schedule.clientAges[y]}</td>
+        <td class="tl-num">${fmtMoney(row.superClosing ?? 0)}</td>
+        <td class="tl-num">${fmtMoney(row.pensionClosing ?? 0)}</td>
+        <td class="tl-num">${fmtMoney(s.pensionDrawdown)}</td>
+        <td class="tl-num">${fmtMoney(s.agePension)}</td>
+        <td class="tl-num">${fmtMoney(otherIncome)}</td>
+        <td class="tl-num">${fmtMoney(s.grossTotal)}</td>
+        <td class="tl-num">${row.incomeRequired == null ? "—" : fmtMoney(row.incomeRequired)}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <div style="max-height:480px; overflow:auto;">
+      <table class="tl">
+        <thead>
+          <tr>
+            <th>Age</th><th class="tl-num">Super</th><th class="tl-num">Pension</th>
+            <th class="tl-num">Drawdown</th><th class="tl-num">Age pension</th>
+            <th class="tl-num">Other income</th><th class="tl-num">Total income</th>
+            <th class="tl-num">Income required</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderRetirementPageBody() {
   const f = retirementFields(retirementPageState);
   const asset = findOtherInvestmentsAsset(retirementPageState);
@@ -696,6 +926,24 @@ function renderRetirementPageBody() {
   const clientLabel = f.client.firstName || "Client";
   const partnerLabel = couple ? (f.partner.firstName || "Partner") : null;
   const pageName = couple ? `${clientLabel} & ${partnerLabel}` : clientLabel;
+
+  const projection = projectPlan(retirementPageState, PROFILES);
+  const analytics = computeRetirementAnalytics(retirementPageState, projection);
+  const household = f.household;
+  const tenure = deriveHomeownerStatus(
+    retirementPageState.properties, retirementPageState.liabilities, projection.yearly[analytics.retirement.planYear]
+  );
+  const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), projection.schedule.clientAges, []);
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const reqByYear = projection.yearly.map((row) => row.incomeRequired);
+  const targetY = analytics.retirement.planYear;
+  const target = projection.yearly[targetY]?.incomeRequired ?? null;
+  const summary = goalVsPositionSummary(projection.yearly, projection.schedule, reqByYear, target);
+  const goalSentence = target == null
+    ? "No Income Required target is active for this plan yet."
+    : summary.crossoverYear == null
+      ? `Your ${fmtMoney(target)} target is met throughout the projection.`
+      : `Your ${fmtMoney(target)} target is met until ${summary.crossoverAge}, then falls to ${fmtMoney(summary.deliveredAtCrossover)}.`;
 
   els.pageRetirement.innerHTML = `
     <header class="page-head">
@@ -746,8 +994,33 @@ function renderRetirementPageBody() {
         ${retirementIncomeRequiredLabelHTML()}
         <label class="ptg-check"><input type="checkbox"${f.includeAgePension ? " checked" : ""} data-rp-field="includeAgePension" /><span>Include age pension</span></label>
       </div>
+      <div class="focus-section">
+        <h3>Summary</h3>
+        ${retirementPageSummaryHTML(analytics)}
+      </div>
+      <div class="focus-section">
+        <h3>Goal versus position</h3>
+        <p class="helper-text">Household after-tax income by source, against your stated Income Required. Bars are gross by source; the line is after tax — compare the shapes, not the exact gap, in a year tax is material.</p>
+        <div id="rpGoalChart" class="chart-mount"></div>
+        <p class="helper-text">${escapeHTML(goalSentence)}</p>
+      </div>
+      <div class="focus-section">
+        <h3>Lifestyle band</h3>
+        ${retirementBandHTML(analytics, household, tenure)}
+      </div>
+      <div class="focus-section">
+        <h3>Super and pension balance</h3>
+        <p class="helper-text">Household super (accumulation) and pension (drawdown) balances by age — the chart a side-by-side comparison leads with.</p>
+        <div id="rpBalanceChart" class="chart-mount"></div>
+      </div>
+      <div class="focus-section">
+        <h3>Year by year</h3>
+        ${retirementYearTableHTML(projection, summary, yearIdxs)}
+      </div>
     </div>
   `;
+  renderRetirementGoalChart(yearIdxs, ages, summary, reqByYear, household, tenure);
+  renderRetirementBalanceChart(projection, yearIdxs);
 }
 
 const INCOME_REQUIRED_SOURCE_LABELS = {

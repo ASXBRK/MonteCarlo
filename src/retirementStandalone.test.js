@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   retirementFields, superAccountFor, findOtherInvestmentsAsset, ensurePersonSuperAccount,
-  partnerHasData, setHousehold,
+  partnerHasData, setHousehold, pensionFor, ensureRetirementPensions,
   setFirstName, setDob, setRetirementAge, setSuperBalance, setSuperAllocation,
   setSalary, setConcessionalContributions, setIncomeRequired,
   setOtherInvestments, setOtherInvestmentsAllocation, setOtherRetirementIncome, setIncludeAgePension,
@@ -161,6 +161,72 @@ describe("ensurePersonSuperAccount", () => {
   });
 });
 
+// Commit 2's own decision (see chat): without an explicit pension the
+// engine never draws super down at all, so ensureRetirementPensions
+// silently provisions one per person once they have a super account,
+// set to drawdownOption "expenditure" with income-driven drawdown
+// switched on — otherwise the retirement projection this page exists
+// to show would just be super accumulating forever, untouched.
+describe("ensureRetirementPensions", () => {
+  it("does nothing when nobody has a super account yet", () => {
+    const state = ensureRetirementPensions(baseState(), PROFILES);
+    expect(state.plan.pensions ?? []).toHaveLength(0);
+  });
+
+  it("creates exactly one client pension, drawdownOption expenditure, sourced from the client's own super account, once a super account exists", () => {
+    const withSuper = setSuperBalance(baseState(), "client", 250000, PROFILES);
+    const state = ensureRetirementPensions(withSuper, PROFILES);
+    expect(state.plan.pensions).toHaveLength(1);
+    const pn = pensionFor(state, "client");
+    expect(pn.drawdownOption).toBe("expenditure");
+    expect(pn.sourceAccountId).toBe(superAccountFor(state, "client").id);
+  });
+
+  it("switches on income-driven drawdown the first time a pension is created", () => {
+    const withSuper = setSuperBalance(baseState(), "client", 250000, PROFILES);
+    expect(withSuper.plan.retirement.incomeDrivenDrawdown).toBe(false);
+    const state = ensureRetirementPensions(withSuper, PROFILES);
+    expect(state.plan.retirement.incomeDrivenDrawdown).toBe(true);
+  });
+
+  it("is idempotent — a second call creates no second pension and does not re-force income-driven drawdown a user has since turned off", () => {
+    const withSuper = setSuperBalance(baseState(), "client", 250000, PROFILES);
+    const once = ensureRetirementPensions(withSuper, PROFILES);
+    const turnedOff = { ...once, plan: { ...once.plan, retirement: { ...once.plan.retirement, incomeDrivenDrawdown: false } } };
+    const twice = ensureRetirementPensions(turnedOff, PROFILES);
+    expect(twice.plan.pensions).toHaveLength(1);
+    expect(twice.plan.pensions[0].id).toBe(once.plan.pensions[0].id);
+    expect(twice.plan.retirement.incomeDrivenDrawdown).toBe(false); // NOT re-forced
+  });
+
+  it("creates a pension per person in a couple, only for whoever already has a super account", () => {
+    let state = setHousehold(baseState(), "couple");
+    state = setSuperBalance(state, "client", 250000, PROFILES);
+    // Partner has no super account yet.
+    state = ensureRetirementPensions(state, PROFILES);
+    expect(state.plan.pensions).toHaveLength(1);
+    expect(pensionFor(state, "client")).toBeTruthy();
+    expect(pensionFor(state, "partner")).toBeNull();
+
+    state = setSuperBalance(state, "partner", 180000, PROFILES);
+    state = ensureRetirementPensions(state, PROFILES);
+    expect(state.plan.pensions).toHaveLength(2);
+    expect(pensionFor(state, "partner").sourceAccountId).toBe(superAccountFor(state, "partner").id);
+  });
+
+  it("setHousehold('single') strips the partner's own pension along with their super account", () => {
+    let state = setHousehold(baseState(), "couple");
+    state = setSuperBalance(state, "client", 250000, PROFILES);
+    state = setSuperBalance(state, "partner", 180000, PROFILES);
+    state = ensureRetirementPensions(state, PROFILES);
+    expect(state.plan.pensions).toHaveLength(2);
+
+    const single = setHousehold(state, "single");
+    expect(single.plan.pensions).toHaveLength(1);
+    expect(single.plan.pensions[0].owner).toBe("client");
+  });
+});
+
 // --- Couple scope (added after Commit 1's first review) -------------------
 //
 // The About and Superannuation cards render per person when the
@@ -313,6 +379,7 @@ describe("no new state shape — round-trips through hydrate() exactly like any 
     state = setOtherInvestmentsAllocation(state, { mode: "profile", profile: "Cash" }, PROFILES);
     state = setOtherRetirementIncome(state, 15000);
     state = setIncludeAgePension(state, false);
+    state = ensureRetirementPensions(state, PROFILES);
     return state;
   }
 
