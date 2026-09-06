@@ -3103,6 +3103,86 @@ per the spec's own closing words.
 
 ---
 
+### Retirement: derived inputs and live constraints (spec 34, Commit 1)
+The standalone page stops being a flat form. Static inputs that
+duplicated a figure the engine already knows are replaced with derived,
+self-explaining readouts; the one field that genuinely couldn't
+describe a real strategy (a single "contributions beyond SG" number)
+gains the same from/to DateRef window every comprehensive-workspace
+contribution row already has.
+
+**Layering.** `retirementStandalone.js` gains seven pure functions
+(`sgFor`, `ageYear`, `preservationAgeFor`, `agePensionAgeFor`,
+`capHeadroomFor`, `firstDiv293Year`, `agePensionEligibilityFor`) — no
+DOM, all engine-derived, all unit-tested directly. `main.js` wraps each
+in a thin HTML-formatting function; this split exists specifically so
+the underlying figures are testable the same way every other pure
+module in this codebase is, matching the spec's own explicit test list.
+
+**SG.** `sgFor` reads `superRatesFor` for the plan's own first FY —
+`min(salary, sgMaximumSalary) × sgRate`, both branches worded
+("12% of $115,000, capped at the maximum contribution base" when
+uncapped; "12% of the $270,830 maximum contribution base — your
+$300,000 salary exceeds it" when the cap actually binds). The old
+duplicate SG input is gone.
+
+**Preservation age / age pension age.** Both derive from DOB via
+`resolveRef({kind:"age",age}, ...)` against the page's own schedule —
+"Preservation age: age 60 (2040)", "Age pension age: age 67 (2047)" —
+shown, never asked. The age-pension toggle's own label is generated the
+same way ("Age pension modelled from age 67 (2047)"), replacing a bare
+checkbox with no context.
+
+**Cap headroom.** `capHeadroomFor` reads
+`projection.yearly[0].superCapUsage[owner]` — the EXACT same field the
+comprehensive Super section's own `superCapHeadroomHTML` reads — so the
+two displays can never disagree by construction. Recomputes live as the
+adviser types.
+
+**Division 293.** The engine's own `taxDetail[owner].div293` is the
+PRIOR year's payment (this codebase's usual CGT-style one-year lag) —
+the wrong figure for "the year it first bites." `firstDiv293Year`
+reconstructs the assessed-year figure directly, scanning each plan year
+and calling `div293Tax` (`Tax/superContributions.js`) fresh from that
+year's own `superCapUsage` and `taxDetail.taxableIncome`, stopping at
+the first year tax is actually payable.
+
+**Contribution from/to.** `setConcessionalContributionsFrom/To` edit
+the SAME concessional-contribution row's own existing DateRef fields
+(already present on every `superContributions` row; already validated
+by `clampFromTo`) via a shared find-or-create helper — no new state
+shape. "Salary sacrifice $15,000 from 55 until retirement" is now
+expressible on this page. The existing `dateRefControlHTML` component
+is reused rather than rebuilt: given a safe, additive refactor (two new
+optional `plan`/`schedule` parameters defaulting to the comprehensive
+workspace's own globals — all 28 existing call sites are unchanged),
+the standalone page passes its own state/schedule explicitly instead of
+duplicating the control.
+
+**Partial-first-year quirk, confirmed not a new bug.** With `now` in a
+partial first year (start month > July), annual-frequency rows —
+salary, the concessional contribution row — skip year 0 entirely per
+CLAUDE.md's own locked convention, so year-0 cap-usage figures read $0
+regardless of what's typed. Confirmed this already affects the
+comprehensive workspace's own `superCapHeadroomHTML` identically (same
+source field); not special-cased.
+
+Tests: `src/retirementStandalone.test.js` — SG uncapped and capped
+against `superRatesFor`'s own figures; preservation/pension age
+resolution from DOB to calendar year, and `ageYear`'s own
+out-of-range handling; `capHeadroomFor` proven to read the identical
+source the comprehensive section reads (and `null` when there's
+nothing to read); `firstDiv293Year` firing in the first full FY once
+salary and SG clear the threshold, and reporting `null` when they never
+do; the from/to window setters, including creating the row from
+scratch and reaching the real engine (contributions outside the window
+don't count toward that year's cap usage). Full suite 2081/2081, build
+green. Browser-verified single and couple mode: SG/preservation/pension
+age/cap-headroom/Division-293 lines all render and recompute live;
+couple mode shows the same lines per person.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

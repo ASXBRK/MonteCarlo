@@ -76,9 +76,15 @@ import {
   setFirstName as rsSetFirstName, setDob as rsSetDob, setRetirementAge as rsSetRetirementAge,
   setSuperBalance as rsSetSuperBalance, setSuperAllocation as rsSetSuperAllocation,
   setSalary as rsSetSalary, setConcessionalContributions as rsSetConcessionalContributions,
+  setConcessionalContributionsFrom as rsSetConcessionalContributionsFrom,
+  setConcessionalContributionsTo as rsSetConcessionalContributionsTo,
   setIncomeRequired as rsSetIncomeRequired,
   setOtherInvestments as rsSetOtherInvestments, setOtherInvestmentsAllocation as rsSetOtherInvestmentsAllocation,
   setOtherRetirementIncome as rsSetOtherRetirementIncome, setIncludeAgePension as rsSetIncludeAgePension,
+  sgFor as rsSgFor, ageYear as rsAgeYear,
+  preservationAgeFor as rsPreservationAgeFor, agePensionAgeFor as rsAgePensionAgeFor,
+  capHeadroomFor as rsCapHeadroomFor, firstDiv293Year as rsFirstDiv293Year,
+  agePensionEligibilityFor as rsAgePensionEligibilityFor,
 } from "./retirementStandalone.js";
 import { computeRetirementAnalytics } from "./retirementAnalytics.js";
 import { goalVsPositionSummary } from "./goalVsPosition.js";
@@ -127,6 +133,7 @@ import {
   expenseCategorySums as expenseCategorySumsPure,
 } from "./cashflowCategories.js";
 import { realThreshold, LITO } from "./Tax/annual.js";
+import { div293Tax } from "./Tax/superContributions.js";
 import { superRatesFor } from "./data/superRates.js";
 import { SUPER_RATES_BASE } from "./data/superRates.js";
 import { agePensionRatesFor, assetsTestCutOut } from "./data/agePension.js";
@@ -736,9 +743,89 @@ function retirementIncomeRequiredLabelHTML() {
 // single household, twice (client, partner) for a couple. `owner` and
 // `personLabel` thread through to each field's data-rp-owner so the
 // delegated change handler below knows which person's row to touch.
-function retirementPersonCardsHTML(owner, personLabel, pf) {
+// --- Retirement Projection — Standalone Surface: derived inputs
+// (spec 34, Commit 1) --------------------------------------------------
+//
+// "The page knows things" — every one of these reads only from
+// retirementPageState + the already-computed projection (spec 12's own
+// governing principle: never a second, competing calculation). None of
+// them are editable inputs, so none register in smartDefaults.js's own
+// SMART_DEFAULTS (that registry describes PRE-FILLED, overridable input
+// VALUES — "Default: X — kind (reason)" behind a tooltip; every figure
+// here has no input to default, just a derived readout) — the
+// underlying PRINCIPLE (show the source, never let a computed figure
+// pass as a considered one) is followed inline instead, in the same
+// plain-sentence shape the spec's own worked examples use.
+
+// Super Guarantee — sgFor (retirementStandalone.js) does the actual
+// calculation; this just picks the wording (spec 34's own literal
+// example keeps the "capped at..." clause even when not binding —
+// disclosing the general rule; the capped branch instead names the
+// actual base and salary, since that's the more useful sentence once
+// the cap genuinely matters).
+function retirementSgHTML(salary) {
+  const sg = rsSgFor(retirementPageState, salary);
+  const pct = sg.ratePct.toFixed(0);
+  const detail = sg.isCapped
+    ? `${pct}% of the ${fmtMoney(sg.sgMaximumSalary)} maximum contribution base — your ${fmtMoney(salary)} salary exceeds it`
+    : `${pct}% of ${fmtMoney(salary)}, capped at the maximum contribution base`;
+  return `<p class="helper-text">Super Guarantee: ${fmtMoney(sg.amount)} (${detail})</p>`;
+}
+
+// Preservation age / age pension age — ageYear (retirementStandalone.js)
+// does the resolution; this just formats the sentence.
+function retirementAgeYearLabel(label, owner, age, projection) {
+  const resolved = rsAgeYear(retirementPageState, owner, age, projection.schedule);
+  const yearText = resolved.outOfRange ? "beyond this projection" : String(resolved.year);
+  return `<p class="helper-text">${escapeHTML(label)}: age ${age} (${yearText})</p>`;
+}
+
+// Concessional cap headroom — capHeadroomFor (retirementStandalone.js)
+// reads the SAME projection.yearly[0].superCapUsage[owner] the
+// comprehensive Super section's own superCapHeadroomHTML reads, so
+// this can never disagree with that figure. "Personal" omitted unless
+// nonzero — this page has no personal-deductible input of its own, so
+// it would otherwise always read $0.
+function retirementCapHeadroomHTML(owner, projection) {
+  const usage = rsCapHeadroomFor(projection, owner);
+  if (!usage) return "";
+  const personalPart = usage.personalDeductible > 0 ? ` · ${fmtMoney(usage.personalDeductible)} personal` : "";
+  return `
+    <p class="helper-text super-cap-headroom">
+      ${fmtMoney(usage.cap)} cap · ${fmtMoney(usage.sg)} SG · ${fmtMoney(usage.salarySacrifice)} sacrifice${personalPart} ·
+      <strong>${fmtMoney(usage.available)} available</strong>
+      (incl. ${fmtMoney(usage.carryForwardAvailable)} carry-forward)
+    </p>
+  `;
+}
+
+// Division 293 warning — firstDiv293Year (retirementStandalone.js) does
+// the actual reconstruction/scan; this just formats the sentence.
+function retirementDiv293WarningHTML(owner, projection) {
+  const hit = rsFirstDiv293Year(retirementPageState, projection, owner);
+  if (!hit) return "";
+  return `<p class="helper-warning">Division 293 applies from ${hit.year}${hit.age != null ? ` (age ${hit.age})` : ""} — an extra ${hit.ratePct.toFixed(0)}% tax on low-tax super contributions once income plus concessional contributions passes ${fmtMoney(hit.threshold)}.</p>`;
+}
+
+// Age pension eligibility, derived and shown rather than a bare toggle
+// (spec 34: "Age pension modelled from age 67 (2049), with the toggle
+// to suppress it"). Client-anchored — the household toggle applies to
+// everyone in the household (setIncludeAgePension already keeps both
+// people's own centrelinkEligible flags in lockstep), so naming one
+// resolved year is a reasonable simplification consistent with every
+// other client-anchored household-level display already on this page.
+function retirementAgePensionToggleLabel(projection) {
+  const resolved = rsAgePensionEligibilityFor(retirementPageState, projection.schedule);
+  const yearText = resolved.outOfRange ? "beyond this projection" : String(resolved.year);
+  return `Age pension modelled from age ${resolved.age} (${yearText})`;
+}
+
+function retirementPersonCardsHTML(owner, personLabel, pf, projection) {
   const sa = superAccountFor(retirementPageState, owner);
   const ownerAttr = ` data-rp-owner="${owner}"`;
+  const contributionFrom = pf.concessionalContributionsFrom ?? { kind: "anchor", anchorId: "start" };
+  const contributionTo = pf.concessionalContributionsTo
+    ?? { kind: "anchor", anchorId: owner === "partner" ? "retirement-partner" : "retirement-client" };
   return `
     <div class="focus-section">
       <h3>${escapeHTML(personLabel)}</h3>
@@ -755,6 +842,10 @@ function retirementPersonCardsHTML(owner, personLabel, pf) {
           <label>Retirement age</label>
           <input type="number" min="18" max="120" step="1" value="${pf.retirementAge}" data-rp-field="retirementAge"${ownerAttr} />
         </div>
+      </div>
+      ${retirementAgeYearLabel("Preservation age", owner, rsPreservationAgeFor(retirementPageState, owner, projection.schedule).age, projection)}
+      ${retirementAgeYearLabel("Age pension age", owner, rsAgePensionAgeFor(retirementPageState, owner, projection.schedule).age, projection)}
+      <div class="person-grid">
         <div class="cf-cell">
           <label>Current super balance ($)</label>
           <input type="number" min="0" step="1000" value="${pf.superBalance}" data-rp-field="superBalance"${ownerAttr} />
@@ -763,15 +854,28 @@ function retirementPersonCardsHTML(owner, personLabel, pf) {
           <label>Salary ($ p.a.)</label>
           <input type="number" min="0" step="1000" value="${pf.salary}" data-rp-field="salary"${ownerAttr} />
         </div>
+      </div>
+      ${retirementSgHTML(pf.salary)}
+      <div class="person-grid">
         <div class="cf-cell">
           <label>Concessional contributions beyond SG ($ p.a.)</label>
           <input type="number" min="0" step="500" value="${pf.concessionalContributions}" data-rp-field="concessionalContributions"${ownerAttr} />
+        </div>
+        <div class="cf-cell">
+          <label>Contribution from</label>
+          ${dateRefControlHTML(contributionFrom, owner, `data-rp-field="ccFrom" data-rp-owner="${owner}"`, 18, 120, retirementPageState.plan, projection.schedule)}
+        </div>
+        <div class="cf-cell">
+          <label>Contribution until</label>
+          ${dateRefControlHTML(contributionTo, owner, `data-rp-field="ccTo" data-rp-owner="${owner}"`, 18, 120, retirementPageState.plan, projection.schedule)}
         </div>
         <div class="cf-cell">
           <label>Risk profile / glide path</label>
           <select data-rp-field="superAllocation"${ownerAttr}>${retirementAllocationOptionsHTML(sa?.allocation)}</select>
         </div>
       </div>
+      ${retirementCapHeadroomHTML(owner, projection)}
+      ${retirementDiv293WarningHTML(owner, projection)}
       ${retirementAssumptionSummaryHTML(owner, personLabel)}
     </div>
   `;
@@ -1228,8 +1332,8 @@ function renderRetirementPageBody() {
       ${retirementAssumptionsPanelHTML(household)}
     </div>
     <div class="focus-panel">
-      ${retirementPersonCardsHTML("client", couple ? `Client — ${clientLabel}` : "About & Superannuation", f.client)}
-      ${couple ? retirementPersonCardsHTML("partner", `Partner — ${partnerLabel}`, f.partner) : ""}
+      ${retirementPersonCardsHTML("client", couple ? `Client — ${clientLabel}` : "About & Superannuation", f.client, projection)}
+      ${couple ? retirementPersonCardsHTML("partner", `Partner — ${partnerLabel}`, f.partner, projection) : ""}
       <div class="focus-section">
         <h3>Household</h3>
         <div class="person-grid">
@@ -1258,7 +1362,7 @@ function renderRetirementPageBody() {
           </div>
         </div>
         ${retirementIncomeRequiredLabelHTML()}
-        <label class="ptg-check"><input type="checkbox"${f.includeAgePension ? " checked" : ""} data-rp-field="includeAgePension" /><span>Include age pension</span></label>
+        <label class="ptg-check"><input type="checkbox"${f.includeAgePension ? " checked" : ""} data-rp-field="includeAgePension" /><span>${escapeHTML(retirementAgePensionToggleLabel(projection))}</span></label>
       </div>
       <div class="focus-section">
         <h3>Summary</h3>
@@ -1317,7 +1421,31 @@ els.pageRetirement.addEventListener("change", (e) => {
   else if (field === "otherInvestmentsAllocation") next = rsSetOtherInvestmentsAllocation(next, parseRetirementAllocationValue(v), PROFILES);
   else if (field === "otherRetirementIncome") next = rsSetOtherRetirementIncome(next, clampNumber(v, 0));
   else if (field === "includeAgePension") next = rsSetIncludeAgePension(next, e.target.checked);
-  else return;
+  else if (field === "ccFrom" || field === "ccTo") {
+    // dateRefControlHTML's own two-control shape (spec 34, Commit 1 —
+    // reused, not reimplemented): the anchor <select> fires with either
+    // a real anchor id or "__age__" (switch to a specific age, resolved
+    // to the anchor's OWN current age so the number input starts
+    // somewhere sensible, matching the comprehensive workspace's own
+    // identical convention); the number input fires with a plain age.
+    const role = e.target.dataset.drRole;
+    const setter = field === "ccFrom" ? rsSetConcessionalContributionsFrom : rsSetConcessionalContributionsTo;
+    let ref;
+    if (role === "anchor") {
+      if (v === "__age__") {
+        const key = field === "ccFrom" ? "concessionalContributionsFrom" : "concessionalContributionsTo";
+        const current = retirementFields(next)[owner]?.[key]
+          ?? { kind: "anchor", anchorId: field === "ccFrom" ? "start" : (owner === "partner" ? "retirement-partner" : "retirement-client") };
+        const freshProjection = projectPlan(next, PROFILES);
+        ref = { kind: "age", age: resolveRef(current, next.plan, freshProjection.schedule, owner).age };
+      } else {
+        ref = { kind: "anchor", anchorId: v };
+      }
+    } else {
+      ref = { kind: "age", age: clampInt(v, 18, 120) };
+    }
+    next = setter(next, owner, ref, PROFILES);
+  } else return;
   commitRetirementPageState(next);
 });
 
@@ -4244,9 +4372,13 @@ function assetExcludedFlagHTML(assetId) {
 // rows, data-pid/data-pfield for properties) onto both controls so the
 // existing delegated change handlers can find the row/field; a
 // `data-dr-role` of "anchor" or "age" tells them which control fired.
-function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax) {
-  const plan = state.plan;
-  const schedule = projection.schedule;
+// `plan`/`schedule` default to the comprehensive workspace's own
+// globals — every existing call site omits them and behaves exactly as
+// before. The standalone retirement page (spec 34, Commit 1) passes
+// its own retirementPageState.plan/projection.schedule explicitly, so
+// this one control is genuinely reused rather than rebuilt a second
+// time for a page that never mounts the comprehensive workspace at all.
+function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax, plan = state.plan, schedule = projection.schedule) {
   const anchors = listAnchors(plan, schedule);
   const isAnchor = ref?.kind === "anchor";
   const resolved = resolveRef(ref, plan, schedule, ownerForAges);

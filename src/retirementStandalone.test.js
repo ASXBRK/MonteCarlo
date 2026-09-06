@@ -3,11 +3,17 @@ import {
   retirementFields, superAccountFor, findOtherInvestmentsAsset, ensurePersonSuperAccount,
   partnerHasData, setHousehold, pensionFor, ensureRetirementPensions,
   setFirstName, setDob, setRetirementAge, setSuperBalance, setSuperAllocation,
-  setSalary, setConcessionalContributions, setIncomeRequired,
+  setSalary, setConcessionalContributions, setConcessionalContributionsFrom, setConcessionalContributionsTo,
+  setIncomeRequired,
   setOtherInvestments, setOtherInvestmentsAllocation, setOtherRetirementIncome, setIncludeAgePension,
+  sgFor, ageYear, preservationAgeFor, agePensionAgeFor, capHeadroomFor, firstDiv293Year,
+  agePensionEligibilityFor,
 } from "./retirementStandalone.js";
 import { defaultState, clampAllToPlan, hydrate, serialize } from "./planState.js";
 import { projectPlan } from "./deterministic.js";
+import { buildSchedules, firstFyStartYear } from "./schedule.js";
+import { superRatesFor } from "./data/superRates.js";
+import { agePensionRatesFor } from "./data/agePension.js";
 import { PROFILES } from "./profiles.js";
 
 const NOW = new Date("2026-08-17T00:00:00+10:00");
@@ -91,6 +97,161 @@ describe("retirementStandalone — per-field setters write to the correct EXISTI
     expect(rows[0].amount).toBe(8000);
   });
 
+  it("concessional contributions default to the SAME start→retirement window createSuperContribution itself picks", () => {
+    const state = setConcessionalContributions(baseState(), "client", 10000, PROFILES);
+    const row = state.cashflows.superContributions.find((c) => c.owner === "client");
+    expect(row.from).toEqual({ kind: "anchor", anchorId: "start" });
+    expect(row.to).toEqual({ kind: "anchor", anchorId: "retirement-client" });
+    expect(retirementFields(state).client.concessionalContributionsFrom).toEqual(row.from);
+    expect(retirementFields(state).client.concessionalContributionsTo).toEqual(row.to);
+  });
+
+  it("setConcessionalContributionsFrom/To — 'salary sacrifice $15,000 from 55 until retirement' — edits the SAME row's own existing DateRef fields, creating it via the same factory if it doesn't exist yet", () => {
+    let state = setConcessionalContributions(baseState(), "client", 15000, PROFILES);
+    state = setConcessionalContributionsFrom(state, "client", { kind: "age", age: 55 }, PROFILES);
+    const rows = state.cashflows.superContributions.filter((c) => c.owner === "client" && c.type === "salarySacrifice");
+    expect(rows).toHaveLength(1); // still the SAME row, not a second one
+    expect(rows[0].amount).toBe(15000);
+    expect(rows[0].from).toEqual({ kind: "age", age: 55 });
+    expect(rows[0].to).toEqual({ kind: "anchor", anchorId: "retirement-client" }); // untouched
+
+    // Setting the window BEFORE any amount is entered still creates
+    // exactly one row (via the same factory), not a parallel concept.
+    const fromScratch = setConcessionalContributionsFrom(baseState(), "client", { kind: "age", age: 55 }, PROFILES);
+    expect(fromScratch.cashflows.superContributions.filter((c) => c.owner === "client")).toHaveLength(1);
+    expect(retirementFields(fromScratch).client.concessionalContributionsFrom).toEqual({ kind: "age", age: 55 });
+  });
+
+  it("setConcessionalContributionsTo edits the row's own 'to' independently of 'from'", () => {
+    let state = setConcessionalContributions(baseState(), "client", 15000, PROFILES);
+    state = setConcessionalContributionsTo(state, "client", { kind: "age", age: 70 }, PROFILES);
+    const row = state.cashflows.superContributions.find((c) => c.owner === "client");
+    expect(row.to).toEqual({ kind: "age", age: 70 });
+    expect(row.from).toEqual({ kind: "anchor", anchorId: "start" }); // untouched
+  });
+
+  it("a from/to window reaches the real engine — contributions outside the window don't count toward SG/cap usage for that year", () => {
+    let state = setSuperBalance(baseState(), "client", 100000, PROFILES);
+    state = setDob(state, "client", "1975-01-01");
+    state = setRetirementAge(state, "client", 65);
+    state = setSalary(state, "client", 150000);
+    state = setConcessionalContributions(state, "client", 15000, PROFILES);
+    state = setConcessionalContributionsFrom(state, "client", { kind: "age", age: 55 }, PROFILES);
+    const clamped = clampAllToPlan(state, PROFILES);
+    const out = projectPlan(clamped, PROFILES);
+    // Client starts well below 55 (currentAge derived from the 1975 dob
+    // against baseState()'s own NOW) — year 0's own salary-sacrifice
+    // flow must be zero; it only starts once age 55 is reached.
+    expect(clamped.plan.client.currentAge).toBeLessThan(55);
+    expect(out.yearly[0].superCapUsage.client.salarySacrifice).toBe(0);
+    const age55PlanYear = 55 - clamped.plan.client.currentAge;
+    expect(out.yearly[age55PlanYear].superCapUsage.client.salarySacrifice).toBeCloseTo(15000, 0);
+  });
+});
+
+// --- Derived inputs (spec 34, Commit 1: "the page knows things") ----------
+describe("retirementStandalone — derived inputs (spec 34 Commit 1)", () => {
+  it("sgFor derives SG at the statutory rate, uncapped", () => {
+    // 115,000 × 12% = 13,800 — the spec's own worked example.
+    const sg = sgFor(baseState(), 115000);
+    expect(sg.amount).toBeCloseTo(13800, 2);
+    expect(sg.ratePct).toBe(12);
+    expect(sg.isCapped).toBe(false);
+    expect(sg.base).toBe(115000);
+  });
+
+  it("sgFor caps at the maximum contribution base once salary exceeds it", () => {
+    const state = baseState();
+    const f0 = firstFyStartYear(state.plan.start);
+    const rates = superRatesFor(f0);
+    const sg = sgFor(state, 300000);
+    expect(sg.isCapped).toBe(true);
+    expect(sg.base).toBe(rates.sgMaximumSalary);
+    expect(sg.amount).toBeCloseTo(rates.sgMaximumSalary * rates.sgRate, 2);
+    expect(sg.sgMaximumSalary).toBe(rates.sgMaximumSalary);
+  });
+
+  it("preservationAgeFor and agePensionAgeFor resolve from date of birth to a calendar year", () => {
+    let state = setDob(baseState(), "client", "1980-08-17"); // ~46 at plan start
+    state = clampAllToPlan(state, PROFILES);
+    const schedule = buildSchedules(state);
+    const f0 = firstFyStartYear(state.plan.start);
+    const currentAge = state.plan.client.currentAge; // plan.start is 1 Aug, before the Aug 17 birthday
+    const rates = superRatesFor(f0);
+    const ap = agePensionRatesFor(f0);
+
+    const preservation = preservationAgeFor(state, "client", schedule);
+    expect(preservation.age).toBe(rates.preservationAge); // 60
+    expect(preservation.year).toBe(f0 + (rates.preservationAge - currentAge));
+
+    const pension = agePensionAgeFor(state, "client", schedule);
+    expect(pension.age).toBe(ap.ageOfEligibility); // 67
+    expect(pension.year).toBe(f0 + (ap.ageOfEligibility - currentAge));
+
+    // agePensionEligibilityFor is the client-anchored convenience wrapper
+    // the household toggle label reads.
+    expect(agePensionEligibilityFor(state, schedule)).toEqual(pension);
+  });
+
+  it("ageYear reports outOfRange rather than a bogus year once the target age falls beyond the projection", () => {
+    let state = setDob(baseState(), "client", "1980-08-17");
+    state = setRetirementAge(state, "client", 65);
+    state = clampAllToPlan(state, PROFILES);
+    const schedule = buildSchedules(state);
+    const resolved = ageYear(state, "client", 200, schedule); // no one's projection runs to age 200
+    expect(resolved.outOfRange).toBe(true);
+    expect(resolved.year).toBeNull();
+  });
+
+  it("capHeadroomFor reads the SAME projection.yearly[0].superCapUsage[owner] the comprehensive Super section's own display reads — cannot disagree with it by construction", () => {
+    let state = setSuperBalance(baseState(), "client", 50000, PROFILES);
+    state = setSalary(state, "client", 115000);
+    state = setConcessionalContributions(state, "client", 10000, PROFILES);
+    const clamped = clampAllToPlan(state, PROFILES);
+    const out = projectPlan(clamped, PROFILES);
+    expect(capHeadroomFor(out, "client")).toEqual(out.yearly[0].superCapUsage.client);
+    expect(capHeadroomFor(out, "client").cap).toBeGreaterThan(0);
+  });
+
+  it("capHeadroomFor returns null when the projection has no yearly rows for the owner", () => {
+    const out = { yearly: [] };
+    expect(capHeadroomFor(out, "client")).toBeNull();
+  });
+
+  it("firstDiv293Year fires in the first year a high enough salary pushes income plus concessional contributions over the threshold", () => {
+    // $300k salary alone (SG ≈ $32,500, essentially the whole cap) plus
+    // taxable income of ~$300k clears the $250k Div293 threshold as soon
+    // as a full FY of salary is assessed — the plan's own partial first
+    // year (start month > July) means year 0 itself draws no salary, so
+    // the earliest it can bite is year 1, the first full FY. A super
+    // account has to exist for SG to actually accrue (superCapUsage.sg
+    // reads 0 without one, per deterministic.test.js's own "cap headroom
+    // is a person-level figure, not account-gated" regression gate —
+    // headroom is still reported, but usage isn't).
+    let state = setSuperBalance(baseState(), "client", 50000, PROFILES);
+    state = setDob(state, "client", "1980-08-17");
+    state = setSalary(state, "client", 300000);
+    const clamped = clampAllToPlan(state, PROFILES);
+    const out = projectPlan(clamped, PROFILES);
+    const f0 = firstFyStartYear(clamped.plan.start);
+    const hit = firstDiv293Year(clamped, out, "client");
+    expect(hit).not.toBeNull();
+    expect(hit.year).toBe(f0 + 1);
+    expect(hit.age).toBe(clamped.plan.client.currentAge + 1);
+    expect(hit.threshold).toBeGreaterThan(0);
+    expect(hit.ratePct).toBe(15);
+  });
+
+  it("firstDiv293Year reports null when income never approaches the threshold", () => {
+    let state = setDob(baseState(), "client", "1980-08-17");
+    state = setSalary(state, "client", 80000);
+    const clamped = clampAllToPlan(state, PROFILES);
+    const out = projectPlan(clamped, PROFILES);
+    expect(firstDiv293Year(clamped, out, "client")).toBeNull();
+  });
+});
+
+describe("retirementStandalone — income required and other household-level setters", () => {
   it("income required → plan.retirement.incomeRequired, merged not replaced (household-level, no owner)", () => {
     let state = setIncomeRequired(baseState(), { source: "asfaComfortable" });
     state = setIncomeRequired(state, { stepDownAtAge: 85 });

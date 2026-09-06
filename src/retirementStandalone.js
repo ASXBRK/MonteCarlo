@@ -37,6 +37,11 @@ import {
   createSuperAccount, createAsset, createIncomeRow, createSuperContribution, createIncomeRequired,
   createPension, isCoupleHousehold,
 } from "./planState.js";
+import { superRatesFor } from "./data/superRates.js";
+import { agePensionRatesFor } from "./data/agePension.js";
+import { div293Tax } from "./Tax/superContributions.js";
+import { resolveRef } from "./keyDates.js";
+import { firstFyStartYear } from "./schedule.js";
 
 const RETIREMENT_CLIENT_ANCHOR = { kind: "anchor", anchorId: "retirement-client" };
 const RETIREMENT_PARTNER_ANCHOR = { kind: "anchor", anchorId: "retirement-partner" };
@@ -94,6 +99,12 @@ function personRetirementFields(state, owner) {
     superAllocation: sa?.allocation ?? null,
     salary: salary?.amount ?? 0,
     concessionalContributions: contribution?.amount ?? 0,
+    // The row's own DateRef window — null (not a default) when no row
+    // exists yet, so the UI can fall back to what createSuperContribution
+    // WOULD default to (start → the owner's own retirement anchor)
+    // without this read side inventing that default a second time.
+    concessionalContributionsFrom: contribution?.from ?? null,
+    concessionalContributionsTo: contribution?.to ?? null,
   };
 }
 
@@ -241,28 +252,53 @@ export function setSalary(state, owner, value) {
   return withSalaryRow(state, owner, { amount: value });
 }
 
+// Shared find-or-create for the one concessional-contribution row this
+// page edits — `patch` is applied whether the row already exists or is
+// being created for the first time (createSuperContribution's own
+// default from/to — start to the owner's own retirement anchor — is
+// the starting point either way; a from/to setter below just patches
+// straight on top of that same row, never a second one).
+function withConcessionalContributionRow(state, owner, profiles, patch) {
+  const withAccount = ensurePersonSuperAccount(state, owner, profiles);
+  const existing = findConcessionalContributionRow(withAccount, owner);
+  if (existing) {
+    const superContributions = withAccount.cashflows.superContributions.map((c) =>
+      (c.id === existing.id ? { ...c, ...patch } : c)
+    );
+    return { ...withAccount, cashflows: { ...withAccount.cashflows, superContributions } };
+  }
+  const row = {
+    ...createSuperContribution(withAccount.plan, withAccount.plan.superAccounts, owner),
+    amount: 0, basis: "amount", frequency: "annual",
+    ...patch,
+  };
+  return {
+    ...withAccount,
+    cashflows: { ...withAccount.cashflows, superContributions: [...(withAccount.cashflows.superContributions ?? []), row] },
+  };
+}
+
 // "Concessional contributions beyond SG (annual)" — salarySacrifice is
 // the natural fit (createSuperContribution's own default type, and the
 // spec's own wording: additional to SG, not SG itself — see schedule.js
 // for why SG needs no explicit contribution row at all: it's derived
 // automatically from every sgApplies:true income row).
 export function setConcessionalContributions(state, owner, value, profiles) {
-  const withAccount = ensurePersonSuperAccount(state, owner, profiles);
-  const existing = findConcessionalContributionRow(withAccount, owner);
-  if (existing) {
-    const superContributions = withAccount.cashflows.superContributions.map((c) =>
-      (c.id === existing.id ? { ...c, amount: value, basis: "amount", frequency: "annual" } : c)
-    );
-    return { ...withAccount, cashflows: { ...withAccount.cashflows, superContributions } };
-  }
-  const row = {
-    ...createSuperContribution(withAccount.plan, withAccount.plan.superAccounts, owner),
-    amount: value, basis: "amount", frequency: "annual",
-  };
-  return {
-    ...withAccount,
-    cashflows: { ...withAccount.cashflows, superContributions: [...(withAccount.cashflows.superContributions ?? []), row] },
-  };
+  return withConcessionalContributionRow(state, owner, profiles, { amount: value, basis: "amount", frequency: "annual" });
+}
+
+// Spec 34, Commit 1 — "a single static number cannot describe any real
+// contribution strategy": the row's own EXISTING from/to DateRef fields
+// (already present on every superContribution row, already validated
+// by clampFromTo/clampSuperContribution — no new state shape) become
+// editable here, so "salary sacrifice $15,000 from 55 until retirement"
+// is expressible on this page, not just in the comprehensive workspace.
+export function setConcessionalContributionsFrom(state, owner, ref, profiles) {
+  return withConcessionalContributionRow(state, owner, profiles, { from: ref });
+}
+
+export function setConcessionalContributionsTo(state, owner, ref, profiles) {
+  return withConcessionalContributionRow(state, owner, profiles, { to: ref });
 }
 
 // --- Household setters ---------------------------------------------------
@@ -396,4 +432,118 @@ export function ensureRetirementPensions(state, profiles) {
   }
   if (!created) return next;
   return { ...next, plan: { ...next.plan, retirement: { ...next.plan.retirement, incomeDrivenDrawdown: true } } };
+}
+
+// --- Derived inputs (spec 34, Commit 1: "the page knows things") --------
+//
+// Pure calculations only — main.js wraps each result in the page's own
+// HTML. Kept here (not inline in main.js) so the underlying figures are
+// unit-testable the same way every other pure module in this codebase
+// is, per the spec's own explicit test list: "SG derives correctly...;
+// preservation and pension ages from DOB; cap headroom matching the
+// comprehensive section's own figures; the Division 293 warning firing
+// at the right year." `schedule` is the caller's own already-built
+// projection.schedule (or buildSchedules(state) directly for a
+// schedule-only need) — these functions never build one themselves.
+
+// Super Guarantee for `owner`, resolved for TODAY's FY (year 0) — a
+// live "what would this year's SG be" readout, via the SAME formula
+// schedule.js's own SG crediting uses
+// (Math.min(salary, sgMaximumSalary) * sgRate). "Remove any input that
+// duplicates it" (spec's own words) — none exists on this page.
+export function sgFor(state, salary) {
+  const a = state.assumptions;
+  const f0 = firstFyStartYear(state.plan.start);
+  const mode = a.bracketMode === "frozen" ? "frozen" : "indexed";
+  const rates = superRatesFor(f0, mode, a.cpi, a.awote ?? 0.032);
+  const isCapped = salary > rates.sgMaximumSalary;
+  const base = Math.min(salary, rates.sgMaximumSalary);
+  return { amount: base * rates.sgRate, ratePct: rates.sgRate * 100, base, sgMaximumSalary: rates.sgMaximumSalary, isCapped, salary };
+}
+
+// The calendar year `owner` reaches `age`, resolved the SAME way every
+// other age-to-year figure in this app is (resolveRef's own
+// {kind:"age"} resolution — ages tick each 1 July, CLAUDE.md's own
+// locked convention — not a naive dob-year-plus-age approximation).
+// `year: null` when the age falls beyond the projection window.
+export function ageYear(state, owner, age, schedule) {
+  const resolved = resolveRef({ kind: "age", age }, state.plan, schedule, owner);
+  const f0 = firstFyStartYear(state.plan.start);
+  return { age, year: resolved.outOfRange ? null : f0 + resolved.planYear, outOfRange: resolved.outOfRange };
+}
+
+// Preservation age (a flat constant for the only cohort this tool
+// models — superRatesFor's own preservationAge) resolved to a year for
+// `owner`. "Derive from date of birth. Show them; do not ask" (spec's
+// own words) — the AGE doesn't vary by client here, the YEAR does.
+export function preservationAgeFor(state, owner, schedule) {
+  const f0 = firstFyStartYear(state.plan.start);
+  const rates = superRatesFor(f0);
+  return ageYear(state, owner, rates.preservationAge, schedule);
+}
+
+// Age pension age (agePensionRatesFor's own ageOfEligibility), same
+// shape as preservationAgeFor.
+export function agePensionAgeFor(state, owner, schedule) {
+  const f0 = firstFyStartYear(state.plan.start);
+  const rates = agePensionRatesFor(f0);
+  return ageYear(state, owner, rates.ageOfEligibility, schedule);
+}
+
+// Concessional cap headroom for `owner`, TODAY's FY (year 0) — "live,
+// as the comprehensive super section already does" (spec's own
+// words): reads the SAME projection.yearly[0].superCapUsage[owner] the
+// comprehensive Super section's own superCapHeadroomHTML reads (see
+// that function's own header in main.js), so this can never disagree
+// with that figure. `null` when no super account/projection exists yet
+// for this owner.
+export function capHeadroomFor(projection, owner) {
+  return projection.yearly?.[0]?.superCapUsage?.[owner] ?? null;
+}
+
+// Division 293 — the FIRST plan year `owner`'s reconstructed Division
+// 293 tax is actually positive (spec: "when income plus concessional
+// contributions approaches $250,000, with the year it first bites").
+// Reconstructed via the SAME pure div293Tax the engine itself calls
+// (Tax/superContributions.js) — never a duplicated rule — fed from
+// what's ALREADY exposed per year (row.superCapUsage for this person's
+// own SG/salary-sacrifice/cap-and-carry-forward position,
+// row.taxDetail[owner].taxableIncome). Deliberately NOT
+// row.taxDetail[owner].div293 — that field reports the PRIOR year's
+// tax, paid this July (deterministic.js's own CGT-style payment-timing
+// convention), which would name the wrong (later) year as "when it
+// first bites". `null` when it never bites within the projection.
+export function firstDiv293Year(state, projection, owner) {
+  const a = state.assumptions;
+  const f0 = firstFyStartYear(state.plan.start);
+  const mode = a.bracketMode === "frozen" ? "frozen" : "indexed";
+  const ages = owner === "partner" ? projection.schedule.partnerAges : projection.schedule.clientAges;
+  for (let y = 0; y < projection.yearly.length; y++) {
+    const row = projection.yearly[y];
+    const usage = row.superCapUsage?.[owner];
+    const taxDetail = row.taxDetail?.[owner];
+    if (!usage || !taxDetail) continue;
+    const rates = superRatesFor(f0 + y, mode, a.cpi, a.awote ?? 0.032);
+    const reportableSuperContributions = usage.sg + usage.salarySacrifice + usage.personalDeductible;
+    const lowTaxContributions = Math.min(reportableSuperContributions, usage.cap + usage.carryForwardAvailable);
+    const { tax } = div293Tax({
+      taxableIncome: taxDetail.taxableIncome,
+      reportableSuperContributions, lowTaxContributions, reportableFringeBenefits: 0,
+      threshold: rates.div293Threshold, rate: rates.div293Rate,
+    });
+    if (tax > 1e-6) {
+      return { year: f0 + y, age: ages?.[y] ?? null, threshold: rates.div293Threshold, ratePct: rates.div293Rate * 100 };
+    }
+  }
+  return null;
+}
+
+// Age pension eligibility, derived (spec: "Age pension modelled from
+// age 67 (2049), with the toggle to suppress it") — client-anchored,
+// same simplification as every other client-anchored household-level
+// display on this page (the toggle itself applies to the whole
+// household — setIncludeAgePension keeps every person's own
+// centrelinkEligible flag in lockstep).
+export function agePensionEligibilityFor(state, schedule) {
+  return agePensionAgeFor(state, "client", schedule);
 }
