@@ -3014,6 +3014,93 @@ query confirmed (via `page.emulateMedia`) to hide the household toggle
 and page-actions while the assumptions panel force-opens. Full suite
 2064/2064 unchanged, build green, zero console errors throughout.
 
+### Retirement: comparison fixture and record (spec 33, Commit 4 — closes spec 33)
+One demo client sized for a real side-by-side session with the firm's
+second retirement tool, plus the written record to run that session
+against.
+
+**`src/demo/retirementComparison.js`.** Single, mid-forties (45),
+retiring at 65, one super account ($150,000, Balanced), a $90,000
+salary, modest other investments ($30,000, Balanced), Income Required
+set to ASFA Comfortable. Built through the SAME setters the standalone
+page itself uses for every one of its own nine fields — the fixture
+IS what you'd type into that page — with `ensureRetirementPensions`
+applied identically (Commit 2's own auto-provisioning), so its
+behaviour is exactly what a real adviser session would produce, not a
+hand-tuned special case.
+
+**One field beyond the page's own nine — disclosed, not hidden.**
+Living expenses ($52,000/yr, CPI-indexed) is NOT one of the standalone
+page's own fields (it collects no expense input at all) but no
+retirement comparison is meaningful without one; added directly via
+`createExpenseRow`, the same factory the comprehensive workspace's own
+Money Out section uses, with the record document naming it explicitly
+as the one addition rather than blending it in as if it were a ninth
+page field.
+
+**A real bug caught while tuning this fixture's own numbers, not a
+defect in the standalone page itself.** With expenses entered but no
+explicit `now`, the fixture showed a shortfall on day one regardless of
+how generous the numbers were — traced to CLAUDE.md's own locked
+convention ("annual rows... skipped in the partial first year if start
+month > July"): the salary row (this page's own default frequency,
+annual) skipped its entire first-year income under a September-dated
+`now`, while the monthly living-expense row fired every month of that
+same partial year regardless. Fixed by pinning
+`RETIREMENT_COMPARISON_NOW` to July, sidestepping the partial-year
+case entirely — disclosed in the module's own header as a mechanical
+fixture-tuning detail, not a standalone-page defect (no real user of
+that page alone can trigger this combination, since it never collects
+an expense row to interact with the salary row's own skip).
+
+**Tuned so every one of the spec's three named effects genuinely
+fires**, not just nominally present: real tax during the working years
+(~$19,000–21,000/yr on the $90,000 salary); the pension draws down
+from ~$447,000 at commencement to fully exhausted by the late 70s (a
+real multi-decade drawdown story, not untouched capital); the age
+pension supplies 35.9% of average retirement income and grows as the
+pension itself depletes. No shortfall ever occurs (`expectAffordable:
+true` holds).
+
+**`docs/reference/retirement-comparison.md`** — the inputs (naming
+which are the page's own nine and which is the one addition), our
+outputs (`computeRetirementAnalytics`'s own figures, asserted
+byte-for-byte against the test so the document can never quietly drift
+from what the engine actually computes), empty columns for the other
+tool's own figures and "which is right and why" per line, and the
+spec's own five expected-differences bullets restated in this specific
+household's own terms (e.g. "expect the other tool's income figure to
+sit ~$19,859/yr, 35.9%, below ours if it doesn't model the age
+pension" — a concrete prediction, not a generic caveat).
+
+Deliberately NOT added to `DEMO_BUILDERS` (`src/demo/index.js`) — same
+convention `src/demo/retiree.js` already established for a fixture
+built for one specific analysis rather than as a "Load demo clients"
+option.
+
+Tests: `src/demo/retirementComparison.test.js` (5 tests) — projects
+cleanly (39 years, no shortfall), the conservation invariant holds for
+every year but the last (this codebase's own standing convention),
+uses the fixed reference date, every named effect (tax/age pension/
+drawdown) is confirmed to actually fire with concrete thresholds (not
+just "not exactly zero"), and every figure in the comparison document
+is asserted to match a live run to 2 decimal places. Full suite
+2069/2069, build green — this fixture is intentionally excluded from
+the app bundle (not imported by `main.js`), confirmed by an unchanged
+bundle hash after adding it.
+
+**Spec 33 complete — all four commits landed and gated:** the
+standalone page and its inputs (Commit 1, revised mid-stream to add
+couple support), its outputs (Commit 2, plus the pension-auto-
+provisioning decision and the `householdCashIncome` bug fix it
+surfaced), comparison support (Commit 3), and this fixture/record
+(Commit 4). The page is real and reachable
+(`#/clients/<cid>/scenarios/<sid>/retirement`) — the deferred items
+(prepopulation from a comprehensive scenario, mode switching, an
+adapter to another system, document output, Monte Carlo framing on
+this surface) all wait on what the actual comparison session finds,
+per the spec's own closing words.
+
 ---
 
 ## WHERE WE'RE GOING
