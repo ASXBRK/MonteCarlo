@@ -528,6 +528,38 @@ let retirementPageClientId = null;
 let retirementPageScenarioId = null;
 let retirementPageState = null;
 
+// computeRetirementAnalytics (retirementAnalytics.js) costs ~370ms on a
+// simple one-person scenario — its own sustainable-income-to-LE search
+// re-runs a full projectPlan() trial per iteration, twice — against
+// ~30ms for projectPlan() alone. That's fine for the comprehensive
+// workspace's own Focus > Retirement view (one visit at a time) but
+// unacceptable here: this page's whole premise is reprojecting live on
+// every keystroke, and a ~370ms tax on every one of them measured as a
+// ~1s round-trip end to end in a browser test — the first thing anyone
+// would notice in a comparison session.
+//
+// Fix (debounce, per the user's own instruction — cheapest option
+// first, only reach for a worse-answer tradeoff like widened solver
+// tolerance if this isn't enough): split the render into a FAST path
+// (person cards, household card, the goal chart, the balance chart,
+// the year-by-year table — all sourced from projectPlan()'s own
+// ~30ms output plus resolveRef()'s cheap anchor resolution, no
+// solver) that runs on every keystroke, and a SLOW path (the Summary
+// card and Lifestyle band, the only two consumers of
+// computeRetirementAnalytics) that runs on a 300ms idle debounce.
+// retirementAnalyticsCache holds the last computed analytics so the
+// fast path always has SOMETHING correct-as-of-recently to show
+// immediately, rather than a blank section while the debounce is
+// pending. A single shared timer variable, cleared and rescheduled on
+// every fast-path render, is naturally race-safe against rapid edits
+// or navigating to a different scenario's retirement page (that, too,
+// calls renderRetirementPageBody, which clears any pending timer
+// before scheduling its own) — see scheduleRetirementAnalyticsRefresh's
+// own header for the one further case (navigating away entirely) and
+// why it's harmless.
+let retirementAnalyticsCache = null;
+let retirementAnalyticsTimer = null;
+
 // Both entry points route through ensureRetirementPensions (Commit 2) —
 // silently provisioning the pension(s) that make super/drawdown actually
 // show something (see that function's own header) — so a scenario
@@ -537,6 +569,12 @@ let retirementPageState = null;
 function renderRetirementPage(clientId, scenarioId) {
   retirementPageClientId = clientId;
   retirementPageScenarioId = scenarioId;
+  // A fresh page load, not a keystroke — the cache would otherwise be
+  // stale (or simply absent) relative to whatever changed via the
+  // comprehensive workspace since this page's last visit, so pay the
+  // one-time synchronous cost here rather than show a blank Summary/
+  // Lifestyle band for the first 300ms.
+  retirementAnalyticsCache = null;
   const loaded = loadScenarioFullState(scenarioId);
   const withPensions = ensureRetirementPensions(loaded, PROFILES);
   if (withPensions !== loaded) {
@@ -554,6 +592,41 @@ function commitRetirementPageState(next) {
   workspace = touchScenario(workspace, retirementPageScenarioId, Date.now());
   saveWorkspace();
   renderRetirementPageBody();
+}
+
+// Recomputes computeRetirementAnalytics ~300ms after the LAST edit
+// (debounced, not throttled — a burst of keystrokes reschedules this
+// every time and only the final one actually runs the solver), then
+// updates ONLY the Summary card and Lifestyle band sections via a
+// direct DOM write — never a full page re-render, so it can never
+// steal focus/cursor position from whatever the user is doing next.
+// Safe if the user has since navigated away from this exact retirement
+// page: $() simply finds nothing (a different route entirely) or the
+// SAME scenario's own (possibly now-hidden) elements, which is a
+// harmless, still-correct update to a page not currently visible —
+// see this function's OWN caller for why a stale timer can never fire
+// against a DIFFERENT scenario's now-current DOM.
+function scheduleRetirementAnalyticsRefresh() {
+  if (retirementAnalyticsTimer) clearTimeout(retirementAnalyticsTimer);
+  retirementAnalyticsTimer = setTimeout(() => {
+    retirementAnalyticsTimer = null;
+    if (!retirementPageState) return;
+    const projection = projectPlan(retirementPageState, PROFILES);
+    const analytics = computeRetirementAnalytics(retirementPageState, projection);
+    retirementAnalyticsCache = analytics;
+    const f = retirementFields(retirementPageState);
+    const household = f.household;
+    const retirementRef = resolveRef(
+      { kind: "anchor", anchorId: "retirement-client" }, retirementPageState.plan, projection.schedule, "client"
+    );
+    const tenure = deriveHomeownerStatus(
+      retirementPageState.properties, retirementPageState.liabilities, projection.yearly[retirementRef.planYear]
+    );
+    const summaryEl = $("rpSummary");
+    if (summaryEl) summaryEl.innerHTML = retirementPageSummaryHTML(analytics);
+    const bandEl = $("rpLifestyleBand");
+    if (bandEl) bandEl.innerHTML = retirementBandHTML(analytics, household, tenure);
+  }, 300);
 }
 
 // A blend of profiles.js's own keys and any glide paths already defined
@@ -927,16 +1000,23 @@ function renderRetirementPageBody() {
   const partnerLabel = couple ? (f.partner.firstName || "Partner") : null;
   const pageName = couple ? `${clientLabel} & ${partnerLabel}` : clientLabel;
 
+  // FAST path (~30ms): projectPlan + resolveRef's own cheap anchor
+  // resolution — everything the person cards, goal chart, balance
+  // chart, and year table need. Deliberately NOT computeRetirement
+  // Analytics (see that function's own header on why it's ~370ms and
+  // debounced separately, below).
   const projection = projectPlan(retirementPageState, PROFILES);
-  const analytics = computeRetirementAnalytics(retirementPageState, projection);
   const household = f.household;
+  const retirementRef = resolveRef(
+    { kind: "anchor", anchorId: "retirement-client" }, retirementPageState.plan, projection.schedule, "client"
+  );
   const tenure = deriveHomeownerStatus(
-    retirementPageState.properties, retirementPageState.liabilities, projection.yearly[analytics.retirement.planYear]
+    retirementPageState.properties, retirementPageState.liabilities, projection.yearly[retirementRef.planYear]
   );
   const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), projection.schedule.clientAges, []);
   const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
   const reqByYear = projection.yearly.map((row) => row.incomeRequired);
-  const targetY = analytics.retirement.planYear;
+  const targetY = retirementRef.planYear;
   const target = projection.yearly[targetY]?.incomeRequired ?? null;
   const summary = goalVsPositionSummary(projection.yearly, projection.schedule, reqByYear, target);
   const goalSentence = target == null
@@ -944,6 +1024,16 @@ function renderRetirementPageBody() {
     : summary.crossoverYear == null
       ? `Your ${fmtMoney(target)} target is met throughout the projection.`
       : `Your ${fmtMoney(target)} target is met until ${summary.crossoverAge}, then falls to ${fmtMoney(summary.deliveredAtCrossover)}.`;
+
+  // SLOW path: computeRetirementAnalytics only feeds the Summary card
+  // and Lifestyle band, both rendered from whatever's cached (the most
+  // recently computed analytics, correct as of up to 300ms ago) —
+  // scheduleRetirementAnalyticsRefresh (called at the end of this
+  // function) recomputes fresh and overwrites just those two sections
+  // once the user stops typing, so this NEVER pays the solver's own
+  // cost on a keystroke.
+  const analytics = retirementAnalyticsCache
+    ?? (retirementAnalyticsCache = computeRetirementAnalytics(retirementPageState, projection));
 
   els.pageRetirement.innerHTML = `
     <header class="page-head">
@@ -996,7 +1086,7 @@ function renderRetirementPageBody() {
       </div>
       <div class="focus-section">
         <h3>Summary</h3>
-        ${retirementPageSummaryHTML(analytics)}
+        <div id="rpSummary">${retirementPageSummaryHTML(analytics)}</div>
       </div>
       <div class="focus-section">
         <h3>Goal versus position</h3>
@@ -1006,7 +1096,7 @@ function renderRetirementPageBody() {
       </div>
       <div class="focus-section">
         <h3>Lifestyle band</h3>
-        ${retirementBandHTML(analytics, household, tenure)}
+        <div id="rpLifestyleBand">${retirementBandHTML(analytics, household, tenure)}</div>
       </div>
       <div class="focus-section">
         <h3>Super and pension balance</h3>
@@ -1021,6 +1111,7 @@ function renderRetirementPageBody() {
   `;
   renderRetirementGoalChart(yearIdxs, ages, summary, reqByYear, household, tenure);
   renderRetirementBalanceChart(projection, yearIdxs);
+  scheduleRetirementAnalyticsRefresh();
 }
 
 const INCOME_REQUIRED_SOURCE_LABELS = {

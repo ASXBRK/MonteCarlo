@@ -2882,6 +2882,61 @@ with the Goal-versus-position chart on the same household's own average
 income; the couple case shows combined two-person super/pension
 balances and correctly resolves the couple ASFA standard.
 
+### Retirement: fixed the sustainable-income lag flagged after Commit 2
+Commit 2's own report disclosed rather than hid a performance cost:
+`computeRetirementAnalytics`'s sustainable-income-to-LE search
+(pre-existing, spec 32 Commit 3 — a `findMinimumThreshold` bisection
+that reruns a full `projectPlan()` trial per iteration, twice) measured
+~370ms against ~30ms for `projectPlan()` alone, making a keystroke's
+round trip ~1s end to end in a browser measurement — fine for the
+comprehensive workspace's own Focus > Retirement view (one visit at a
+time) but a poor fit for a page whose entire premise is reprojecting
+live. Fixed on the user's own instruction, cheapest option first.
+
+**Split the render into a fast path and a debounced slow path.** The
+fast path (person cards, household card, the goal chart, the balance
+chart, the year-by-year table) needs only `projectPlan()`'s own ~30ms
+output plus `resolveRef()`'s cheap anchor resolution for the retirement
+year — it never touches `computeRetirementAnalytics` and runs on every
+keystroke, same as before. The slow path (the Summary card and
+Lifestyle band — the ONLY two consumers of `computeRetirementAnalytics`
+on this page) now runs on a 300ms idle debounce
+(`scheduleRetirementAnalyticsRefresh`), writing directly into two
+stable-id DOM nodes (`#rpSummary`, `#rpLifestyleBand`) rather than
+through a full page re-render — so it can never steal focus/cursor
+position, and a burst of rapid edits collapses to exactly one
+computation after the user stops, not one per keystroke (a single
+shared timer variable, cleared and rescheduled on every fast-path
+render). `retirementAnalyticsCache` holds the last computed analytics
+so the fast-path render always has something correct-as-of-recently to
+show immediately rather than a blank section while the debounce is
+pending; a fresh page LOAD (not a keystroke) still pays the cost
+synchronously once, so the very first paint is never stale.
+Cache-invalidation option (2) wasn't needed — the debounce alone
+resolved it; solver-tolerance widening (option 3, a worse-answer
+tradeoff) wasn't touched.
+
+**Measured, before and after** (browser-driven, this exact page):
+- Before: ~955ms from a single field edit's `change` event to the
+  year-by-year table reflecting it (the whole render blocked on the
+  solver).
+- After: ~58ms for the same measurement (the fast path, unblocked).
+  The Summary card settles to its own fresh, correct value ~600–900ms
+  after the LAST edit in a burst (debounce wait + solver cost,
+  happening once, in the background) — confirmed via a 5-edit rapid
+  burst (80ms apart, faster than the debounce): total loop wall time
+  ~668ms (baseline ~400ms for 5×80ms waits with nothing blocking) —
+  had each edit fired its own ~370ms computation, blocking the main
+  thread, the loop would have taken several seconds, not run at
+  baseline-plus-normal-overhead.
+
+Not a result-contract change; no test suite changes (this is DOM-timing
+behaviour, not a computation this codebase unit-tests elsewhere either
+— consistent with how the Commit 2 chart-rendering functions are
+verified: browser measurement, not a vitest assertion). Full suite
+2064/2064 unchanged, build green, zero console errors throughout the
+performance verification.
+
 ---
 
 ## WHERE WE'RE GOING
