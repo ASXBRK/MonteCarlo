@@ -2692,12 +2692,41 @@ integration tests proving the age-pension toggle actually gates
 `agePensionDetail.client.paid` in real engine output, not just the
 stored flag.
 
-**Single-person only.** No partner UI at all in this commit — the
-spec's own field list reads as "per person," never doubled for a
-couple, and Commit 4's fixture is explicitly a single person. The one
-Centrelink-eligibility flag on the page (`plan.client.taxProfile
-.centrelinkEligible`) is genuinely per-person in the schema, not a
-household toggle — for a single-person page the two coincide.
+**Single-person only, revised to single-or-couple before Commit 2
+started.** Shipped single-only first (the spec's own field list reads
+as "per person," never doubled for a couple); the user corrected the
+scope immediately after review — most retirement conversations are
+couples, and the underlying state already supports one. Added: a
+household type toggle (Single/Couple, `plan.household` mapped to
+"single"/"married") at the top of the page; the About and
+Superannuation cards render once per person when couple (client,
+partner), each with its own first name/DOB/retirement age/super
+balance/salary/concessional-contributions/risk-profile and its own
+assumptions-summary line (a couple can hold two different risk
+profiles, so one combined line would blur them); Household-level
+fields (Income Required, other investments, other retirement income,
+the age pension toggle) stay ONE shared control either way — untouched,
+since `resolveIncomeRequired`/`asfaAnnual`/age-pension means testing
+already key off `plan.household` themselves. The one exception: the
+single "Include age pension" toggle now applies its choice to BOTH
+people's `taxProfile.centrelinkEligible` when a couple (no household-
+level Centrelink flag exists in the schema — this keeps the two
+per-person flags in lockstep behind what reads as one switch).
+Retirement Age's own label text (couple vs single ASFA figures) is now
+resolved from `plan.household` too — previously hard-coded to
+"single", a real, if latent, bug fixed as part of the same change.
+
+Couple → single is the one destructive direction: switching back
+strips every partner-owned super account, salary row, and
+concessional-contribution row (`setHousehold`) rather than leaving
+`clampPlan`'s own generic owner:"partner"→"client" reassignment (once
+`plan.partner` is null) to silently merge the partner's balance into
+the client's own figure. `main.js` confirms first
+(`window.confirm`, matching the comprehensive workspace's own marital-
+status toggle convention) whenever `partnerHasData()` — a super
+account, salary, or contribution actually entered — is true; bare
+identity fields alone (name/DOB with no money attached) don't trigger
+it, since they're cheap to re-type.
 
 **Routing** (`router.js`): new `retirement` page id,
 `#/clients/<cid>/scenarios/<sid>/retirement`, validated the same way
@@ -2721,15 +2750,21 @@ changes. Outputs (Commit 2), the assumptions panel and comparison
 support (Commit 3), and the comparison fixture (Commit 4) are still to
 come.
 
-Tests: `retirementStandalone.test.js` (24 tests — per-field write/read,
-double-call idempotence, the state-shape and round-trip tests above),
-`router.test.js` extended for the new route. Full suite 2040/2040,
-build green, browser-verified: all 11 fields filled and confirmed to
-persist across a reload, then confirmed to appear identically in the
-comprehensive workspace's Setup, Super, Income, Financial assets, and
-Settings sections — same balance, same allocation, same salary row,
-same Income Required source, same funding order — with zero console
-errors throughout.
+Tests: `retirementStandalone.test.js` (39 tests — per-field write/read
+for both client and partner, `setHousehold` in both directions
+including the partner-data-stripping test, `partnerHasData`, the
+state-shape and round-trip tests run once per household type, and an
+age-pension-off-suppresses-both-people couple integration test),
+`router.test.js` extended for the new route. Full suite 2055/2055,
+build green, browser-verified for both household types: all fields
+filled and confirmed to persist across a reload, confirmed to appear
+identically in the comprehensive workspace's Setup/Super/Income/
+Financial assets/Settings sections (two super accounts under distinct
+owners for a couple, correctly labelled and cross-linked), the
+couple→single confirm dialog firing and cleanly reverting to the
+client's own untouched figures, and the Income Required label
+resolving distinct ASFA couple/single wording — zero console errors
+throughout.
 
 ---
 

@@ -53,6 +53,7 @@ import {
   PACKAGING_TYPES, BONUS_DESTINATION_TYPES,
   normaliseRetirement, INCOME_REQUIRED_SOURCES,
   GLIDE_PATH_REBALANCE_MODES, createGlidePath, clampGlidePath, createGlidePathStep,
+  isCoupleHousehold,
 } from "./planState.js";
 import { singleStepGlidePathPreset, gradualGlidePathPreset } from "./glidePaths.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
@@ -69,7 +70,8 @@ import {
 } from "./data/asfaStandards.js";
 import { deriveHomeownerStatus, resolveIncomeRequired } from "./retirement.js";
 import {
-  retirementFields, clientSuperAccount, findOtherInvestmentsAsset,
+  retirementFields, superAccountFor, findOtherInvestmentsAsset, partnerHasData,
+  setHousehold as rsSetHousehold,
   setFirstName as rsSetFirstName, setDob as rsSetDob, setRetirementAge as rsSetRetirementAge,
   setSuperBalance as rsSetSuperBalance, setSuperAllocation as rsSetSuperAllocation,
   setSalary as rsSetSalary, setConcessionalContributions as rsSetConcessionalContributions,
@@ -578,13 +580,15 @@ function parseRetirementAllocationValue(value) {
 // the whole point of the comparison is that assumptions are legible"),
 // read off the SAME super allocation the form itself is editing — a
 // glide path has no single return figure (it varies by age), so that
-// case names the glide path instead of a number.
-function retirementAssumptionSummaryHTML() {
-  const sa = clientSuperAccount(retirementPageState);
+// case names the glide path instead of a number. One line per person —
+// a couple can hold two different risk profiles, so a single combined
+// line would either pick one arbitrarily or blur them together.
+function retirementAssumptionSummaryHTML(owner, label) {
+  const sa = superAccountFor(retirementPageState, owner);
   const cpi = retirementPageState.assumptions.cpi;
   const icrPct = sa?.icrPct ?? 0;
   // No super account exists until the user edits ANY of its own fields
-  // (retirementStandalone.js's own ensureClientSuperAccount) — resolve
+  // (retirementStandalone.js's own ensurePersonSuperAccount) — resolve
   // what allocation WOULD be created (the same middle-profile default
   // createSuperAccount itself picks) so this summary never shows a
   // different assumption than the one about to be saved.
@@ -601,7 +605,7 @@ function retirementAssumptionSummaryHTML() {
   }
   return `
     <p class="helper-text retirement-assumption-summary">
-      ${returnText} · Fee: ${icrPct.toFixed(2)}% p.a. · Inflation: ${(cpi * 100).toFixed(1)}% p.a.
+      ${label ? `<strong>${escapeHTML(label)}:</strong> ` : ""}${returnText} · Fee: ${icrPct.toFixed(2)}% p.a. · Inflation: ${(cpi * 100).toFixed(1)}% p.a.
       · Glide path: ${allocation.mode === "glidePath" ? "applies" : "none"}
     </p>
   `;
@@ -616,9 +620,13 @@ function retirementAssumptionSummaryHTML() {
 // back to "renter" in that case, the same disclosed simplification
 // deterministic.js's own income-driven-drawdown resolution already
 // uses for the identical reason (see that module's own comment).
+// Household-aware (single vs couple ASFA figures/labels) — resolveIncome
+// Required itself already keys off plan.household; only the LABEL text
+// needed the same household passed through explicitly.
 function retirementIncomeRequiredLabelHTML() {
   const plan = retirementPageState.plan;
   const cfg = plan.retirement?.incomeRequired;
+  const household = isCoupleHousehold(plan.household) ? "couple" : "single";
   const schedule = buildSchedules(retirementPageState);
   const accessor = resolveIncomeRequired(plan, schedule, retirementPageState.assumptions.cpi, retirementPageState.assumptions.wageGrowth ?? 0.027, {
     properties: retirementPageState.properties, liabilities: retirementPageState.liabilities,
@@ -627,69 +635,87 @@ function retirementIncomeRequiredLabelHTML() {
   const sourceLabel = {
     currentExpenses: "current expenses",
     custom: "a custom amount",
-    asfaComfortable: asfaStandardLabel("comfortable", "single"),
-    asfaModest: asfaStandardLabel("modest", "single") + " — derived",
-    asfaModestRenter: asfaStandardLabel("modestRenter", "single"),
+    asfaComfortable: asfaStandardLabel("comfortable", household),
+    asfaModest: asfaStandardLabel("modest", household) + " — derived",
+    asfaModestRenter: asfaStandardLabel("modestRenter", household),
   }[cfg?.source] ?? "current expenses";
   return amount == null
     ? `<p class="helper-text">Income required: not yet active (starts at retirement).</p>`
     : `<p class="helper-text">Income required: ${fmtMoney(amount)} — derived from ${escapeHTML(sourceLabel)}</p>`;
 }
 
+// About + Superannuation fields for ONE person — rendered once for a
+// single household, twice (client, partner) for a couple. `owner` and
+// `personLabel` thread through to each field's data-rp-owner so the
+// delegated change handler below knows which person's row to touch.
+function retirementPersonCardsHTML(owner, personLabel, pf) {
+  const sa = superAccountFor(retirementPageState, owner);
+  const ownerAttr = ` data-rp-owner="${owner}"`;
+  return `
+    <div class="focus-section">
+      <h3>${escapeHTML(personLabel)}</h3>
+      <div class="person-grid">
+        <div class="cf-cell">
+          <label>First name</label>
+          <input type="text" maxlength="60" value="${escapeHTML(pf.firstName)}" data-rp-field="firstName"${ownerAttr} />
+        </div>
+        <div class="cf-cell">
+          <label>Date of birth</label>
+          <input type="date" value="${escapeHTML(pf.dob ?? "")}" data-rp-field="dob"${ownerAttr} />
+        </div>
+        <div class="cf-cell">
+          <label>Retirement age</label>
+          <input type="number" min="18" max="120" step="1" value="${pf.retirementAge}" data-rp-field="retirementAge"${ownerAttr} />
+        </div>
+        <div class="cf-cell">
+          <label>Current super balance ($)</label>
+          <input type="number" min="0" step="1000" value="${pf.superBalance}" data-rp-field="superBalance"${ownerAttr} />
+        </div>
+        <div class="cf-cell">
+          <label>Salary ($ p.a.)</label>
+          <input type="number" min="0" step="1000" value="${pf.salary}" data-rp-field="salary"${ownerAttr} />
+        </div>
+        <div class="cf-cell">
+          <label>Concessional contributions beyond SG ($ p.a.)</label>
+          <input type="number" min="0" step="500" value="${pf.concessionalContributions}" data-rp-field="concessionalContributions"${ownerAttr} />
+        </div>
+        <div class="cf-cell">
+          <label>Risk profile / glide path</label>
+          <select data-rp-field="superAllocation"${ownerAttr}>${retirementAllocationOptionsHTML(sa?.allocation)}</select>
+        </div>
+      </div>
+      ${retirementAssumptionSummaryHTML(owner, personLabel)}
+    </div>
+  `;
+}
+
 function renderRetirementPageBody() {
   const f = retirementFields(retirementPageState);
-  const sa = clientSuperAccount(retirementPageState);
   const asset = findOtherInvestmentsAsset(retirementPageState);
-  const clientName = f.firstName || "Client";
+  const couple = f.household === "couple";
+  const clientLabel = f.client.firstName || "Client";
+  const partnerLabel = couple ? (f.partner.firstName || "Partner") : null;
+  const pageName = couple ? `${clientLabel} & ${partnerLabel}` : clientLabel;
 
   els.pageRetirement.innerHTML = `
     <header class="page-head">
-      <h1>Retirement projection — ${escapeHTML(clientName)}</h1>
+      <h1>Retirement projection — ${escapeHTML(pageName)}</h1>
       <div class="page-actions">
         <a class="btn-text" href="${escapeHTML(formatRoute({ page: "workspace", clientId: retirementPageClientId, scenarioId: retirementPageScenarioId }))}">Open in comprehensive workspace</a>
         <a class="btn-text" href="${escapeHTML(formatRoute({ page: "client", clientId: retirementPageClientId }))}">Back to scenarios</a>
       </div>
     </header>
-    ${retirementAssumptionSummaryHTML()}
+    <div class="focus-section">
+      <div class="seg-toggle" role="group" aria-label="Household type">
+        ${[["single", "Single"], ["couple", "Couple"]].map(([v, l]) => `
+          <button class="seg-option${f.household === v ? " active" : ""}" type="button"
+                  data-rp-action="household" data-value="${v}">${l}</button>
+        `).join("")}
+      </div>
+    </div>
     <div class="focus-panel">
-      <div class="focus-section">
-        <h3>About</h3>
-        <div class="person-grid">
-          <div class="cf-cell">
-            <label>First name</label>
-            <input type="text" maxlength="60" value="${escapeHTML(f.firstName)}" data-rp-field="firstName" />
-          </div>
-          <div class="cf-cell">
-            <label>Date of birth</label>
-            <input type="date" value="${escapeHTML(f.dob ?? "")}" data-rp-field="dob" />
-          </div>
-          <div class="cf-cell">
-            <label>Retirement age</label>
-            <input type="number" min="18" max="120" step="1" value="${f.retirementAge}" data-rp-field="retirementAge" />
-          </div>
-        </div>
-      </div>
-      <div class="focus-section">
-        <h3>Superannuation</h3>
-        <div class="person-grid">
-          <div class="cf-cell">
-            <label>Current super balance ($)</label>
-            <input type="number" min="0" step="1000" value="${f.superBalance}" data-rp-field="superBalance" />
-          </div>
-          <div class="cf-cell">
-            <label>Salary ($ p.a.)</label>
-            <input type="number" min="0" step="1000" value="${f.salary}" data-rp-field="salary" />
-          </div>
-          <div class="cf-cell">
-            <label>Concessional contributions beyond SG ($ p.a.)</label>
-            <input type="number" min="0" step="500" value="${f.concessionalContributions}" data-rp-field="concessionalContributions" />
-          </div>
-          <div class="cf-cell">
-            <label>Risk profile / glide path</label>
-            <select data-rp-field="superAllocation">${retirementAllocationOptionsHTML(sa?.allocation)}</select>
-          </div>
-        </div>
-      </div>
+      ${retirementPersonCardsHTML("client", couple ? `Client — ${clientLabel}` : "About & Superannuation", f.client)}
+      ${couple ? retirementPersonCardsHTML("partner", `Partner — ${partnerLabel}`, f.partner) : ""}
       <div class="focus-section">
         <h3>Household</h3>
         <div class="person-grid">
@@ -735,15 +761,16 @@ const INCOME_REQUIRED_SOURCE_LABELS = {
 els.pageRetirement.addEventListener("change", (e) => {
   const field = e.target.dataset.rpField;
   if (!field) return;
+  const owner = e.target.dataset.rpOwner === "partner" ? "partner" : "client";
   const v = e.target.value;
   let next = retirementPageState;
-  if (field === "firstName") next = rsSetFirstName(next, v);
-  else if (field === "dob") next = rsSetDob(next, v);
-  else if (field === "retirementAge") next = rsSetRetirementAge(next, clampInt(v, 18, 120));
-  else if (field === "superBalance") next = rsSetSuperBalance(next, clampNumber(v, 0), PROFILES);
-  else if (field === "superAllocation") next = rsSetSuperAllocation(next, parseRetirementAllocationValue(v), PROFILES);
-  else if (field === "salary") next = rsSetSalary(next, clampNumber(v, 0));
-  else if (field === "concessionalContributions") next = rsSetConcessionalContributions(next, clampNumber(v, 0), PROFILES);
+  if (field === "firstName") next = rsSetFirstName(next, owner, v);
+  else if (field === "dob") next = rsSetDob(next, owner, v);
+  else if (field === "retirementAge") next = rsSetRetirementAge(next, owner, clampInt(v, 18, 120));
+  else if (field === "superBalance") next = rsSetSuperBalance(next, owner, clampNumber(v, 0), PROFILES);
+  else if (field === "superAllocation") next = rsSetSuperAllocation(next, owner, parseRetirementAllocationValue(v), PROFILES);
+  else if (field === "salary") next = rsSetSalary(next, owner, clampNumber(v, 0));
+  else if (field === "concessionalContributions") next = rsSetConcessionalContributions(next, owner, clampNumber(v, 0), PROFILES);
   else if (field === "incomeRequiredSource") next = rsSetIncomeRequired(next, { source: v });
   else if (field === "incomeRequiredCustomAmount") next = rsSetIncomeRequired(next, { customAmount: clampNumber(v, 0) });
   else if (field === "otherInvestments") next = rsSetOtherInvestments(next, clampNumber(v, 0), PROFILES);
@@ -752,6 +779,27 @@ els.pageRetirement.addEventListener("change", (e) => {
   else if (field === "includeAgePension") next = rsSetIncludeAgePension(next, e.target.checked);
   else return;
   commitRetirementPageState(next);
+});
+
+// Household toggle (single/couple) — a click, not a change event (the
+// segmented-button convention the comprehensive workspace's own marital-
+// status control already uses at renderPlanBar/data-plan-action, not a
+// <select>, since going couple → single can be destructive and needs a
+// confirm BEFORE the state change, not after).
+els.pageRetirement.addEventListener("click", (e) => {
+  const btn = e.target.closest('[data-rp-action="household"]');
+  if (!btn) return;
+  const target = btn.dataset.value;
+  const current = retirementFields(retirementPageState).household;
+  if (target === current) return;
+  if (target === "single" && partnerHasData(retirementPageState)) {
+    const proceed = window.confirm(
+      "Switching to Single removes the partner's super balance, salary, and " +
+      "contribution details entered on this page. Continue?"
+    );
+    if (!proceed) return;
+  }
+  commitRetirementPageState(rsSetHousehold(retirementPageState, target));
 });
 
 // --- sidebar navigation: one section per page (Sidebar nav) -----------------

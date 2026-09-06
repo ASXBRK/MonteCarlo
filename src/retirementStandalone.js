@@ -1,22 +1,26 @@
 // Retirement Projection — Standalone Surface (docs/specs/33-retirement-
 // standalone.md, Commit 1) — pure, no DOM/Plotly.
 //
-// Maps the standalone page's own eleven inputs onto EXISTING state
-// fields — plan.client.*, plan.superAccounts[*], cashflows.income,
-// cashflows.superContributions, state.assets[*], plan.retirement — and
-// nothing else. This is the spec's own explicit constraint, restated in
-// the chat that commissioned this commit: "NO NEW STATE SHAPE... A
-// scenario created on this page is an ordinary scenario with a subset
-// populated, and must open correctly in the comprehensive workspace."
-// A parallel state shape would recreate, inside this tool, the exact
-// "two models disagreeing" problem spec 32/33 exist to let a firm
-// diagnose in ANOTHER tool — building one here would be absurd.
+// Maps the standalone page's own inputs onto EXISTING state fields —
+// plan.client.*, plan.partner.*, plan.superAccounts[*],
+// cashflows.income, cashflows.superContributions, state.assets[*],
+// plan.retirement — and nothing else. This is the spec's own explicit
+// constraint, restated in the chat that commissioned this commit: "NO
+// NEW STATE SHAPE... A scenario created on this page is an ordinary
+// scenario with a subset populated, and must open correctly in the
+// comprehensive workspace." A parallel state shape would recreate,
+// inside this tool, the exact "two models disagreeing" problem spec
+// 32/33 exist to let a firm diagnose in ANOTHER tool — building one
+// here would be absurd.
 //
-// Scope: single ("household: single") only — the spec's own field list
-// is written in the singular ("Per person" as ONE block, no household-
-// type selector among the nine-ish fields, and Commit 4's own fixture is
-// "a single person"). A couple is out of scope for this page; the
-// comprehensive workspace already covers that.
+// Household scope, revised after Commit 1's first review: both single
+// and couple households. The About and Superannuation cards are
+// per-person (client, and partner when household is "couple");
+// Household-level fields (Income Required, other investments, other
+// retirement income, the age pension toggle) stay a single set of
+// controls regardless — resolveIncomeRequired/asfaAnnual/age-pension
+// means testing already key off plan.household themselves, so nothing
+// there needs touching for couple support.
 //
 // Every setter takes a state and returns a NEW state (never mutates its
 // argument) with exactly the touched path replaced — the caller is
@@ -31,29 +35,34 @@
 
 import {
   createSuperAccount, createAsset, createIncomeRow, createSuperContribution, createIncomeRequired,
+  isCoupleHousehold,
 } from "./planState.js";
 
 const RETIREMENT_CLIENT_ANCHOR = { kind: "anchor", anchorId: "retirement-client" };
+const RETIREMENT_PARTNER_ANCHOR = { kind: "anchor", anchorId: "retirement-partner" };
 const END_ANCHOR = { kind: "anchor", anchorId: "end" };
+const retirementAnchorFor = (owner) => (owner === "partner" ? RETIREMENT_PARTNER_ANCHOR : RETIREMENT_CLIENT_ANCHOR);
 
-// --- Reads (own account/row per concern) ------------------------------
+// --- Reads (own account/row per concern; every one takes `owner`) -----
 
-export function clientSuperAccount(state) {
-  return (state.plan.superAccounts ?? []).find((s) => s.owner === "client") ?? null;
+export function superAccountFor(state, owner) {
+  return (state.plan.superAccounts ?? []).find((s) => s.owner === owner) ?? null;
 }
 
-function findSalaryRow(state) {
-  return (state.cashflows.income ?? []).find((r) => r.owner === "client" && r.category === "salary") ?? null;
+function findSalaryRow(state, owner) {
+  return (state.cashflows.income ?? []).find((r) => r.owner === owner && r.category === "salary") ?? null;
 }
 
-function findConcessionalContributionRow(state) {
-  return (state.cashflows.superContributions ?? []).find((c) => c.owner === "client" && c.type === "salarySacrifice") ?? null;
+function findConcessionalContributionRow(state, owner) {
+  return (state.cashflows.superContributions ?? []).find((c) => c.owner === owner && c.type === "salarySacrifice") ?? null;
 }
 
 // Structural match, not a marker field (no new field anywhere) — the
 // one income row owned by the client, categorised "otherIncome", that
-// starts at the retirement-client anchor specifically. A household that
-// separately adds a SECOND otherIncome row via the comprehensive
+// starts at the retirement-client anchor specifically. Always
+// client-owned: "other retirement income" is a HOUSEHOLD figure on
+// this page (one combined amount), never split per person. A household
+// that separately adds a SECOND otherIncome row via the comprehensive
 // workspace (starting elsewhere) is out of this simple page's own
 // reach — a disclosed limitation of "deliberately narrow", not a
 // silent miscount.
@@ -68,25 +77,37 @@ export function findOtherInvestmentsAsset(state) {
   return (state.assets ?? [])[0] ?? null;
 }
 
-// retirementFields(state) → the eleven fields' own CURRENT values, read
-// straight off the existing state paths above — the read side symmetric
-// with every setter below, so the page can populate its form from
-// whatever state it loaded (a fresh scenario, or one edited earlier in
-// this same session) without tracking any of its own local copy.
-export function retirementFields(state) {
-  const sa = clientSuperAccount(state);
-  const salary = findSalaryRow(state);
-  const contribution = findConcessionalContributionRow(state);
-  const otherIncome = findOtherRetirementIncomeRow(state);
-  const asset = findOtherInvestmentsAsset(state);
+function personRetirementFields(state, owner) {
+  const person = owner === "partner" ? state.plan.partner : state.plan.client;
+  const sa = superAccountFor(state, owner);
+  const salary = findSalaryRow(state, owner);
+  const contribution = findConcessionalContributionRow(state, owner);
   return {
-    firstName: state.plan.client.firstName,
-    dob: state.plan.client.dob,
-    retirementAge: state.plan.client.retirementAge,
+    firstName: person?.firstName ?? "",
+    dob: person?.dob ?? "",
+    retirementAge: person?.retirementAge ?? 65,
     superBalance: sa?.balance ?? 0,
     superAllocation: sa?.allocation ?? null,
     salary: salary?.amount ?? 0,
     concessionalContributions: contribution?.amount ?? 0,
+  };
+}
+
+// retirementFields(state) → the page's own fields' CURRENT values, read
+// straight off the existing state paths above — the read side symmetric
+// with every setter below, so the page can populate its form from
+// whatever state it loaded (a fresh scenario, or one edited earlier in
+// this same session) without tracking any of its own local copy.
+// `client`/`partner` mirror each other's shape; `partner` is null for a
+// single household (no partner card to render).
+export function retirementFields(state) {
+  const couple = isCoupleHousehold(state.plan.household);
+  const otherIncome = findOtherRetirementIncomeRow(state);
+  const asset = findOtherInvestmentsAsset(state);
+  return {
+    household: couple ? "couple" : "single",
+    client: personRetirementFields(state, "client"),
+    partner: couple ? personRetirementFields(state, "partner") : null,
     incomeRequired: state.plan.retirement?.incomeRequired ?? createIncomeRequired(),
     otherInvestments: asset?.balance ?? 0,
     otherInvestmentsAllocation: asset?.allocation ?? null,
@@ -95,40 +116,94 @@ export function retirementFields(state) {
   };
 }
 
-// --- Per-person setters -------------------------------------------------
-
-export function setFirstName(state, value) {
-  return { ...state, plan: { ...state.plan, client: { ...state.plan.client, firstName: value } } };
+// True once the partner has any figures entered on THIS page (a super
+// account, a salary row, or a concessional-contribution row) — the
+// signal main.js uses to decide whether switching back to "single"
+// needs a confirmation (nothing to lose vs real dollars to lose).
+// Partner identity fields alone (name/DOB/retirement age with no money
+// attached) don't count — cheap to re-type, not worth a confirm.
+export function partnerHasData(state) {
+  return !!(
+    superAccountFor(state, "partner")
+    || findSalaryRow(state, "partner")
+    || findConcessionalContributionRow(state, "partner")
+  );
 }
 
-export function setDob(state, value) {
-  return { ...state, plan: { ...state.plan, client: { ...state.plan.client, dob: value } } };
+// --- Household toggle ---------------------------------------------------
+
+// target: "single" | "couple". Couple → single strips every partner-
+// owned row THIS PAGE creates (super account, salary row, concessional-
+// contribution row) before nulling plan.partner — otherwise clampPlan's
+// own generic behaviour (every owner:"partner" row silently reassigned
+// to "client" once plan.partner is null — see clampSuperAccount/
+// clampIncomeRow/clampSuperContribution) would merge the partner's
+// balance/salary into the client's own figures with no visible change,
+// rather than actually removing them. main.js is responsible for
+// confirming with the user first when partnerHasData(state) is true —
+// this setter itself is unconditional once called, same "pure, no
+// dialog" convention as every other setter in this module.
+export function setHousehold(state, target) {
+  if (target === "couple") {
+    if (isCoupleHousehold(state.plan.household)) return state;
+    return {
+      ...state,
+      plan: {
+        ...state.plan,
+        household: "married",
+        partner: state.plan.partner ?? { currentAge: state.plan.client.currentAge },
+      },
+    };
+  }
+  const superAccounts = (state.plan.superAccounts ?? []).filter((s) => s.owner !== "partner");
+  const income = (state.cashflows.income ?? []).filter((r) => r.owner !== "partner");
+  const superContributions = (state.cashflows.superContributions ?? []).filter((c) => c.owner !== "partner");
+  return {
+    ...state,
+    plan: { ...state.plan, household: "single", partner: null, superAccounts },
+    cashflows: { ...state.cashflows, income, superContributions },
+  };
 }
 
-export function setRetirementAge(state, value) {
-  return { ...state, plan: { ...state.plan, client: { ...state.plan.client, retirementAge: value } } };
+// --- Per-person setters (owner: "client" | "partner") -------------------
+
+function withPerson(state, owner, patch) {
+  const key = owner === "partner" ? "partner" : "client";
+  return { ...state, plan: { ...state.plan, [key]: { ...state.plan[key], ...patch } } };
 }
 
-// Ensures exactly one super account for the client exists, creating one
+export function setFirstName(state, owner, value) {
+  return withPerson(state, owner, { firstName: value });
+}
+
+export function setDob(state, owner, value) {
+  return withPerson(state, owner, { dob: value });
+}
+
+export function setRetirementAge(state, owner, value) {
+  return withPerson(state, owner, { retirementAge: value });
+}
+
+// Ensures exactly one super account for `owner` exists, creating one
 // via the SAME factory the comprehensive Super input section's own
 // "+ Add super account" button calls, if none does yet. Never a second,
 // parallel concept of "the retirement page's own super account" — a
 // scenario created here has ordinary plan.superAccounts entries, full
 // stop.
-export function ensureClientSuperAccount(state, profiles) {
-  if (clientSuperAccount(state)) return state;
-  const sa = createSuperAccount(state.plan, state.plan.superAccounts ?? [], profiles, "client");
+export function ensurePersonSuperAccount(state, owner, profiles) {
+  if (superAccountFor(state, owner)) return state;
+  const sa = createSuperAccount(state.plan, state.plan.superAccounts ?? [], profiles, owner);
   return { ...state, plan: { ...state.plan, superAccounts: [...(state.plan.superAccounts ?? []), sa] } };
 }
 
-function withClientSuperAccount(state, profiles, patch) {
-  const next = ensureClientSuperAccount(state, profiles);
-  const superAccounts = next.plan.superAccounts.map((s) => (s.owner === "client" ? { ...s, ...patch(s) } : s));
+function withPersonSuperAccount(state, owner, profiles, patch) {
+  const next = ensurePersonSuperAccount(state, owner, profiles);
+  const superAccounts = next.plan.superAccounts.map((s) => (s.owner === owner ? { ...s, ...patch(s) } : s));
   return { ...next, plan: { ...next.plan, superAccounts } };
 }
 
-export function setSuperBalance(state, value, profiles) {
-  return withClientSuperAccount(state, profiles, () => ({ balance: value }));
+export function setSuperBalance(state, owner, value, profiles) {
+  return withPersonSuperAccount(state, owner, profiles, () => ({ balance: value }));
 }
 
 // `allocation` is either { mode: "profile", profile } or
@@ -137,22 +212,27 @@ export function setSuperBalance(state, value, profiles) {
 // setter stores it as given and leaves validation to the caller's own
 // clampAllToPlan pass (a dangling glidePathId falls back to a firm
 // profile there, same as everywhere else).
-export function setSuperAllocation(state, allocation, profiles) {
-  return withClientSuperAccount(state, profiles, () => ({ allocation }));
+export function setSuperAllocation(state, owner, allocation, profiles) {
+  return withPersonSuperAccount(state, owner, profiles, () => ({ allocation }));
 }
 
-function withSalaryRow(state, patch) {
-  const existing = findSalaryRow(state);
+function withSalaryRow(state, owner, patch) {
+  const existing = findSalaryRow(state, owner);
   if (existing) {
     const income = state.cashflows.income.map((r) => (r.id === existing.id ? { ...r, ...patch } : r));
     return { ...state, cashflows: { ...state.cashflows, income } };
   }
-  const row = { ...createIncomeRow(state.plan, state.cashflows.income ?? []), ...patch };
+  const row = {
+    ...createIncomeRow(state.plan, state.cashflows.income ?? []),
+    owner,
+    to: retirementAnchorFor(owner),
+    ...patch,
+  };
   return { ...state, cashflows: { ...state.cashflows, income: [...(state.cashflows.income ?? []), row] } };
 }
 
-export function setSalary(state, value) {
-  return withSalaryRow(state, { amount: value });
+export function setSalary(state, owner, value) {
+  return withSalaryRow(state, owner, { amount: value });
 }
 
 // "Concessional contributions beyond SG (annual)" — salarySacrifice is
@@ -160,9 +240,9 @@ export function setSalary(state, value) {
 // spec's own wording: additional to SG, not SG itself — see schedule.js
 // for why SG needs no explicit contribution row at all: it's derived
 // automatically from every sgApplies:true income row).
-export function setConcessionalContributions(state, value, profiles) {
-  const withAccount = ensureClientSuperAccount(state, profiles);
-  const existing = findConcessionalContributionRow(withAccount);
+export function setConcessionalContributions(state, owner, value, profiles) {
+  const withAccount = ensurePersonSuperAccount(state, owner, profiles);
+  const existing = findConcessionalContributionRow(withAccount, owner);
   if (existing) {
     const superContributions = withAccount.cashflows.superContributions.map((c) =>
       (c.id === existing.id ? { ...c, amount: value, basis: "amount", frequency: "annual" } : c)
@@ -170,7 +250,7 @@ export function setConcessionalContributions(state, value, profiles) {
     return { ...withAccount, cashflows: { ...withAccount.cashflows, superContributions } };
   }
   const row = {
-    ...createSuperContribution(withAccount.plan, withAccount.plan.superAccounts, "client"),
+    ...createSuperContribution(withAccount.plan, withAccount.plan.superAccounts, owner),
     amount: value, basis: "amount", frequency: "annual",
   };
   return {
@@ -186,6 +266,8 @@ export function setConcessionalContributions(state, value, profiles) {
 // or { customAmount: 90000 }) rather than requiring the caller to
 // reconstruct the whole object, matching main.js's own
 // commitIncomeRequired convention on the comprehensive Settings page.
+// Already household-aware (isCoupleHousehold(plan.household) inside
+// retirement.js's own resolver) — nothing here changes for a couple.
 export function setIncomeRequired(state, patch) {
   const incomeRequired = { ...(state.plan.retirement?.incomeRequired ?? createIncomeRequired()), ...patch };
   return { ...state, plan: { ...state.plan, retirement: { ...state.plan.retirement, incomeRequired } } };
@@ -205,6 +287,8 @@ function withOtherInvestmentsAsset(state, profiles, patch) {
 // exactly one financial asset (assets[0]); this writes into THAT row
 // rather than adding a second one, so a scenario created here still
 // carries the ordinary single-asset shape every fresh scenario has.
+// One combined pool for the household, same as otherRetirementIncome —
+// never split per person.
 export function setOtherInvestments(state, value, profiles) {
   return withOtherInvestmentsAsset(state, profiles, () => ({ balance: value }));
 }
@@ -237,20 +321,26 @@ export function setOtherRetirementIncome(state, value) {
   return { ...state, cashflows: { ...state.cashflows, income: [...(state.cashflows.income ?? []), row] } };
 }
 
-// "Include age pension" toggle, default on. There is no single
-// household-level Centrelink flag in this schema (planState.js's
-// applyCentrelinkEligibleDefault sets plan.client.taxProfile.
-// centrelinkEligible / centrelinkEligibleIsDefault PER PERSON) — for
-// this single-person page that IS the household flag. ON restores the
-// smart default (age-based eligibility, still tracked); OFF is an
-// explicit, permanent override — never age-pension-eligible regardless
-// of age — same one-way "stop tracking the smart default" convention
-// every other derived-default field in this schema already uses.
+// "Include age pension" toggle, default on, ONE control for the whole
+// household — there is no single household-level Centrelink flag in
+// this schema (planState.js's applyCentrelinkEligibleDefault sets
+// plan.client.taxProfile.centrelinkEligible / centrelinkEligibleIsDefault
+// PER PERSON), so this setter applies the same choice to whichever
+// people currently exist (client always; partner too, when present) —
+// keeping the schema's per-person flags in lockstep behind what reads
+// as a single household switch on this page. Age pension MEANS TESTING
+// itself already resolves couple-vs-single thresholds from
+// plan.household with no change needed here; this toggle only controls
+// whether either person is assessed at all. ON restores the smart
+// default (age-based eligibility, still tracked); OFF is an explicit,
+// permanent override — never age-pension-eligible regardless of age —
+// same one-way "stop tracking the smart default" convention every other
+// derived-default field in this schema already uses.
 export function setIncludeAgePension(state, included) {
-  const taxProfile = {
-    ...state.plan.client.taxProfile,
-    centrelinkEligible: included ? true : false,
-    centrelinkEligibleIsDefault: included,
-  };
-  return { ...state, plan: { ...state.plan, client: { ...state.plan.client, taxProfile } } };
+  const patch = { centrelinkEligible: included ? true : false, centrelinkEligibleIsDefault: included };
+  const client = { ...state.plan.client, taxProfile: { ...state.plan.client.taxProfile, ...patch } };
+  const partner = state.plan.partner
+    ? { ...state.plan.partner, taxProfile: { ...state.plan.partner.taxProfile, ...patch } }
+    : state.plan.partner;
+  return { ...state, plan: { ...state.plan, client, partner } };
 }
