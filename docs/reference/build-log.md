@@ -3246,6 +3246,99 @@ correctly hides the stale result and re-shows the Run button.
 
 ---
 
+### Retirement: lifecycle and the glide-versus-static comparison (spec 34, Commit 3)
+Item 1 of the original brief. The spec's own words: "the single most
+valuable screen in the spec — it answers the young-client objection and
+justifies lifecycle investing in one picture." Four pieces, all wiring
+over existing engine machinery (glidePaths.js, allocation.js,
+monteCarlo.js) — no new engine work.
+
+**Glide path presets on the page.** The page already had a "Risk
+profile / glide path" selector (spec 33); it only ever listed glide
+paths already saved to the plan. Two new options — "+ New glide path —
+Single-step..." / "...Gradual..." — mirror glidePaths.js's own
+`singleStepGlidePathPreset`/`gradualGlidePathPreset` (spec 32) exactly
+in step shape and profile names, but reconstructed per-OWNER
+(`retirementStandalone.js`'s new `applyGlidePathPreset`) rather than
+calling those functions directly, which hardcode `plan.client`'s own
+ages — a partner comparison must never mis-borrow the client's
+retirement age. Picking one adds a genuinely new glide path to
+`plan.glidePaths` (an existing field, not a new shape) and points the
+account at it — same "add-preset-*" behaviour the comprehensive
+workspace's own Settings panel already has, now reachable without a
+trip there first.
+
+**Asset allocation chart.** Reuses `allocationSeries` (allocation.js)
+exactly as the comprehensive workspace's own asset-allocation chart
+does, over this page's own super accounts and "other investments"
+asset — defensive rising under a glide path, flat under a static
+profile.
+
+**Lifecycle vs static.** New pure module,
+`retirementLifecycleComparison.js`: clones the plan twice, forcing ONE
+person's super allocation to a glide path in one clone and a fixed
+profile in the other — everything else (balance, salary, contributions,
+drawdown, the other person in a couple) identical — and runs BOTH
+through the same `projectPlan()` the rest of the app uses. The glide
+arm uses the plan's own first glide path if one exists, else the
+single-step preset generated fresh for the comparison only (added to
+the clone, never written back — a what-if, not a commit); the static
+arm uses the person's own current profile if already static, else
+"Balanced". Reports the difference in capital at retirement and at
+life expectancy, stated in plain money terms ("the glide path leaves
+$50,492 more... at retirement"). A `data-rp-owner`-scoped seg-toggle
+picks which person's account the comparison runs on, in couple mode.
+
+**Distribution comparison.** "The honest answer is that a glide path
+is not simply worse or better. It has a narrower distribution: worse
+median, better tail... a deterministic line cannot show it." Reuses
+`runMonteCarlo`/`monteCarloWorker.js` exactly, TWICE — one worker per
+arm, both firing from the SAME clones the deterministic comparison
+already built — via a separate module state (`rpCompare*`) from
+Commit 2's single-plan Monte Carlo, since this compares two runs at
+once. One chart (the spec's own simpler option) with both medians and
+both 10–90 bands; the narrowing is stated as measured from THIS run's
+own final-year spread, not asserted a priori — a real run that happens
+not to narrow says so rather than forcing the usually-expected shape.
+Live-verified: a $150k/$90k client showed the glide path's median
+$48,715 higher AND its own spread $82,828 narrower than static — the
+whole argument for lifecycle investing, in one measured result.
+
+**A real defect caught in browser verification, fixed same-commit.**
+Each arm's worker posts "done" independently; `rpCompareResult` is
+built up incrementally (`{ glide }` then `{ ..., static }`), so it was
+briefly TRUTHY with only one arm present. The render guard checked
+`!rpCompareResult` (truthy check) rather than requiring BOTH arms,
+so a progress tick landing between the two "done" messages read the
+missing arm's own `netAssets` and threw — three console errors,
+caught live, not by the test suite (this is DOM composition, no
+harness). Fixed by requiring `rpCompareResult?.glide &&
+rpCompareResult?.static` before the chart/stats render at all.
+
+**Performance.** `buildLifecycleComparison` runs two `projectPlan()`
+calls of its own; computing it once per full page render (this page
+re-renders its whole body on every keystroke) and threading the same
+object through the comparison sentence, its chart, and the distribution
+section's render cache — rather than each independently recomputing it
+— avoids doubling the page's own per-keystroke engine cost.
+
+Tests: `src/retirementLifecycleComparison.test.js` (8 tests) — the
+preset/existing-glide-path resolution, the static-profile fallback,
+both arms genuinely running through `projectPlan` on independent clones
+with everything but the allocation identical, the owner's own ages used
+for a partner's generated preset (documenting `clampGlidePath`'s own
+pre-existing client-anchored floor — not a defect introduced here), and
+capital-at-retirement/LE both reported for a normal plan.
+`retirementStandalone.test.js` gains 5 tests for `applyGlidePathPreset`
+(single/gradual step shape, account auto-creation, two distinct picks
+never collapsing into one edit, partner ages independent of the
+client's). Full suite 2094/2094, build green. Browser-verified end to
+end: preset pick → allocation selector updates → cap headroom recomputes
+→ comparison sentence and chart render → distribution comparison runs
+to completion with the expected narrower-glide-path result.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

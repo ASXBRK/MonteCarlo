@@ -35,7 +35,7 @@
 
 import {
   createSuperAccount, createAsset, createIncomeRow, createSuperContribution, createIncomeRequired,
-  createPension, isCoupleHousehold,
+  createPension, isCoupleHousehold, clampGlidePath,
 } from "./planState.js";
 import { superRatesFor } from "./data/superRates.js";
 import { agePensionRatesFor } from "./data/agePension.js";
@@ -546,4 +546,59 @@ export function firstDiv293Year(state, projection, owner) {
 // centrelinkEligible flag in lockstep).
 export function agePensionEligibilityFor(state, schedule) {
   return agePensionAgeFor(state, "client", schedule);
+}
+
+// --- Glide path presets (spec 34, Commit 3: "the two presets from spec
+// 32 plus any the adviser has defined") -----------------------------
+//
+// Mirrors glidePaths.js's own singleStepGlidePathPreset/
+// gradualGlidePathPreset (spec 32) exactly in step shape and profile
+// names, but parametrized by OWNER rather than hardcoded to plan.client
+// — this page edits either person's own account, and those two
+// functions only ever read plan.client's own ages.
+export const GLIDE_PATH_PRESET_KINDS = ["single", "gradual"];
+
+function glidePathPresetSteps(kind, plan, owner) {
+  const person = owner === "partner" ? plan.partner : plan.client;
+  const currentAge = person.currentAge, retirementAge = person.retirementAge;
+  if (kind === "gradual") {
+    const stepDownStart = Math.max(currentAge, retirementAge - 10);
+    return {
+      name: "Gradual (steps down over the 10 years before retirement, then again at 75)",
+      steps: [
+        { fromAge: currentAge, profile: "High Growth – Capital" },
+        { fromAge: stepDownStart, profile: "High Growth – Capital" },
+        { fromAge: retirementAge, profile: "Balanced" },
+        { fromAge: Math.max(retirementAge, 74), profile: "Balanced" },
+        { fromAge: Math.max(retirementAge + 1, 75), profile: "Moderately Defensive" },
+      ],
+      rebalance: "annual",
+    };
+  }
+  return {
+    name: "Single-step (High Growth → Balanced at retirement)",
+    steps: [
+      { fromAge: currentAge, profile: "High Growth – Capital" },
+      { fromAge: retirementAge, profile: "Balanced" },
+    ],
+    rebalance: "annual",
+  };
+}
+
+// Adds a NEW glide path (built from the given preset, for this owner's
+// own ages) to plan.glidePaths — an EXISTING field, the same list the
+// comprehensive workspace's own Settings panel already maintains, not a
+// new shape — and points the owner's super account at it. Every call
+// creates a genuinely new glide path (never edits one in place): the
+// spec's own examples treat each preset pick as adding a reusable
+// option to choose from again, matching "add-preset-single"/
+// "add-preset-gradual" in the comprehensive workspace exactly.
+export function applyGlidePathPreset(state, owner, presetKind, profiles) {
+  const withAccount = ensurePersonSuperAccount(state, owner, profiles);
+  const gp = clampGlidePath(glidePathPresetSteps(presetKind, withAccount.plan, owner), withAccount.plan, profiles);
+  const glidePaths = [...(withAccount.plan.glidePaths ?? []), gp];
+  const superAccounts = withAccount.plan.superAccounts.map((sa) =>
+    (sa.owner === owner ? { ...sa, allocation: { mode: "glidePath", glidePathId: gp.id } } : sa)
+  );
+  return { ...withAccount, plan: { ...withAccount.plan, glidePaths, superAccounts } };
 }

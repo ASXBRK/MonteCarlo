@@ -7,7 +7,7 @@ import {
   setIncomeRequired,
   setOtherInvestments, setOtherInvestmentsAllocation, setOtherRetirementIncome, setIncludeAgePension,
   sgFor, ageYear, preservationAgeFor, agePensionAgeFor, capHeadroomFor, firstDiv293Year,
-  agePensionEligibilityFor,
+  agePensionEligibilityFor, applyGlidePathPreset,
 } from "./retirementStandalone.js";
 import { defaultState, clampAllToPlan, hydrate, serialize } from "./planState.js";
 import { projectPlan } from "./deterministic.js";
@@ -248,6 +248,66 @@ describe("retirementStandalone — derived inputs (spec 34 Commit 1)", () => {
     const clamped = clampAllToPlan(state, PROFILES);
     const out = projectPlan(clamped, PROFILES);
     expect(firstDiv293Year(clamped, out, "client")).toBeNull();
+  });
+});
+
+describe("applyGlidePathPreset (spec 34 Commit 3)", () => {
+  it("single preset creates a two-step glide path anchored to the owner's own current/retirement ages, and points the account at it", () => {
+    let state = setDob(baseState(), "client", "1980-05-01");
+    state = setRetirementAge(state, "client", 65);
+    state = clampAllToPlan(state, PROFILES);
+    const before = state.plan.glidePaths ?? [];
+    const next = applyGlidePathPreset(state, "client", "single", PROFILES);
+    const added = next.plan.glidePaths.filter((g) => !before.some((b) => b.id === g.id));
+    expect(added).toHaveLength(1);
+    const gp = added[0];
+    expect(gp.steps).toHaveLength(2);
+    expect(gp.steps[0].fromAge).toBe(next.plan.client.currentAge);
+    expect(gp.steps.at(-1).fromAge).toBe(65);
+    const sa = next.plan.superAccounts.find((s) => s.owner === "client");
+    expect(sa.allocation).toEqual({ mode: "glidePath", glidePathId: gp.id });
+  });
+
+  it("gradual preset creates a multi-step glide path stepping down before retirement, then again at 75", () => {
+    let state = setDob(baseState(), "client", "1980-05-01");
+    state = setRetirementAge(state, "client", 65);
+    state = clampAllToPlan(state, PROFILES);
+    const next = applyGlidePathPreset(state, "client", "gradual", PROFILES);
+    const sa = next.plan.superAccounts.find((s) => s.owner === "client");
+    const gp = next.plan.glidePaths.find((g) => g.id === sa.allocation.glidePathId);
+    expect(gp.steps.length).toBeGreaterThan(2);
+    expect(gp.steps[0].profile).toBe("High Growth – Capital");
+    expect(gp.steps.at(-1).profile).toBe("Moderately Defensive");
+  });
+
+  it("creates a NEW super account via the same factory when the owner has none yet", () => {
+    const state = baseState();
+    expect((state.plan.superAccounts ?? []).some((s) => s.owner === "client")).toBe(false);
+    const next = applyGlidePathPreset(state, "client", "single", PROFILES);
+    expect(next.plan.superAccounts.filter((s) => s.owner === "client")).toHaveLength(1);
+  });
+
+  it("applying a preset twice adds two distinct glide paths (never edits one in place), matching the comprehensive workspace's own add-preset behaviour", () => {
+    let state = clampAllToPlan(setDob(baseState(), "client", "1980-05-01"), PROFILES);
+    let next = applyGlidePathPreset(state, "client", "single", PROFILES);
+    next = applyGlidePathPreset(next, "client", "gradual", PROFILES);
+    expect(next.plan.glidePaths).toHaveLength(2);
+    // The account now points at whichever was applied LAST.
+    const sa = next.plan.superAccounts.find((s) => s.owner === "client");
+    expect(sa.allocation.glidePathId).toBe(next.plan.glidePaths[1].id);
+  });
+
+  it("partner preset uses the partner's own ages, independent of the client's", () => {
+    let state = setHousehold(baseState(), "couple");
+    state = setDob(state, "client", "1980-05-01");
+    state = setRetirementAge(state, "client", 65);
+    state = setDob(state, "partner", "1985-01-01");
+    state = setRetirementAge(state, "partner", 60);
+    state = clampAllToPlan(state, PROFILES);
+    const next = applyGlidePathPreset(state, "partner", "single", PROFILES);
+    const sa = next.plan.superAccounts.find((s) => s.owner === "partner");
+    const gp = next.plan.glidePaths.find((g) => g.id === sa.allocation.glidePathId);
+    expect(gp.steps.at(-1).fromAge).toBe(60); // the partner's own retirement age, not the client's 65
   });
 });
 

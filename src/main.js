@@ -8,6 +8,7 @@
 import { PROFILES, realMu, impliedFrankingPct, ASSET_CLASS_KEYS, ASSET_CLASS_LABELS } from "./profiles.js";
 import { allocationSeries } from "./allocation.js";
 import { runMonteCarlo, DEFAULT_NUM_PATHS } from "./monteCarlo.js";
+import { buildLifecycleComparison } from "./retirementLifecycleComparison.js";
 import {
   defaultState, createAsset, createLifestyleAsset, createCashflow, createLumpSum,
   createIncomeRow, createExpenseRow, createDeductionRow, clampDeductionRow,
@@ -85,6 +86,7 @@ import {
   preservationAgeFor as rsPreservationAgeFor, agePensionAgeFor as rsAgePensionAgeFor,
   capHeadroomFor as rsCapHeadroomFor, firstDiv293Year as rsFirstDiv293Year,
   agePensionEligibilityFor as rsAgePensionEligibilityFor,
+  applyGlidePathPreset as rsApplyGlidePathPreset, GLIDE_PATH_PRESET_KINDS,
 } from "./retirementStandalone.js";
 import { computeRetirementAnalytics } from "./retirementAnalytics.js";
 import { goalVsPositionSummary } from "./goalVsPosition.js";
@@ -691,6 +693,7 @@ function renderRetirementPage(clientId, scenarioId) {
   // scenario's own projection/year axis — a real mismatch, not just a
   // stale figure).
   invalidateRetirementMcResult();
+  invalidateRetirementCompareResult();
   retirementPageClientId = clientId;
   retirementPageScenarioId = scenarioId;
   // A fresh page load, not a keystroke — the cache would otherwise be
@@ -720,6 +723,9 @@ function commitRetirementPageState(next) {
   // compare convention as refreshOutputs() below, scoped to this page.
   if (rpMcResultFingerprint !== null && rpMcResultFingerprint !== retirementMcFingerprint()) {
     invalidateRetirementMcResult();
+  }
+  if (rpCompareFingerprint !== null && rpCompareFingerprint !== retirementMcFingerprint()) {
+    invalidateRetirementCompareResult();
   }
   renderRetirementPageBody();
 }
@@ -775,6 +781,18 @@ function retirementDefaultProfileKey() {
   return PROFILE_KEYS[Math.floor((PROFILE_KEYS.length - 1) / 2)] ?? null;
 }
 
+// spec 34, Commit 3: "A glide path selector alongside the risk profile
+// — the two presets from spec 32 plus any the adviser has defined."
+// The two presets are ALWAYS offered (never conditioned on whether one
+// has been picked before — each pick creates its own new glide path,
+// same as the comprehensive workspace's own "add-preset-*" buttons), so
+// the adviser can go straight from "static profile" to "lifecycle"
+// without a trip to the comprehensive workspace's Settings panel first.
+const GLIDE_PATH_PRESET_LABELS = {
+  single: "Single-step (High Growth → Balanced at retirement)",
+  gradual: "Gradual (steps down before retirement, then again at 75)",
+};
+
 function retirementAllocationOptionsHTML(allocation) {
   const resolved = allocation ?? { mode: "profile", profile: retirementDefaultProfileKey() };
   const isGlidePath = resolved.mode === "glidePath";
@@ -785,7 +803,10 @@ function retirementAllocationOptionsHTML(allocation) {
   const glideOpts = glidePaths.map((gp) =>
     `<option value="glidePath:${gp.id}"${isGlidePath && resolved.glidePathId === gp.id ? " selected" : ""}>${escapeHTML(gp.name)} (glide path)</option>`
   ).join("");
-  return profileOpts + glideOpts;
+  const presetOpts = GLIDE_PATH_PRESET_KINDS.map((kind) =>
+    `<option value="preset:${kind}">+ New glide path — ${escapeHTML(GLIDE_PATH_PRESET_LABELS[kind])}</option>`
+  ).join("");
+  return profileOpts + glideOpts + presetOpts;
 }
 
 function parseRetirementAllocationValue(value) {
@@ -1175,6 +1196,305 @@ function renderRetirementBalanceChart(projection, yearIdxs) {
   }, { displayModeBar: false, responsive: true });
 }
 
+// --- Asset allocation over time (spec 34, Commit 3) ---------------------
+//
+// "The asset allocation chart on the page, showing defensive rising
+// over time. This is the picture that justifies the strategy and the
+// reason the option was asked for." Reuses allocationSeries
+// (allocation.js) EXACTLY as the comprehensive workspace's own asset-
+// allocation chart does — the household's super account(s) plus the
+// "other investments" asset, whatever mode (static profile or glide
+// path) each is actually on right now. No bonds/properties on this
+// page; no person filter (this page's whole surface is one household).
+function renderRetirementAllocationChart(projection, yearIdxs) {
+  const el = $("rpAllocationChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const { perYear, usesCustom } = allocationSeries(
+    yearIdxs.map((y) => projection.yearly[y]), retirementPageState.assets, retirementPageState.plan.superAccounts ?? [],
+    PROFILES, [], retirementPageState.plan.glidePaths,
+    { client: projection.schedule.clientAges, partner: projection.schedule.partnerAges },
+    (i) => yearIdxs[i]
+  );
+  if (perYear.every((p) => p.total === 0)) {
+    el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Nothing to show yet — enter a super balance or other investments above to see it here.</p>`;
+    return;
+  }
+  const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#d97b2f"];
+  const traces = ASSET_CLASS_KEYS.map((k, i) => ({
+    x: ages, y: perYear.map((p) => p.weightPct[k]),
+    name: ASSET_CLASS_LABELS[k], type: "scatter", mode: "lines",
+    stackgroup: "alloc", fill: "tonexty",
+    line: { color: palette[i % palette.length], width: 1 },
+    hovertemplate: `Age %{x}<br>%{y:.1f}%<extra>${escapeHTML(ASSET_CLASS_LABELS[k])}</extra>`,
+  }));
+  Plotly.react(el, traces, {
+    margin: { l: 60, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: "Allocation", standoff: 10 },
+      tickformat: ".0f", ticksuffix: "%", dtick: 25,
+      range: [0, 100], gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+  $("rpAllocationNote").textContent = usesCustom
+    ? "Assets and super accounts with a custom allocation are shown using their selected volatility-basis profile's class weights (the same profile Monte Carlo variability borrows from)."
+    : "";
+}
+
+// --- Lifecycle vs static (spec 34, Commit 3) -----------------------------
+//
+// "Lifecycle versus static, side by side: the same client under a
+// glide path and under a fixed profile, as two lines, with the
+// difference in capital at retirement and at life expectancy stated."
+// The single most valuable screen in the spec — it answers the young-
+// client objection and justifies lifecycle investing in one picture.
+
+let retirementLifecycleOwner = "client"; // which person's account this comparison runs on (couple only)
+
+function retirementLifecycleComparisonHTML(comparison, label) {
+  if (!comparison) {
+    return `<p class="helper-text">${escapeHTML(label)} has no super account yet — enter a balance above to compare lifecycle investing against a fixed profile.</p>`;
+  }
+  const at = (v) => (v == null ? "—" : fmtMoney(v));
+  const retirementLine = comparison.capitalAtRetirement == null
+    ? "This person's own retirement falls beyond this projection, so no retirement-age figure is shown."
+    : `At retirement, the glide path leaves ${at(Math.abs(comparison.capitalAtRetirement.diff))} ${comparison.capitalAtRetirement.diff >= 0 ? "more" : "less"} than the static profile (${at(comparison.capitalAtRetirement.glide)} vs ${at(comparison.capitalAtRetirement.static)}).`;
+  const leLine = `By life expectancy (age ${comparison.capitalAtLE.age}), the glide path leaves ${at(Math.abs(comparison.capitalAtLE.diff))} ${comparison.capitalAtLE.diff >= 0 ? "more" : "less"} than the static profile (${at(comparison.capitalAtLE.glide)} vs ${at(comparison.capitalAtLE.static)}).`;
+  const presetNote = comparison.glideIsPreset
+    ? ` (generated for this comparison only — not yet saved to the plan)`
+    : "";
+  return `
+    <p class="helper-text">Comparing this plan under <strong>${escapeHTML(comparison.glideLabel)}</strong>${presetNote} against a fixed <strong>${escapeHTML(comparison.staticLabel)}</strong> profile — everything else about the plan (balance, salary, contributions, drawdown) is identical in both.</p>
+    <div id="rpLifecycleChart" class="chart-mount"></div>
+    <p class="helper-text">${escapeHTML(retirementLine)}</p>
+    <p class="helper-text">${escapeHTML(leLine)}</p>
+  `;
+}
+
+function renderRetirementLifecycleChart(comparison) {
+  const el = $("rpLifecycleChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  if (!comparison) return;
+  const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), comparison.glideProjection.schedule.clientAges, []);
+  const ages = yearIdxs.map((y) => comparison.glideProjection.schedule.clientAges[y]);
+  const glideSeries = yearIdxs.map((y) => comparison.glideProjection.yearly[y].netAssets);
+  const staticSeries = yearIdxs.map((y) => comparison.staticProjection.yearly[y].netAssets);
+  const traces = [
+    { x: ages, y: glideSeries, mode: "lines", name: `Glide path (${comparison.glideLabel})`,
+      line: { color: "rgb(28, 90, 180)", width: 2.5 }, hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Glide path</extra>" },
+    { x: ages, y: staticSeries, mode: "lines", name: `Static (${comparison.staticLabel})`,
+      line: { color: "#dc5a28", width: 2.5, dash: "dash" }, hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Static</extra>" },
+  ];
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: "Net assets (today's dollars)", standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// --- Lifecycle vs static — distributions (spec 34, Commit 3) ------------
+//
+// "And with Monte Carlo from Commit 2, run that comparison as
+// distributions — because the honest answer is that a glide path is
+// not simply worse or better. It has a narrower distribution: worse
+// median, better tail." Reuses runMonteCarlo/monteCarloWorker.js
+// exactly, TWICE — once per arm's own already-cloned state (the SAME
+// clones the deterministic comparison above already built) — via two
+// independent workers so progress/completion for one arm never blocks
+// the other. Deliberately separate module state from Commit 2's single-
+// plan rpMc* — this section compares TWO runs at once, a different
+// shape, not a variation on the same one.
+let rpCompareResult = null; // { glide, static } | null — each a runMonteCarlo() result
+let rpCompareFingerprint = null;
+let rpCompareRunning = false;
+let rpCompareProgress = null; // { glide: {done,total}|null, static: {done,total}|null }
+let rpCompareWorkers = null; // { glide: Worker, static: Worker } | null
+let rpCompareRenderCache = null; // { owner, ages, yearIdxs } — set once per full page render
+
+function stopRetirementCompareWorkers() {
+  if (rpCompareWorkers) {
+    rpCompareWorkers.glide?.terminate();
+    rpCompareWorkers.static?.terminate();
+    rpCompareWorkers = null;
+  }
+  rpCompareRunning = false;
+  rpCompareProgress = null;
+}
+
+function invalidateRetirementCompareResult() {
+  rpCompareResult = null;
+  rpCompareFingerprint = null;
+  stopRetirementCompareWorkers();
+}
+
+function renderRetirementCompareFromCache() {
+  if (!rpCompareRenderCache) return;
+  renderRetirementCompareSection(rpCompareRenderCache.comparison);
+}
+
+// `comparison` is the SAME object retirementLifecycleComparisonHTML/
+// renderRetirementLifecycleChart already used for this render — computed
+// once per full page render (see renderRetirementPageBody), never
+// re-derived here, so a progress tick during a run never pays for a
+// second pair of projectPlan() calls.
+function renderRetirementCompareSection(comparison) {
+  const runBtn = els.pageRetirement.querySelector('[data-rp-action="compare-run"]');
+  const cancelBtn = els.pageRetirement.querySelector('[data-rp-action="compare-cancel"]');
+  const statusEl = $("rpCompareStatus");
+  if (!runBtn || !cancelBtn || !statusEl) return;
+  runBtn.hidden = rpCompareRunning;
+  cancelBtn.hidden = !rpCompareRunning;
+  if (rpCompareRunning) {
+    const done = (rpCompareProgress?.glide?.done ?? 0) + (rpCompareProgress?.static?.done ?? 0);
+    const total = (rpCompareProgress?.glide?.total ?? DEFAULT_NUM_PATHS) + (rpCompareProgress?.static?.total ?? DEFAULT_NUM_PATHS);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    statusEl.textContent = `Simulating both arms — ${done.toLocaleString()} / ${total.toLocaleString()} paths (${pct}%).`;
+  } else if (!rpCompareResult) {
+    statusEl.textContent = "";
+  } else {
+    statusEl.textContent = "Re-run after changing the plan — this result is a snapshot, not live.";
+  }
+  // BOTH arms, not just truthy — the two workers finish independently,
+  // so rpCompareResult is genuinely partial ({ glide } only, say) for
+  // however long the slower arm is still running; rendering the chart/
+  // stats against a partial result crashed on the missing arm's own
+  // netAssets (a real defect this comment now guards against).
+  const bothDone = !!(rpCompareResult?.glide && rpCompareResult?.static);
+  const resultsEl = $("rpCompareResults");
+  if (!resultsEl) return;
+  resultsEl.hidden = !bothDone;
+  if (!bothDone) return;
+  renderRetirementCompareChart(comparison);
+  $("rpCompareStats").innerHTML = retirementCompareStatsHTML(rpCompareResult);
+}
+
+// "Two fan charts, or one chart with both medians and both 10–90 bands"
+// — one chart, per the spec's own simpler option: both medians as solid
+// lines, both 10–90 bands shaded (glide narrower, static wider is the
+// expected shape — the whole argument for lifecycle investing).
+function renderRetirementCompareChart(comparison) {
+  const el = $("rpCompareChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  if (!comparison) return;
+  const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), comparison.glideProjection.schedule.clientAges, []);
+  const ages = yearIdxs.map((y) => comparison.glideProjection.schedule.clientAges[y]);
+  const band = (result, key) => yearIdxs.map((y) => result.netAssets[key][y]);
+
+  const glideOuter = "rgba(28, 90, 180, 0.12)", glideInner = "rgba(28, 90, 180, 0.28)";
+  const staticOuter = "rgba(220, 90, 40, 0.10)", staticInner = "rgba(220, 90, 40, 0.22)";
+  const traces = [
+    { x: ages, y: band(rpCompareResult.static, "p10"), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: band(rpCompareResult.static, "p90"), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: staticOuter,
+      name: "Static — 10th–90th", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: band(rpCompareResult.glide, "p10"), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: band(rpCompareResult.glide, "p90"), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: glideOuter,
+      name: "Glide path — 10th–90th", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: band(rpCompareResult.static, "p50"), mode: "lines", line: { color: "#dc5a28", width: 2, dash: "dash" },
+      name: "Static — median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Static median</extra>" },
+    { x: ages, y: band(rpCompareResult.glide, "p50"), mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
+      name: "Glide path — median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Glide path median</extra>" },
+  ];
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.25, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: "Net assets (today's dollars)", standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// "It has a narrower distribution: worse median, better tail" — stated
+// as a fact about THIS run's own two spreads (p90 − p10 at the final
+// year), not asserted a priori; if the run doesn't show narrowing (a
+// real possibility for an unusual plan), this says so rather than
+// forcing the spec's own expected shape onto every result.
+function retirementCompareStatsHTML(result) {
+  const y = result.glide.years - 1;
+  const glideSpread = result.glide.netAssets.p90[y] - result.glide.netAssets.p10[y];
+  const staticSpread = result.static.netAssets.p90[y] - result.static.netAssets.p10[y];
+  const narrower = glideSpread < staticSpread;
+  const narrowingLine = narrower
+    ? `The glide path's own final-year spread (10th–90th percentile) is ${fmtMoney(staticSpread - glideSpread)} narrower than the static profile's — a narrower distribution, the outcome lifecycle investing is meant to produce.`
+    : `In this run, the glide path's own final-year spread is NOT narrower than the static profile's (${fmtMoney(glideSpread)} vs ${fmtMoney(staticSpread)}) — reported as run, not forced to the usually-expected shape.`;
+  const stats = [
+    retirementStatHTML("Glide path — median ending net assets", fmtMoney(result.glide.netAssets.p50[y])),
+    retirementStatHTML("Static — median ending net assets", fmtMoney(result.static.netAssets.p50[y])),
+    retirementStatHTML("Glide path — ruin probability", `${Math.round(result.glide.ruinProbability * 100)}%`),
+    retirementStatHTML("Static — ruin probability", `${Math.round(result.static.ruinProbability * 100)}%`),
+  ];
+  return `<div class="summary-strip">${stats.join("")}</div><p class="helper-text">${escapeHTML(narrowingLine)}</p>`;
+}
+
+function startRetirementCompareRun(owner) {
+  if (rpCompareRunning || !retirementPageState) return;
+  const comparison = buildLifecycleComparison(retirementPageState, owner, PROFILES);
+  if (!comparison) return;
+  rpCompareRunning = true;
+  rpCompareFingerprint = retirementMcFingerprint();
+  rpCompareProgress = { glide: { done: 0, total: DEFAULT_NUM_PATHS }, static: { done: 0, total: DEFAULT_NUM_PATHS } };
+  renderRetirementCompareFromCache();
+
+  const glideWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
+  const staticWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
+  rpCompareWorkers = { glide: glideWorker, static: staticWorker };
+
+  const onArmMessage = (arm) => (e) => {
+    const msg = e.data;
+    if (msg.type === "progress") {
+      rpCompareProgress = { ...rpCompareProgress, [arm]: { done: msg.done, total: msg.total } };
+      renderRetirementCompareFromCache();
+    } else if (msg.type === "done") {
+      rpCompareResult = { ...(rpCompareResult ?? {}), [arm]: msg.result };
+      if (rpCompareResult.glide && rpCompareResult.static) stopRetirementCompareWorkers();
+      renderRetirementCompareFromCache();
+    } else if (msg.type === "error") {
+      invalidateRetirementCompareResult();
+      renderRetirementCompareFromCache();
+      const statusEl = $("rpCompareStatus");
+      if (statusEl) statusEl.textContent = `Comparison failed: ${msg.message}`;
+    }
+  };
+  glideWorker.onmessage = onArmMessage("glide");
+  staticWorker.onmessage = onArmMessage("static");
+  const onArmError = () => {
+    invalidateRetirementCompareResult();
+    renderRetirementCompareFromCache();
+    const statusEl = $("rpCompareStatus");
+    if (statusEl) statusEl.textContent = "Comparison failed.";
+  };
+  glideWorker.onerror = onArmError;
+  staticWorker.onerror = onArmError;
+  glideWorker.postMessage({ state: comparison.glideState, profiles: PROFILES, options: {} });
+  staticWorker.postMessage({ state: comparison.staticState, profiles: PROFILES, options: {} });
+}
+
+function cancelRetirementCompareRun() {
+  invalidateRetirementCompareResult();
+  renderRetirementCompareFromCache();
+  const statusEl = $("rpCompareStatus");
+  if (statusEl) statusEl.textContent = "Cancelled.";
+}
+
 // --- Monte Carlo (spec 34, Commit 2) -----------------------------------
 //
 // Item 2 of the original brief: reuses runMonteCarlo (monteCarlo.js) and
@@ -1516,6 +1836,13 @@ function renderRetirementPageBody() {
   const clientLabel = f.client.firstName || "Client";
   const partnerLabel = couple ? (f.partner.firstName || "Partner") : null;
   const pageName = couple ? `${clientLabel} & ${partnerLabel}` : clientLabel;
+  // Lifecycle vs static (spec 34, Commit 3) — computed ONCE per render
+  // (two projectPlan() calls of its own) and threaded through the
+  // comparison sentence, its chart, and the distribution-comparison
+  // section below, rather than each recomputing it independently.
+  const lifecycleOwner = couple ? retirementLifecycleOwner : "client";
+  const lifecycleLabel = lifecycleOwner === "partner" ? partnerLabel : clientLabel;
+  const lifecycleComparison = buildLifecycleComparison(retirementPageState, lifecycleOwner, PROFILES);
 
   // FAST path (~30ms): projectPlan + resolveRef's own cheap anchor
   // resolution — everything the person cards, goal chart, balance
@@ -1640,6 +1967,34 @@ function renderRetirementPageBody() {
         <div id="rpBalanceChart" class="chart-mount"></div>
       </div>
       <div class="focus-section">
+        <h3>Asset allocation over time</h3>
+        <p class="helper-text">The mix behind the balances above — defensive rising over time under a glide path, flat under a static profile. The picture that justifies a lifecycle strategy.</p>
+        <div id="rpAllocationChart" class="chart-mount"></div>
+        <p class="chart-note-inline" id="rpAllocationNote"></p>
+      </div>
+      <div class="focus-section">
+        <h3>Lifecycle vs static</h3>
+        ${couple ? `
+          <div class="seg-toggle" role="group" aria-label="Compare whose account">
+            ${[["client", clientLabel], ["partner", partnerLabel]].map(([v, l]) => `
+              <button class="seg-option${retirementLifecycleOwner === v ? " active" : ""}" type="button"
+                      data-rp-action="lifecycle-owner" data-value="${v}">${escapeHTML(l)}</button>
+            `).join("")}
+          </div>
+        ` : ""}
+        <div id="rpLifecycleComparison">${retirementLifecycleComparisonHTML(lifecycleComparison, lifecycleLabel)}</div>
+        <div class="page-actions rp-no-print">
+          <button class="btn-text" type="button" data-rp-action="compare-run"${rpCompareRunning ? " hidden" : ""}>Run distribution comparison (${(DEFAULT_NUM_PATHS * 2).toLocaleString()} paths)</button>
+          <button class="btn-text" type="button" data-rp-action="compare-cancel"${rpCompareRunning ? "" : " hidden"}>Cancel</button>
+          <span id="rpCompareStatus" class="helper-text"></span>
+        </div>
+        <p class="helper-text">A glide path is not simply worse or better — it typically has a narrower distribution: worse median, better tail. That is the whole argument for lifecycle investing, and a single line can't show it.</p>
+        <div id="rpCompareResults" hidden>
+          <div id="rpCompareChart" class="chart-mount"></div>
+          <div id="rpCompareStats"></div>
+        </div>
+      </div>
+      <div class="focus-section">
         <h3>Year by year</h3>
         ${retirementYearTableHTML(projection, summary, yearIdxs)}
       </div>
@@ -1647,6 +2002,10 @@ function renderRetirementPageBody() {
   `;
   renderRetirementGoalChart(yearIdxs, ages, summary, reqByYear, household, tenure);
   renderRetirementBalanceChart(projection, yearIdxs);
+  renderRetirementAllocationChart(projection, yearIdxs);
+  renderRetirementLifecycleChart(lifecycleComparison);
+  rpCompareRenderCache = { owner: lifecycleOwner, comparison: lifecycleComparison };
+  renderRetirementCompareSection(lifecycleComparison);
   retirementMcRenderCache = { projection, yearIdxs, ages };
   renderRetirementMcSection(projection, yearIdxs, ages);
   scheduleRetirementAnalyticsRefresh();
@@ -1670,7 +2029,14 @@ els.pageRetirement.addEventListener("change", (e) => {
   else if (field === "dob") next = rsSetDob(next, owner, v);
   else if (field === "retirementAge") next = rsSetRetirementAge(next, owner, clampInt(v, 18, 120));
   else if (field === "superBalance") next = rsSetSuperBalance(next, owner, clampNumber(v, 0), PROFILES);
-  else if (field === "superAllocation") next = rsSetSuperAllocation(next, owner, parseRetirementAllocationValue(v), PROFILES);
+  else if (field === "superAllocation") {
+    // "+ New glide path — <preset>" (spec 34, Commit 3) creates a brand
+    // new glide path from that preset (own ages, own new id — never
+    // edits an existing one) and points this account at it; anything
+    // else is the existing profile/glide-path-by-id selection.
+    if (v.startsWith("preset:")) next = rsApplyGlidePathPreset(next, owner, v.slice("preset:".length), PROFILES);
+    else next = rsSetSuperAllocation(next, owner, parseRetirementAllocationValue(v), PROFILES);
+  }
   else if (field === "salary") next = rsSetSalary(next, owner, clampNumber(v, 0));
   else if (field === "concessionalContributions") next = rsSetConcessionalContributions(next, owner, clampNumber(v, 0), PROFILES);
   else if (field === "incomeRequiredSource") next = rsSetIncomeRequired(next, { source: v });
@@ -1735,6 +2101,25 @@ els.pageRetirement.addEventListener("click", (e) => {
 els.pageRetirement.addEventListener("click", (e) => {
   if (e.target.closest('[data-rp-action="mc-run"]')) startRetirementMonteCarloRun();
   else if (e.target.closest('[data-rp-action="mc-cancel"]')) cancelRetirementMonteCarloRun();
+});
+
+// Lifecycle vs static (spec 34, Commit 3) — the owner toggle re-renders
+// the whole body (a genuinely different comparison, cheap to recompute,
+// same as every other full-body re-render on this page); the compare
+// run/cancel buttons, like Commit 2's, never mutate retirementPageState.
+els.pageRetirement.addEventListener("click", (e) => {
+  const ownerBtn = e.target.closest('[data-rp-action="lifecycle-owner"]');
+  if (ownerBtn) {
+    const target = ownerBtn.dataset.value;
+    if (target !== retirementLifecycleOwner) {
+      retirementLifecycleOwner = target;
+      invalidateRetirementCompareResult();
+      renderRetirementPageBody();
+    }
+    return;
+  }
+  if (e.target.closest('[data-rp-action="compare-run"]')) startRetirementCompareRun(rpCompareRenderCache?.owner ?? "client");
+  else if (e.target.closest('[data-rp-action="compare-cancel"]')) cancelRetirementCompareRun();
 });
 
 // Print/CSV/copy-figures (spec 33, Commit 3) — a separate listener from
