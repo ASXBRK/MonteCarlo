@@ -116,6 +116,32 @@ export function agePensionPaid(row) {
   return (d?.client?.paid ?? 0) + (d?.partner?.paid ?? 0);
 }
 
+// Performance: this predicate is the innermost loop of a binary search
+// (findMinimumThreshold below) — ~30 real projectPlan() runs per window,
+// x2 windows (LE, LE+5) per computeRetirementAnalytics call, which is
+// what makes the standalone retirement page's live "type a number, see
+// it update" feel sluggish (spec 33 Commit 2) despite projectPlan()
+// itself running in single-digit milliseconds. The trial doesn't need
+// projectPlan() to run any further than a couple of years past the
+// window it's testing: `out.shortfall` is the FIRST unfunded month
+// found by a forward-only per-month loop (deterministic.js tracks it as
+// it goes; nothing later ever revises an earlier month's own outcome),
+// and the only computations that key off "how many years does the plan
+// have left" are the LAST row's own accrual annotations (accrued CGT/
+// Div293/bond-withdrawal tax, death benefit detail — deterministic.js's
+// own "final-FY" fields) — informational figures on that one row, never
+// fed back into the balances or shortfall tracking earlier rows read.
+// So a plan artificially ended a couple of years after the window is
+// behaviour-IDENTICAL, up to and including the window, to the same plan
+// run to its real length — it just skips computing years neither window
+// nor the caller ever look at. Capping only ever SHRINKS the trial's own
+// horizon (never lengthens one that's naturally shorter than the
+// window), so a plan that already ends within/near the window is
+// unaffected. This changes nothing about WHAT is solved for or the
+// value converged on — only how much of the engine's own loop each
+// trial has to run to get there.
+const SHORTFALL_TRIAL_HORIZON_BUFFER_YEARS = 2;
+
 // A single trial: clone `state`, add the synthetic retirement-to-LE
 // expense at `x`, re-clamp (the same "never hand a mutated object
 // straight to the engine" discipline solveFor's own evaluate() uses),
@@ -124,6 +150,8 @@ function hasShortfallByLE(state, from, to, lePlanYear, x) {
   const clone = structuredClone(state);
   applyVary(clone, { kind: "syntheticExpense", from, to }, x);
   const validated = clampAllToPlan(clone, PROFILES);
+  const cappedEndAge = to.age + SHORTFALL_TRIAL_HORIZON_BUFFER_YEARS;
+  if (cappedEndAge < validated.plan.endAge) validated.plan.endAge = cappedEndAge;
   const out = projectPlan(validated);
   return out.shortfall != null && out.shortfall.planYear <= lePlanYear;
 }

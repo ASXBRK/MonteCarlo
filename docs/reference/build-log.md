@@ -2766,6 +2766,38 @@ client's own untouched figures, and the Income Required label
 resolving distinct ASFA couple/single wording — zero console errors
 throughout.
 
+### Retirement: sustainable-income solver performance (spec 33 follow-up)
+`computeRetirementAnalytics`'s "sustainable income to LE"/"to LE+5"
+figures each run `findMinimumThreshold` (`solve.js`) — a binary search
+that re-runs a full `projectPlan()` trial per iteration, twice (once per
+LE window). Fine at ~370ms when the only caller was Focus > Retirement's
+occasional re-solve; newly visible once the standalone retirement page
+(`renderRetirementPageBody`) started calling it on every keystroke,
+against that page's own "sub-millisecond, immediate feedback" spec text.
+
+Two changes, both provably value-preserving (verified bit-identical
+across 8 varied fixtures — single/couple, young/near-retirement, zero-
+balance — before/after): (1) `findMinimumThreshold` no longer re-runs
+`metric()` for its final boundary spot-check — the loop already computed
+that exact value for whichever endpoint it last moved, just discarded
+it; (2) each sustainable-income trial caps its own cloned plan's
+`endAge` a couple of years past the LE/LE+5 window being tested, never
+past the plan's real end. Safe because `out.shortfall` is the FIRST
+unfunded month found by a forward-only per-month loop — nothing later
+revises an earlier month's own outcome — and the only horizon-length-
+dependent computations are the last row's own accrual annotations
+(accrued CGT/Div293, death benefit detail), informational fields never
+fed back into balances or shortfall tracking. ~25–40% faster per
+`computeRetirementAnalytics` call depending on how much of the plan's
+own horizon lies beyond the LE+5 window (bigger win for a plan whose
+end age sits well past LE, since the unavoidable pre-retirement
+accumulation phase, which no version of this fix touches, still
+dominates for long-horizon young clients).
+
+Full suite 2055/2055, `retirementAnalytics.test.js`/`solve.test.js`
+unchanged and green, build green. No result-contract change, no new
+plan-state fields.
+
 ---
 
 ## WHERE WE'RE GOING

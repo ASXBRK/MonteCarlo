@@ -125,6 +125,13 @@ export function findMinimumThreshold({ lo, hi, metric, threshold, tolerance = 0.
   // a tighter one.
   const clears = (v) => v <= threshold + tolerance;
   let iterations = 0;
+  // `a`/`b` always straddle the search with a known metric() value at
+  // each end (metricAtA clears, metricAtB doesn't) — tracked as the
+  // search narrows so the final "is this boundary real" spot-check
+  // (below) can reuse whichever endpoint's value the loop already
+  // computed, rather than re-running an expensive metric() (a real
+  // projectPlan() trial, for this module's own callers) a second time
+  // for a value already known.
   const atLo = metric(lo);
   iterations++;
   if (clears(atLo)) return { value: lo, achieved: true, iterations, converged: true, reason: "converged" };
@@ -135,14 +142,15 @@ export function findMinimumThreshold({ lo, hi, metric, threshold, tolerance = 0.
     // answer, not a plausible-looking guess.
     return { value: null, achieved: false, iterations, converged: false, reason: "out-of-bounds" };
   }
-  let a = lo, b = hi;
+  let a = lo, b = hi, metricAtA = atLo, metricAtB = atHi;
   // Width threshold: a cent for a continuous (dollar) domain, or
   // effectively "done" for a coarser one (e.g. a caller solving over
   // integer ages/months rounds the result anyway). Independent of the
   // metric tolerance above — this is precision in x, not in f(x).
   while (b - a > 0.01 && iterations < maxIterations) {
     const mid = (a + b) / 2;
-    if (clears(metric(mid))) b = mid; else a = mid;
+    const metricAtMid = metric(mid);
+    if (clears(metricAtMid)) { b = mid; metricAtB = metricAtMid; } else { a = mid; metricAtA = metricAtMid; }
     iterations++;
   }
   if (b - a > 0.01) {
@@ -151,10 +159,9 @@ export function findMinimumThreshold({ lo, hi, metric, threshold, tolerance = 0.
   // Spot-check the boundary really is a boundary — the same "did the
   // assumed direction actually hold" discipline bisectScalar applies to
   // a continuous equation search, adapted to a threshold predicate.
-  const metricAtA = metric(a);
-  iterations++;
-  const metricAtB = metric(b);
-  iterations++;
+  // metricAtA/metricAtB are exactly the values the loop above already
+  // computed for the FINAL a/b (or the initial atLo/atHi, if the loop
+  // never ran) — not re-derived, just the same result read back.
   if (clears(metricAtA) || !clears(metricAtB)) {
     return { value: null, achieved: false, iterations, converged: false, reason: "non-monotonic" };
   }
