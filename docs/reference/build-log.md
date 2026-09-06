@@ -3183,6 +3183,69 @@ couple mode shows the same lines per person.
 
 ---
 
+### Retirement: Monte Carlo and probability of ruin (spec 34, Commit 2)
+Item 2 of the original brief: a distribution, not just one line. No new
+engine work — `runMonteCarlo` (`monteCarlo.js`) and its worker
+(`monteCarloWorker.js`) already existed for the comprehensive
+workspace's own Monte Carlo view; this commit wires the identical
+worker/progress/cancel/fingerprint-cache pattern to the standalone
+page's own state.
+
+**Run/cancel/cache.** `rpMcResult`/`rpMcRunning`/`rpMcProgress`/
+`rpMcWorker` mirror the comprehensive workspace's own `mcResult` et al.
+exactly, scoped to `retirementPageState`. `retirementMcFingerprint()`
+is the same field selection as `planFingerprint()` (everything that
+feeds `projectPlan`, nothing display-only) applied to this page's own
+state; `commitRetirementPageState` invalidates the cached/in-flight
+result only when that fingerprint has actually changed since the run
+started — a plan edit invalidates, a pure re-render does not.
+`renderRetirementPage` (scenario navigation) invalidates unconditionally,
+so a stale run for a PREVIOUS scenario can never post its "done" result
+against this page's new one.
+
+**Progress ticks redraw only the Monte Carlo section**, not the whole
+page (`retirementMcRenderCache`, set once per full `renderRetirementPageBody()`
+call) — this page renders its whole body as one big innerHTML replace,
+so a naive full re-render on every progress tick would risk disrupting
+focus on whatever field the adviser is mid-edit in, for no reason: a
+Monte Carlo run is deliberately decoupled from plan edits, so a
+progress tick has no business touching the rest of the page at all.
+
+**Framed for the client, not the modeller** — the spec's own worked
+example: the headline sentence ("in about 1 in 5 scenarios you run
+short before 95" — `approxOneInN`, rounding `1/ruinProbability`) leads,
+with the raw ruin percentage and its success-framed restatement ("lasts
+to life expectancy in N% of simulations") stated beside it, median
+first-shortfall age when at least one path ruined, and the custom-
+allocation flag `runMonteCarlo` already returns (which asset(s) borrowed
+a volatility-basis profile) surfaced unconditionally, matching the
+comprehensive workspace's own identical note.
+
+**Fan chart** — 10/25/50/75/90 bands with the deterministic line
+overlaid, same trace/colour convention as the comprehensive workspace's
+own Monte Carlo chart, but always today's dollars (this page has no
+nominal/real toggle, per `renderRetirementBalanceChart`'s own existing
+convention).
+
+**No new pure-function tests** — this commit is composition only.
+`runMonteCarlo`'s own ruin/shortfall/custom-holdings mechanics are
+already thoroughly covered in `monteCarlo.test.js` (including the
+"ruinProbability is exactly 0 for an ample plan and exactly 1 for a
+hopeless one" case), and main.js has no DOM test harness in this
+codebase (per CLAUDE.md's own "pure modules never import DOM" —
+main.js is the DOM side, verified in-browser like every other view on
+this page). Full suite 2081/2081 unchanged, build green.
+
+Browser-verified: Run button starts the worker and shows live progress;
+Cancel terminates it and clears status; a completed run shows the
+headline sentence, both ruin-probability framings, and the fan chart
+mount (Plotly itself unavailable in this sandboxed environment — the
+same pre-existing CDN-blocked guard every other chart on this page
+already falls back to); editing a field after a completed run
+correctly hides the stale result and re-shows the Run button.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

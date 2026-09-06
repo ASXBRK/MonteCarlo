@@ -568,6 +568,115 @@ let retirementPageState = null;
 let retirementAnalyticsCache = null;
 let retirementAnalyticsTimer = null;
 
+// Monte Carlo (spec 34, Commit 2) — "A Run simulation button on the
+// page. runMonteCarlo already runs in a worker with progress and
+// cancel — reuse it exactly, do not reimplement." Same worker/progress/
+// cancel/fingerprint-cache SHAPE as the comprehensive workspace's own
+// Monte Carlo view (mcResult et al., below) but scoped separately: this
+// page has its own state (retirementPageState), its own single
+// scenario at a time, and no display-only mutations to distinguish from
+// real ones (every commitRetirementPageState call is a real plan edit).
+let rpMcResult = null;
+let rpMcResultFingerprint = null;
+let rpMcRunning = false;
+let rpMcProgress = null;
+let rpMcWorker = null;
+// Set at the end of every renderRetirementPageBody() call so a worker
+// progress/done message — which updates only the Monte Carlo section,
+// not the whole page — can redraw it against the SAME projection/year
+// axis the rest of the page is currently showing, without re-running
+// projectPlan() on every progress tick.
+let retirementMcRenderCache = null;
+
+function retirementMcFingerprint() {
+  // Same field selection as planFingerprint() below, applied to
+  // retirementPageState instead of the comprehensive workspace's global
+  // state — everything that feeds projectPlan(), nothing display-only.
+  return JSON.stringify({
+    plan: retirementPageState.plan, assets: retirementPageState.assets,
+    cashflows: retirementPageState.cashflows, settings: retirementPageState.settings,
+    assumptions: retirementPageState.assumptions, properties: retirementPageState.properties,
+    liabilities: retirementPageState.liabilities,
+  });
+}
+
+function stopRetirementMcWorker() {
+  if (rpMcWorker) { rpMcWorker.terminate(); rpMcWorker = null; }
+  rpMcRunning = false;
+  rpMcProgress = null;
+}
+
+function invalidateRetirementMcResult() {
+  rpMcResult = null;
+  rpMcResultFingerprint = null;
+  stopRetirementMcWorker();
+}
+
+// Redraws ONLY the Monte Carlo section against the cached render
+// context (see retirementMcRenderCache above) — called from worker
+// progress/done/error handlers and from the run/cancel button
+// handlers, none of which change retirementPageState itself.
+function renderRetirementMcFromCache() {
+  if (!retirementMcRenderCache) return;
+  renderRetirementMcSection(retirementMcRenderCache.projection, retirementMcRenderCache.yearIdxs, retirementMcRenderCache.ages);
+}
+
+// "About 1 in N" — the client-facing framing the spec's own worked
+// example uses ("in about 1 in 5 scenarios you run short before 95")
+// rather than a bare percentage. Returns null when there's nothing to
+// approximate (p <= 0).
+function approxOneInN(p) {
+  if (p <= 0) return null;
+  if (p >= 1) return 1;
+  return Math.max(1, Math.round(1 / p));
+}
+
+function startRetirementMonteCarloRun() {
+  if (rpMcRunning || !retirementPageState) return;
+  rpMcRunning = true;
+  // Stamped now, not on completion — see planFingerprint's own
+  // identical comment: a plan mutation while this run is in flight
+  // must invalidate it, compared against THIS fingerprint.
+  rpMcResultFingerprint = retirementMcFingerprint();
+  rpMcProgress = { done: 0, total: DEFAULT_NUM_PATHS };
+  renderRetirementMcFromCache();
+
+  rpMcWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
+  rpMcWorker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === "progress") {
+      rpMcProgress = { done: msg.done, total: msg.total };
+      renderRetirementMcFromCache();
+    } else if (msg.type === "done") {
+      rpMcResult = msg.result;
+      stopRetirementMcWorker();
+      renderRetirementMcFromCache();
+    } else if (msg.type === "error") {
+      invalidateRetirementMcResult();
+      renderRetirementMcFromCache();
+      const statusEl = $("rpMcStatus");
+      if (statusEl) statusEl.textContent = `Simulation failed: ${msg.message}`;
+    }
+  };
+  rpMcWorker.onerror = (e) => {
+    invalidateRetirementMcResult();
+    renderRetirementMcFromCache();
+    const statusEl = $("rpMcStatus");
+    if (statusEl) statusEl.textContent = `Simulation failed: ${e.message}`;
+  };
+  // retirementPageState/PROFILES are plain data (no functions, no DOM)
+  // — structured-clone across the worker boundary without loss, same
+  // as the comprehensive workspace's own postMessage call.
+  rpMcWorker.postMessage({ state: retirementPageState, profiles: PROFILES, options: {} });
+}
+
+function cancelRetirementMonteCarloRun() {
+  invalidateRetirementMcResult();
+  renderRetirementMcFromCache();
+  const statusEl = $("rpMcStatus");
+  if (statusEl) statusEl.textContent = "Cancelled.";
+}
+
 // Both entry points route through ensureRetirementPensions (Commit 2) —
 // silently provisioning the pension(s) that make super/drawdown actually
 // show something (see that function's own header) — so a scenario
@@ -575,6 +684,13 @@ let retirementAnalyticsTimer = null;
 // workspace since its last visit here) gets the same treatment as one
 // edited on this page.
 function renderRetirementPage(clientId, scenarioId) {
+  // A DIFFERENT scenario (or the same one reloaded) — any in-flight or
+  // cached Monte Carlo run belongs to whatever plan was showing before
+  // and must not survive the navigation (it would otherwise eventually
+  // post a "done" message that gets rendered against this new
+  // scenario's own projection/year axis — a real mismatch, not just a
+  // stale figure).
+  invalidateRetirementMcResult();
   retirementPageClientId = clientId;
   retirementPageScenarioId = scenarioId;
   // A fresh page load, not a keystroke — the cache would otherwise be
@@ -599,6 +715,12 @@ function commitRetirementPageState(next) {
   writeRaw(scenarioKey(retirementPageScenarioId), serialize(retirementPageState));
   workspace = touchScenario(workspace, retirementPageScenarioId, Date.now());
   saveWorkspace();
+  // Invalidate a cached/in-flight Monte Carlo result exactly when the
+  // plan has actually changed since it started — same fingerprint-
+  // compare convention as refreshOutputs() below, scoped to this page.
+  if (rpMcResultFingerprint !== null && rpMcResultFingerprint !== retirementMcFingerprint()) {
+    invalidateRetirementMcResult();
+  }
   renderRetirementPageBody();
 }
 
@@ -1053,6 +1175,127 @@ function renderRetirementBalanceChart(projection, yearIdxs) {
   }, { displayModeBar: false, responsive: true });
 }
 
+// --- Monte Carlo (spec 34, Commit 2) -----------------------------------
+//
+// Item 2 of the original brief: reuses runMonteCarlo (monteCarlo.js) and
+// monteCarloWorker.js EXACTLY as the comprehensive workspace's own Monte
+// Carlo view does — same worker, same progress/cancel contract, same
+// single locked ruin definition — wired to this page's own state
+// instead. No new engine work; this section is composition only.
+
+// Run/Cancel/status + results — driven by the rpMc* module state above.
+// `projection`/`yearIdxs`/`ages` come from retirementMcRenderCache (the
+// context the rest of the page is currently showing), NOT recomputed
+// here, so a progress tick never re-runs projectPlan().
+function renderRetirementMcSection(projection, yearIdxs, ages) {
+  const runBtn = els.pageRetirement.querySelector('[data-rp-action="mc-run"]');
+  const cancelBtn = els.pageRetirement.querySelector('[data-rp-action="mc-cancel"]');
+  const statusEl = $("rpMcStatus");
+  if (!runBtn || !cancelBtn || !statusEl) return; // not mounted (page navigated away)
+  runBtn.hidden = rpMcRunning;
+  cancelBtn.hidden = !rpMcRunning;
+  if (rpMcRunning) {
+    const pct = rpMcProgress && rpMcProgress.total > 0 ? Math.round((rpMcProgress.done / rpMcProgress.total) * 100) : 0;
+    statusEl.textContent = rpMcProgress
+      ? `Simulating — ${rpMcProgress.done.toLocaleString()} / ${rpMcProgress.total.toLocaleString()} paths (${pct}%).`
+      : "Simulating…";
+  } else if (!rpMcResult) {
+    statusEl.textContent = "";
+  } else {
+    statusEl.textContent =
+      `${rpMcResult.numPaths.toLocaleString()} paths in ${(rpMcResult.elapsedMs / 1000).toFixed(1)}s. ` +
+      "Re-run after changing the plan — this result is a snapshot, not live.";
+  }
+  const resultsEl = $("rpMcResults");
+  if (!resultsEl) return;
+  resultsEl.hidden = !rpMcResult;
+  if (!rpMcResult) return;
+  renderRetirementMcChart(rpMcResult, projection, yearIdxs, ages);
+  $("rpMcStats").innerHTML = retirementMcStatsHTML(rpMcResult, ages[ages.length - 1] ?? projection.schedule.clientAges[projection.schedule.clientAges.length - 1]);
+}
+
+// Probability of ruin, framed for the client first (spec: "the headline
+// is not 'ruin probability 18%' — it is 'in about 1 in 5 scenarios you
+// run short before 95'. State both; lead with the plain one."), the
+// modeller number and the success-framed restatement beside it, median
+// first-shortfall age when at least one path ruined, and the custom-
+// allocation flag runMonteCarlo already returns — surfaced, never
+// silently dropped.
+function retirementMcStatsHTML(result, endAge) {
+  const ruinProbability = result.ruinProbability; // the single locked definition (monteCarlo.js) — nothing here computes it a second way
+  const ruinPct = Math.round(ruinProbability * 100);
+  const successPct = Math.round((1 - ruinProbability) * 100);
+  const n = approxOneInN(ruinProbability);
+  const plain = n == null
+    ? `This plan lasted the whole way, to age ${endAge}, in every one of the ${result.numPaths.toLocaleString()} simulations run.`
+    : n <= 1
+      ? `This plan ran short before age ${endAge} in every simulation run.`
+      : `In about 1 in ${n} simulations, this plan runs short before age ${endAge}.`;
+  const stats = [
+    retirementStatHTML("Ruin probability", `${ruinPct}%`, true),
+    retirementStatHTML("Lasts to life expectancy", `${successPct}% of simulations`),
+  ];
+  if (result.medianShortfallAge != null) {
+    stats.push(retirementStatHTML("Median first-shortfall age", Math.round(result.medianShortfallAge)));
+  }
+  const customNote = result.customHoldings.length > 0
+    ? `<p class="helper-text">${result.customHoldings.length} asset(s) use custom returns; their variability is modelled on the volatility basis profile selected for each — ${result.customHoldings.map((h) => `${escapeHTML(h.name)} (${escapeHTML(h.volBasis)})`).join(", ")}.</p>`
+    : "";
+  return `
+    <p class="helper-text rp-mc-headline"><strong>${escapeHTML(plain)}</strong></p>
+    <div class="summary-strip">${stats.join("")}</div>
+    <p class="helper-text">Ruin probability: the fraction of simulated paths with any unfunded cashflow before this plan's own projection end — the single definition used everywhere in this tool. "Lasts to life expectancy" restates the same figure the way a client hears it.</p>
+    ${customNote}
+  `;
+}
+
+// Fan chart: 10/25/50/75/90 simulated net-asset bands with the
+// deterministic line overlaid (spec: "the deterministic line sits above
+// the median" — this tool's own existing disclosure on why: the median
+// of a lognormal-ish compounding process sits below its mean, and the
+// deterministic run compounds at the mean). Always today's dollars —
+// this page has no nominal/real toggle (see renderRetirementBalanceChart's
+// own header for the same convention).
+function renderRetirementMcChart(result, projection, yearIdxs, ages) {
+  const el = $("rpMcChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const band = (key) => yearIdxs.map((y) => result.netAssets[key][y]);
+  const p10 = band("p10"), p25 = band("p25"), p50 = band("p50"), p75 = band("p75"), p90 = band("p90");
+  // Same netAssets figure the deterministic engine reports
+  // (projection.yearly[y].netAssets) — genuinely comparable, not a
+  // second, differently-derived series.
+  const deterministic = yearIdxs.map((y) => projection.yearly[y].netAssets);
+
+  const outer = "rgba(28, 90, 180, 0.12)";
+  const inner = "rgba(28, 90, 180, 0.28)";
+  const traces = [
+    { x: ages, y: p10, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: p90, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: outer,
+      name: "10th–90th percentile", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: p25, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: p75, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: inner,
+      name: "25th–75th percentile", hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: p50, mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
+      name: "Median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
+    { x: ages, y: deterministic, mode: "lines", line: { color: "#444", width: 1.5, dash: "dash" },
+      name: "Deterministic projection", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Deterministic</extra>" },
+  ];
+
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: "Net assets (today's dollars)", standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
 // Age · super · pension · drawdown · age pension · other income · total
 // income · income required — the spec's own column list. "Drawdown",
 // "age pension" and "total income" (grossTotal) are read straight off
@@ -1368,6 +1611,19 @@ function renderRetirementPageBody() {
         <h3>Summary</h3>
         <div id="rpSummary">${retirementPageSummaryHTML(analytics)}</div>
       </div>
+      <div class="focus-section" id="rpMcSection">
+        <h3>Monte Carlo</h3>
+        <p class="helper-text">${DEFAULT_NUM_PATHS.toLocaleString()} simulated paths through the same tax-aware engine as the projection above, with randomised investment returns and inflation — the distribution behind the single deterministic line. Never runs automatically; re-run after changing the plan.</p>
+        <div class="page-actions rp-no-print">
+          <button class="btn-text" type="button" data-rp-action="mc-run"${rpMcRunning ? " hidden" : ""}>Run simulation (${DEFAULT_NUM_PATHS.toLocaleString()} paths)</button>
+          <button class="btn-text" type="button" data-rp-action="mc-cancel"${rpMcRunning ? "" : " hidden"}>Cancel</button>
+          <span id="rpMcStatus" class="helper-text"></span>
+        </div>
+        <div id="rpMcResults" hidden>
+          <div id="rpMcChart" class="chart-mount"></div>
+          <div id="rpMcStats"></div>
+        </div>
+      </div>
       <div class="focus-section">
         <h3>Goal versus position</h3>
         <p class="helper-text">Household after-tax income by source, against your stated Income Required. Bars are gross by source; the line is after tax — compare the shapes, not the exact gap, in a year tax is material.</p>
@@ -1391,6 +1647,8 @@ function renderRetirementPageBody() {
   `;
   renderRetirementGoalChart(yearIdxs, ages, summary, reqByYear, household, tenure);
   renderRetirementBalanceChart(projection, yearIdxs);
+  retirementMcRenderCache = { projection, yearIdxs, ages };
+  renderRetirementMcSection(projection, yearIdxs, ages);
   scheduleRetirementAnalyticsRefresh();
 }
 
@@ -1468,6 +1726,15 @@ els.pageRetirement.addEventListener("click", (e) => {
     if (!proceed) return;
   }
   commitRetirementPageState(rsSetHousehold(retirementPageState, target));
+});
+
+// Monte Carlo run/cancel (spec 34, Commit 2) — a separate delegated
+// listener, same convention: these two buttons never mutate
+// retirementPageState (a run doesn't change the plan), so they route
+// around commitRetirementPageState entirely.
+els.pageRetirement.addEventListener("click", (e) => {
+  if (e.target.closest('[data-rp-action="mc-run"]')) startRetirementMonteCarloRun();
+  else if (e.target.closest('[data-rp-action="mc-cancel"]')) cancelRetirementMonteCarloRun();
 });
 
 // Print/CSV/copy-figures (spec 33, Commit 3) — a separate listener from
