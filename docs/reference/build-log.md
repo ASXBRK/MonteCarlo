@@ -2937,6 +2937,83 @@ verified: browser measurement, not a vitest assertion). Full suite
 2064/2064 unchanged, build green, zero console errors throughout the
 performance verification.
 
+### Retirement: comparison support (spec 33, Commit 3)
+The features that make a side-by-side session with the firm's second
+retirement tool productive — "small, and the reason the page exists"
+(the spec's own words).
+
+**Assumptions panel** — a `<details>` (native expand/collapse, no JS)
+placed right after the household toggle, near the top of the page: "when
+two projections disagree, this is the first thing anyone will want to
+see." Every figure is read from the SAME source the engine itself reads
+for this exact plan — `PROFILES` (returns by profile), this scenario's
+own super accounts/asset (fees — the real ICR values in play, not a
+generic list), `retirementPageState.assumptions` (inflation, wage
+growth), `superRatesFor`/`SUPER_RATES_BASE` (contributions tax 15%/30%
+above the Division 293 threshold, earnings tax 15% accumulation vs 0%
+exempt in pension phase), `MIN_DRAWDOWN_BANDS` (pension drawdown
+minimums by age), `agePensionRatesFor` (rates and thresholds, correctly
+resolved for THIS household's single/couple type) — never a hard-coded
+list, so it cannot drift from what the projection actually used. Deliber-
+ately NOT a reuse of the comprehensive workspace's own `buildAssumptions
+Groups()` (the Assumptions output view's own transposed, years-as-
+columns, exhaustive-threshold table) — that function is scoped to the
+global `state` and built for a much larger surface (every super/CGT/
+Division 296 threshold by year); this panel is the spec's own smaller,
+named list. Read-only, with a link to the comprehensive workspace's own
+Assumptions output view (`#/clients/.../output/assumptions`) — Parameters
+itself is a modal inside that workspace, not independently routable;
+landing on Assumptions puts the same read values in front of the adviser
+with Parameters one click away.
+
+**Print/PDF** — a "Print / Save as PDF" button calling `window.print()`,
+plus a narrowly-scoped `@media print` block (`#pageRetirement` only —
+this app has no other print stylesheet, and this one must not touch the
+comprehensive workspace's own printing) hiding the household toggle and
+page-action buttons. A `beforeprint` listener force-opens the assumptions
+`<details>` regardless of trigger (this button or the browser's own
+print shortcut) — a collapsed panel would otherwise silently vanish from
+the printed artefact.
+
+**CSV export** — `retirementYearTableRows()` extracted as the ONE shared
+source for both the on-screen year-by-year table and the CSV (the spec's
+own test requirement: "the CSV matches the on-screen table" — satisfied
+by construction, not by keeping two implementations in sync by hand).
+Raw rounded numbers, not formatted currency strings, "so the two tools'
+numbers can be diffed in a spreadsheet line by line." Filename uses a
+NEW `retirementExportNameBase()`, not the existing shared `exportName
+Base()` — that one reads `workspace.activeClientId/activeScenarioId`
+(whatever's mounted in the comprehensive workspace), which is not
+necessarily this page's own client/scenario (visiting this page never
+changes what's "active" there); a wrong-scenario CSV filename would be
+a genuinely bad answer for a tool whose whole job is not confusing which
+numbers came from where.
+
+**Copy-figures** — plain text via `navigator.clipboard.writeText`
+(mirroring the existing "flash the button to 'Copied!' for 1.5s, fall
+back to a clipboard-unavailable alert" convention already used by every
+other clipboard action in this file), with the three figures the spec
+names by name: balance at retirement, first shortfall age, sustainable
+income to LE. Reads whatever analytics is currently cached (Commit 2's
+own debounce) rather than forcing a fresh ~370ms computation on click —
+a discrete action, not a live-typing concern, so up to 300ms of lag
+behind the very latest edit is an acceptable, unnoticeable tradeoff.
+
+Not a result-contract change; no new plan-state fields. Tests: none new
+in the vitest suite — every piece here is DOM-composition/browser-API
+code (a `<details>` panel, `window.print()`, `Blob`/anchor download,
+`navigator.clipboard`), consistent with how Commit 2's own chart-
+rendering functions are verified (browser measurement, not a vitest
+assertion) — verified instead via a dedicated browser pass: the CSV's
+44 rows compared cell-by-cell against the on-screen table (0 mismatches);
+the assumptions panel's own age-pension section confirmed to switch
+correctly between single ($31,223/yr) and couple ($47,070/yr combined)
+figures; the Parameters link's route confirmed; the clipboard content
+confirmed to contain exactly the three named figures; the print media
+query confirmed (via `page.emulateMedia`) to hide the household toggle
+and page-actions while the assumptions panel force-opens. Full suite
+2064/2064 unchanged, build green, zero console errors throughout.
+
 ---
 
 ## WHERE WE'RE GOING

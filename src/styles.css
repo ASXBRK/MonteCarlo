@@ -3059,3 +3059,21 @@ dialog.modal::backdrop {
 .mre-segment.investment { background: #9aa5b1; }
 .mre-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 12px; }
 .mre-legend-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+
+/* Retirement Projection — Standalone Surface: comparison support
+   (spec 33, Commit 3). The assumptions panel is a plain <details>
+   (native expand/collapse, no JS needed) using the existing .tl table
+   classes for visual consistency with the rest of the app's own
+   read-only tables. Print scoping is deliberately narrow (#pageRetirement
+   only) — this app has no other print stylesheet, and this one must
+   not affect the comprehensive workspace's own printing (untested,
+   out of this spec's scope). */
+.rp-assumptions { margin: 8px 0 4px; }
+.rp-assumptions summary { cursor: pointer; padding: 4px 0; }
+.rp-assumptions h4 { margin: 14px 0 4px; font-size: 13px; }
+.rp-assumptions table.tl { margin-bottom: 4px; }
+
+@media print {
+  #pageRetirement .page-actions,
+  #pageRetirement .rp-no-print { display: none; }
+}

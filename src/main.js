@@ -130,6 +130,7 @@ import { realThreshold, LITO } from "./Tax/annual.js";
 import { superRatesFor } from "./data/superRates.js";
 import { SUPER_RATES_BASE } from "./data/superRates.js";
 import { agePensionRatesFor, assetsTestCutOut } from "./data/agePension.js";
+import { MIN_DRAWDOWN_BANDS } from "./data/pensionRates.js";
 import { LEG } from "./Tax/engine.js";
 import { expenseFundingSeries, taxByTypeSeries, debtVsAssetsSeries, debtAssetsCrossoverYear, superVsNonSuperSeries } from "./chartSeries.js";
 import {
@@ -957,26 +958,41 @@ function renderRetirementBalanceChart(projection, yearIdxs) {
 // the chart"). "Other income" collapses the remaining three chart
 // buckets (employment, investment income, asset drawdown) into one
 // column, since the spec's own table doesn't ask for them separately.
-function retirementYearTableHTML(projection, summary, yearIdxs) {
-  const rows = yearIdxs.map((y) => {
+// Raw per-year figures, shared by the on-screen table and the CSV
+// export (Commit 3) — built ONCE so the two can never disagree (the
+// spec's own test requirement: "the CSV matches the on-screen table").
+function retirementYearTableRows(projection, summary, yearIdxs) {
+  return yearIdxs.map((y) => {
     const row = projection.yearly[y];
     const s = summary.series[y];
-    const otherIncome = s.employment + s.investmentIncome + s.assetDrawdown;
-    return `
+    return {
+      age: projection.schedule.clientAges[y],
+      superBalance: row.superClosing ?? 0,
+      pensionBalance: row.pensionClosing ?? 0,
+      drawdown: s.pensionDrawdown,
+      agePension: s.agePension,
+      otherIncome: s.employment + s.investmentIncome + s.assetDrawdown,
+      totalIncome: s.grossTotal,
+      incomeRequired: row.incomeRequired,
+    };
+  });
+}
+
+function retirementYearTableHTML(projection, summary, yearIdxs) {
+  const rows = retirementYearTableRows(projection, summary, yearIdxs).map((r) => `
       <tr>
-        <td>${projection.schedule.clientAges[y]}</td>
-        <td class="tl-num">${fmtMoney(row.superClosing ?? 0)}</td>
-        <td class="tl-num">${fmtMoney(row.pensionClosing ?? 0)}</td>
-        <td class="tl-num">${fmtMoney(s.pensionDrawdown)}</td>
-        <td class="tl-num">${fmtMoney(s.agePension)}</td>
-        <td class="tl-num">${fmtMoney(otherIncome)}</td>
-        <td class="tl-num">${fmtMoney(s.grossTotal)}</td>
-        <td class="tl-num">${row.incomeRequired == null ? "—" : fmtMoney(row.incomeRequired)}</td>
+        <td>${r.age}</td>
+        <td class="tl-num">${fmtMoney(r.superBalance)}</td>
+        <td class="tl-num">${fmtMoney(r.pensionBalance)}</td>
+        <td class="tl-num">${fmtMoney(r.drawdown)}</td>
+        <td class="tl-num">${fmtMoney(r.agePension)}</td>
+        <td class="tl-num">${fmtMoney(r.otherIncome)}</td>
+        <td class="tl-num">${fmtMoney(r.totalIncome)}</td>
+        <td class="tl-num">${r.incomeRequired == null ? "—" : fmtMoney(r.incomeRequired)}</td>
       </tr>
-    `;
-  }).join("");
+    `).join("");
   return `
-    <div style="max-height:480px; overflow:auto;">
+    <div id="rpYearTable" style="max-height:480px; overflow:auto;">
       <table class="tl">
         <thead>
           <tr>
@@ -990,6 +1006,160 @@ function retirementYearTableHTML(projection, summary, yearIdxs) {
       </table>
     </div>
   `;
+}
+
+// CSV export (Commit 3) — same rows, same shared helpers (csvEsc/
+// downloadCSV) every other Focus view's own export already uses.
+// Raw numbers, not formatted currency strings — "so the two tools'
+// numbers can be diffed in a spreadsheet line by line" (the spec's own
+// words) wants arithmetic-ready values, not "$1,234".
+function retirementYearTableCSV(projection, summary, yearIdxs) {
+  const header = ["Age", "Super", "Pension", "Drawdown", "Age pension", "Other income", "Total income", "Income required"];
+  const lines = [header.map(csvEsc).join(",")];
+  for (const r of retirementYearTableRows(projection, summary, yearIdxs)) {
+    lines.push([
+      r.age, Math.round(r.superBalance), Math.round(r.pensionBalance), Math.round(r.drawdown),
+      Math.round(r.agePension), Math.round(r.otherIncome), Math.round(r.totalIncome),
+      r.incomeRequired == null ? "" : Math.round(r.incomeRequired),
+    ].map(csvEsc).join(","));
+  }
+  return lines;
+}
+
+// Like exportNameBase() but scoped to THIS page's own client/scenario —
+// exportNameBase() reads workspace.activeClientId/activeScenarioId
+// (whatever's mounted in the comprehensive workspace), which is not
+// necessarily what's open here (visiting this page never changes
+// which scenario is "active" there).
+function retirementExportNameBase() {
+  const client = findClient(workspace, retirementPageClientId);
+  const scenario = client?.scenarios.find((s) => s.id === retirementPageScenarioId);
+  return sanitiseFilename(`${client?.name ?? "client"}-${scenario?.name ?? "scenario"}`);
+}
+
+// Assumptions panel (spec 33, Commit 3) — "when two projections
+// disagree, this is the first thing anyone will want to see." Every
+// value here is read from the SAME source the engine itself reads for
+// THIS plan — PROFILES, SUPER_RATES_BASE (via superRatesFor),
+// MIN_DRAWDOWN_BANDS, agePensionRatesFor, this scenario's own super
+// accounts/assets — never a hard-coded list, so it cannot drift from
+// what the projection actually used. Read-only, with a link to the
+// comprehensive workspace's own Assumptions output view (Parameters
+// itself is a modal inside that workspace, not routable directly;
+// landing on Assumptions puts the same read values in front of the
+// user with Parameters one click away, same as it would be for any
+// other scenario).
+function retirementAssumptionsPanelHTML(household) {
+  const plan = retirementPageState.plan;
+  const a = retirementPageState.assumptions;
+  const mode = a.bracketMode === "frozen" ? "frozen" : "indexed";
+  const f0 = firstFyStartYear(plan.start);
+  const awote = a.awote ?? 0.032;
+
+  const returnRows = PROFILE_KEYS.map((k) => {
+    const profile = PROFILES[k];
+    const gross = (profile.incomeReturn + profile.growthReturn) * 100;
+    const net = ((1 + profile.incomeReturn + profile.growthReturn) / (1 + a.cpi) - 1) * 100;
+    return `<tr><td>${escapeHTML(k)}</td><td class="tl-num">${gross.toFixed(1)}%</td><td class="tl-num">${net.toFixed(1)}%</td></tr>`;
+  }).join("");
+
+  const feeRows = [];
+  const clientSa = superAccountFor(retirementPageState, "client");
+  if (clientSa) feeRows.push([`${household === "couple" ? "Client " : ""}super — ICR`, `${(clientSa.icrPct ?? 0).toFixed(2)}% p.a.`]);
+  if (household === "couple") {
+    const partnerSa = superAccountFor(retirementPageState, "partner");
+    if (partnerSa) feeRows.push(["Partner super — ICR", `${(partnerSa.icrPct ?? 0).toFixed(2)}% p.a.`]);
+  }
+  const otherAsset = findOtherInvestmentsAsset(retirementPageState);
+  if (otherAsset) feeRows.push(["Other investments — ICR", `${(otherAsset.icrPct ?? 0).toFixed(2)}% p.a.`]);
+  const feeRowsHTML = feeRows.length
+    ? feeRows.map(([label, val]) => `<tr><td>${escapeHTML(label)}</td><td class="tl-num">${escapeHTML(val)}</td></tr>`).join("")
+    : `<tr><td colspan="2">No fees entered yet.</td></tr>`;
+
+  const sr = superRatesFor(f0, mode, a.cpi, awote);
+  const ap = agePensionRatesFor(f0, mode, a.cpi, awote);
+  const householdAgePensionRows = (household === "couple" ? [
+    ["Age pension age", ap.ageOfEligibility],
+    ["Rate — each (p.a.)", fmtMoney(ap.couple.rateEach)],
+    ["Rate — combined (p.a.)", fmtMoney(ap.couple.rateCombined)],
+    ["Assets test — full-pension threshold (homeowner)", fmtMoney(ap.couple.assetsFullHomeowner)],
+    ["Assets test — full-pension threshold (non-homeowner)", fmtMoney(ap.couple.assetsFullNonHomeowner)],
+    ["Assets test — taper", `$${ap.reductionRatePer1000} per $1,000 above threshold, per year`],
+    ["Income test — free area (combined, p.a.)", fmtMoney(ap.couple.incomeFreeAreaCombined)],
+    ["Income test — taper", `${(ap.incomeReductionRate * 100).toFixed(0)}c per $1 above the free area`],
+    ["Deeming threshold (combined)", fmtMoney(ap.couple.deemingThreshold)],
+  ] : [
+    ["Age pension age", ap.ageOfEligibility],
+    ["Rate (p.a.)", fmtMoney(ap.single.rate)],
+    ["Assets test — full-pension threshold (homeowner)", fmtMoney(ap.single.assetsFullHomeowner)],
+    ["Assets test — full-pension threshold (non-homeowner)", fmtMoney(ap.single.assetsFullNonHomeowner)],
+    ["Assets test — taper", `$${ap.reductionRatePer1000} per $1,000 above threshold, per year`],
+    ["Income test — free area (p.a.)", fmtMoney(ap.single.incomeFreeArea)],
+    ["Income test — taper", `${(ap.incomeReductionRate * 100).toFixed(0)}c per $1 above the free area`],
+    ["Deeming threshold", fmtMoney(ap.single.deemingThreshold)],
+  ]).map(([l, v]) => `<tr><td>${escapeHTML(l)}</td><td class="tl-num">${escapeHTML(String(v))}</td></tr>`).join("");
+
+  const drawdownRows = MIN_DRAWDOWN_BANDS.map((b) =>
+    `<tr><td>${b.minAge}${b.maxAge === Infinity ? "+" : `–${b.maxAge}`}</td><td class="tl-num">${(b.pct * 100).toFixed(0)}%</td></tr>`
+  ).join("");
+
+  const workspaceLink = formatRoute({
+    page: "workspace", clientId: retirementPageClientId, scenarioId: retirementPageScenarioId,
+    area: "output", section: "assumptions",
+  });
+
+  return `
+    <details class="rp-assumptions">
+      <summary><strong>Assumptions</strong> — every value this projection actually used</summary>
+      <p class="helper-text">Read-only.
+        <a class="btn-text" href="${escapeHTML(workspaceLink)}">Open in comprehensive workspace → Assumptions / Parameters</a>
+        to change any of these.
+      </p>
+      <h4>Returns by profile</h4>
+      <table class="tl"><thead><tr><th>Profile</th><th class="tl-num">Gross nominal</th><th class="tl-num">Real (net of ${(a.cpi * 100).toFixed(1)}% CPI)</th></tr></thead>
+      <tbody>${returnRows}</tbody></table>
+      <h4>Fees — this scenario</h4>
+      <table class="tl"><tbody>${feeRowsHTML}</tbody></table>
+      <h4>Inflation and wage growth</h4>
+      <table class="tl"><tbody>
+        <tr><td>CPI</td><td class="tl-num">${(a.cpi * 100).toFixed(1)}% p.a.</td></tr>
+        <tr><td>Wage growth (WPI)</td><td class="tl-num">${((a.wageGrowth ?? 0.027) * 100).toFixed(1)}% p.a.</td></tr>
+        <tr><td>Super cap indexation (AWOTE)</td><td class="tl-num">${(awote * 100).toFixed(1)}% p.a.</td></tr>
+      </tbody></table>
+      <h4>Super tax</h4>
+      <table class="tl"><tbody>
+        <tr><td>Contributions tax</td><td class="tl-num">${(sr.contributionsTaxRate * 100).toFixed(0)}%</td></tr>
+        <tr><td>Contributions tax above Division 293 threshold (${fmtMoney(sr.div293Threshold)})</td><td class="tl-num">${((sr.contributionsTaxRate + sr.div293Rate) * 100).toFixed(0)}%</td></tr>
+        <tr><td>Earnings tax — accumulation phase</td><td class="tl-num">${(sr.earningsTaxRate * 100).toFixed(0)}%</td></tr>
+        <tr><td>Earnings tax — retirement (pension) phase</td><td class="tl-num">0% (exempt)</td></tr>
+      </tbody></table>
+      <h4>Pension drawdown minimums (% of 1 July balance, by age)</h4>
+      <table class="tl"><thead><tr><th>Age</th><th class="tl-num">Minimum</th></tr></thead><tbody>${drawdownRows}</tbody></table>
+      <h4>Age pension rates and thresholds (${escapeHTML(household)}, as at ${escapeHTML(ap.asAt)})</h4>
+      <table class="tl"><tbody>${householdAgePensionRows}</tbody></table>
+      <p class="helper-text">${escapeHTML(ap.source)}</p>
+    </details>
+  `;
+}
+
+// Copy-figures (spec 33, Commit 3) — plain text, the three headline
+// numbers the spec names by name: balance at retirement, first
+// shortfall age, sustainable income. Reads whatever analytics is
+// currently cached (see scheduleRetirementAnalyticsRefresh's own
+// header) rather than forcing a fresh ~370ms computation on click — a
+// discrete action, not a live-typing concern, so up to 300ms of lag
+// behind the very latest edit is an acceptable, unnoticeable tradeoff.
+function retirementCopyFiguresText(pageName) {
+  const a = retirementAnalyticsCache;
+  if (!a) return `Retirement projection — ${pageName}`;
+  const money = (v) => (v == null ? "—" : fmtMoney(v));
+  const age = (v) => (v == null ? "—" : Math.round(v));
+  return [
+    `Retirement projection — ${pageName}`,
+    `Balance at retirement (age ${a.retirement.age}): ${money(a.capitalAtRetirement)}`,
+    `First shortfall age: ${age(a.firstShortfallAge)}`,
+    `Sustainable income to LE (age ${a.le.age}): ${a.le.sustainableIncomeConverged ? money(a.le.sustainableIncomeToLE) : "—"}`,
+  ].join("\n");
 }
 
 function renderRetirementPageBody() {
@@ -1039,17 +1209,23 @@ function renderRetirementPageBody() {
     <header class="page-head">
       <h1>Retirement projection — ${escapeHTML(pageName)}</h1>
       <div class="page-actions">
+        <button class="btn-text" type="button" data-rp-action="print">Print / Save as PDF</button>
+        <button class="btn-text" type="button" data-rp-action="export-csv">Export CSV</button>
+        <button class="btn-text" type="button" data-rp-action="copy-figures">Copy figures</button>
         <a class="btn-text" href="${escapeHTML(formatRoute({ page: "workspace", clientId: retirementPageClientId, scenarioId: retirementPageScenarioId }))}">Open in comprehensive workspace</a>
         <a class="btn-text" href="${escapeHTML(formatRoute({ page: "client", clientId: retirementPageClientId }))}">Back to scenarios</a>
       </div>
     </header>
-    <div class="focus-section">
+    <div class="focus-section rp-no-print">
       <div class="seg-toggle" role="group" aria-label="Household type">
         ${[["single", "Single"], ["couple", "Couple"]].map(([v, l]) => `
           <button class="seg-option${f.household === v ? " active" : ""}" type="button"
                   data-rp-action="household" data-value="${v}">${l}</button>
         `).join("")}
       </div>
+    </div>
+    <div class="focus-section">
+      ${retirementAssumptionsPanelHTML(household)}
     </div>
     <div class="focus-panel">
       ${retirementPersonCardsHTML("client", couple ? `Client — ${clientLabel}` : "About & Superannuation", f.client)}
@@ -1164,6 +1340,59 @@ els.pageRetirement.addEventListener("click", (e) => {
     if (!proceed) return;
   }
   commitRetirementPageState(rsSetHousehold(retirementPageState, target));
+});
+
+// Print/CSV/copy-figures (spec 33, Commit 3) — a separate listener from
+// the household toggle above (a distinct concern), same delegated-click
+// convention.
+function retirementDownloadCSV(viewName, lines) {
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${retirementExportNameBase()}-${viewName}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// Opens the assumptions panel before printing, whether triggered by
+// this page's own "Print" button or the browser's native print
+// shortcut — a collapsed <details> would otherwise silently vanish
+// from the printed artefact ("the whole page as one printable view").
+window.addEventListener("beforeprint", () => {
+  els.pageRetirement.querySelectorAll(".rp-assumptions").forEach((d) => { d.open = true; });
+});
+
+els.pageRetirement.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-rp-action]");
+  if (!btn) return;
+  const action = btn.dataset.rpAction;
+  if (action === "print") {
+    window.print();
+  } else if (action === "export-csv") {
+    const f = retirementFields(retirementPageState);
+    const projection = projectPlan(retirementPageState, PROFILES);
+    const retirementRef = resolveRef(
+      { kind: "anchor", anchorId: "retirement-client" }, retirementPageState.plan, projection.schedule, "client"
+    );
+    const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), projection.schedule.clientAges, []);
+    const reqByYear = projection.yearly.map((row) => row.incomeRequired);
+    const target = projection.yearly[retirementRef.planYear]?.incomeRequired ?? null;
+    const summary = goalVsPositionSummary(projection.yearly, projection.schedule, reqByYear, target);
+    retirementDownloadCSV("year-by-year", retirementYearTableCSV(projection, summary, yearIdxs));
+  } else if (action === "copy-figures") {
+    const f = retirementFields(retirementPageState);
+    const couple = f.household === "couple";
+    const pageName = couple ? `${f.client.firstName || "Client"} & ${f.partner.firstName || "Partner"}` : (f.client.firstName || "Client");
+    const text = retirementCopyFiguresText(pageName);
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = "Copy figures"; }, 1500);
+      }).catch(() => window.alert("Couldn't access the clipboard — try again, or use Export CSV instead."));
+    } else {
+      window.alert("Clipboard access isn't available in this browser — use Export CSV instead.");
+    }
+  }
 });
 
 // --- sidebar navigation: one section per page (Sidebar nav) -----------------
