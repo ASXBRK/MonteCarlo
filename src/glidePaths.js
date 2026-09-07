@@ -186,3 +186,40 @@ export function gradualGlidePathPreset(plan) {
     rebalance: "annual",
   };
 }
+
+// Per-OWNER preset generation (docs/specs/34-retirement-intelligent.md,
+// Commit 3; relocated from retirementStandalone.js by docs/specs/35-
+// retirement-output-view.md — spec 33's standalone page is withdrawn,
+// but this generator is generic and feeds spec 35's own Commit 5 glide-
+// path builder, so it survives and moves here). Same step shape/profile
+// names as singleStepGlidePathPreset/gradualGlidePathPreset above, but
+// parametrized by OWNER rather than hardcoded to plan.client — a
+// partner's own glide path needs the PARTNER's ages, not the client's.
+export const GLIDE_PATH_PRESET_KINDS = ["single", "gradual"];
+
+export function glidePathPresetStepsFor(kind, plan, owner) {
+  const person = owner === "partner" ? plan.partner : plan.client;
+  const currentAge = person.currentAge, retirementAge = person.retirementAge;
+  if (kind === "gradual") {
+    const stepDownStart = Math.max(currentAge, retirementAge - 10);
+    return {
+      name: "Gradual (steps down over the 10 years before retirement, then again at 75)",
+      steps: [
+        { fromAge: currentAge, profile: "High Growth – Capital" },
+        { fromAge: stepDownStart, profile: "High Growth – Capital" },
+        { fromAge: retirementAge, profile: "Balanced" },
+        { fromAge: Math.max(retirementAge, 74), profile: "Balanced" },
+        { fromAge: Math.max(retirementAge + 1, 75), profile: "Moderately Defensive" },
+      ],
+      rebalance: "annual",
+    };
+  }
+  return {
+    name: "Single-step (High Growth → Balanced at retirement)",
+    steps: [
+      { fromAge: currentAge, profile: "High Growth – Capital" },
+      { fromAge: retirementAge, profile: "Balanced" },
+    ],
+    rebalance: "annual",
+  };
+}

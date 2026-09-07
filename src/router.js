@@ -11,16 +11,16 @@
 //                                                       resolves the landing section)
 //   #/clients/<cid>/scenarios/<sid>/input/<section>   → an input fact-find page
 //   #/clients/<cid>/scenarios/<sid>/output/<view>     → an output graph or table
-//   #/clients/<cid>/scenarios/<sid>/retirement         → Retirement Projection
-//                                                       standalone page (client-level,
-//                                                       no input sidebar — docs/specs/
-//                                                       33-retirement-standalone.md,
-//                                                       Commit 1). The scenario it
-//                                                       addresses is an ORDINARY one
-//                                                       (same CLIENT state, same
-//                                                       engine) — this route only
-//                                                       changes what's SHOWN, never
-//                                                       the state shape underneath.
+//                                                       (the "Retirement" group's views
+//                                                       — retirement-projection etc. —
+//                                                       are ordinary output views here,
+//                                                       docs/specs/35-retirement-output-
+//                                                       view.md. The standalone retirement
+//                                                       page/route from docs/specs/33 was
+//                                                       withdrawn by spec 35: retirement
+//                                                       accuracy needs the full comprehensive
+//                                                       input set, so it is an OUTPUT over
+//                                                       those inputs, not a second surface.)
 
 export const INPUT_SECTIONS = [
   "setup", "tax-details", "children", "implementation", "income", "deductions", "expenses", "financial-assets", "lifestyle-assets",
@@ -68,6 +68,12 @@ export const OUTPUT_VIEWS = [
   // exactly this question.
   "monte-carlo", "monte-carlo-table",
   "whatif-rate-shock", "whatif-crash", "whatif-income-gap", "whatif-expense-shock",
+  // Retirement (docs/specs/35-retirement-output-view.md, Commit 1) — a
+  // fifth output group, over the SAME comprehensive inputs every other
+  // view already reads (no second input surface — see that spec's own
+  // "Why" section on why spec 33's standalone page was withdrawn). Single-
+  // form views, same as Focus/What-if — no OUTPUT_SUBJECT_FORMS entry.
+  "retirement-projection", "retirement-balances", "retirement-table", "retirement-monte-carlo", "retirement-lifecycle",
 ];
 export const DEFAULT_OUTPUT_VIEW = "projection";
 
@@ -119,8 +125,6 @@ export function formatRoute(route) {
       const ids = (route.scenarioIds ?? []).map(encodeURIComponent).join(",");
       return `#/clients/${encodeURIComponent(route.clientId)}/compare?s=${ids}`;
     }
-    case "retirement":
-      return `#/clients/${encodeURIComponent(route.clientId)}/scenarios/${encodeURIComponent(route.scenarioId)}/retirement`;
     case "workspace": {
       const base = `#/clients/${encodeURIComponent(route.clientId)}/scenarios/${encodeURIComponent(route.scenarioId)}`;
       if (route.area === "input" || route.area === "output") {
@@ -160,9 +164,6 @@ export function parseRoute(hash) {
   if (parts.length === 4 && parts[2] === "scenarios") {
     return { page: "workspace", clientId: parts[1], scenarioId: parts[3], area: null, section: null };
   }
-  if (parts.length === 5 && parts[2] === "scenarios" && parts[4] === "retirement") {
-    return { page: "retirement", clientId: parts[1], scenarioId: parts[3] };
-  }
   if (parts.length === 6 && parts[2] === "scenarios" && (parts[4] === "input" || parts[4] === "output")) {
     const route = { page: "workspace", clientId: parts[1], scenarioId: parts[3], area: parts[4], section: parts[5] };
     if (parts[4] === "output") {
@@ -195,7 +196,6 @@ export function resolveRoute(hash, index) {
     return { ...r, scenarioIds };
   }
   if (!client.scenarios.some((s) => s.id === r.scenarioId)) return null;
-  if (r.page === "retirement") return r;
   if (r.area == null) return r; // bare — caller resolves the landing section
 
   if (r.area === "input") {

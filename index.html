@@ -17,11 +17,6 @@
 
       <section id="pageCompare" class="page-list" aria-label="Compare scenarios" hidden></section>
 
-      <!-- Retirement Projection — Standalone Surface (docs/specs/33-
-           retirement-standalone.md) — a client-level page, no input
-           sidebar, same as Compare. -->
-      <section id="pageRetirement" class="page-list" aria-label="Retirement projection" hidden></section>
-
       <div id="pageWorkspace" hidden>
       <header class="app-header">
         <h1>Portfolio Projection</h1>
@@ -280,6 +275,57 @@
               <div id="viewWhatIfCrash" hidden></div>
               <div id="viewWhatIfIncomeGap" hidden></div>
               <div id="viewWhatIfExpenseShock" hidden></div>
+              <!-- Retirement (docs/specs/35-retirement-output-view.md,
+                   Commit 1) — an output group over the SAME comprehensive
+                   inputs every other view above reads; no second input
+                   surface (spec 33's standalone page was withdrawn). -->
+              <div id="viewRetirementProjection" hidden>
+                <div id="retirementSummary"></div>
+                <h3 class="mc-subheading">Goal versus position</h3>
+                <p class="helper-text">Household after-tax income by source, against your stated Income Required. Bars are gross by source; the line is after tax — compare the shapes, not the exact gap, in a year tax is material.</p>
+                <div id="retirementGoalChart" class="chart-mount"></div>
+                <p id="retirementGoalSentence" class="helper-text"></p>
+                <h3 class="mc-subheading">Lifestyle band</h3>
+                <div id="retirementLifestyleBand"></div>
+              </div>
+              <div id="viewRetirementBalances" hidden>
+                <h3 class="mc-subheading">Super and pension balance</h3>
+                <p class="helper-text">Household super (accumulation) and pension (drawdown) balances by age.</p>
+                <div id="retirementBalanceChart" class="chart-mount"></div>
+                <h3 class="mc-subheading">Asset allocation over time</h3>
+                <p class="helper-text">Defensive rising over time under a glide path, flat under a static profile.</p>
+                <div id="retirementAllocationChart" class="chart-mount"></div>
+                <p id="retirementAllocationNote" class="chart-note-inline"></p>
+              </div>
+              <div id="viewRetirementTable" hidden>
+                <div id="retirementYearTable"></div>
+              </div>
+              <div id="viewRetirementMonteCarlo" hidden>
+                <p class="helper-text">2,000 simulated paths through the same tax-aware engine as the projection above, with randomised investment returns and inflation.</p>
+                <div class="mc-controls">
+                  <button id="retirementMcRunBtn" class="btn-text" type="button">Run simulation (2,000 paths)</button>
+                  <button id="retirementMcCancelBtn" class="btn-text" type="button" hidden>Cancel</button>
+                  <span id="retirementMcStatus" class="mc-status"></span>
+                </div>
+                <div id="retirementMcResults" hidden>
+                  <div id="retirementMcChart"></div>
+                  <div id="retirementMcStats"></div>
+                </div>
+              </div>
+              <div id="viewRetirementLifecycle" hidden>
+                <div id="retirementLifecycleOwnerToggle" class="seg-toggle entity-select" role="tablist" aria-label="Client or partner" hidden></div>
+                <div id="retirementLifecycleComparison"></div>
+                <div id="retirementLifecycleChart" class="chart-mount"></div>
+                <div class="mc-controls">
+                  <button id="retirementCompareRunBtn" class="btn-text" type="button">Run distribution comparison (4,000 paths)</button>
+                  <button id="retirementCompareCancelBtn" class="btn-text" type="button" hidden>Cancel</button>
+                  <span id="retirementCompareStatus" class="mc-status"></span>
+                </div>
+                <div id="retirementCompareResults" hidden>
+                  <div id="retirementCompareChart"></div>
+                  <div id="retirementCompareStats"></div>
+                </div>
+              </div>
             </div>
             <div class="chart-note" data-role="chartNote"></div>
           </section>

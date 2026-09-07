@@ -3,10 +3,8 @@ import {
   resolveComparisonGlidePath, resolveComparisonStaticProfile, buildLifecycleComparison,
 } from "./retirementLifecycleComparison.js";
 import {
-  setSuperBalance, setSalary, setDob, setRetirementAge, setHousehold,
-} from "./retirementStandalone.js";
-import { defaultState, clampAllToPlan } from "./planState.js";
-import { createGlidePath, clampGlidePath } from "./planState.js";
+  defaultState, clampAllToPlan, createGlidePath, clampGlidePath, createSuperAccount, createIncomeRow,
+} from "./planState.js";
 import { PROFILES } from "./profiles.js";
 
 const NOW = new Date("2026-08-17T00:00:00+10:00");
@@ -15,13 +13,26 @@ function baseState() {
   return defaultState(PROFILES, NOW);
 }
 
+function withPersonPatch(state, owner, patch) {
+  const key = owner === "partner" ? "partner" : "client";
+  return { ...state, plan: { ...state.plan, [key]: { ...state.plan[key], ...patch } } };
+}
+
 // A client with a super account, salary, and a reasonable balance —
 // the minimum a lifecycle comparison needs to have something to grow.
+// Built via the SAME planState.js factories the comprehensive
+// workspace's own "+ Add..." buttons call (retirementStandalone.js,
+// which used to wrap these for a single-page form, was withdrawn by
+// docs/specs/35-retirement-output-view.md — this test now builds the
+// fixture directly, matching the rest of this codebase's own test
+// convention, e.g. retirementAnalytics.test.js).
 function clientWithSuper(state = baseState()) {
-  let s = setDob(state, "client", "1980-05-01");
-  s = setRetirementAge(s, "client", 65);
-  s = setSuperBalance(s, "client", 100000, PROFILES);
-  s = setSalary(s, "client", 90000);
+  let s = withPersonPatch(state, "client", { dob: "1980-05-01", retirementAge: 65 });
+  s = clampAllToPlan(s, PROFILES); // resolve currentAge from dob before any factory reads it
+  const sa = { ...createSuperAccount(s.plan, [], PROFILES, "client"), balance: 100000 };
+  s = { ...s, plan: { ...s.plan, superAccounts: [sa] } };
+  const income = { ...createIncomeRow(s.plan, []), amount: 90000 };
+  s = { ...s, cashflows: { ...s.cashflows, income: [income] } };
   return clampAllToPlan(s, PROFILES);
 }
 
@@ -96,10 +107,12 @@ describe("buildLifecycleComparison", () => {
   });
 
   it("uses the OWNER's own retirement age for the generated preset's end step in a couple, not the client's", () => {
-    let state = setHousehold(clientWithSuper(), "couple");
-    state = setDob(state, "partner", "1985-01-01");
-    state = setRetirementAge(state, "partner", 60);
-    state = setSuperBalance(state, "partner", 50000, PROFILES);
+    let state = clientWithSuper();
+    state = { ...state, plan: { ...state.plan, household: "married", partner: { currentAge: state.plan.client.currentAge } } };
+    state = withPersonPatch(state, "partner", { dob: "1985-01-01", retirementAge: 60 });
+    state = clampAllToPlan(state, PROFILES);
+    const partnerSa = { ...createSuperAccount(state.plan, state.plan.superAccounts, PROFILES, "partner"), balance: 50000 };
+    state = { ...state, plan: { ...state.plan, superAccounts: [...state.plan.superAccounts, partnerSa] } };
     state = clampAllToPlan(state, PROFILES);
     const result = buildLifecycleComparison(state, "partner", PROFILES);
     expect(result).not.toBeNull();

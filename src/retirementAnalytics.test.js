@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
   computeRetirementAnalytics, superPensionExhaustionAge, meanOverWindow, isMaterialLEDifference,
-  householdCashIncome,
+  householdCashIncome, sgFor, ageYear, preservationAgeFor, agePensionAgeFor, capHeadroomFor,
+  firstDiv293Year, agePensionEligibilityFor,
 } from "./retirementAnalytics.js";
 import { projectPlan } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
 import { remainingLE } from "./data/lifeTables.js";
-import { defaultState, clampAllToPlan, createSuperAccount, createPension } from "./planState.js";
+import { defaultState, clampAllToPlan, createSuperAccount, createPension, createIncomeRow } from "./planState.js";
+import { superRatesFor } from "./data/superRates.js";
+import { agePensionRatesFor } from "./data/agePension.js";
+import { firstFyStartYear } from "./schedule.js";
 
 const ageRef = (age) => ({ kind: "age", age });
 const anchorRef = (anchorId) => ({ kind: "anchor", anchorId });
@@ -254,6 +258,109 @@ describe("computeRetirementAnalytics — average retirement income folds in pens
     // "minimum" against a $600k+ balance).
     expect(a.le.averageRetirementIncome).not.toBeCloseTo(sumAfterTaxOld / n, 0);
     expect(a.le.averageRetirementIncome).toBeGreaterThan((sumAfterTaxOld / n) * 2);
+  });
+});
+
+// --- Per-person derived figures (relocated from retirementStandalone.js
+// by docs/specs/35-retirement-output-view.md, Commit 1) --------------
+
+describe("sgFor", () => {
+  it("derives SG at the statutory rate, uncapped", () => {
+    // 115,000 × 12% = 13,800.
+    const state = defaultState(PROFILES);
+    const sg = sgFor(state, 115000);
+    expect(sg.amount).toBeCloseTo(13800, 2);
+    expect(sg.ratePct).toBe(12);
+    expect(sg.isCapped).toBe(false);
+  });
+
+  it("caps at the maximum contribution base once salary exceeds it", () => {
+    const state = defaultState(PROFILES);
+    const f0 = firstFyStartYear(state.plan.start);
+    const rates = superRatesFor(f0);
+    const sg = sgFor(state, 300000);
+    expect(sg.isCapped).toBe(true);
+    expect(sg.base).toBe(rates.sgMaximumSalary);
+    expect(sg.amount).toBeCloseTo(rates.sgMaximumSalary * rates.sgRate, 2);
+  });
+});
+
+describe("preservationAgeFor / agePensionAgeFor / ageYear", () => {
+  it("resolve from date of birth to a calendar year", () => {
+    let state = defaultState(PROFILES);
+    state = { ...state, plan: { ...state.plan, client: { ...state.plan.client, dob: "1980-01-01", retirementAge: 65 } } };
+    state = clampAllToPlan(state, PROFILES);
+    const result = projectPlan(state, PROFILES);
+    const f0 = firstFyStartYear(state.plan.start);
+    const currentAge = state.plan.client.currentAge;
+    const superRates = superRatesFor(f0);
+    const apRates = agePensionRatesFor(f0);
+
+    const preservation = preservationAgeFor(state, "client", result.schedule);
+    expect(preservation.age).toBe(superRates.preservationAge);
+    expect(preservation.year).toBe(f0 + (superRates.preservationAge - currentAge));
+
+    const pension = agePensionAgeFor(state, "client", result.schedule);
+    expect(pension.age).toBe(apRates.ageOfEligibility);
+    expect(pension.year).toBe(f0 + (apRates.ageOfEligibility - currentAge));
+
+    expect(agePensionEligibilityFor(state, result.schedule)).toEqual(pension);
+  });
+
+  it("reports outOfRange rather than a bogus year once the target age falls beyond the projection", () => {
+    let state = defaultState(PROFILES);
+    state = { ...state, plan: { ...state.plan, client: { ...state.plan.client, dob: "1980-01-01", retirementAge: 65 } } };
+    state = clampAllToPlan(state, PROFILES);
+    const result = projectPlan(state, PROFILES);
+    const resolved = ageYear(state, "client", 200, result.schedule);
+    expect(resolved.outOfRange).toBe(true);
+    expect(resolved.year).toBeNull();
+  });
+});
+
+describe("capHeadroomFor / firstDiv293Year", () => {
+  // A super account plus a salary income row, via the same factories
+  // planState.js's own callers use — the plan's own start month (this
+  // real session's "now") makes year 0 a partial FY (CLAUDE.md's own
+  // locked convention: annual rows skip a partial first year), so these
+  // checks read year 1, the first full FY, same as every other test in
+  // this codebase that hits this same quirk.
+  function stateWithSalaryAndSuper(dob, salary) {
+    let state = defaultState(PROFILES);
+    state = { ...state, plan: { ...state.plan, client: { ...state.plan.client, dob, retirementAge: 65 } } };
+    state = clampAllToPlan(state, PROFILES);
+    const sa = { ...createSuperAccount(state.plan, [], PROFILES, "client"), balance: 50000 };
+    state = { ...state, plan: { ...state.plan, superAccounts: [sa] } };
+    const income = { ...createIncomeRow(state.plan, []), amount: salary };
+    state = { ...state, cashflows: { ...state.cashflows, income: [income] } };
+    return clampAllToPlan(state, PROFILES);
+  }
+
+  it("capHeadroomFor reads the SAME projection.yearly[0].superCapUsage[owner] the comprehensive Super section's own display reads", () => {
+    const state = stateWithSalaryAndSuper("1980-01-01", 115000);
+    const result = projectPlan(state, PROFILES);
+    expect(capHeadroomFor(result, "client")).toEqual(result.yearly[0].superCapUsage.client);
+    expect(capHeadroomFor(result, "client").cap).toBeGreaterThan(0);
+  });
+
+  it("capHeadroomFor returns null when the projection has no yearly rows for the owner", () => {
+    expect(capHeadroomFor({ yearly: [] }, "client")).toBeNull();
+  });
+
+  it("firstDiv293Year fires in the first full FY a high salary clears the threshold", () => {
+    const state = stateWithSalaryAndSuper("1980-01-01", 300000);
+    const result = projectPlan(state, PROFILES);
+    const f0 = firstFyStartYear(state.plan.start);
+    const hit = firstDiv293Year(state, result, "client");
+    expect(hit).not.toBeNull();
+    expect(hit.year).toBe(f0 + 1);
+    expect(hit.ratePct).toBe(15);
+  });
+
+  it("firstDiv293Year reports null when income never approaches the threshold", () => {
+    const state = stateWithSalaryAndSuper("1980-01-01", 80000);
+    const result = projectPlan(state, PROFILES);
+    expect(firstDiv293Year(state, result, "client")).toBeNull();
   });
 });
 

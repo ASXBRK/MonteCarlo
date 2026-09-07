@@ -40,6 +40,10 @@ import { resolveEndBasis, clampAllToPlan } from "./planState.js";
 import { applyVary, findMinimumThreshold } from "./solve.js";
 import { projectPlan } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
+import { superRatesFor } from "./data/superRates.js";
+import { agePensionRatesFor } from "./data/agePension.js";
+import { div293Tax } from "./Tax/superContributions.js";
+import { firstFyStartYear } from "./schedule.js";
 
 // The Retirement key date and the LE anchor (at a given offset, 0 or 5)
 // both resolve to a plan year the same way — { planYear, age, fyLabel,
@@ -241,4 +245,106 @@ export function computeRetirementAnalytics(state, result) {
     le, lePlus5,
     materialLEDifference,
   };
+}
+
+// --- Per-person derived figures (docs/specs/34-retirement-intelligent.md,
+// Commit 1; relocated from retirementStandalone.js by docs/specs/35-
+// retirement-output-view.md, Commit 1 — spec 33's standalone page is
+// withdrawn, but these are generic per-person derivations off ANY
+// state/projection, not standalone-page-specific, so they survive and
+// move here alongside computeRetirementAnalytics rather than being
+// deleted with the rest of that module). Pure, no DOM/Plotly.
+
+// Super Guarantee for `owner`, resolved for TODAY's FY (year 0) — via
+// the SAME formula schedule.js's own SG crediting uses
+// (Math.min(salary, sgMaximumSalary) * sgRate).
+export function sgFor(state, salary) {
+  const a = state.assumptions;
+  const f0 = firstFyStartYear(state.plan.start);
+  const mode = a.bracketMode === "frozen" ? "frozen" : "indexed";
+  const rates = superRatesFor(f0, mode, a.cpi, a.awote ?? 0.032);
+  const isCapped = salary > rates.sgMaximumSalary;
+  const base = Math.min(salary, rates.sgMaximumSalary);
+  return { amount: base * rates.sgRate, ratePct: rates.sgRate * 100, base, sgMaximumSalary: rates.sgMaximumSalary, isCapped, salary };
+}
+
+// The calendar year `owner` reaches `age`, resolved the SAME way every
+// other age-to-year figure in this app is (resolveRef's own
+// {kind:"age"} resolution — ages tick each 1 July, CLAUDE.md's own
+// locked convention — not a naive dob-year-plus-age approximation).
+// `year: null` when the age falls beyond the projection window.
+export function ageYear(state, owner, age, schedule) {
+  const resolved = resolveRef({ kind: "age", age }, state.plan, schedule, owner);
+  const f0 = firstFyStartYear(state.plan.start);
+  return { age, year: resolved.outOfRange ? null : f0 + resolved.planYear, outOfRange: resolved.outOfRange };
+}
+
+// Preservation age (a flat constant for the only cohort this tool
+// models — superRatesFor's own preservationAge) resolved to a year for
+// `owner`.
+export function preservationAgeFor(state, owner, schedule) {
+  const f0 = firstFyStartYear(state.plan.start);
+  const rates = superRatesFor(f0);
+  return ageYear(state, owner, rates.preservationAge, schedule);
+}
+
+// Age pension age (agePensionRatesFor's own ageOfEligibility), same
+// shape as preservationAgeFor.
+export function agePensionAgeFor(state, owner, schedule) {
+  const f0 = firstFyStartYear(state.plan.start);
+  const rates = agePensionRatesFor(f0);
+  return ageYear(state, owner, rates.ageOfEligibility, schedule);
+}
+
+// Concessional cap headroom for `owner`, TODAY's FY (year 0) — reads
+// the SAME projection.yearly[0].superCapUsage[owner] the comprehensive
+// Super section's own superCapHeadroomHTML reads, so this can never
+// disagree with that figure. `null` when no super account/projection
+// exists yet for this owner.
+export function capHeadroomFor(projection, owner) {
+  return projection.yearly?.[0]?.superCapUsage?.[owner] ?? null;
+}
+
+// Division 293 — the FIRST plan year `owner`'s reconstructed Division
+// 293 tax is actually positive. Reconstructed via the SAME pure
+// div293Tax the engine itself calls (Tax/superContributions.js) — never
+// a duplicated rule — fed from what's ALREADY exposed per year
+// (row.superCapUsage for this person's own SG/salary-sacrifice/cap-and-
+// carry-forward position, row.taxDetail[owner].taxableIncome).
+// Deliberately NOT row.taxDetail[owner].div293 — that field reports the
+// PRIOR year's tax, paid this July (deterministic.js's own CGT-style
+// payment-timing convention), which would name the wrong (later) year
+// as "when it first bites". `null` when it never bites within the
+// projection.
+export function firstDiv293Year(state, projection, owner) {
+  const a = state.assumptions;
+  const f0 = firstFyStartYear(state.plan.start);
+  const mode = a.bracketMode === "frozen" ? "frozen" : "indexed";
+  const ages = owner === "partner" ? projection.schedule.partnerAges : projection.schedule.clientAges;
+  for (let y = 0; y < projection.yearly.length; y++) {
+    const row = projection.yearly[y];
+    const usage = row.superCapUsage?.[owner];
+    const taxDetail = row.taxDetail?.[owner];
+    if (!usage || !taxDetail) continue;
+    const rates = superRatesFor(f0 + y, mode, a.cpi, a.awote ?? 0.032);
+    const reportableSuperContributions = usage.sg + usage.salarySacrifice + usage.personalDeductible;
+    const lowTaxContributions = Math.min(reportableSuperContributions, usage.cap + usage.carryForwardAvailable);
+    const { tax } = div293Tax({
+      taxableIncome: taxDetail.taxableIncome,
+      reportableSuperContributions, lowTaxContributions, reportableFringeBenefits: 0,
+      threshold: rates.div293Threshold, rate: rates.div293Rate,
+    });
+    if (tax > 1e-6) {
+      return { year: f0 + y, age: ages?.[y] ?? null, threshold: rates.div293Threshold, ratePct: rates.div293Rate * 100 };
+    }
+  }
+  return null;
+}
+
+// Age pension eligibility, derived — client-anchored, the same
+// simplification every other client-anchored household-level display in
+// this app already uses (the age-pension toggle applies to the whole
+// household).
+export function agePensionEligibilityFor(state, schedule) {
+  return agePensionAgeFor(state, "client", schedule);
 }

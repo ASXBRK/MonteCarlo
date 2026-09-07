@@ -13,35 +13,20 @@
 import { clampGlidePath } from "./planState.js";
 import { projectPlan } from "./deterministic.js";
 import { resolveRef } from "./keyDates.js";
-
-// Same step shape/profile names as glidePaths.js's own
-// singleStepGlidePathPreset (spec 32) — NOT that function directly,
-// since it hardcodes plan.client's own ages; this comparison needs the
-// OWNER's ages (client or partner), so the preset is reconstructed
-// per-owner here rather than applying a client-only preset to a
-// partner comparison.
-function singleStepPresetForOwner(plan, owner) {
-  const person = owner === "partner" ? plan.partner : plan.client;
-  return {
-    name: "Single-step (High Growth → Balanced at retirement)",
-    steps: [
-      { fromAge: person.currentAge, profile: "High Growth – Capital" },
-      { fromAge: person.retirementAge, profile: "Balanced" },
-    ],
-    rebalance: "annual",
-  };
-}
+import { glidePathPresetStepsFor } from "./glidePaths.js";
 
 // The glide path this comparison uses: the FIRST glide path already on
 // the plan (whatever the adviser has defined, per the spec's own "plus
 // any the adviser has defined"), or — when none exists yet — the
-// single-step preset above, generated fresh for this comparison only
-// (added to a CLONE's own plan.glidePaths, never written back to the
-// real plan: this is a what-if, not a commit).
+// single-step preset (glidePaths.js's own per-owner generator — NOT
+// singleStepGlidePathPreset directly, since that hardcodes plan.client's
+// own ages and this comparison needs the OWNER's), generated fresh for
+// this comparison only (added to a CLONE's own plan.glidePaths, never
+// written back to the real plan: this is a what-if, not a commit).
 export function resolveComparisonGlidePath(state, owner, profiles) {
   const existing = (state.plan.glidePaths ?? [])[0];
   if (existing) return { glidePath: existing, isPreset: false };
-  const gp = clampGlidePath(singleStepPresetForOwner(state.plan, owner), state.plan, profiles);
+  const gp = clampGlidePath(glidePathPresetStepsFor("single", state.plan, owner), state.plan, profiles);
   return { glidePath: gp, isPreset: true };
 }
 

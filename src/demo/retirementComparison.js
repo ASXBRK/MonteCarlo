@@ -3,20 +3,18 @@
 // firm's second retirement tool, documented in
 // docs/reference/retirement-comparison.md.
 //
-// Built through the SAME setters the standalone retirement page itself
-// uses (src/retirementStandalone.js) for every one of its own nine
-// fields, not the raw factory calls every OTHER demo fixture in this
-// directory uses (see src/demo/retiree.js's own header for that
-// convention) — this fixture's whole purpose is "what you'd type into
-// that page," so building it through the page's own inputs is the most
-// direct proof it's reachable there, and these exact constants double
-// as the literal "inputs" column in the comparison document. The ONE
-// exception is living expenses (below) — the standalone page has no
-// expense field at all, but no retirement comparison is meaningful
-// without one, so it's added directly via createExpenseRow, the same
-// factory the comprehensive workspace's own Money Out section uses;
-// disclosed as such in the comparison document rather than silently
-// blended in as if it came from the page's own nine fields.
+// Originally built through the standalone retirement page's own setters
+// (src/retirementStandalone.js) — that page was withdrawn by docs/specs/
+// 35-retirement-output-view.md ("retirement accuracy needs the full
+// comprehensive input set... it is an OUTPUT over those inputs, not a
+// second surface"), so this fixture now uses the SAME raw planState.js
+// factories every OTHER demo fixture in this directory uses (see
+// src/demo/retiree.js's own header) — a scenario built with a super
+// account/salary/other-investments/income-required, same figures as
+// before, still reachable from the comprehensive workspace exactly the
+// same way. Living expenses is added directly via createExpenseRow, the
+// same factory the comprehensive workspace's own Money Out section
+// uses; disclosed as such in the comparison document.
 //
 // Deliberately NOT added to DEMO_BUILDERS (src/demo/index.js) — same
 // reasoning as retiree.js's own header: this exists for the comparison
@@ -34,25 +32,18 @@
 // named effects genuinely fires, not just nominally present.
 //
 // A FIXED reference date (RETIREMENT_COMPARISON_NOW), not "new Date()"
-// — for two independent reasons. (1) Every OTHER demo fixture in this
-// directory sidesteps age drift by using a bare currentAge instead of a
-// dob (see firstHomeBuyer.js's own header); retirementStandalone.js has
-// no such setter (setDob takes a real date of birth, by design — this
-// page's own field IS "date of birth"), and since this fixture is never
-// wired into "Load demo clients" the tradeoff runs the other way here:
-// build()'s own age must stay EXACTLY 45 across every future run of its
-// own test and every future read of the documented figures, which a
-// fixed `now` guarantees. (2) The fixed date is deliberately pinned to
-// JULY, not "whenever this was written" — CLAUDE.md's own locked
-// convention ("Annual rows and one-offs fire in July; skipped in the
-// partial first year if start month > July") would otherwise skip the
-// salary row's entire first-year income (an ANNUAL row, this page's
-// own default frequency) while the monthly living-expense row still
-// fires every month of that same partial year — a real shortfall in
-// year one purely from that interaction, caught while tuning this
-// fixture's own numbers, not a defect in the standalone page itself
-// (which never collects an expense row at all, so no real user of that
-// page alone can ever trigger this specific combination).
+// — for two independent reasons. (1) build()'s own age must stay
+// EXACTLY 45 across every future run of its own test and every future
+// read of the documented figures, which a fixed `now` guarantees (a
+// dob-based fixture, unlike most of this directory's own currentAge-
+// based ones, would otherwise drift). (2) The fixed date is deliberately
+// pinned to JULY, not "whenever this was written" — CLAUDE.md's own
+// locked convention ("Annual rows and one-offs fire in July; skipped in
+// the partial first year if start month > July") would otherwise skip
+// the salary row's entire first-year income (an ANNUAL row) while the
+// monthly living-expense row still fires every month of that same
+// partial year — a real shortfall in year one purely from that
+// interaction, caught while tuning this fixture's own numbers.
 export const RETIREMENT_COMPARISON_NOW = new Date("2026-07-15T00:00:00+10:00");
 export const RETIREMENT_COMPARISON_DOB = "1981-06-15"; // → 45 as at the fixed NOW above
 export const RETIREMENT_COMPARISON_RETIREMENT_AGE = 65;
@@ -68,23 +59,43 @@ export const RETIREMENT_COMPARISON_INCOME_REQUIRED_SOURCE = "asfaComfortable";
 export const RETIREMENT_COMPARISON_LIVING_EXPENSES = 52_000;
 
 import { PROFILES } from "../profiles.js";
-import { defaultState, clampAllToPlan, createExpenseRow } from "../planState.js";
 import {
-  setDob, setRetirementAge, setSuperBalance, setSuperAllocation,
-  setSalary, setOtherInvestments, setOtherInvestmentsAllocation,
-  setIncomeRequired, ensureRetirementPensions,
-} from "../retirementStandalone.js";
+  defaultState, clampAllToPlan, createExpenseRow, createSuperAccount, createIncomeRow,
+  createAsset, createIncomeRequired, createPension,
+} from "../planState.js";
 
 export function build(now = RETIREMENT_COMPARISON_NOW) {
   let state = defaultState(PROFILES, now);
-  state = setDob(state, "client", RETIREMENT_COMPARISON_DOB);
-  state = setRetirementAge(state, "client", RETIREMENT_COMPARISON_RETIREMENT_AGE);
-  state = setSuperBalance(state, "client", RETIREMENT_COMPARISON_SUPER_BALANCE, PROFILES);
-  state = setSuperAllocation(state, "client", { mode: "profile", profile: RETIREMENT_COMPARISON_SUPER_ALLOCATION }, PROFILES);
-  state = setSalary(state, "client", RETIREMENT_COMPARISON_SALARY);
-  state = setOtherInvestments(state, RETIREMENT_COMPARISON_OTHER_INVESTMENTS, PROFILES);
-  state = setOtherInvestmentsAllocation(state, { mode: "profile", profile: RETIREMENT_COMPARISON_OTHER_INVESTMENTS_ALLOCATION }, PROFILES);
-  state = setIncomeRequired(state, { source: RETIREMENT_COMPARISON_INCOME_REQUIRED_SOURCE });
+  state = { ...state, plan: { ...state.plan, client: { ...state.plan.client, dob: RETIREMENT_COMPARISON_DOB, retirementAge: RETIREMENT_COMPARISON_RETIREMENT_AGE } } };
+  state = clampAllToPlan(state, PROFILES); // resolve currentAge from dob before any factory below reads it
+
+  const sa = {
+    ...createSuperAccount(state.plan, [], PROFILES, "client"),
+    balance: RETIREMENT_COMPARISON_SUPER_BALANCE,
+    allocation: { mode: "profile", profile: RETIREMENT_COMPARISON_SUPER_ALLOCATION },
+  };
+  state = { ...state, plan: { ...state.plan, superAccounts: [sa] } };
+
+  const salary = { ...createIncomeRow(state.plan, []), amount: RETIREMENT_COMPARISON_SALARY };
+  state = { ...state, cashflows: { ...state.cashflows, income: [salary] } };
+
+  const otherInvestments = {
+    ...createAsset(state.plan, [], PROFILES),
+    balance: RETIREMENT_COMPARISON_OTHER_INVESTMENTS,
+    allocation: { mode: "profile", profile: RETIREMENT_COMPARISON_OTHER_INVESTMENTS_ALLOCATION },
+  };
+  state = {
+    ...state, assets: [otherInvestments],
+    settings: { ...state.settings, fundingOrder: [otherInvestments.id] },
+  };
+
+  state = {
+    ...state,
+    plan: {
+      ...state.plan,
+      retirement: { ...state.plan.retirement, incomeRequired: { ...createIncomeRequired(), source: RETIREMENT_COMPARISON_INCOME_REQUIRED_SOURCE } },
+    },
+  };
 
   const livingExpenses = {
     ...createExpenseRow(state.plan, []),
@@ -93,10 +104,19 @@ export function build(now = RETIREMENT_COMPARISON_NOW) {
   };
   state = { ...state, cashflows: { ...state.cashflows, expenses: [livingExpenses] } };
 
-  // Same pension auto-provisioning the standalone page itself applies
-  // (spec 33 Commit 2) — without it, super would never draw down at
-  // all, and "drawdown... bites" would be false for this fixture.
-  state = ensureRetirementPensions(state, PROFILES);
+  // Without a pension, super would never draw down at all, and
+  // "drawdown... bites" would be false for this fixture — same
+  // "fund expenditure shortfall" drawdown + income-driven-drawdown
+  // provisioning the standalone page itself used to apply automatically
+  // (spec 33 Commit 2), now set explicitly since that page is gone.
+  const pension = {
+    ...createPension(state.plan, [], state.plan.superAccounts, "client"),
+    drawdownOption: "expenditure",
+  };
+  state = {
+    ...state,
+    plan: { ...state.plan, pensions: [pension], retirement: { ...state.plan.retirement, incomeDrivenDrawdown: true } },
+  };
   const clamped = clampAllToPlan(state, PROFILES);
 
   return {

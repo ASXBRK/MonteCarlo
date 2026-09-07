@@ -4,6 +4,7 @@ import { PROFILES } from "./profiles.js";
 import {
   glidePathWindow, precomputeGlideYearly, blendAtAge,
   singleStepGlidePathPreset, gradualGlidePathPreset,
+  glidePathPresetStepsFor, GLIDE_PATH_PRESET_KINDS,
 } from "./glidePaths.js";
 
 const STEPS = [
@@ -177,5 +178,47 @@ describe("presets", () => {
     const closeToRetirement = { client: { currentAge: 62, retirementAge: 65 } };
     const preset = gradualGlidePathPreset(closeToRetirement);
     expect(preset.steps[1].fromAge).toBeGreaterThanOrEqual(62);
+  });
+});
+
+// Per-owner preset generation (relocated from retirementStandalone.js by
+// docs/specs/35-retirement-output-view.md, Commit 1) — same shapes as
+// singleStepGlidePathPreset/gradualGlidePathPreset above, but reading
+// EITHER person's own ages, for spec 35's own Commit 5 glide-path builder.
+describe("glidePathPresetStepsFor", () => {
+  const couplePlan = {
+    client: { currentAge: 46, retirementAge: 65 },
+    partner: { currentAge: 41, retirementAge: 60 },
+  };
+
+  it("GLIDE_PATH_PRESET_KINDS names exactly the two presets", () => {
+    expect(GLIDE_PATH_PRESET_KINDS).toEqual(["single", "gradual"]);
+  });
+
+  it("'single' for the client matches singleStepGlidePathPreset(plan) exactly", () => {
+    const viaOwner = glidePathPresetStepsFor("single", couplePlan, "client");
+    const viaClient = singleStepGlidePathPreset(couplePlan);
+    expect(viaOwner).toEqual(viaClient);
+  });
+
+  it("'gradual' for the client matches gradualGlidePathPreset(plan) exactly", () => {
+    const viaOwner = glidePathPresetStepsFor("gradual", couplePlan, "client");
+    const viaClient = gradualGlidePathPreset(couplePlan);
+    expect(viaOwner).toEqual(viaClient);
+  });
+
+  it("uses the PARTNER's own ages, not the client's — the whole reason this generator exists", () => {
+    const single = glidePathPresetStepsFor("single", couplePlan, "partner");
+    expect(single.steps[0].fromAge).toBe(41);
+    expect(single.steps.at(-1).fromAge).toBe(60);
+    // Genuinely different from what the client's own preset would produce.
+    expect(single.steps.at(-1).fromAge).not.toBe(65);
+
+    const gradual = glidePathPresetStepsFor("gradual", couplePlan, "partner");
+    expect(gradual.steps[0].fromAge).toBe(41);
+    expect(gradual.steps[0].profile).toBe("High Growth – Capital");
+    expect(gradual.steps.at(-1).profile).toBe("Moderately Defensive");
+    const ages = gradual.steps.map((s) => s.fromAge);
+    expect(ages).toEqual([...ages].sort((a, b) => a - b));
   });
 });

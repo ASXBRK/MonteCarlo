@@ -3339,6 +3339,134 @@ to completion with the expected narrower-glide-path result.
 
 ---
 
+### Retirement: output group, standalone page removed (spec 35, Commit 1)
+**Spec 33's standalone retirement page is withdrawn.** The reason,
+recorded per the spec's own instruction so it is not attempted again:
+retirement accuracy needs multiple super funds, fees per fund, real
+contribution windows, pension-phase consolidation, and per-row SG
+treatment — simplify any of that and the numbers become wrong, which is
+worse than a busy form. There was never a simplification available.
+Retirement is now an OUTPUT over the comprehensive inputs: one set of
+inputs, nothing that can disagree, no second input model to map when
+this engine is consumed elsewhere.
+
+**What moved, unchanged.** A fifth output group, "Retirement"
+(`OUTPUT_NAV.Retirement`/`OUTPUT_GROUPS`, router.js's `retirement-
+projection|balances|table|monte-carlo|lifecycle`), five single-form
+views (no chart/table duality, same convention as Focus/What-if):
+- **Projection** — Analytics card, Goal-versus-position chart +
+  sentence, Lifestyle band. Reuses the EXISTING `retirementSummaryHTML`/
+  `renderFocusRetirementGoalChart`/`retirementBandHTML` the comprehensive
+  workspace's own Focus > Retirement view already used (spec 32) —
+  `renderFocusRetirementGoalChart` gained two optional element-id
+  parameters (safe additive refactor, every existing call site
+  unchanged) so the identical chart-building logic mounts a second time
+  without duplicating it. Verified byte-identical to Focus > Retirement's
+  own summary-strip for the same scenario.
+- **Balances & allocation** — Super/pension balance chart, asset
+  allocation chart (reusing `allocationSeries` exactly as the Output
+  group's own Allocation chart does).
+- **Year by year** — the standalone page's own table, CSV export wired
+  into the existing per-view export dispatcher.
+- **Monte Carlo** — reuses the SAME shared `mcResult`/`mcRunning`/
+  `mcProgress` and `startMonteCarloRun`/`cancelMonteCarloRun` the
+  comprehensive workspace's own What if > Monte Carlo view already
+  runs — a second, client-framed PRESENTATION of the identical run
+  ("in about 1 in N simulations, this plan runs short before age X"
+  leading, the raw ruin % and success-framed restatement beside it),
+  not a second simulation. `refreshMonteCarloViews()` now also calls
+  `renderRetirementMonteCarloView()`, so a run started from either
+  screen stays in sync on both. Verified live: running from the
+  Retirement view populates the SAME result the Graphs view shows,
+  with no separate run needed.
+- **Lifecycle vs static** — `buildLifecycleComparison` (spec 34)
+  unchanged; the distribution comparison keeps its OWN separate module
+  state (`rpCompare*`, now repointed to `state`) since it genuinely
+  runs two arms at once, unlike the single-plan Monte Carlo above.
+
+Every dollar figure across all five views now respects the SAME
+nominal/real toggle every other output view already does — the
+standalone page had no such toggle at all (always today's dollars).
+Disclosed as an improvement, not a regression: identical figures at the
+Today's Dollars default, the only mode that page ever had.
+
+**Deleted**: the standalone page's route (`#/…/retirement`, `page:
+"retirement"` in router.js), `src/retirementStandalone.js` and its test
+file (the nine-field form, its per-page setters, `retirementFields`/
+`superAccountFor`/etc. — all existed only to serve a form that no
+longer exists), the "+ New retirement projection" client-page button,
+`#pageRetirement` in index.html, and ~1,640 lines of standalone-page-
+only rendering code in main.js.
+
+**What survived from retirementStandalone.js, and where it went**
+(the "report anything worth keeping" instruction): the module's per-
+person DERIVED-VALUE functions (`sgFor`, `ageYear`, `preservationAgeFor`,
+`agePensionAgeFor`, `capHeadroomFor`, `firstDiv293Year`,
+`agePensionEligibilityFor`) are generic — they operate on any state/
+projection, not standalone-page-specific — and relocated to
+`retirementAnalytics.js` alongside `computeRetirementAnalytics`, fully
+re-tested there (not yet consumed by any view; likely useful for
+Commit 2's review panel). The glide-path preset generator
+(`applyGlidePathPreset`'s pure step-shape half, `glidePathPresetSteps`)
+relocated to `glidePaths.js` as `glidePathPresetStepsFor` alongside
+`singleStepGlidePathPreset`/`gradualGlidePathPreset` (spec 32) — its
+OWN test suite there, and `retirementLifecycleComparison.js` now
+imports it instead of keeping its own duplicate. The STATE-MUTATING
+half of `applyGlidePathPreset` (creating a super account + pointing it
+at a new glide path) was NOT relocated — it depended on
+`ensurePersonSuperAccount`, itself deleted with the rest of the
+standalone page's account-bootstrapping; Commit 5 (the glide path
+builder) will rebuild whatever mutation it needs using Commit 2's own
+"add inline" affordances once those exist, rather than duplicating a
+bespoke account-creation path now. `ensureRetirementPensions` (silent
+pension auto-provisioning) was deliberately NOT carried forward in any
+form: auto-creating a pension behind the adviser's back on merely
+VIEWING an output contradicts "one set of inputs, nothing that can
+disagree" — a plan with no pension now simply shows that (no drawdown,
+super accumulates untouched), which the Commit 2 review panel's own
+"an absent group is the signal" mechanism is designed to surface
+non-silently. Every other function in the deleted module (the nine-
+field-form setters/readers) served only the deleted form and needed no
+new home.
+
+**A pre-existing duplication, noted not touched.** Focus > Retirement
+(spec 32, Commit 5) is now a strict SUBSET of Retirement > Projection's
+own content — same analytics, same goal chart, same lifestyle band,
+none of Retirement's Monte Carlo/lifecycle/allocation/table. Spec 35
+doesn't ask for its removal and doing so would break its own route/
+reachability-list entries for no requested benefit; left exactly as it
+was, flagged here for a future spec to decide.
+
+**Fixture repairs.** `src/demo/retirementComparison.js` (spec 33,
+Commit 4) and `retirementLifecycleComparison.test.js` both built their
+fixtures through the deleted setters — rewritten to use the same raw
+`planState.js` factories every other demo fixture and test in this
+codebase already uses. Verified byte-identical: the comparison
+fixture's own "matches the figures documented in retirement-
+comparison.md exactly" test still passes unchanged. `demo/coverage.test.js`
+gained checkers for the five new view ids (mirroring `buildLifecycle
+Comparison`'s own null-return gate for `retirement-lifecycle`; "has the
+inputs a run would use" for `retirement-monte-carlo`, matching the
+existing `monte-carlo` checker's own convention, since no demo client
+pre-runs a simulation).
+
+Tests: `retirementAnalytics.test.js` +8 (the relocated derived-value
+functions), `glidePaths.test.js` +5 (`glidePathPresetStepsFor`,
+including exact-match against the client-hardcoded originals),
+`retirementLifecycleComparison.test.js` all 8 re-passing against the
+rebuilt fixture, `demo/retirementComparison.test.js` all 5 re-passing
+byte-identical, `demo/coverage.test.js` +5 checkers, `router.test.js`
+updated (retirement-route tests removed, five new view ids added to
+the OUTPUT_VIEWS coverage assertion). Full suite 2046/2046 (down from
+2094: retirementStandalone.test.js's own suite deleted with the module,
+offset by the relocated functions' own new tests), build green. Browser-verified end to end on a real demo scenario:
+all five views render with live data; Retirement > Projection's summary-
+strip verified byte-identical to Focus > Retirement's own for the same
+scenario; Monte Carlo run from the Retirement view correctly populates
+the shared result the Graphs view also shows; zero console errors.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

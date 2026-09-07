@@ -70,24 +70,6 @@ import {
   ASFA_STANDARDS_BASE, asfaAnnual, asfaStandardLabel, asfaStalenessWarning, ASFA_HOMEOWNER_ASSUMPTION_NOTE,
 } from "./data/asfaStandards.js";
 import { deriveHomeownerStatus, resolveIncomeRequired } from "./retirement.js";
-import {
-  retirementFields, superAccountFor, findOtherInvestmentsAsset, partnerHasData, pensionFor,
-  ensureRetirementPensions,
-  setHousehold as rsSetHousehold,
-  setFirstName as rsSetFirstName, setDob as rsSetDob, setRetirementAge as rsSetRetirementAge,
-  setSuperBalance as rsSetSuperBalance, setSuperAllocation as rsSetSuperAllocation,
-  setSalary as rsSetSalary, setConcessionalContributions as rsSetConcessionalContributions,
-  setConcessionalContributionsFrom as rsSetConcessionalContributionsFrom,
-  setConcessionalContributionsTo as rsSetConcessionalContributionsTo,
-  setIncomeRequired as rsSetIncomeRequired,
-  setOtherInvestments as rsSetOtherInvestments, setOtherInvestmentsAllocation as rsSetOtherInvestmentsAllocation,
-  setOtherRetirementIncome as rsSetOtherRetirementIncome, setIncludeAgePension as rsSetIncludeAgePension,
-  sgFor as rsSgFor, ageYear as rsAgeYear,
-  preservationAgeFor as rsPreservationAgeFor, agePensionAgeFor as rsAgePensionAgeFor,
-  capHeadroomFor as rsCapHeadroomFor, firstDiv293Year as rsFirstDiv293Year,
-  agePensionEligibilityFor as rsAgePensionEligibilityFor,
-  applyGlidePathPreset as rsApplyGlidePathPreset, GLIDE_PATH_PRESET_KINDS,
-} from "./retirementStandalone.js";
 import { computeRetirementAnalytics } from "./retirementAnalytics.js";
 import { goalVsPositionSummary } from "./goalVsPosition.js";
 import { resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors } from "./lifestyleBand.js";
@@ -171,7 +153,6 @@ const els = {
   pageClients: $("pageClients"),
   pageClient: $("pageClient"),
   pageCompare: $("pageCompare"),
-  pageRetirement: $("pageRetirement"),
   pageWorkspace: $("pageWorkspace"),
   planBar: $("planBar"),
   taxDetailsSection: $("taxDetailsSection"),
@@ -280,6 +261,10 @@ const els = {
   cancelMonteCarloTableBtn: $("cancelMonteCarloTableBtn"),
   monteCarloTableStatus: $("monteCarloTableStatus"),
   monteCarloTableResults: $("monteCarloTableResults"),
+  retirementMcRunBtn: $("retirementMcRunBtn"),
+  retirementMcCancelBtn: $("retirementMcCancelBtn"),
+  retirementMcStatus: $("retirementMcStatus"),
+  retirementMcResults: $("retirementMcResults"),
   chartTreatmentSelects: document.querySelectorAll("[data-treatment]"),
   paramsBtn: $("paramsBtn"),
   paramsModal: $("paramsModal"),
@@ -339,6 +324,11 @@ const els = {
   viewWhatIfCrash: $("viewWhatIfCrash"),
   viewWhatIfIncomeGap: $("viewWhatIfIncomeGap"),
   viewWhatIfExpenseShock: $("viewWhatIfExpenseShock"),
+  viewRetirementProjection: $("viewRetirementProjection"),
+  viewRetirementBalances: $("viewRetirementBalances"),
+  viewRetirementTable: $("viewRetirementTable"),
+  viewRetirementMonteCarlo: $("viewRetirementMonteCarlo"),
+  viewRetirementLifecycle: $("viewRetirementLifecycle"),
 };
 
 // --- workspace + persistence ----------------------------------------------
@@ -441,7 +431,6 @@ function showPage(name) {
   els.pageClients.hidden = name !== "clients";
   els.pageClient.hidden = name !== "client";
   els.pageCompare.hidden = name !== "compare";
-  els.pageRetirement.hidden = name !== "retirement";
   els.pageWorkspace.hidden = name !== "workspace";
 }
 
@@ -479,7 +468,6 @@ function handleRoute() {
   if (route.page === "clients") { renderClientsPage(); return; }
   if (route.page === "client") { renderClientPage(route.clientId); return; }
   if (route.page === "compare") { renderComparePage(route.clientId, route.scenarioIds); return; }
-  if (route.page === "retirement") { renderRetirementPage(route.clientId, route.scenarioId); return; }
 
   // workspace
   if (mountedScenarioId !== route.scenarioId) mountWorkspace(route.clientId, route.scenarioId);
@@ -514,1666 +502,6 @@ function mountWorkspace(clientId, scenarioId) {
   syncBracketModeInputs();
   els.chartTreatmentSelects.forEach((sel) => { sel.value = state.display.chartTreatment[sel.dataset.treatment]; });
 }
-
-// --- Retirement Projection — Standalone Surface (docs/specs/33-
-// retirement-standalone.md, Commit 1) ---------------------------------
-//
-// "A page where you type nine numbers and get a retirement projection."
-// A client-level page, no input sidebar — same pattern as Compare
-// (renderComparePage/loadScenarioFullState above): its own local
-// `retirementPageState`/`retirementPageScenarioId`, never the workspace-
-// scoped `state`/`mountedScenarioId` globals, since this route is reached
-// WITHOUT mounting the comprehensive workspace at all.
-//
-// Every field writes to an EXISTING state path via retirementStandalone.js
-// (createSuperAccount/createAsset/createIncomeRow/createSuperContribution
-// — the SAME factories the comprehensive workspace's own "+ Add..."
-// buttons call) — never a parallel shape. Each change: apply the pure
-// setter, clampAllToPlan (the same "mutate, then clamp once" convention
-// every other commit function in this file already uses), save via the
-// same writeRaw/scenarioKey/serialize primitives "New scenario" uses,
-// then re-render from the freshly-clamped state so the form always shows
-// what was actually accepted (a clamped value, not the raw keystroke).
-let retirementPageClientId = null;
-let retirementPageScenarioId = null;
-let retirementPageState = null;
-
-// computeRetirementAnalytics (retirementAnalytics.js) costs ~370ms on a
-// simple one-person scenario — its own sustainable-income-to-LE search
-// re-runs a full projectPlan() trial per iteration, twice — against
-// ~30ms for projectPlan() alone. That's fine for the comprehensive
-// workspace's own Focus > Retirement view (one visit at a time) but
-// unacceptable here: this page's whole premise is reprojecting live on
-// every keystroke, and a ~370ms tax on every one of them measured as a
-// ~1s round-trip end to end in a browser test — the first thing anyone
-// would notice in a comparison session.
-//
-// Fix (debounce, per the user's own instruction — cheapest option
-// first, only reach for a worse-answer tradeoff like widened solver
-// tolerance if this isn't enough): split the render into a FAST path
-// (person cards, household card, the goal chart, the balance chart,
-// the year-by-year table — all sourced from projectPlan()'s own
-// ~30ms output plus resolveRef()'s cheap anchor resolution, no
-// solver) that runs on every keystroke, and a SLOW path (the Summary
-// card and Lifestyle band, the only two consumers of
-// computeRetirementAnalytics) that runs on a 300ms idle debounce.
-// retirementAnalyticsCache holds the last computed analytics so the
-// fast path always has SOMETHING correct-as-of-recently to show
-// immediately, rather than a blank section while the debounce is
-// pending. A single shared timer variable, cleared and rescheduled on
-// every fast-path render, is naturally race-safe against rapid edits
-// or navigating to a different scenario's retirement page (that, too,
-// calls renderRetirementPageBody, which clears any pending timer
-// before scheduling its own) — see scheduleRetirementAnalyticsRefresh's
-// own header for the one further case (navigating away entirely) and
-// why it's harmless.
-let retirementAnalyticsCache = null;
-let retirementAnalyticsTimer = null;
-
-// Monte Carlo (spec 34, Commit 2) — "A Run simulation button on the
-// page. runMonteCarlo already runs in a worker with progress and
-// cancel — reuse it exactly, do not reimplement." Same worker/progress/
-// cancel/fingerprint-cache SHAPE as the comprehensive workspace's own
-// Monte Carlo view (mcResult et al., below) but scoped separately: this
-// page has its own state (retirementPageState), its own single
-// scenario at a time, and no display-only mutations to distinguish from
-// real ones (every commitRetirementPageState call is a real plan edit).
-let rpMcResult = null;
-let rpMcResultFingerprint = null;
-let rpMcRunning = false;
-let rpMcProgress = null;
-let rpMcWorker = null;
-// Set at the end of every renderRetirementPageBody() call so a worker
-// progress/done message — which updates only the Monte Carlo section,
-// not the whole page — can redraw it against the SAME projection/year
-// axis the rest of the page is currently showing, without re-running
-// projectPlan() on every progress tick.
-let retirementMcRenderCache = null;
-
-function retirementMcFingerprint() {
-  // Same field selection as planFingerprint() below, applied to
-  // retirementPageState instead of the comprehensive workspace's global
-  // state — everything that feeds projectPlan(), nothing display-only.
-  return JSON.stringify({
-    plan: retirementPageState.plan, assets: retirementPageState.assets,
-    cashflows: retirementPageState.cashflows, settings: retirementPageState.settings,
-    assumptions: retirementPageState.assumptions, properties: retirementPageState.properties,
-    liabilities: retirementPageState.liabilities,
-  });
-}
-
-function stopRetirementMcWorker() {
-  if (rpMcWorker) { rpMcWorker.terminate(); rpMcWorker = null; }
-  rpMcRunning = false;
-  rpMcProgress = null;
-}
-
-function invalidateRetirementMcResult() {
-  rpMcResult = null;
-  rpMcResultFingerprint = null;
-  stopRetirementMcWorker();
-}
-
-// Redraws ONLY the Monte Carlo section against the cached render
-// context (see retirementMcRenderCache above) — called from worker
-// progress/done/error handlers and from the run/cancel button
-// handlers, none of which change retirementPageState itself.
-function renderRetirementMcFromCache() {
-  if (!retirementMcRenderCache) return;
-  renderRetirementMcSection(retirementMcRenderCache.projection, retirementMcRenderCache.yearIdxs, retirementMcRenderCache.ages);
-}
-
-// "About 1 in N" — the client-facing framing the spec's own worked
-// example uses ("in about 1 in 5 scenarios you run short before 95")
-// rather than a bare percentage. Returns null when there's nothing to
-// approximate (p <= 0).
-function approxOneInN(p) {
-  if (p <= 0) return null;
-  if (p >= 1) return 1;
-  return Math.max(1, Math.round(1 / p));
-}
-
-function startRetirementMonteCarloRun() {
-  if (rpMcRunning || !retirementPageState) return;
-  rpMcRunning = true;
-  // Stamped now, not on completion — see planFingerprint's own
-  // identical comment: a plan mutation while this run is in flight
-  // must invalidate it, compared against THIS fingerprint.
-  rpMcResultFingerprint = retirementMcFingerprint();
-  rpMcProgress = { done: 0, total: DEFAULT_NUM_PATHS };
-  renderRetirementMcFromCache();
-
-  rpMcWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
-  rpMcWorker.onmessage = (e) => {
-    const msg = e.data;
-    if (msg.type === "progress") {
-      rpMcProgress = { done: msg.done, total: msg.total };
-      renderRetirementMcFromCache();
-    } else if (msg.type === "done") {
-      rpMcResult = msg.result;
-      stopRetirementMcWorker();
-      renderRetirementMcFromCache();
-    } else if (msg.type === "error") {
-      invalidateRetirementMcResult();
-      renderRetirementMcFromCache();
-      const statusEl = $("rpMcStatus");
-      if (statusEl) statusEl.textContent = `Simulation failed: ${msg.message}`;
-    }
-  };
-  rpMcWorker.onerror = (e) => {
-    invalidateRetirementMcResult();
-    renderRetirementMcFromCache();
-    const statusEl = $("rpMcStatus");
-    if (statusEl) statusEl.textContent = `Simulation failed: ${e.message}`;
-  };
-  // retirementPageState/PROFILES are plain data (no functions, no DOM)
-  // — structured-clone across the worker boundary without loss, same
-  // as the comprehensive workspace's own postMessage call.
-  rpMcWorker.postMessage({ state: retirementPageState, profiles: PROFILES, options: {} });
-}
-
-function cancelRetirementMonteCarloRun() {
-  invalidateRetirementMcResult();
-  renderRetirementMcFromCache();
-  const statusEl = $("rpMcStatus");
-  if (statusEl) statusEl.textContent = "Cancelled.";
-}
-
-// Both entry points route through ensureRetirementPensions (Commit 2) —
-// silently provisioning the pension(s) that make super/drawdown actually
-// show something (see that function's own header) — so a scenario
-// loaded straight from storage (edited only in the comprehensive
-// workspace since its last visit here) gets the same treatment as one
-// edited on this page.
-function renderRetirementPage(clientId, scenarioId) {
-  // A DIFFERENT scenario (or the same one reloaded) — any in-flight or
-  // cached Monte Carlo run belongs to whatever plan was showing before
-  // and must not survive the navigation (it would otherwise eventually
-  // post a "done" message that gets rendered against this new
-  // scenario's own projection/year axis — a real mismatch, not just a
-  // stale figure).
-  invalidateRetirementMcResult();
-  invalidateRetirementCompareResult();
-  retirementPageClientId = clientId;
-  retirementPageScenarioId = scenarioId;
-  // A fresh page load, not a keystroke — the cache would otherwise be
-  // stale (or simply absent) relative to whatever changed via the
-  // comprehensive workspace since this page's last visit, so pay the
-  // one-time synchronous cost here rather than show a blank Summary/
-  // Lifestyle band for the first 300ms.
-  retirementAnalyticsCache = null;
-  const loaded = loadScenarioFullState(scenarioId);
-  const withPensions = ensureRetirementPensions(loaded, PROFILES);
-  if (withPensions !== loaded) {
-    commitRetirementPageState(withPensions);
-  } else {
-    retirementPageState = loaded;
-    renderRetirementPageBody();
-  }
-}
-
-function commitRetirementPageState(next) {
-  const withPensions = ensureRetirementPensions(next, PROFILES);
-  retirementPageState = clampAllToPlan(withPensions, PROFILES);
-  writeRaw(scenarioKey(retirementPageScenarioId), serialize(retirementPageState));
-  workspace = touchScenario(workspace, retirementPageScenarioId, Date.now());
-  saveWorkspace();
-  // Invalidate a cached/in-flight Monte Carlo result exactly when the
-  // plan has actually changed since it started — same fingerprint-
-  // compare convention as refreshOutputs() below, scoped to this page.
-  if (rpMcResultFingerprint !== null && rpMcResultFingerprint !== retirementMcFingerprint()) {
-    invalidateRetirementMcResult();
-  }
-  if (rpCompareFingerprint !== null && rpCompareFingerprint !== retirementMcFingerprint()) {
-    invalidateRetirementCompareResult();
-  }
-  renderRetirementPageBody();
-}
-
-// Recomputes computeRetirementAnalytics ~300ms after the LAST edit
-// (debounced, not throttled — a burst of keystrokes reschedules this
-// every time and only the final one actually runs the solver), then
-// updates ONLY the Summary card and Lifestyle band sections via a
-// direct DOM write — never a full page re-render, so it can never
-// steal focus/cursor position from whatever the user is doing next.
-// Safe if the user has since navigated away from this exact retirement
-// page: $() simply finds nothing (a different route entirely) or the
-// SAME scenario's own (possibly now-hidden) elements, which is a
-// harmless, still-correct update to a page not currently visible —
-// see this function's OWN caller for why a stale timer can never fire
-// against a DIFFERENT scenario's now-current DOM.
-function scheduleRetirementAnalyticsRefresh() {
-  if (retirementAnalyticsTimer) clearTimeout(retirementAnalyticsTimer);
-  retirementAnalyticsTimer = setTimeout(() => {
-    retirementAnalyticsTimer = null;
-    if (!retirementPageState) return;
-    const projection = projectPlan(retirementPageState, PROFILES);
-    const analytics = computeRetirementAnalytics(retirementPageState, projection);
-    retirementAnalyticsCache = analytics;
-    const f = retirementFields(retirementPageState);
-    const household = f.household;
-    const retirementRef = resolveRef(
-      { kind: "anchor", anchorId: "retirement-client" }, retirementPageState.plan, projection.schedule, "client"
-    );
-    const tenure = deriveHomeownerStatus(
-      retirementPageState.properties, retirementPageState.liabilities, projection.yearly[retirementRef.planYear]
-    );
-    const summaryEl = $("rpSummary");
-    if (summaryEl) summaryEl.innerHTML = retirementPageSummaryHTML(analytics);
-    const bandEl = $("rpLifestyleBand");
-    if (bandEl) bandEl.innerHTML = retirementBandHTML(analytics, household, tenure);
-  }, 300);
-}
-
-// A blend of profiles.js's own keys and any glide paths already defined
-// on this plan (created via the comprehensive workspace — this page
-// never creates one of its own; see retirementStandalone.js's own
-// header on why the page stays single-person, existing-shape-only).
-// The middle profile key — createSuperAccount/createAsset's own default
-// for a brand-new account/asset (planState.js: `keys[Math.floor((keys.
-// length - 1) / 2)]`). Reused here so a not-yet-created super account
-// (nothing typed into any of its fields yet) shows the SAME allocation
-// its own creation would actually pick, rather than the browser's
-// default "nothing selected, so show the first option" behaviour —
-// which would otherwise silently show "Cash" (alphabetically first)
-// while a real edit creates a middle-of-the-road profile underneath it.
-function retirementDefaultProfileKey() {
-  return PROFILE_KEYS[Math.floor((PROFILE_KEYS.length - 1) / 2)] ?? null;
-}
-
-// spec 34, Commit 3: "A glide path selector alongside the risk profile
-// — the two presets from spec 32 plus any the adviser has defined."
-// The two presets are ALWAYS offered (never conditioned on whether one
-// has been picked before — each pick creates its own new glide path,
-// same as the comprehensive workspace's own "add-preset-*" buttons), so
-// the adviser can go straight from "static profile" to "lifecycle"
-// without a trip to the comprehensive workspace's Settings panel first.
-const GLIDE_PATH_PRESET_LABELS = {
-  single: "Single-step (High Growth → Balanced at retirement)",
-  gradual: "Gradual (steps down before retirement, then again at 75)",
-};
-
-function retirementAllocationOptionsHTML(allocation) {
-  const resolved = allocation ?? { mode: "profile", profile: retirementDefaultProfileKey() };
-  const isGlidePath = resolved.mode === "glidePath";
-  const glidePaths = retirementPageState.plan.glidePaths ?? [];
-  const profileOpts = PROFILE_KEYS.map((k) =>
-    `<option value="profile:${k}"${!isGlidePath && resolved.profile === k ? " selected" : ""}>${escapeHTML(k)}</option>`
-  ).join("");
-  const glideOpts = glidePaths.map((gp) =>
-    `<option value="glidePath:${gp.id}"${isGlidePath && resolved.glidePathId === gp.id ? " selected" : ""}>${escapeHTML(gp.name)} (glide path)</option>`
-  ).join("");
-  const presetOpts = GLIDE_PATH_PRESET_KINDS.map((kind) =>
-    `<option value="preset:${kind}">+ New glide path — ${escapeHTML(GLIDE_PATH_PRESET_LABELS[kind])}</option>`
-  ).join("");
-  return profileOpts + glideOpts + presetOpts;
-}
-
-function parseRetirementAllocationValue(value) {
-  const [mode, key] = value.split(":");
-  return mode === "glidePath" ? { mode: "glidePath", glidePathId: key } : { mode: "profile", profile: key };
-}
-
-// The one-line assumption summary (spec's own "not buried in a modal —
-// the whole point of the comparison is that assumptions are legible"),
-// read off the SAME super allocation the form itself is editing — a
-// glide path has no single return figure (it varies by age), so that
-// case names the glide path instead of a number. One line per person —
-// a couple can hold two different risk profiles, so a single combined
-// line would either pick one arbitrarily or blur them together.
-function retirementAssumptionSummaryHTML(owner, label) {
-  const sa = superAccountFor(retirementPageState, owner);
-  const cpi = retirementPageState.assumptions.cpi;
-  const icrPct = sa?.icrPct ?? 0;
-  // No super account exists until the user edits ANY of its own fields
-  // (retirementStandalone.js's own ensurePersonSuperAccount) — resolve
-  // what allocation WOULD be created (the same middle-profile default
-  // createSuperAccount itself picks) so this summary never shows a
-  // different assumption than the one about to be saved.
-  const allocation = sa?.allocation ?? { mode: "profile", profile: retirementDefaultProfileKey() };
-  let returnText;
-  if (allocation.mode === "glidePath") {
-    const gp = (retirementPageState.plan.glidePaths ?? []).find((g) => g.id === allocation.glidePathId);
-    returnText = `Return: glide path "${escapeHTML(gp?.name ?? "unknown")}" (varies by age)`;
-  } else {
-    const profile = PROFILES[allocation.profile];
-    const grossNominal = profile ? (profile.incomeReturn + profile.growthReturn) * 100 : 0;
-    const netReal = profile ? ((1 + profile.incomeReturn + profile.growthReturn - icrPct / 100) / (1 + cpi) - 1) * 100 : 0;
-    returnText = `Return: ${escapeHTML(allocation.profile ?? "—")} — ${grossNominal.toFixed(1)}% p.a. nominal (${netReal.toFixed(1)}% real net of fees)`;
-  }
-  return `
-    <p class="helper-text retirement-assumption-summary">
-      ${label ? `<strong>${escapeHTML(label)}:</strong> ` : ""}${returnText} · Fee: ${icrPct.toFixed(2)}% p.a. · Inflation: ${(cpi * 100).toFixed(1)}% p.a.
-      · Glide path: ${allocation.mode === "glidePath" ? "applies" : "none"}
-    </p>
-  `;
-}
-
-// "Every derived default labelled" (the spec's own second required
-// bullet) — resolved via the SAME resolveIncomeRequired accessor the
-// engine itself calls, at year 0, so the figure shown here can never
-// disagree with what a real projection would report for the same
-// input. `yearly` is omitted from ctx (no projection has run on this
-// page in Commit 1) — asfaModest's own derived-homeowner-status falls
-// back to "renter" in that case, the same disclosed simplification
-// deterministic.js's own income-driven-drawdown resolution already
-// uses for the identical reason (see that module's own comment).
-// Household-aware (single vs couple ASFA figures/labels) — resolveIncome
-// Required itself already keys off plan.household; only the LABEL text
-// needed the same household passed through explicitly.
-function retirementIncomeRequiredLabelHTML() {
-  const plan = retirementPageState.plan;
-  const cfg = plan.retirement?.incomeRequired;
-  const household = isCoupleHousehold(plan.household) ? "couple" : "single";
-  const schedule = buildSchedules(retirementPageState);
-  const accessor = resolveIncomeRequired(plan, schedule, retirementPageState.assumptions.cpi, retirementPageState.assumptions.wageGrowth ?? 0.027, {
-    properties: retirementPageState.properties, liabilities: retirementPageState.liabilities,
-  });
-  const amount = accessor(0);
-  const sourceLabel = {
-    currentExpenses: "current expenses",
-    custom: "a custom amount",
-    asfaComfortable: asfaStandardLabel("comfortable", household),
-    asfaModest: asfaStandardLabel("modest", household) + " — derived",
-    asfaModestRenter: asfaStandardLabel("modestRenter", household),
-  }[cfg?.source] ?? "current expenses";
-  return amount == null
-    ? `<p class="helper-text">Income required: not yet active (starts at retirement).</p>`
-    : `<p class="helper-text">Income required: ${fmtMoney(amount)} — derived from ${escapeHTML(sourceLabel)}</p>`;
-}
-
-// About + Superannuation fields for ONE person — rendered once for a
-// single household, twice (client, partner) for a couple. `owner` and
-// `personLabel` thread through to each field's data-rp-owner so the
-// delegated change handler below knows which person's row to touch.
-// --- Retirement Projection — Standalone Surface: derived inputs
-// (spec 34, Commit 1) --------------------------------------------------
-//
-// "The page knows things" — every one of these reads only from
-// retirementPageState + the already-computed projection (spec 12's own
-// governing principle: never a second, competing calculation). None of
-// them are editable inputs, so none register in smartDefaults.js's own
-// SMART_DEFAULTS (that registry describes PRE-FILLED, overridable input
-// VALUES — "Default: X — kind (reason)" behind a tooltip; every figure
-// here has no input to default, just a derived readout) — the
-// underlying PRINCIPLE (show the source, never let a computed figure
-// pass as a considered one) is followed inline instead, in the same
-// plain-sentence shape the spec's own worked examples use.
-
-// Super Guarantee — sgFor (retirementStandalone.js) does the actual
-// calculation; this just picks the wording (spec 34's own literal
-// example keeps the "capped at..." clause even when not binding —
-// disclosing the general rule; the capped branch instead names the
-// actual base and salary, since that's the more useful sentence once
-// the cap genuinely matters).
-function retirementSgHTML(salary) {
-  const sg = rsSgFor(retirementPageState, salary);
-  const pct = sg.ratePct.toFixed(0);
-  const detail = sg.isCapped
-    ? `${pct}% of the ${fmtMoney(sg.sgMaximumSalary)} maximum contribution base — your ${fmtMoney(salary)} salary exceeds it`
-    : `${pct}% of ${fmtMoney(salary)}, capped at the maximum contribution base`;
-  return `<p class="helper-text">Super Guarantee: ${fmtMoney(sg.amount)} (${detail})</p>`;
-}
-
-// Preservation age / age pension age — ageYear (retirementStandalone.js)
-// does the resolution; this just formats the sentence.
-function retirementAgeYearLabel(label, owner, age, projection) {
-  const resolved = rsAgeYear(retirementPageState, owner, age, projection.schedule);
-  const yearText = resolved.outOfRange ? "beyond this projection" : String(resolved.year);
-  return `<p class="helper-text">${escapeHTML(label)}: age ${age} (${yearText})</p>`;
-}
-
-// Concessional cap headroom — capHeadroomFor (retirementStandalone.js)
-// reads the SAME projection.yearly[0].superCapUsage[owner] the
-// comprehensive Super section's own superCapHeadroomHTML reads, so
-// this can never disagree with that figure. "Personal" omitted unless
-// nonzero — this page has no personal-deductible input of its own, so
-// it would otherwise always read $0.
-function retirementCapHeadroomHTML(owner, projection) {
-  const usage = rsCapHeadroomFor(projection, owner);
-  if (!usage) return "";
-  const personalPart = usage.personalDeductible > 0 ? ` · ${fmtMoney(usage.personalDeductible)} personal` : "";
-  return `
-    <p class="helper-text super-cap-headroom">
-      ${fmtMoney(usage.cap)} cap · ${fmtMoney(usage.sg)} SG · ${fmtMoney(usage.salarySacrifice)} sacrifice${personalPart} ·
-      <strong>${fmtMoney(usage.available)} available</strong>
-      (incl. ${fmtMoney(usage.carryForwardAvailable)} carry-forward)
-    </p>
-  `;
-}
-
-// Division 293 warning — firstDiv293Year (retirementStandalone.js) does
-// the actual reconstruction/scan; this just formats the sentence.
-function retirementDiv293WarningHTML(owner, projection) {
-  const hit = rsFirstDiv293Year(retirementPageState, projection, owner);
-  if (!hit) return "";
-  return `<p class="helper-warning">Division 293 applies from ${hit.year}${hit.age != null ? ` (age ${hit.age})` : ""} — an extra ${hit.ratePct.toFixed(0)}% tax on low-tax super contributions once income plus concessional contributions passes ${fmtMoney(hit.threshold)}.</p>`;
-}
-
-// Age pension eligibility, derived and shown rather than a bare toggle
-// (spec 34: "Age pension modelled from age 67 (2049), with the toggle
-// to suppress it"). Client-anchored — the household toggle applies to
-// everyone in the household (setIncludeAgePension already keeps both
-// people's own centrelinkEligible flags in lockstep), so naming one
-// resolved year is a reasonable simplification consistent with every
-// other client-anchored household-level display already on this page.
-function retirementAgePensionToggleLabel(projection) {
-  const resolved = rsAgePensionEligibilityFor(retirementPageState, projection.schedule);
-  const yearText = resolved.outOfRange ? "beyond this projection" : String(resolved.year);
-  return `Age pension modelled from age ${resolved.age} (${yearText})`;
-}
-
-function retirementPersonCardsHTML(owner, personLabel, pf, projection) {
-  const sa = superAccountFor(retirementPageState, owner);
-  const ownerAttr = ` data-rp-owner="${owner}"`;
-  const contributionFrom = pf.concessionalContributionsFrom ?? { kind: "anchor", anchorId: "start" };
-  const contributionTo = pf.concessionalContributionsTo
-    ?? { kind: "anchor", anchorId: owner === "partner" ? "retirement-partner" : "retirement-client" };
-  return `
-    <div class="focus-section">
-      <h3>${escapeHTML(personLabel)}</h3>
-      <div class="person-grid">
-        <div class="cf-cell">
-          <label>First name</label>
-          <input type="text" maxlength="60" value="${escapeHTML(pf.firstName)}" data-rp-field="firstName"${ownerAttr} />
-        </div>
-        <div class="cf-cell">
-          <label>Date of birth</label>
-          <input type="date" value="${escapeHTML(pf.dob ?? "")}" data-rp-field="dob"${ownerAttr} />
-        </div>
-        <div class="cf-cell">
-          <label>Retirement age</label>
-          <input type="number" min="18" max="120" step="1" value="${pf.retirementAge}" data-rp-field="retirementAge"${ownerAttr} />
-        </div>
-      </div>
-      ${retirementAgeYearLabel("Preservation age", owner, rsPreservationAgeFor(retirementPageState, owner, projection.schedule).age, projection)}
-      ${retirementAgeYearLabel("Age pension age", owner, rsAgePensionAgeFor(retirementPageState, owner, projection.schedule).age, projection)}
-      <div class="person-grid">
-        <div class="cf-cell">
-          <label>Current super balance ($)</label>
-          <input type="number" min="0" step="1000" value="${pf.superBalance}" data-rp-field="superBalance"${ownerAttr} />
-        </div>
-        <div class="cf-cell">
-          <label>Salary ($ p.a.)</label>
-          <input type="number" min="0" step="1000" value="${pf.salary}" data-rp-field="salary"${ownerAttr} />
-        </div>
-      </div>
-      ${retirementSgHTML(pf.salary)}
-      <div class="person-grid">
-        <div class="cf-cell">
-          <label>Concessional contributions beyond SG ($ p.a.)</label>
-          <input type="number" min="0" step="500" value="${pf.concessionalContributions}" data-rp-field="concessionalContributions"${ownerAttr} />
-        </div>
-        <div class="cf-cell">
-          <label>Contribution from</label>
-          ${dateRefControlHTML(contributionFrom, owner, `data-rp-field="ccFrom" data-rp-owner="${owner}"`, 18, 120, retirementPageState.plan, projection.schedule)}
-        </div>
-        <div class="cf-cell">
-          <label>Contribution until</label>
-          ${dateRefControlHTML(contributionTo, owner, `data-rp-field="ccTo" data-rp-owner="${owner}"`, 18, 120, retirementPageState.plan, projection.schedule)}
-        </div>
-        <div class="cf-cell">
-          <label>Risk profile / glide path</label>
-          <select data-rp-field="superAllocation"${ownerAttr}>${retirementAllocationOptionsHTML(sa?.allocation)}</select>
-        </div>
-      </div>
-      ${retirementCapHeadroomHTML(owner, projection)}
-      ${retirementDiv293WarningHTML(owner, projection)}
-      ${retirementAssumptionSummaryHTML(owner, personLabel)}
-    </div>
-  `;
-}
-
-// --- Retirement Projection — Standalone Surface: outputs (spec 33,
-// Commit 2) -----------------------------------------------------------
-//
-// Mounts what phase one already built — retirementAnalytics.js,
-// goalVsPosition.js, lifestyleBand.js — reading the SAME already-run
-// projection every output on this page shares (spec 12's own governing
-// principle: never a separate calculation per output). Plus a new
-// super/pension balance chart and a year-by-year table, both derived
-// the same way. "Everything updates live as inputs change" (the spec's
-// own words) falls out for free: renderRetirementPageBody already
-// re-runs on every edit, and this page's own projectPlan() call is the
-// only one anywhere touching retirementPageState.
-//
-// Real (today's) dollars throughout, no nominal/real toggle of this
-// page's own — the spec names none, and the engine's own native unit
-// already IS real terms (CLAUDE.md: "Real terms everywhere in the
-// engine; nominal is display-time scaling") — so simply not scaling
-// gives exactly that. retirementBandHTML (lifestyleBand.js's own
-// renderer, imported already) already works this way unconditionally;
-// retirementPageSummaryHTML below is a deliberate near-duplicate of the
-// Focus view's own retirementSummaryHTML for the SAME reason — that
-// one's own moneyAt() closes over the comprehensive workspace's global
-// displayFactor()/isNominal(), which read the MOUNTED workspace
-// scenario, not retirementPageState; reusing it here would silently
-// display the wrong scenario's units (or throw, if no workspace is
-// mounted in this navigation at all — this route never mounts one).
-//
-// Element ids are prefixed "rp" and never reused anywhere else in this
-// file — pageRetirement and the comprehensive workspace's own
-// Focus > Retirement view (focusRetirementGoalChart etc.) can both
-// exist in the DOM at once (only one hidden via CSS, see showPage), so
-// a shared id would risk $() grabbing the wrong, hidden element.
-
-function retirementPageSummaryHTML(analytics) {
-  const money = (v) => (v == null ? "—" : fmtMoney(v));
-  const ageOrDash = (v) => (v == null ? "—" : Math.round(v));
-  const pctOrDash = (v) => (v == null ? "—" : `${v.toFixed(0)}%`);
-  const le = analytics.le, lePlus5 = analytics.lePlus5;
-  const stats = [
-    retirementStatHTML("Retirement age", analytics.retirement.age, true),
-    retirementStatHTML("Capital at retirement", money(analytics.capitalAtRetirement)),
-    retirementStatHTML("First shortfall age", ageOrDash(analytics.firstShortfallAge)),
-    retirementStatHTML("Super/pension exhaustion age", ageOrDash(analytics.superPensionExhaustionAge)),
-    retirementStatHTML(`Capital at LE (age ${le.age})`, money(le.capitalAtLE)),
-    retirementStatHTML("Average retirement income to LE", money(le.averageRetirementIncome)),
-    retirementStatHTML("Average age pension to LE", money(le.averageAgePension)),
-    retirementStatHTML("Age pension % of income to LE", pctOrDash(le.averageAgePensionPctOfIncome)),
-    retirementStatHTML("Sustainable income to LE", le.sustainableIncomeConverged ? money(le.sustainableIncomeToLE) : "—"),
-    retirementStatHTML(`Sustainable income to LE+5 (age ${lePlus5.age})`, lePlus5.sustainableIncomeConverged ? money(lePlus5.sustainableIncomeToLE) : "—"),
-  ].join("");
-  const warning = analytics.materialLEDifference
-    ? `<p class="helper-warning">Sustainable income to LE and LE+5 differ by more than 10% — outliving the average life expectancy materially changes what's sustainable, so both are shown rather than one headline figure.</p>`
-    : "";
-  return `<div class="summary-strip">${stats}</div>${warning}`;
-}
-
-// Adapted from renderFocusRetirementGoalChart (spec 32, Commit 5a) —
-// same segments, same crossover annotation, same optional ASFA
-// reference lines — but reading explicit params instead of the
-// comprehensive workspace's globals, and with no nominal/real scaling
-// (see this section's own header).
-function renderRetirementGoalChart(yearIdxs, ages, summary, reqByYear, household, tenure) {
-  const el = $("rpGoalChart");
-  if (!el) return;
-  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
-
-  const traces = [];
-  for (const seg of GOAL_CHART_SEGMENTS) {
-    const vals = yearIdxs.map((y) => summary.series[y][seg.key]);
-    if (seriesIsAllZero(vals)) continue;
-    traces.push({
-      x: ages, y: vals, name: seg.name, type: "bar", marker: { color: seg.color },
-      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
-    });
-  }
-  const reqSeries = yearIdxs.map((y) => reqByYear[y]);
-  if (reqSeries.some((v) => v != null)) {
-    traces.push({
-      x: ages, y: reqSeries, name: "Income Required", type: "scatter", mode: "lines",
-      line: { color: "#c1121f", width: 2 },
-      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Income Required</extra>",
-    });
-  }
-  const asfaLowerStandard = tenure === "renter" ? "modestRenter" : "modest";
-  for (const std of [asfaLowerStandard, "comfortable"]) {
-    const amt = asfaAnnual(std, household);
-    if (amt == null) continue;
-    traces.push({
-      x: ages, y: yearIdxs.map(() => amt), name: asfaStandardLabel(std, household),
-      type: "scatter", mode: "lines", line: { color: "#888", width: 1, dash: "dot" },
-      hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(asfaStandardLabel(std, household))}</extra>`,
-    });
-  }
-
-  const crossoverShapes = summary.crossoverYear != null ? [{
-    type: "line", xref: "x", x0: summary.crossoverAge, x1: summary.crossoverAge, yref: "paper", y0: 0, y1: 1,
-    line: { color: "rgba(180, 40, 40, 0.55)", width: 1.5, dash: "dash" },
-  }] : [];
-  const crossoverAnnotations = summary.crossoverYear != null ? [{
-    x: summary.crossoverAge, y: 1, xref: "x", yref: "paper", yanchor: "bottom", xanchor: "left",
-    text: "First shortfall", showarrow: false, textangle: -90,
-    font: { size: 9, color: "rgba(180, 40, 40, 0.85)" },
-  }] : [];
-
-  Plotly.react(el, traces, {
-    margin: { l: 70, r: 20, t: 24, b: 60 },
-    paper_bgcolor: "white", plot_bgcolor: "white",
-    barmode: "stack", hovermode: "x unified", showlegend: true,
-    legend: { orientation: "h", y: -0.3, x: 0.5, xanchor: "center" },
-    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
-    yaxis: {
-      title: { text: "Income (today's dollars)", standoff: 10 },
-      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
-    },
-    shapes: crossoverShapes,
-    annotations: crossoverAnnotations,
-    font: BASE_CHART_FONT,
-  }, { displayModeBar: false, responsive: true });
-}
-
-// The chart the spec's own Commit 2 text names as the one "the
-// comparison tool leads with" — household-wide super (accumulation)
-// and pension (drawdown) balances, stacked so the combined height
-// reads as total retirement capital, the same shape renderSuperBalances
-// Chart already uses for the comprehensive workspace's own per-account
-// breakdown, but collapsed to the two aggregate figures every yearly
-// row already carries (row.superClosing/pensionClosing — see
-// retirementAnalytics.js's own superPensionExhaustionAge, which reads
-// the identical two fields).
-function renderRetirementBalanceChart(projection, yearIdxs) {
-  const el = $("rpBalanceChart");
-  if (!el) return;
-  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
-
-  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
-  const superSeries = yearIdxs.map((y) => projection.yearly[y].superClosing ?? 0);
-  const pensionSeries = yearIdxs.map((y) => projection.yearly[y].pensionClosing ?? 0);
-
-  const traces = [];
-  if (!seriesIsAllZero(superSeries)) {
-    traces.push({
-      x: ages, y: superSeries, name: "Super (accumulation)", type: "scatter", mode: "lines",
-      stackgroup: "balance", fill: "tonexty", line: { color: "#1c5ab4", width: 1 },
-      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Super</extra>",
-    });
-  }
-  if (!seriesIsAllZero(pensionSeries)) {
-    traces.push({
-      x: ages, y: pensionSeries, name: "Pension (drawdown)", type: "scatter", mode: "lines",
-      stackgroup: "balance", fill: "tonexty", line: { color: "#6b8e23", width: 1 },
-      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Pension</extra>",
-    });
-  }
-  if (traces.length === 0) {
-    el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Nothing to show yet — enter a super balance above to see it here.</p>`;
-    return;
-  }
-
-  Plotly.react(el, traces, {
-    margin: { l: 70, r: 20, t: 24, b: 50 },
-    paper_bgcolor: "white", plot_bgcolor: "white",
-    hovermode: "x unified", showlegend: true,
-    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
-    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
-    yaxis: {
-      title: { text: "Balance (today's dollars)", standoff: 10 },
-      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
-    },
-    font: BASE_CHART_FONT,
-  }, { displayModeBar: false, responsive: true });
-}
-
-// --- Asset allocation over time (spec 34, Commit 3) ---------------------
-//
-// "The asset allocation chart on the page, showing defensive rising
-// over time. This is the picture that justifies the strategy and the
-// reason the option was asked for." Reuses allocationSeries
-// (allocation.js) EXACTLY as the comprehensive workspace's own asset-
-// allocation chart does — the household's super account(s) plus the
-// "other investments" asset, whatever mode (static profile or glide
-// path) each is actually on right now. No bonds/properties on this
-// page; no person filter (this page's whole surface is one household).
-function renderRetirementAllocationChart(projection, yearIdxs) {
-  const el = $("rpAllocationChart");
-  if (!el) return;
-  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
-  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
-  const { perYear, usesCustom } = allocationSeries(
-    yearIdxs.map((y) => projection.yearly[y]), retirementPageState.assets, retirementPageState.plan.superAccounts ?? [],
-    PROFILES, [], retirementPageState.plan.glidePaths,
-    { client: projection.schedule.clientAges, partner: projection.schedule.partnerAges },
-    (i) => yearIdxs[i]
-  );
-  if (perYear.every((p) => p.total === 0)) {
-    el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Nothing to show yet — enter a super balance or other investments above to see it here.</p>`;
-    return;
-  }
-  const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#d97b2f"];
-  const traces = ASSET_CLASS_KEYS.map((k, i) => ({
-    x: ages, y: perYear.map((p) => p.weightPct[k]),
-    name: ASSET_CLASS_LABELS[k], type: "scatter", mode: "lines",
-    stackgroup: "alloc", fill: "tonexty",
-    line: { color: palette[i % palette.length], width: 1 },
-    hovertemplate: `Age %{x}<br>%{y:.1f}%<extra>${escapeHTML(ASSET_CLASS_LABELS[k])}</extra>`,
-  }));
-  Plotly.react(el, traces, {
-    margin: { l: 60, r: 20, t: 24, b: 50 },
-    paper_bgcolor: "white", plot_bgcolor: "white",
-    hovermode: "x unified", showlegend: true,
-    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
-    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
-    yaxis: {
-      title: { text: "Allocation", standoff: 10 },
-      tickformat: ".0f", ticksuffix: "%", dtick: 25,
-      range: [0, 100], gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
-    },
-    font: BASE_CHART_FONT,
-  }, { displayModeBar: false, responsive: true });
-  $("rpAllocationNote").textContent = usesCustom
-    ? "Assets and super accounts with a custom allocation are shown using their selected volatility-basis profile's class weights (the same profile Monte Carlo variability borrows from)."
-    : "";
-}
-
-// --- Lifecycle vs static (spec 34, Commit 3) -----------------------------
-//
-// "Lifecycle versus static, side by side: the same client under a
-// glide path and under a fixed profile, as two lines, with the
-// difference in capital at retirement and at life expectancy stated."
-// The single most valuable screen in the spec — it answers the young-
-// client objection and justifies lifecycle investing in one picture.
-
-let retirementLifecycleOwner = "client"; // which person's account this comparison runs on (couple only)
-
-function retirementLifecycleComparisonHTML(comparison, label) {
-  if (!comparison) {
-    return `<p class="helper-text">${escapeHTML(label)} has no super account yet — enter a balance above to compare lifecycle investing against a fixed profile.</p>`;
-  }
-  const at = (v) => (v == null ? "—" : fmtMoney(v));
-  const retirementLine = comparison.capitalAtRetirement == null
-    ? "This person's own retirement falls beyond this projection, so no retirement-age figure is shown."
-    : `At retirement, the glide path leaves ${at(Math.abs(comparison.capitalAtRetirement.diff))} ${comparison.capitalAtRetirement.diff >= 0 ? "more" : "less"} than the static profile (${at(comparison.capitalAtRetirement.glide)} vs ${at(comparison.capitalAtRetirement.static)}).`;
-  const leLine = `By life expectancy (age ${comparison.capitalAtLE.age}), the glide path leaves ${at(Math.abs(comparison.capitalAtLE.diff))} ${comparison.capitalAtLE.diff >= 0 ? "more" : "less"} than the static profile (${at(comparison.capitalAtLE.glide)} vs ${at(comparison.capitalAtLE.static)}).`;
-  const presetNote = comparison.glideIsPreset
-    ? ` (generated for this comparison only — not yet saved to the plan)`
-    : "";
-  return `
-    <p class="helper-text">Comparing this plan under <strong>${escapeHTML(comparison.glideLabel)}</strong>${presetNote} against a fixed <strong>${escapeHTML(comparison.staticLabel)}</strong> profile — everything else about the plan (balance, salary, contributions, drawdown) is identical in both.</p>
-    <div id="rpLifecycleChart" class="chart-mount"></div>
-    <p class="helper-text">${escapeHTML(retirementLine)}</p>
-    <p class="helper-text">${escapeHTML(leLine)}</p>
-  `;
-}
-
-function renderRetirementLifecycleChart(comparison) {
-  const el = $("rpLifecycleChart");
-  if (!el) return;
-  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
-  if (!comparison) return;
-  const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), comparison.glideProjection.schedule.clientAges, []);
-  const ages = yearIdxs.map((y) => comparison.glideProjection.schedule.clientAges[y]);
-  const glideSeries = yearIdxs.map((y) => comparison.glideProjection.yearly[y].netAssets);
-  const staticSeries = yearIdxs.map((y) => comparison.staticProjection.yearly[y].netAssets);
-  const traces = [
-    { x: ages, y: glideSeries, mode: "lines", name: `Glide path (${comparison.glideLabel})`,
-      line: { color: "rgb(28, 90, 180)", width: 2.5 }, hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Glide path</extra>" },
-    { x: ages, y: staticSeries, mode: "lines", name: `Static (${comparison.staticLabel})`,
-      line: { color: "#dc5a28", width: 2.5, dash: "dash" }, hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Static</extra>" },
-  ];
-  Plotly.react(el, traces, {
-    margin: { l: 70, r: 20, t: 24, b: 50 },
-    paper_bgcolor: "white", plot_bgcolor: "white",
-    hovermode: "x unified", showlegend: true,
-    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
-    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
-    yaxis: {
-      title: { text: "Net assets (today's dollars)", standoff: 10 },
-      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
-    },
-    font: BASE_CHART_FONT,
-  }, { displayModeBar: false, responsive: true });
-}
-
-// --- Lifecycle vs static — distributions (spec 34, Commit 3) ------------
-//
-// "And with Monte Carlo from Commit 2, run that comparison as
-// distributions — because the honest answer is that a glide path is
-// not simply worse or better. It has a narrower distribution: worse
-// median, better tail." Reuses runMonteCarlo/monteCarloWorker.js
-// exactly, TWICE — once per arm's own already-cloned state (the SAME
-// clones the deterministic comparison above already built) — via two
-// independent workers so progress/completion for one arm never blocks
-// the other. Deliberately separate module state from Commit 2's single-
-// plan rpMc* — this section compares TWO runs at once, a different
-// shape, not a variation on the same one.
-let rpCompareResult = null; // { glide, static } | null — each a runMonteCarlo() result
-let rpCompareFingerprint = null;
-let rpCompareRunning = false;
-let rpCompareProgress = null; // { glide: {done,total}|null, static: {done,total}|null }
-let rpCompareWorkers = null; // { glide: Worker, static: Worker } | null
-let rpCompareRenderCache = null; // { owner, ages, yearIdxs } — set once per full page render
-
-function stopRetirementCompareWorkers() {
-  if (rpCompareWorkers) {
-    rpCompareWorkers.glide?.terminate();
-    rpCompareWorkers.static?.terminate();
-    rpCompareWorkers = null;
-  }
-  rpCompareRunning = false;
-  rpCompareProgress = null;
-}
-
-function invalidateRetirementCompareResult() {
-  rpCompareResult = null;
-  rpCompareFingerprint = null;
-  stopRetirementCompareWorkers();
-}
-
-function renderRetirementCompareFromCache() {
-  if (!rpCompareRenderCache) return;
-  renderRetirementCompareSection(rpCompareRenderCache.comparison);
-}
-
-// `comparison` is the SAME object retirementLifecycleComparisonHTML/
-// renderRetirementLifecycleChart already used for this render — computed
-// once per full page render (see renderRetirementPageBody), never
-// re-derived here, so a progress tick during a run never pays for a
-// second pair of projectPlan() calls.
-function renderRetirementCompareSection(comparison) {
-  const runBtn = els.pageRetirement.querySelector('[data-rp-action="compare-run"]');
-  const cancelBtn = els.pageRetirement.querySelector('[data-rp-action="compare-cancel"]');
-  const statusEl = $("rpCompareStatus");
-  if (!runBtn || !cancelBtn || !statusEl) return;
-  runBtn.hidden = rpCompareRunning;
-  cancelBtn.hidden = !rpCompareRunning;
-  if (rpCompareRunning) {
-    const done = (rpCompareProgress?.glide?.done ?? 0) + (rpCompareProgress?.static?.done ?? 0);
-    const total = (rpCompareProgress?.glide?.total ?? DEFAULT_NUM_PATHS) + (rpCompareProgress?.static?.total ?? DEFAULT_NUM_PATHS);
-    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-    statusEl.textContent = `Simulating both arms — ${done.toLocaleString()} / ${total.toLocaleString()} paths (${pct}%).`;
-  } else if (!rpCompareResult) {
-    statusEl.textContent = "";
-  } else {
-    statusEl.textContent = "Re-run after changing the plan — this result is a snapshot, not live.";
-  }
-  // BOTH arms, not just truthy — the two workers finish independently,
-  // so rpCompareResult is genuinely partial ({ glide } only, say) for
-  // however long the slower arm is still running; rendering the chart/
-  // stats against a partial result crashed on the missing arm's own
-  // netAssets (a real defect this comment now guards against).
-  const bothDone = !!(rpCompareResult?.glide && rpCompareResult?.static);
-  const resultsEl = $("rpCompareResults");
-  if (!resultsEl) return;
-  resultsEl.hidden = !bothDone;
-  if (!bothDone) return;
-  renderRetirementCompareChart(comparison);
-  $("rpCompareStats").innerHTML = retirementCompareStatsHTML(rpCompareResult);
-}
-
-// "Two fan charts, or one chart with both medians and both 10–90 bands"
-// — one chart, per the spec's own simpler option: both medians as solid
-// lines, both 10–90 bands shaded (glide narrower, static wider is the
-// expected shape — the whole argument for lifecycle investing).
-function renderRetirementCompareChart(comparison) {
-  const el = $("rpCompareChart");
-  if (!el) return;
-  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
-  if (!comparison) return;
-  const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), comparison.glideProjection.schedule.clientAges, []);
-  const ages = yearIdxs.map((y) => comparison.glideProjection.schedule.clientAges[y]);
-  const band = (result, key) => yearIdxs.map((y) => result.netAssets[key][y]);
-
-  const glideOuter = "rgba(28, 90, 180, 0.12)", glideInner = "rgba(28, 90, 180, 0.28)";
-  const staticOuter = "rgba(220, 90, 40, 0.10)", staticInner = "rgba(220, 90, 40, 0.22)";
-  const traces = [
-    { x: ages, y: band(rpCompareResult.static, "p10"), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
-    { x: ages, y: band(rpCompareResult.static, "p90"), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: staticOuter,
-      name: "Static — 10th–90th", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
-    { x: ages, y: band(rpCompareResult.glide, "p10"), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
-    { x: ages, y: band(rpCompareResult.glide, "p90"), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: glideOuter,
-      name: "Glide path — 10th–90th", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
-    { x: ages, y: band(rpCompareResult.static, "p50"), mode: "lines", line: { color: "#dc5a28", width: 2, dash: "dash" },
-      name: "Static — median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Static median</extra>" },
-    { x: ages, y: band(rpCompareResult.glide, "p50"), mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
-      name: "Glide path — median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Glide path median</extra>" },
-  ];
-  Plotly.react(el, traces, {
-    margin: { l: 70, r: 20, t: 24, b: 50 },
-    paper_bgcolor: "white", plot_bgcolor: "white",
-    hovermode: "x unified", showlegend: true,
-    legend: { orientation: "h", y: -0.25, x: 0.5, xanchor: "center" },
-    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
-    yaxis: {
-      title: { text: "Net assets (today's dollars)", standoff: 10 },
-      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
-    },
-    font: BASE_CHART_FONT,
-  }, { displayModeBar: false, responsive: true });
-}
-
-// "It has a narrower distribution: worse median, better tail" — stated
-// as a fact about THIS run's own two spreads (p90 − p10 at the final
-// year), not asserted a priori; if the run doesn't show narrowing (a
-// real possibility for an unusual plan), this says so rather than
-// forcing the spec's own expected shape onto every result.
-function retirementCompareStatsHTML(result) {
-  const y = result.glide.years - 1;
-  const glideSpread = result.glide.netAssets.p90[y] - result.glide.netAssets.p10[y];
-  const staticSpread = result.static.netAssets.p90[y] - result.static.netAssets.p10[y];
-  const narrower = glideSpread < staticSpread;
-  const narrowingLine = narrower
-    ? `The glide path's own final-year spread (10th–90th percentile) is ${fmtMoney(staticSpread - glideSpread)} narrower than the static profile's — a narrower distribution, the outcome lifecycle investing is meant to produce.`
-    : `In this run, the glide path's own final-year spread is NOT narrower than the static profile's (${fmtMoney(glideSpread)} vs ${fmtMoney(staticSpread)}) — reported as run, not forced to the usually-expected shape.`;
-  const stats = [
-    retirementStatHTML("Glide path — median ending net assets", fmtMoney(result.glide.netAssets.p50[y])),
-    retirementStatHTML("Static — median ending net assets", fmtMoney(result.static.netAssets.p50[y])),
-    retirementStatHTML("Glide path — ruin probability", `${Math.round(result.glide.ruinProbability * 100)}%`),
-    retirementStatHTML("Static — ruin probability", `${Math.round(result.static.ruinProbability * 100)}%`),
-  ];
-  return `<div class="summary-strip">${stats.join("")}</div><p class="helper-text">${escapeHTML(narrowingLine)}</p>`;
-}
-
-function startRetirementCompareRun(owner) {
-  if (rpCompareRunning || !retirementPageState) return;
-  const comparison = buildLifecycleComparison(retirementPageState, owner, PROFILES);
-  if (!comparison) return;
-  rpCompareRunning = true;
-  rpCompareFingerprint = retirementMcFingerprint();
-  rpCompareProgress = { glide: { done: 0, total: DEFAULT_NUM_PATHS }, static: { done: 0, total: DEFAULT_NUM_PATHS } };
-  renderRetirementCompareFromCache();
-
-  const glideWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
-  const staticWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
-  rpCompareWorkers = { glide: glideWorker, static: staticWorker };
-
-  const onArmMessage = (arm) => (e) => {
-    const msg = e.data;
-    if (msg.type === "progress") {
-      rpCompareProgress = { ...rpCompareProgress, [arm]: { done: msg.done, total: msg.total } };
-      renderRetirementCompareFromCache();
-    } else if (msg.type === "done") {
-      rpCompareResult = { ...(rpCompareResult ?? {}), [arm]: msg.result };
-      if (rpCompareResult.glide && rpCompareResult.static) stopRetirementCompareWorkers();
-      renderRetirementCompareFromCache();
-    } else if (msg.type === "error") {
-      invalidateRetirementCompareResult();
-      renderRetirementCompareFromCache();
-      const statusEl = $("rpCompareStatus");
-      if (statusEl) statusEl.textContent = `Comparison failed: ${msg.message}`;
-    }
-  };
-  glideWorker.onmessage = onArmMessage("glide");
-  staticWorker.onmessage = onArmMessage("static");
-  const onArmError = () => {
-    invalidateRetirementCompareResult();
-    renderRetirementCompareFromCache();
-    const statusEl = $("rpCompareStatus");
-    if (statusEl) statusEl.textContent = "Comparison failed.";
-  };
-  glideWorker.onerror = onArmError;
-  staticWorker.onerror = onArmError;
-  glideWorker.postMessage({ state: comparison.glideState, profiles: PROFILES, options: {} });
-  staticWorker.postMessage({ state: comparison.staticState, profiles: PROFILES, options: {} });
-}
-
-function cancelRetirementCompareRun() {
-  invalidateRetirementCompareResult();
-  renderRetirementCompareFromCache();
-  const statusEl = $("rpCompareStatus");
-  if (statusEl) statusEl.textContent = "Cancelled.";
-}
-
-// --- Monte Carlo (spec 34, Commit 2) -----------------------------------
-//
-// Item 2 of the original brief: reuses runMonteCarlo (monteCarlo.js) and
-// monteCarloWorker.js EXACTLY as the comprehensive workspace's own Monte
-// Carlo view does — same worker, same progress/cancel contract, same
-// single locked ruin definition — wired to this page's own state
-// instead. No new engine work; this section is composition only.
-
-// Run/Cancel/status + results — driven by the rpMc* module state above.
-// `projection`/`yearIdxs`/`ages` come from retirementMcRenderCache (the
-// context the rest of the page is currently showing), NOT recomputed
-// here, so a progress tick never re-runs projectPlan().
-function renderRetirementMcSection(projection, yearIdxs, ages) {
-  const runBtn = els.pageRetirement.querySelector('[data-rp-action="mc-run"]');
-  const cancelBtn = els.pageRetirement.querySelector('[data-rp-action="mc-cancel"]');
-  const statusEl = $("rpMcStatus");
-  if (!runBtn || !cancelBtn || !statusEl) return; // not mounted (page navigated away)
-  runBtn.hidden = rpMcRunning;
-  cancelBtn.hidden = !rpMcRunning;
-  if (rpMcRunning) {
-    const pct = rpMcProgress && rpMcProgress.total > 0 ? Math.round((rpMcProgress.done / rpMcProgress.total) * 100) : 0;
-    statusEl.textContent = rpMcProgress
-      ? `Simulating — ${rpMcProgress.done.toLocaleString()} / ${rpMcProgress.total.toLocaleString()} paths (${pct}%).`
-      : "Simulating…";
-  } else if (!rpMcResult) {
-    statusEl.textContent = "";
-  } else {
-    statusEl.textContent =
-      `${rpMcResult.numPaths.toLocaleString()} paths in ${(rpMcResult.elapsedMs / 1000).toFixed(1)}s. ` +
-      "Re-run after changing the plan — this result is a snapshot, not live.";
-  }
-  const resultsEl = $("rpMcResults");
-  if (!resultsEl) return;
-  resultsEl.hidden = !rpMcResult;
-  if (!rpMcResult) return;
-  renderRetirementMcChart(rpMcResult, projection, yearIdxs, ages);
-  $("rpMcStats").innerHTML = retirementMcStatsHTML(rpMcResult, ages[ages.length - 1] ?? projection.schedule.clientAges[projection.schedule.clientAges.length - 1]);
-}
-
-// Probability of ruin, framed for the client first (spec: "the headline
-// is not 'ruin probability 18%' — it is 'in about 1 in 5 scenarios you
-// run short before 95'. State both; lead with the plain one."), the
-// modeller number and the success-framed restatement beside it, median
-// first-shortfall age when at least one path ruined, and the custom-
-// allocation flag runMonteCarlo already returns — surfaced, never
-// silently dropped.
-function retirementMcStatsHTML(result, endAge) {
-  const ruinProbability = result.ruinProbability; // the single locked definition (monteCarlo.js) — nothing here computes it a second way
-  const ruinPct = Math.round(ruinProbability * 100);
-  const successPct = Math.round((1 - ruinProbability) * 100);
-  const n = approxOneInN(ruinProbability);
-  const plain = n == null
-    ? `This plan lasted the whole way, to age ${endAge}, in every one of the ${result.numPaths.toLocaleString()} simulations run.`
-    : n <= 1
-      ? `This plan ran short before age ${endAge} in every simulation run.`
-      : `In about 1 in ${n} simulations, this plan runs short before age ${endAge}.`;
-  const stats = [
-    retirementStatHTML("Ruin probability", `${ruinPct}%`, true),
-    retirementStatHTML("Lasts to life expectancy", `${successPct}% of simulations`),
-  ];
-  if (result.medianShortfallAge != null) {
-    stats.push(retirementStatHTML("Median first-shortfall age", Math.round(result.medianShortfallAge)));
-  }
-  const customNote = result.customHoldings.length > 0
-    ? `<p class="helper-text">${result.customHoldings.length} asset(s) use custom returns; their variability is modelled on the volatility basis profile selected for each — ${result.customHoldings.map((h) => `${escapeHTML(h.name)} (${escapeHTML(h.volBasis)})`).join(", ")}.</p>`
-    : "";
-  return `
-    <p class="helper-text rp-mc-headline"><strong>${escapeHTML(plain)}</strong></p>
-    <div class="summary-strip">${stats.join("")}</div>
-    <p class="helper-text">Ruin probability: the fraction of simulated paths with any unfunded cashflow before this plan's own projection end — the single definition used everywhere in this tool. "Lasts to life expectancy" restates the same figure the way a client hears it.</p>
-    ${customNote}
-  `;
-}
-
-// Fan chart: 10/25/50/75/90 simulated net-asset bands with the
-// deterministic line overlaid (spec: "the deterministic line sits above
-// the median" — this tool's own existing disclosure on why: the median
-// of a lognormal-ish compounding process sits below its mean, and the
-// deterministic run compounds at the mean). Always today's dollars —
-// this page has no nominal/real toggle (see renderRetirementBalanceChart's
-// own header for the same convention).
-function renderRetirementMcChart(result, projection, yearIdxs, ages) {
-  const el = $("rpMcChart");
-  if (!el) return;
-  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
-  const band = (key) => yearIdxs.map((y) => result.netAssets[key][y]);
-  const p10 = band("p10"), p25 = band("p25"), p50 = band("p50"), p75 = band("p75"), p90 = band("p90");
-  // Same netAssets figure the deterministic engine reports
-  // (projection.yearly[y].netAssets) — genuinely comparable, not a
-  // second, differently-derived series.
-  const deterministic = yearIdxs.map((y) => projection.yearly[y].netAssets);
-
-  const outer = "rgba(28, 90, 180, 0.12)";
-  const inner = "rgba(28, 90, 180, 0.28)";
-  const traces = [
-    { x: ages, y: p10, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
-    { x: ages, y: p90, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: outer,
-      name: "10th–90th percentile", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
-    { x: ages, y: p25, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
-    { x: ages, y: p75, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: inner,
-      name: "25th–75th percentile", hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
-    { x: ages, y: p50, mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
-      name: "Median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
-    { x: ages, y: deterministic, mode: "lines", line: { color: "#444", width: 1.5, dash: "dash" },
-      name: "Deterministic projection", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Deterministic</extra>" },
-  ];
-
-  Plotly.react(el, traces, {
-    margin: { l: 70, r: 20, t: 24, b: 50 },
-    paper_bgcolor: "white", plot_bgcolor: "white",
-    hovermode: "x unified", showlegend: true,
-    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
-    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
-    yaxis: {
-      title: { text: "Net assets (today's dollars)", standoff: 10 },
-      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
-    },
-    font: BASE_CHART_FONT,
-  }, { displayModeBar: false, responsive: true });
-}
-
-// Age · super · pension · drawdown · age pension · other income · total
-// income · income required — the spec's own column list. "Drawdown",
-// "age pension" and "total income" (grossTotal) are read straight off
-// goalVsPositionSummary's own per-year series — the SAME numbers the
-// goal-versus-position chart's own bars sum to, so the two can never
-// disagree (the spec's own test requirement: "the table's totals match
-// the chart"). "Other income" collapses the remaining three chart
-// buckets (employment, investment income, asset drawdown) into one
-// column, since the spec's own table doesn't ask for them separately.
-// Raw per-year figures, shared by the on-screen table and the CSV
-// export (Commit 3) — built ONCE so the two can never disagree (the
-// spec's own test requirement: "the CSV matches the on-screen table").
-function retirementYearTableRows(projection, summary, yearIdxs) {
-  return yearIdxs.map((y) => {
-    const row = projection.yearly[y];
-    const s = summary.series[y];
-    return {
-      age: projection.schedule.clientAges[y],
-      superBalance: row.superClosing ?? 0,
-      pensionBalance: row.pensionClosing ?? 0,
-      drawdown: s.pensionDrawdown,
-      agePension: s.agePension,
-      otherIncome: s.employment + s.investmentIncome + s.assetDrawdown,
-      totalIncome: s.grossTotal,
-      incomeRequired: row.incomeRequired,
-    };
-  });
-}
-
-function retirementYearTableHTML(projection, summary, yearIdxs) {
-  const rows = retirementYearTableRows(projection, summary, yearIdxs).map((r) => `
-      <tr>
-        <td>${r.age}</td>
-        <td class="tl-num">${fmtMoney(r.superBalance)}</td>
-        <td class="tl-num">${fmtMoney(r.pensionBalance)}</td>
-        <td class="tl-num">${fmtMoney(r.drawdown)}</td>
-        <td class="tl-num">${fmtMoney(r.agePension)}</td>
-        <td class="tl-num">${fmtMoney(r.otherIncome)}</td>
-        <td class="tl-num">${fmtMoney(r.totalIncome)}</td>
-        <td class="tl-num">${r.incomeRequired == null ? "—" : fmtMoney(r.incomeRequired)}</td>
-      </tr>
-    `).join("");
-  return `
-    <div id="rpYearTable" style="max-height:480px; overflow:auto;">
-      <table class="tl">
-        <thead>
-          <tr>
-            <th>Age</th><th class="tl-num">Super</th><th class="tl-num">Pension</th>
-            <th class="tl-num">Drawdown</th><th class="tl-num">Age pension</th>
-            <th class="tl-num">Other income</th><th class="tl-num">Total income</th>
-            <th class="tl-num">Income required</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
-  `;
-}
-
-// CSV export (Commit 3) — same rows, same shared helpers (csvEsc/
-// downloadCSV) every other Focus view's own export already uses.
-// Raw numbers, not formatted currency strings — "so the two tools'
-// numbers can be diffed in a spreadsheet line by line" (the spec's own
-// words) wants arithmetic-ready values, not "$1,234".
-function retirementYearTableCSV(projection, summary, yearIdxs) {
-  const header = ["Age", "Super", "Pension", "Drawdown", "Age pension", "Other income", "Total income", "Income required"];
-  const lines = [header.map(csvEsc).join(",")];
-  for (const r of retirementYearTableRows(projection, summary, yearIdxs)) {
-    lines.push([
-      r.age, Math.round(r.superBalance), Math.round(r.pensionBalance), Math.round(r.drawdown),
-      Math.round(r.agePension), Math.round(r.otherIncome), Math.round(r.totalIncome),
-      r.incomeRequired == null ? "" : Math.round(r.incomeRequired),
-    ].map(csvEsc).join(","));
-  }
-  return lines;
-}
-
-// Like exportNameBase() but scoped to THIS page's own client/scenario —
-// exportNameBase() reads workspace.activeClientId/activeScenarioId
-// (whatever's mounted in the comprehensive workspace), which is not
-// necessarily what's open here (visiting this page never changes
-// which scenario is "active" there).
-function retirementExportNameBase() {
-  const client = findClient(workspace, retirementPageClientId);
-  const scenario = client?.scenarios.find((s) => s.id === retirementPageScenarioId);
-  return sanitiseFilename(`${client?.name ?? "client"}-${scenario?.name ?? "scenario"}`);
-}
-
-// Assumptions panel (spec 33, Commit 3) — "when two projections
-// disagree, this is the first thing anyone will want to see." Every
-// value here is read from the SAME source the engine itself reads for
-// THIS plan — PROFILES, SUPER_RATES_BASE (via superRatesFor),
-// MIN_DRAWDOWN_BANDS, agePensionRatesFor, this scenario's own super
-// accounts/assets — never a hard-coded list, so it cannot drift from
-// what the projection actually used. Read-only, with a link to the
-// comprehensive workspace's own Assumptions output view (Parameters
-// itself is a modal inside that workspace, not routable directly;
-// landing on Assumptions puts the same read values in front of the
-// user with Parameters one click away, same as it would be for any
-// other scenario).
-function retirementAssumptionsPanelHTML(household) {
-  const plan = retirementPageState.plan;
-  const a = retirementPageState.assumptions;
-  const mode = a.bracketMode === "frozen" ? "frozen" : "indexed";
-  const f0 = firstFyStartYear(plan.start);
-  const awote = a.awote ?? 0.032;
-
-  const returnRows = PROFILE_KEYS.map((k) => {
-    const profile = PROFILES[k];
-    const gross = (profile.incomeReturn + profile.growthReturn) * 100;
-    const net = ((1 + profile.incomeReturn + profile.growthReturn) / (1 + a.cpi) - 1) * 100;
-    return `<tr><td>${escapeHTML(k)}</td><td class="tl-num">${gross.toFixed(1)}%</td><td class="tl-num">${net.toFixed(1)}%</td></tr>`;
-  }).join("");
-
-  const feeRows = [];
-  const clientSa = superAccountFor(retirementPageState, "client");
-  if (clientSa) feeRows.push([`${household === "couple" ? "Client " : ""}super — ICR`, `${(clientSa.icrPct ?? 0).toFixed(2)}% p.a.`]);
-  if (household === "couple") {
-    const partnerSa = superAccountFor(retirementPageState, "partner");
-    if (partnerSa) feeRows.push(["Partner super — ICR", `${(partnerSa.icrPct ?? 0).toFixed(2)}% p.a.`]);
-  }
-  const otherAsset = findOtherInvestmentsAsset(retirementPageState);
-  if (otherAsset) feeRows.push(["Other investments — ICR", `${(otherAsset.icrPct ?? 0).toFixed(2)}% p.a.`]);
-  const feeRowsHTML = feeRows.length
-    ? feeRows.map(([label, val]) => `<tr><td>${escapeHTML(label)}</td><td class="tl-num">${escapeHTML(val)}</td></tr>`).join("")
-    : `<tr><td colspan="2">No fees entered yet.</td></tr>`;
-
-  const sr = superRatesFor(f0, mode, a.cpi, awote);
-  const ap = agePensionRatesFor(f0, mode, a.cpi, awote);
-  const householdAgePensionRows = (household === "couple" ? [
-    ["Age pension age", ap.ageOfEligibility],
-    ["Rate — each (p.a.)", fmtMoney(ap.couple.rateEach)],
-    ["Rate — combined (p.a.)", fmtMoney(ap.couple.rateCombined)],
-    ["Assets test — full-pension threshold (homeowner)", fmtMoney(ap.couple.assetsFullHomeowner)],
-    ["Assets test — full-pension threshold (non-homeowner)", fmtMoney(ap.couple.assetsFullNonHomeowner)],
-    ["Assets test — taper", `$${ap.reductionRatePer1000} per $1,000 above threshold, per year`],
-    ["Income test — free area (combined, p.a.)", fmtMoney(ap.couple.incomeFreeAreaCombined)],
-    ["Income test — taper", `${(ap.incomeReductionRate * 100).toFixed(0)}c per $1 above the free area`],
-    ["Deeming threshold (combined)", fmtMoney(ap.couple.deemingThreshold)],
-  ] : [
-    ["Age pension age", ap.ageOfEligibility],
-    ["Rate (p.a.)", fmtMoney(ap.single.rate)],
-    ["Assets test — full-pension threshold (homeowner)", fmtMoney(ap.single.assetsFullHomeowner)],
-    ["Assets test — full-pension threshold (non-homeowner)", fmtMoney(ap.single.assetsFullNonHomeowner)],
-    ["Assets test — taper", `$${ap.reductionRatePer1000} per $1,000 above threshold, per year`],
-    ["Income test — free area (p.a.)", fmtMoney(ap.single.incomeFreeArea)],
-    ["Income test — taper", `${(ap.incomeReductionRate * 100).toFixed(0)}c per $1 above the free area`],
-    ["Deeming threshold", fmtMoney(ap.single.deemingThreshold)],
-  ]).map(([l, v]) => `<tr><td>${escapeHTML(l)}</td><td class="tl-num">${escapeHTML(String(v))}</td></tr>`).join("");
-
-  const drawdownRows = MIN_DRAWDOWN_BANDS.map((b) =>
-    `<tr><td>${b.minAge}${b.maxAge === Infinity ? "+" : `–${b.maxAge}`}</td><td class="tl-num">${(b.pct * 100).toFixed(0)}%</td></tr>`
-  ).join("");
-
-  const workspaceLink = formatRoute({
-    page: "workspace", clientId: retirementPageClientId, scenarioId: retirementPageScenarioId,
-    area: "output", section: "assumptions",
-  });
-
-  return `
-    <details class="rp-assumptions">
-      <summary><strong>Assumptions</strong> — every value this projection actually used</summary>
-      <p class="helper-text">Read-only.
-        <a class="btn-text" href="${escapeHTML(workspaceLink)}">Open in comprehensive workspace → Assumptions / Parameters</a>
-        to change any of these.
-      </p>
-      <h4>Returns by profile</h4>
-      <table class="tl"><thead><tr><th>Profile</th><th class="tl-num">Gross nominal</th><th class="tl-num">Real (net of ${(a.cpi * 100).toFixed(1)}% CPI)</th></tr></thead>
-      <tbody>${returnRows}</tbody></table>
-      <h4>Fees — this scenario</h4>
-      <table class="tl"><tbody>${feeRowsHTML}</tbody></table>
-      <h4>Inflation and wage growth</h4>
-      <table class="tl"><tbody>
-        <tr><td>CPI</td><td class="tl-num">${(a.cpi * 100).toFixed(1)}% p.a.</td></tr>
-        <tr><td>Wage growth (WPI)</td><td class="tl-num">${((a.wageGrowth ?? 0.027) * 100).toFixed(1)}% p.a.</td></tr>
-        <tr><td>Super cap indexation (AWOTE)</td><td class="tl-num">${(awote * 100).toFixed(1)}% p.a.</td></tr>
-      </tbody></table>
-      <h4>Super tax</h4>
-      <table class="tl"><tbody>
-        <tr><td>Contributions tax</td><td class="tl-num">${(sr.contributionsTaxRate * 100).toFixed(0)}%</td></tr>
-        <tr><td>Contributions tax above Division 293 threshold (${fmtMoney(sr.div293Threshold)})</td><td class="tl-num">${((sr.contributionsTaxRate + sr.div293Rate) * 100).toFixed(0)}%</td></tr>
-        <tr><td>Earnings tax — accumulation phase</td><td class="tl-num">${(sr.earningsTaxRate * 100).toFixed(0)}%</td></tr>
-        <tr><td>Earnings tax — retirement (pension) phase</td><td class="tl-num">0% (exempt)</td></tr>
-      </tbody></table>
-      <h4>Pension drawdown minimums (% of 1 July balance, by age)</h4>
-      <table class="tl"><thead><tr><th>Age</th><th class="tl-num">Minimum</th></tr></thead><tbody>${drawdownRows}</tbody></table>
-      <h4>Age pension rates and thresholds (${escapeHTML(household)}, as at ${escapeHTML(ap.asAt)})</h4>
-      <table class="tl"><tbody>${householdAgePensionRows}</tbody></table>
-      <p class="helper-text">${escapeHTML(ap.source)}</p>
-    </details>
-  `;
-}
-
-// Copy-figures (spec 33, Commit 3) — plain text, the three headline
-// numbers the spec names by name: balance at retirement, first
-// shortfall age, sustainable income. Reads whatever analytics is
-// currently cached (see scheduleRetirementAnalyticsRefresh's own
-// header) rather than forcing a fresh ~370ms computation on click — a
-// discrete action, not a live-typing concern, so up to 300ms of lag
-// behind the very latest edit is an acceptable, unnoticeable tradeoff.
-function retirementCopyFiguresText(pageName) {
-  const a = retirementAnalyticsCache;
-  if (!a) return `Retirement projection — ${pageName}`;
-  const money = (v) => (v == null ? "—" : fmtMoney(v));
-  const age = (v) => (v == null ? "—" : Math.round(v));
-  return [
-    `Retirement projection — ${pageName}`,
-    `Balance at retirement (age ${a.retirement.age}): ${money(a.capitalAtRetirement)}`,
-    `First shortfall age: ${age(a.firstShortfallAge)}`,
-    `Sustainable income to LE (age ${a.le.age}): ${a.le.sustainableIncomeConverged ? money(a.le.sustainableIncomeToLE) : "—"}`,
-  ].join("\n");
-}
-
-function renderRetirementPageBody() {
-  const f = retirementFields(retirementPageState);
-  const asset = findOtherInvestmentsAsset(retirementPageState);
-  const couple = f.household === "couple";
-  const clientLabel = f.client.firstName || "Client";
-  const partnerLabel = couple ? (f.partner.firstName || "Partner") : null;
-  const pageName = couple ? `${clientLabel} & ${partnerLabel}` : clientLabel;
-  // Lifecycle vs static (spec 34, Commit 3) — computed ONCE per render
-  // (two projectPlan() calls of its own) and threaded through the
-  // comparison sentence, its chart, and the distribution-comparison
-  // section below, rather than each recomputing it independently.
-  const lifecycleOwner = couple ? retirementLifecycleOwner : "client";
-  const lifecycleLabel = lifecycleOwner === "partner" ? partnerLabel : clientLabel;
-  const lifecycleComparison = buildLifecycleComparison(retirementPageState, lifecycleOwner, PROFILES);
-
-  // FAST path (~30ms): projectPlan + resolveRef's own cheap anchor
-  // resolution — everything the person cards, goal chart, balance
-  // chart, and year table need. Deliberately NOT computeRetirement
-  // Analytics (see that function's own header on why it's ~370ms and
-  // debounced separately, below).
-  const projection = projectPlan(retirementPageState, PROFILES);
-  const household = f.household;
-  const retirementRef = resolveRef(
-    { kind: "anchor", anchorId: "retirement-client" }, retirementPageState.plan, projection.schedule, "client"
-  );
-  const tenure = deriveHomeownerStatus(
-    retirementPageState.properties, retirementPageState.liabilities, projection.yearly[retirementRef.planYear]
-  );
-  const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), projection.schedule.clientAges, []);
-  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
-  const reqByYear = projection.yearly.map((row) => row.incomeRequired);
-  const targetY = retirementRef.planYear;
-  const target = projection.yearly[targetY]?.incomeRequired ?? null;
-  const summary = goalVsPositionSummary(projection.yearly, projection.schedule, reqByYear, target);
-  const goalSentence = target == null
-    ? "No Income Required target is active for this plan yet."
-    : summary.crossoverYear == null
-      ? `Your ${fmtMoney(target)} target is met throughout the projection.`
-      : `Your ${fmtMoney(target)} target is met until ${summary.crossoverAge}, then falls to ${fmtMoney(summary.deliveredAtCrossover)}.`;
-
-  // SLOW path: computeRetirementAnalytics only feeds the Summary card
-  // and Lifestyle band, both rendered from whatever's cached (the most
-  // recently computed analytics, correct as of up to 300ms ago) —
-  // scheduleRetirementAnalyticsRefresh (called at the end of this
-  // function) recomputes fresh and overwrites just those two sections
-  // once the user stops typing, so this NEVER pays the solver's own
-  // cost on a keystroke.
-  const analytics = retirementAnalyticsCache
-    ?? (retirementAnalyticsCache = computeRetirementAnalytics(retirementPageState, projection));
-
-  els.pageRetirement.innerHTML = `
-    <header class="page-head">
-      <h1>Retirement projection — ${escapeHTML(pageName)}</h1>
-      <div class="page-actions">
-        <button class="btn-text" type="button" data-rp-action="print">Print / Save as PDF</button>
-        <button class="btn-text" type="button" data-rp-action="export-csv">Export CSV</button>
-        <button class="btn-text" type="button" data-rp-action="copy-figures">Copy figures</button>
-        <a class="btn-text" href="${escapeHTML(formatRoute({ page: "workspace", clientId: retirementPageClientId, scenarioId: retirementPageScenarioId }))}">Open in comprehensive workspace</a>
-        <a class="btn-text" href="${escapeHTML(formatRoute({ page: "client", clientId: retirementPageClientId }))}">Back to scenarios</a>
-      </div>
-    </header>
-    <div class="focus-section rp-no-print">
-      <div class="seg-toggle" role="group" aria-label="Household type">
-        ${[["single", "Single"], ["couple", "Couple"]].map(([v, l]) => `
-          <button class="seg-option${f.household === v ? " active" : ""}" type="button"
-                  data-rp-action="household" data-value="${v}">${l}</button>
-        `).join("")}
-      </div>
-    </div>
-    <div class="focus-section">
-      ${retirementAssumptionsPanelHTML(household)}
-    </div>
-    <div class="focus-panel">
-      ${retirementPersonCardsHTML("client", couple ? `Client — ${clientLabel}` : "About & Superannuation", f.client, projection)}
-      ${couple ? retirementPersonCardsHTML("partner", `Partner — ${partnerLabel}`, f.partner, projection) : ""}
-      <div class="focus-section">
-        <h3>Household</h3>
-        <div class="person-grid">
-          <div class="cf-cell">
-            <label>Income required — source</label>
-            <select data-rp-field="incomeRequiredSource">
-              ${INCOME_REQUIRED_SOURCES.map((s) => `<option value="${s}"${f.incomeRequired.source === s ? " selected" : ""}>${escapeHTML(INCOME_REQUIRED_SOURCE_LABELS[s] ?? s)}</option>`).join("")}
-            </select>
-          </div>
-          ${f.incomeRequired.source === "custom" ? `
-          <div class="cf-cell">
-            <label>Income required — custom amount ($ p.a.)</label>
-            <input type="number" min="0" step="1000" value="${f.incomeRequired.customAmount}" data-rp-field="incomeRequiredCustomAmount" />
-          </div>` : ""}
-          <div class="cf-cell">
-            <label>Other investments — lump sum ($)</label>
-            <input type="number" min="0" step="1000" value="${f.otherInvestments}" data-rp-field="otherInvestments" />
-          </div>
-          <div class="cf-cell">
-            <label>Other investments — risk profile</label>
-            <select data-rp-field="otherInvestmentsAllocation">${retirementAllocationOptionsHTML(asset?.allocation)}</select>
-          </div>
-          <div class="cf-cell">
-            <label>Other retirement income ($ p.a., indexed, from retirement)</label>
-            <input type="number" min="0" step="500" value="${f.otherRetirementIncome}" data-rp-field="otherRetirementIncome" />
-          </div>
-        </div>
-        ${retirementIncomeRequiredLabelHTML()}
-        <label class="ptg-check"><input type="checkbox"${f.includeAgePension ? " checked" : ""} data-rp-field="includeAgePension" /><span>${escapeHTML(retirementAgePensionToggleLabel(projection))}</span></label>
-      </div>
-      <div class="focus-section">
-        <h3>Summary</h3>
-        <div id="rpSummary">${retirementPageSummaryHTML(analytics)}</div>
-      </div>
-      <div class="focus-section" id="rpMcSection">
-        <h3>Monte Carlo</h3>
-        <p class="helper-text">${DEFAULT_NUM_PATHS.toLocaleString()} simulated paths through the same tax-aware engine as the projection above, with randomised investment returns and inflation — the distribution behind the single deterministic line. Never runs automatically; re-run after changing the plan.</p>
-        <div class="page-actions rp-no-print">
-          <button class="btn-text" type="button" data-rp-action="mc-run"${rpMcRunning ? " hidden" : ""}>Run simulation (${DEFAULT_NUM_PATHS.toLocaleString()} paths)</button>
-          <button class="btn-text" type="button" data-rp-action="mc-cancel"${rpMcRunning ? "" : " hidden"}>Cancel</button>
-          <span id="rpMcStatus" class="helper-text"></span>
-        </div>
-        <div id="rpMcResults" hidden>
-          <div id="rpMcChart" class="chart-mount"></div>
-          <div id="rpMcStats"></div>
-        </div>
-      </div>
-      <div class="focus-section">
-        <h3>Goal versus position</h3>
-        <p class="helper-text">Household after-tax income by source, against your stated Income Required. Bars are gross by source; the line is after tax — compare the shapes, not the exact gap, in a year tax is material.</p>
-        <div id="rpGoalChart" class="chart-mount"></div>
-        <p class="helper-text">${escapeHTML(goalSentence)}</p>
-      </div>
-      <div class="focus-section">
-        <h3>Lifestyle band</h3>
-        <div id="rpLifestyleBand">${retirementBandHTML(analytics, household, tenure)}</div>
-      </div>
-      <div class="focus-section">
-        <h3>Super and pension balance</h3>
-        <p class="helper-text">Household super (accumulation) and pension (drawdown) balances by age — the chart a side-by-side comparison leads with.</p>
-        <div id="rpBalanceChart" class="chart-mount"></div>
-      </div>
-      <div class="focus-section">
-        <h3>Asset allocation over time</h3>
-        <p class="helper-text">The mix behind the balances above — defensive rising over time under a glide path, flat under a static profile. The picture that justifies a lifecycle strategy.</p>
-        <div id="rpAllocationChart" class="chart-mount"></div>
-        <p class="chart-note-inline" id="rpAllocationNote"></p>
-      </div>
-      <div class="focus-section">
-        <h3>Lifecycle vs static</h3>
-        ${couple ? `
-          <div class="seg-toggle" role="group" aria-label="Compare whose account">
-            ${[["client", clientLabel], ["partner", partnerLabel]].map(([v, l]) => `
-              <button class="seg-option${retirementLifecycleOwner === v ? " active" : ""}" type="button"
-                      data-rp-action="lifecycle-owner" data-value="${v}">${escapeHTML(l)}</button>
-            `).join("")}
-          </div>
-        ` : ""}
-        <div id="rpLifecycleComparison">${retirementLifecycleComparisonHTML(lifecycleComparison, lifecycleLabel)}</div>
-        <div class="page-actions rp-no-print">
-          <button class="btn-text" type="button" data-rp-action="compare-run"${rpCompareRunning ? " hidden" : ""}>Run distribution comparison (${(DEFAULT_NUM_PATHS * 2).toLocaleString()} paths)</button>
-          <button class="btn-text" type="button" data-rp-action="compare-cancel"${rpCompareRunning ? "" : " hidden"}>Cancel</button>
-          <span id="rpCompareStatus" class="helper-text"></span>
-        </div>
-        <p class="helper-text">A glide path is not simply worse or better — it typically has a narrower distribution: worse median, better tail. That is the whole argument for lifecycle investing, and a single line can't show it.</p>
-        <div id="rpCompareResults" hidden>
-          <div id="rpCompareChart" class="chart-mount"></div>
-          <div id="rpCompareStats"></div>
-        </div>
-      </div>
-      <div class="focus-section">
-        <h3>Year by year</h3>
-        ${retirementYearTableHTML(projection, summary, yearIdxs)}
-      </div>
-    </div>
-  `;
-  renderRetirementGoalChart(yearIdxs, ages, summary, reqByYear, household, tenure);
-  renderRetirementBalanceChart(projection, yearIdxs);
-  renderRetirementAllocationChart(projection, yearIdxs);
-  renderRetirementLifecycleChart(lifecycleComparison);
-  rpCompareRenderCache = { owner: lifecycleOwner, comparison: lifecycleComparison };
-  renderRetirementCompareSection(lifecycleComparison);
-  retirementMcRenderCache = { projection, yearIdxs, ages };
-  renderRetirementMcSection(projection, yearIdxs, ages);
-  scheduleRetirementAnalyticsRefresh();
-}
-
-const INCOME_REQUIRED_SOURCE_LABELS = {
-  currentExpenses: "Current expenses",
-  custom: "Custom amount",
-  asfaComfortable: "ASFA Comfortable",
-  asfaModest: "ASFA Modest — derived (homeowner/renter)",
-  asfaModestRenter: "ASFA Modest (renter) — override",
-};
-
-els.pageRetirement.addEventListener("change", (e) => {
-  const field = e.target.dataset.rpField;
-  if (!field) return;
-  const owner = e.target.dataset.rpOwner === "partner" ? "partner" : "client";
-  const v = e.target.value;
-  let next = retirementPageState;
-  if (field === "firstName") next = rsSetFirstName(next, owner, v);
-  else if (field === "dob") next = rsSetDob(next, owner, v);
-  else if (field === "retirementAge") next = rsSetRetirementAge(next, owner, clampInt(v, 18, 120));
-  else if (field === "superBalance") next = rsSetSuperBalance(next, owner, clampNumber(v, 0), PROFILES);
-  else if (field === "superAllocation") {
-    // "+ New glide path — <preset>" (spec 34, Commit 3) creates a brand
-    // new glide path from that preset (own ages, own new id — never
-    // edits an existing one) and points this account at it; anything
-    // else is the existing profile/glide-path-by-id selection.
-    if (v.startsWith("preset:")) next = rsApplyGlidePathPreset(next, owner, v.slice("preset:".length), PROFILES);
-    else next = rsSetSuperAllocation(next, owner, parseRetirementAllocationValue(v), PROFILES);
-  }
-  else if (field === "salary") next = rsSetSalary(next, owner, clampNumber(v, 0));
-  else if (field === "concessionalContributions") next = rsSetConcessionalContributions(next, owner, clampNumber(v, 0), PROFILES);
-  else if (field === "incomeRequiredSource") next = rsSetIncomeRequired(next, { source: v });
-  else if (field === "incomeRequiredCustomAmount") next = rsSetIncomeRequired(next, { customAmount: clampNumber(v, 0) });
-  else if (field === "otherInvestments") next = rsSetOtherInvestments(next, clampNumber(v, 0), PROFILES);
-  else if (field === "otherInvestmentsAllocation") next = rsSetOtherInvestmentsAllocation(next, parseRetirementAllocationValue(v), PROFILES);
-  else if (field === "otherRetirementIncome") next = rsSetOtherRetirementIncome(next, clampNumber(v, 0));
-  else if (field === "includeAgePension") next = rsSetIncludeAgePension(next, e.target.checked);
-  else if (field === "ccFrom" || field === "ccTo") {
-    // dateRefControlHTML's own two-control shape (spec 34, Commit 1 —
-    // reused, not reimplemented): the anchor <select> fires with either
-    // a real anchor id or "__age__" (switch to a specific age, resolved
-    // to the anchor's OWN current age so the number input starts
-    // somewhere sensible, matching the comprehensive workspace's own
-    // identical convention); the number input fires with a plain age.
-    const role = e.target.dataset.drRole;
-    const setter = field === "ccFrom" ? rsSetConcessionalContributionsFrom : rsSetConcessionalContributionsTo;
-    let ref;
-    if (role === "anchor") {
-      if (v === "__age__") {
-        const key = field === "ccFrom" ? "concessionalContributionsFrom" : "concessionalContributionsTo";
-        const current = retirementFields(next)[owner]?.[key]
-          ?? { kind: "anchor", anchorId: field === "ccFrom" ? "start" : (owner === "partner" ? "retirement-partner" : "retirement-client") };
-        const freshProjection = projectPlan(next, PROFILES);
-        ref = { kind: "age", age: resolveRef(current, next.plan, freshProjection.schedule, owner).age };
-      } else {
-        ref = { kind: "anchor", anchorId: v };
-      }
-    } else {
-      ref = { kind: "age", age: clampInt(v, 18, 120) };
-    }
-    next = setter(next, owner, ref, PROFILES);
-  } else return;
-  commitRetirementPageState(next);
-});
-
-// Household toggle (single/couple) — a click, not a change event (the
-// segmented-button convention the comprehensive workspace's own marital-
-// status control already uses at renderPlanBar/data-plan-action, not a
-// <select>, since going couple → single can be destructive and needs a
-// confirm BEFORE the state change, not after).
-els.pageRetirement.addEventListener("click", (e) => {
-  const btn = e.target.closest('[data-rp-action="household"]');
-  if (!btn) return;
-  const target = btn.dataset.value;
-  const current = retirementFields(retirementPageState).household;
-  if (target === current) return;
-  if (target === "single" && partnerHasData(retirementPageState)) {
-    const proceed = window.confirm(
-      "Switching to Single removes the partner's super balance, salary, and " +
-      "contribution details entered on this page. Continue?"
-    );
-    if (!proceed) return;
-  }
-  commitRetirementPageState(rsSetHousehold(retirementPageState, target));
-});
-
-// Monte Carlo run/cancel (spec 34, Commit 2) — a separate delegated
-// listener, same convention: these two buttons never mutate
-// retirementPageState (a run doesn't change the plan), so they route
-// around commitRetirementPageState entirely.
-els.pageRetirement.addEventListener("click", (e) => {
-  if (e.target.closest('[data-rp-action="mc-run"]')) startRetirementMonteCarloRun();
-  else if (e.target.closest('[data-rp-action="mc-cancel"]')) cancelRetirementMonteCarloRun();
-});
-
-// Lifecycle vs static (spec 34, Commit 3) — the owner toggle re-renders
-// the whole body (a genuinely different comparison, cheap to recompute,
-// same as every other full-body re-render on this page); the compare
-// run/cancel buttons, like Commit 2's, never mutate retirementPageState.
-els.pageRetirement.addEventListener("click", (e) => {
-  const ownerBtn = e.target.closest('[data-rp-action="lifecycle-owner"]');
-  if (ownerBtn) {
-    const target = ownerBtn.dataset.value;
-    if (target !== retirementLifecycleOwner) {
-      retirementLifecycleOwner = target;
-      invalidateRetirementCompareResult();
-      renderRetirementPageBody();
-    }
-    return;
-  }
-  if (e.target.closest('[data-rp-action="compare-run"]')) startRetirementCompareRun(rpCompareRenderCache?.owner ?? "client");
-  else if (e.target.closest('[data-rp-action="compare-cancel"]')) cancelRetirementCompareRun();
-});
-
-// Print/CSV/copy-figures (spec 33, Commit 3) — a separate listener from
-// the household toggle above (a distinct concern), same delegated-click
-// convention.
-function retirementDownloadCSV(viewName, lines) {
-  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${retirementExportNameBase()}-${viewName}.csv`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
-// Opens the assumptions panel before printing, whether triggered by
-// this page's own "Print" button or the browser's native print
-// shortcut — a collapsed <details> would otherwise silently vanish
-// from the printed artefact ("the whole page as one printable view").
-window.addEventListener("beforeprint", () => {
-  els.pageRetirement.querySelectorAll(".rp-assumptions").forEach((d) => { d.open = true; });
-});
-
-els.pageRetirement.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-rp-action]");
-  if (!btn) return;
-  const action = btn.dataset.rpAction;
-  if (action === "print") {
-    window.print();
-  } else if (action === "export-csv") {
-    const f = retirementFields(retirementPageState);
-    const projection = projectPlan(retirementPageState, PROFILES);
-    const retirementRef = resolveRef(
-      { kind: "anchor", anchorId: "retirement-client" }, retirementPageState.plan, projection.schedule, "client"
-    );
-    const yearIdxs = thinnedYearIndices(defaultReportPeriod(retirementPageState.plan), projection.schedule.clientAges, []);
-    const reqByYear = projection.yearly.map((row) => row.incomeRequired);
-    const target = projection.yearly[retirementRef.planYear]?.incomeRequired ?? null;
-    const summary = goalVsPositionSummary(projection.yearly, projection.schedule, reqByYear, target);
-    retirementDownloadCSV("year-by-year", retirementYearTableCSV(projection, summary, yearIdxs));
-  } else if (action === "copy-figures") {
-    const f = retirementFields(retirementPageState);
-    const couple = f.household === "couple";
-    const pageName = couple ? `${f.client.firstName || "Client"} & ${f.partner.firstName || "Partner"}` : (f.client.firstName || "Client");
-    const text = retirementCopyFiguresText(pageName);
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(text).then(() => {
-        btn.textContent = "Copied!";
-        setTimeout(() => { btn.textContent = "Copy figures"; }, 1500);
-      }).catch(() => window.alert("Couldn't access the clipboard — try again, or use Export CSV instead."));
-    } else {
-      window.alert("Clipboard access isn't available in this browser — use Export CSV instead.");
-    }
-  }
-});
 
 // --- sidebar navigation: one section per page (Sidebar nav) -----------------
 
@@ -2274,15 +602,28 @@ const OUTPUT_NAV = {
     { id: "whatif-income-gap", label: "Income interruption" },
     { id: "whatif-expense-shock", label: "Expense shock" },
   ],
+  // Retirement (docs/specs/35-retirement-output-view.md) — a fifth
+  // output group over the SAME comprehensive inputs every other group
+  // already reads. "One set of inputs, nothing that can disagree" — the
+  // standalone retirement page (spec 33) is withdrawn; every one of its
+  // outputs moves here unchanged.
+  Retirement: [
+    { id: "retirement-projection", label: "Projection" },
+    { id: "retirement-balances", label: "Balances & allocation" },
+    { id: "retirement-table", label: "Year by year" },
+    { id: "retirement-monte-carlo", label: "Monte Carlo" },
+    { id: "retirement-lifecycle", label: "Lifecycle vs static" },
+  ],
 };
-// Commit 2's output-side groups — the three OUTPUT_NAV groups
-// themselves become the collapsible units (no further nesting asked
-// for), so this is just OUTPUT_NAV reshaped into the same {id, label,
-// ids} shape INPUT_GROUPS uses.
+// Commit 2's output-side groups — the OUTPUT_NAV groups themselves
+// become the collapsible units (no further nesting asked for), so this
+// is just OUTPUT_NAV reshaped into the same {id, label, ids} shape
+// INPUT_GROUPS uses.
 const OUTPUT_GROUPS = [
   { id: "output", label: "Output", ids: OUTPUT_NAV.Output.map((n) => n.id) },
   { id: "focus", label: "Focus", ids: OUTPUT_NAV.Focus.map((n) => n.id) },
   { id: "whatif", label: "What if", ids: OUTPUT_NAV.WhatIf.map((n) => n.id) },
+  { id: "retirement", label: "Retirement", ids: OUTPUT_NAV.Retirement.map((n) => n.id) },
 ];
 const SECTION_LABELS = Object.fromEntries([
   ...INPUT_NAV.map((n) => [n.id, n.label]),
@@ -2955,7 +1296,6 @@ function renderClientPage(clientId) {
     `
     : `
       <button class="btn-text" type="button" data-action="new-scenario">+ New scenario</button>
-      <button class="btn-text" type="button" data-action="new-retirement-projection">+ New retirement projection</button>
       <button class="btn-text" type="button" data-action="enter-compare" ${canCompare ? "" : "disabled"}
               title="${canCompare ? "Select scenarios to compare" : "Add another scenario to compare"}">Compare</button>
     `;
@@ -2989,21 +1329,6 @@ els.pageClient.addEventListener("click", (e) => {
       workspace = r.index;
       saveWorkspace();
       navigate({ page: "workspace", clientId, scenarioId: r.scenarioId });
-      break;
-    }
-    // Retirement Projection — Standalone Surface (docs/specs/33-
-    // retirement-standalone.md, Commit 1): an ordinary scenario, same
-    // defaultState() every "New scenario" creates — only the LANDING
-    // route differs (the standalone page instead of the comprehensive
-    // workspace's own Setup section). Nothing about the state it holds
-    // is special; opening it via "New scenario" later, or this button on
-    // an existing scenario, shows exactly the same data either way.
-    case "new-retirement-projection": {
-      const r = newScenario(workspace, clientId, Date.now(), "Retirement projection");
-      writeRaw(scenarioKey(r.scenarioId), serialize(defaultState(PROFILES)));
-      workspace = r.index;
-      saveWorkspace();
-      navigate({ page: "retirement", clientId, scenarioId: r.scenarioId });
       break;
     }
     case "rename": {
@@ -5025,11 +3350,9 @@ function assetExcludedFlagHTML(assetId) {
 // existing delegated change handlers can find the row/field; a
 // `data-dr-role` of "anchor" or "age" tells them which control fired.
 // `plan`/`schedule` default to the comprehensive workspace's own
-// globals — every existing call site omits them and behaves exactly as
-// before. The standalone retirement page (spec 34, Commit 1) passes
-// its own retirementPageState.plan/projection.schedule explicitly, so
-// this one control is genuinely reused rather than rebuilt a second
-// time for a page that never mounts the comprehensive workspace at all.
+// globals — every call site omits them and gets that behaviour; the
+// params exist so a caller working from a CLONE (a comparison arm,
+// a what-if) can pass its own plan/schedule instead.
 function dateRefControlHTML(ref, ownerForAges, dataAttrs, ageMin, ageMax, plan = state.plan, schedule = projection.schedule) {
   const anchors = listAnchors(plan, schedule);
   const isAnchor = ref?.kind === "anchor";
@@ -10515,6 +8838,9 @@ function refreshOutputs() {
   if (mcResultFingerprint !== null && mcResultFingerprint !== planFingerprint()) {
     invalidateMonteCarloResult();
   }
+  if (rpCompareFingerprint !== null && rpCompareFingerprint !== planFingerprint()) {
+    invalidateRetirementCompareResult();
+  }
   renderPeriodSelector();
   renderSummaryStrip();
   renderActiveView();
@@ -10572,6 +8898,11 @@ const VIEW_MOUNTS = {
   "whatif-crash": () => els.viewWhatIfCrash,
   "whatif-income-gap": () => els.viewWhatIfIncomeGap,
   "whatif-expense-shock": () => els.viewWhatIfExpenseShock,
+  "retirement-projection": () => els.viewRetirementProjection,
+  "retirement-balances": () => els.viewRetirementBalances,
+  "retirement-table": () => els.viewRetirementTable,
+  "retirement-monte-carlo": () => els.viewRetirementMonteCarlo,
+  "retirement-lifecycle": () => els.viewRetirementLifecycle,
 };
 const GRAPH_VIEWS = new Set([
   "projection", "composite", "net-assets", "asset-balances", "asset-allocation", "monte-carlo", "super-balances", "liabilities-balances", "cashflow-bars",
@@ -10652,6 +8983,11 @@ function renderActiveView() {
   else if (activeView === "whatif-crash") renderWhatIfCrashView();
   else if (activeView === "whatif-income-gap") renderWhatIfIncomeGapView();
   else if (activeView === "whatif-expense-shock") renderWhatIfExpenseShockView();
+  else if (activeView === "retirement-projection") renderRetirementProjectionView();
+  else if (activeView === "retirement-balances") renderRetirementBalancesView();
+  else if (activeView === "retirement-table") renderRetirementTableView();
+  else if (activeView === "retirement-monte-carlo") renderRetirementMonteCarloView();
+  else if (activeView === "retirement-lifecycle") renderRetirementLifecycleView();
 }
 
 const isNominal = () => state.display.units === "nominal";
@@ -11267,6 +9603,7 @@ function renderMonteCarloControls(runBtn, cancelBtn, statusEl) {
 function refreshMonteCarloViews() {
   renderMonteCarloView();
   renderMonteCarloTableView();
+  renderRetirementMonteCarloView();
 }
 
 function renderMonteCarloView() {
@@ -11484,6 +9821,7 @@ function startMonteCarloRun() {
       refreshMonteCarloViews();
       els.monteCarloStatus.textContent = `Monte Carlo run failed: ${msg.message}`;
       els.monteCarloTableStatus.textContent = `Monte Carlo run failed: ${msg.message}`;
+      if (els.retirementMcStatus) els.retirementMcStatus.textContent = `Simulation failed: ${msg.message}`;
     }
   };
   mcWorker.onerror = (e) => {
@@ -11491,6 +9829,7 @@ function startMonteCarloRun() {
     refreshMonteCarloViews();
     els.monteCarloStatus.textContent = `Monte Carlo run failed: ${e.message}`;
     els.monteCarloTableStatus.textContent = `Monte Carlo run failed: ${e.message}`;
+    if (els.retirementMcStatus) els.retirementMcStatus.textContent = `Simulation failed: ${e.message}`;
   };
   // state/PROFILES are plain data (no functions, no DOM) — structured-
   // clone across the worker boundary without loss.
@@ -16612,9 +14951,14 @@ const GOAL_CHART_SEGMENTS = [
   { key: "assetDrawdown", name: "Asset drawdown", color: "#5e60ce" },
 ];
 
-function renderFocusRetirementGoalChart(analytics, household, tenure) {
-  const el = $("focusRetirementGoalChart");
-  const sentenceEl = $("focusRetirementSentence");
+// `chartElId`/`sentenceElId` default to the Focus view's own mount ids
+// — every existing call site omits them and behaves exactly as before.
+// The Retirement output group (docs/specs/35-retirement-output-view.md,
+// Commit 1) passes its own ids so the identical chart-building logic
+// mounts a second time without duplicating it.
+function renderFocusRetirementGoalChart(analytics, household, tenure, chartElId = "focusRetirementGoalChart", sentenceElId = "focusRetirementSentence") {
+  const el = $(chartElId);
+  const sentenceEl = $(sentenceElId);
   if (!el) return;
   const yearIdxs = selectedYearIndices();
   const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
@@ -16742,6 +15086,566 @@ function retirementBandHTML(analytics, household, tenure) {
     <p class="helper-text">Placed using average retirement income to LE (Commit 3's own figure — a single year would mislead) and shown in today's dollars regardless of the nominal/real display toggle above, since ASFA's own figures are stated the same way.</p>
   `;
 }
+
+// --- Retirement (docs/specs/35-retirement-output-view.md, Commit 1) -----
+//
+// A fifth output group over the SAME comprehensive state/projection
+// every other view already reads — "one set of inputs, nothing that
+// can disagree." Every function below reuses an EXISTING builder
+// (retirementSummaryHTML, renderFocusRetirementGoalChart,
+// retirementBandHTML, allocationSeries, runMonteCarlo,
+// buildLifecycleComparison) rather than re-deriving a figure — this
+// spec is composition, not new engine work. Every dollar figure
+// respects the SAME nominal/real toggle every other output view does
+// (the standalone page it replaces had no such toggle at all — always
+// today's dollars — so this is a disclosed improvement, not a
+// regression: identical figures at the Today's Dollars default, the
+// only mode that page ever had).
+
+function renderRetirementProjectionView() {
+  const analytics = computeRetirementAnalytics(state, projection);
+  const household = isCouple() ? "couple" : "single";
+  const tenure = derivedHomeownerStatus();
+  $("retirementSummary").innerHTML = retirementSummaryHTML(analytics);
+  $("retirementLifestyleBand").innerHTML = retirementBandHTML(analytics, household, tenure);
+  renderFocusRetirementGoalChart(analytics, household, tenure, "retirementGoalChart", "retirementGoalSentence");
+}
+
+// Super (accumulation) and pension (drawdown) balances, stacked — the
+// SAME two aggregate fields the comprehensive workspace's own Super
+// view already reports per account (superClosing/pensionClosing), just
+// summed to the household total this page leads with.
+function renderRetirementBalanceChart() {
+  const el = $("retirementBalanceChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const superSeries = yearIdxs.map((y) => (projection.yearly[y].superClosing ?? 0) * factor(y));
+  const pensionSeries = yearIdxs.map((y) => (projection.yearly[y].pensionClosing ?? 0) * factor(y));
+
+  const traces = [];
+  if (!seriesIsAllZero(superSeries)) {
+    traces.push({
+      x: ages, y: superSeries, name: "Super (accumulation)", type: "scatter", mode: "lines",
+      stackgroup: "balance", fill: "tonexty", line: { color: "#1c5ab4", width: 1 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Super</extra>",
+    });
+  }
+  if (!seriesIsAllZero(pensionSeries)) {
+    traces.push({
+      x: ages, y: pensionSeries, name: "Pension (drawdown)", type: "scatter", mode: "lines",
+      stackgroup: "balance", fill: "tonexty", line: { color: "#6b8e23", width: 1 },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Pension</extra>",
+    });
+  }
+  if (traces.length === 0) {
+    el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Nothing to show yet — add a super account to see it here.</p>`;
+    return;
+  }
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Balance (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: false, rangemode: "tozero",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Asset allocation over time — reuses allocationSeries EXACTLY as the
+// Output group's own "Allocation" chart does (allocation.js), over the
+// household's every included asset/super/bond — "the picture that
+// justifies the strategy" (spec's own words), a glide path's defensive
+// share rising visibly over time.
+function renderRetirementAllocationChart() {
+  const el = $("retirementAllocationChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const { perYear, usesCustom } = allocationSeries(
+    yearIdxs.map((y) => projection.yearly[y]), state.assets, state.plan.superAccounts ?? [],
+    PROFILES, state.bonds ?? [], state.plan.glidePaths,
+    { client: projection.schedule.clientAges, partner: projection.schedule.partnerAges },
+    (i) => yearIdxs[i]
+  );
+  if (perYear.every((p) => p.total === 0)) {
+    el.innerHTML = `<p class="helper-text" style="padding:24px 8px;">Nothing to show yet — add an asset or super account to see it here.</p>`;
+    return;
+  }
+  const palette = ["#1c5ab4", "#6b8e23", "#dc5a28", "#5e60ce", "#2e8a8a", "#d97b2f"];
+  const traces = ASSET_CLASS_KEYS.map((k, i) => ({
+    x: ages, y: perYear.map((p) => p.weightPct[k]),
+    name: ASSET_CLASS_LABELS[k], type: "scatter", mode: "lines",
+    stackgroup: "alloc", fill: "tonexty",
+    line: { color: palette[i % palette.length], width: 1 },
+    hovertemplate: `Age %{x}<br>%{y:.1f}%<extra>${escapeHTML(ASSET_CLASS_LABELS[k])}</extra>`,
+  }));
+  Plotly.react(el, traces, {
+    margin: { l: 60, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Client age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: "Allocation", standoff: 10 },
+      tickformat: ".0f", ticksuffix: "%", dtick: 25,
+      range: [0, 100], gridcolor: "rgba(0,0,0,0.06)", zeroline: false,
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+  $("retirementAllocationNote").textContent = usesCustom
+    ? "Assets and super accounts with a custom allocation are shown using their selected volatility-basis profile's class weights (the same profile Monte Carlo variability borrows from)."
+    : "";
+}
+
+function renderRetirementBalancesView() {
+  renderRetirementBalanceChart();
+  renderRetirementAllocationChart();
+}
+
+// Age · super · pension · drawdown · age pension · other income · total
+// income · income required — the SAME columns/sourcing the standalone
+// page's own year table used (goalVsPositionSummary's own per-year
+// series, so this table's totals can never disagree with the Goal-
+// versus-position chart's own bars).
+function retirementYearTableRows() {
+  const yearIdxs = selectedYearIndices();
+  const analytics = computeRetirementAnalytics(state, projection);
+  const reqByYear = projection.yearly.map((row) => row.incomeRequired);
+  const target = projection.yearly[analytics.retirement.planYear]?.incomeRequired ?? null;
+  const summary = goalVsPositionSummary(projection.yearly, projection.schedule, reqByYear, target);
+  return yearIdxs.map((y) => {
+    const row = projection.yearly[y];
+    const s = summary.series[y];
+    const factor = displayFactor(endMonthOfYear(y));
+    return {
+      age: projection.schedule.clientAges[y],
+      superBalance: (row.superClosing ?? 0) * factor,
+      pensionBalance: (row.pensionClosing ?? 0) * factor,
+      drawdown: s.pensionDrawdown * factor,
+      agePension: s.agePension * factor,
+      otherIncome: (s.employment + s.investmentIncome + s.assetDrawdown) * factor,
+      totalIncome: s.grossTotal * factor,
+      incomeRequired: row.incomeRequired == null ? null : row.incomeRequired * factor,
+    };
+  });
+}
+
+function retirementYearTableHTML() {
+  const rows = retirementYearTableRows().map((r) => `
+      <tr>
+        <td>${r.age}</td>
+        <td class="tl-num">${fmtMoney(r.superBalance)}</td>
+        <td class="tl-num">${fmtMoney(r.pensionBalance)}</td>
+        <td class="tl-num">${fmtMoney(r.drawdown)}</td>
+        <td class="tl-num">${fmtMoney(r.agePension)}</td>
+        <td class="tl-num">${fmtMoney(r.otherIncome)}</td>
+        <td class="tl-num">${fmtMoney(r.totalIncome)}</td>
+        <td class="tl-num">${r.incomeRequired == null ? "—" : fmtMoney(r.incomeRequired)}</td>
+      </tr>
+    `).join("");
+  return `
+    <div style="max-height:480px; overflow:auto;">
+      <table class="tl">
+        <thead>
+          <tr>
+            <th>Age</th><th class="tl-num">Super</th><th class="tl-num">Pension</th>
+            <th class="tl-num">Drawdown</th><th class="tl-num">Age pension</th>
+            <th class="tl-num">Other income</th><th class="tl-num">Total income</th>
+            <th class="tl-num">Income required</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderRetirementTableView() {
+  $("retirementYearTable").innerHTML = retirementYearTableHTML();
+}
+
+function exportRetirementTableCSV() {
+  const esc = (s) => `"${String(s).replaceAll('"', '""')}"`;
+  const rows = retirementYearTableRows();
+  const lines = [
+    ["Age", "Super", "Pension", "Drawdown", "Age pension", "Other income", "Total income", "Income required"].map(esc).join(","),
+    ...rows.map((r) => [
+      r.age, r.superBalance.toFixed(2), r.pensionBalance.toFixed(2), r.drawdown.toFixed(2),
+      r.agePension.toFixed(2), r.otherIncome.toFixed(2), r.totalIncome.toFixed(2),
+      r.incomeRequired == null ? "" : r.incomeRequired.toFixed(2),
+    ].join(",")),
+  ];
+  downloadCSV("retirement-year-by-year", lines);
+}
+
+// Monte Carlo (item 2 of the original brief) — reuses the SAME shared
+// mcResult/mcRunning/mcProgress and startMonteCarloRun/cancelMonteCarloRun
+// the comprehensive workspace's own "What if > Monte Carlo" view already
+// runs; this is a second, client-framed PRESENTATION of the identical
+// run, not a second simulation — "one Monte Carlo result, nothing that
+// can disagree," the same principle spec 35 applies to inputs. Kept in
+// sync via refreshMonteCarloViews() (called on every progress/done/
+// error message, alongside the two existing MC views).
+function approxOneInN(p) {
+  if (p <= 0) return null;
+  if (p >= 1) return 1;
+  return Math.max(1, Math.round(1 / p));
+}
+
+function renderRetirementMonteCarloView() {
+  const runBtn = els.retirementMcRunBtn, cancelBtn = els.retirementMcCancelBtn, statusEl = els.retirementMcStatus;
+  if (!runBtn || !cancelBtn || !statusEl) return;
+  runBtn.hidden = mcRunning;
+  cancelBtn.hidden = !mcRunning;
+  if (mcRunning) {
+    const pct = mcProgress && mcProgress.total > 0 ? Math.round((mcProgress.done / mcProgress.total) * 100) : 0;
+    statusEl.textContent = mcProgress
+      ? `Simulating — ${mcProgress.done.toLocaleString()} / ${mcProgress.total.toLocaleString()} paths (${pct}%).`
+      : "Simulating…";
+  } else if (!mcResult) {
+    statusEl.textContent = "";
+  } else {
+    statusEl.textContent = `${mcResult.numPaths.toLocaleString()} paths in ${(mcResult.elapsedMs / 1000).toFixed(1)}s. Re-run after changing the plan — this result is a snapshot, not live.`;
+  }
+  if (els.retirementMcResults) els.retirementMcResults.hidden = !mcResult;
+  if (!mcResult) return;
+  renderRetirementMcChart();
+  $("retirementMcStats").innerHTML = retirementMcStatsHTML();
+}
+
+function renderRetirementMcChart() {
+  const el = $("retirementMcChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => projection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const band = (key) => yearIdxs.map((y) => mcResult.netAssets[key][y] * factor(y));
+  const p10 = band("p10"), p25 = band("p25"), p50 = band("p50"), p75 = band("p75"), p90 = band("p90");
+  const deterministic = yearIdxs.map((y) => projection.yearly[y].netAssets * factor(y));
+  const outer = "rgba(28, 90, 180, 0.12)", inner = "rgba(28, 90, 180, 0.28)";
+  const traces = [
+    { x: ages, y: p10, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: p90, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: outer,
+      name: "10th–90th percentile", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: p25, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: p75, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: inner,
+      name: "25th–75th percentile", hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: p50, mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
+      name: "Median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
+    { x: ages, y: deterministic, mode: "lines", line: { color: "#444", width: 1.5, dash: "dash" },
+      name: "Deterministic projection", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Deterministic</extra>" },
+  ];
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Probability of ruin, framed for the client first ("in about 1 in N
+// simulations, this plan runs short before age X" leads; the raw ruin
+// percentage and its success-framed restatement stated beside it) — the
+// single locked ruin definition (monteCarlo.js), never computed a
+// second way.
+function retirementMcStatsHTML() {
+  const years = mcResult.years;
+  const endAge = projection.schedule.clientAges[years - 1];
+  const ruinProbability = mcResult.ruinProbability;
+  const ruinPct = Math.round(ruinProbability * 100);
+  const successPct = Math.round((1 - ruinProbability) * 100);
+  const n = approxOneInN(ruinProbability);
+  const plain = n == null
+    ? `This plan lasted the whole way, to age ${endAge}, in every one of the ${mcResult.numPaths.toLocaleString()} simulations run.`
+    : n <= 1
+      ? `This plan ran short before age ${endAge} in every simulation run.`
+      : `In about 1 in ${n} simulations, this plan runs short before age ${endAge}.`;
+  const stats = [
+    retirementStatHTML("Ruin probability", `${ruinPct}%`, true),
+    retirementStatHTML("Lasts to life expectancy", `${successPct}% of simulations`),
+  ];
+  if (mcResult.medianShortfallAge != null) {
+    stats.push(retirementStatHTML("Median first-shortfall age", Math.round(mcResult.medianShortfallAge)));
+  }
+  const customNote = mcResult.customHoldings.length > 0
+    ? `<p class="helper-text">${mcResult.customHoldings.length} asset(s) use custom returns; their variability is modelled on the volatility basis profile selected for each — ${mcResult.customHoldings.map((h) => `${escapeHTML(h.name)} (${escapeHTML(h.volBasis)})`).join(", ")}.</p>`
+    : "";
+  return `
+    <p class="helper-text rp-mc-headline"><strong>${escapeHTML(plain)}</strong></p>
+    <div class="summary-strip">${stats.join("")}</div>
+    <p class="helper-text">Ruin probability: the fraction of simulated paths with any unfunded cashflow before this plan's own projection end — the single definition used everywhere in this tool. "Lasts to life expectancy" restates the same figure the way a client hears it.</p>
+    ${customNote}
+  `;
+}
+
+els.retirementMcRunBtn?.addEventListener("click", startMonteCarloRun);
+els.retirementMcCancelBtn?.addEventListener("click", cancelMonteCarloRun);
+
+// --- Lifecycle vs static (item 1 of the original brief) -----------------
+//
+// buildLifecycleComparison (retirementLifecycleComparison.js) clones
+// state twice — one arm forced to a glide path, one to a fixed profile
+// — and runs both through the SAME projectPlan(). The distribution
+// comparison below reuses runMonteCarlo/monteCarloWorker.js twice (one
+// worker per arm, from those same clones) — separate module state from
+// the shared mcResult above, since this genuinely compares TWO runs at
+// once, not the plan's own single result.
+
+let retirementLifecycleOwner = "client"; // which person's account this comparison runs on (couple only)
+
+function retirementLifecycleComparisonHTML(comparison, label) {
+  if (!comparison) {
+    return `<p class="helper-text">${escapeHTML(label)} has no super account yet — add one to compare lifecycle investing against a fixed profile.</p>`;
+  }
+  const factor = displayFactor(endMonthOfYear(comparison.glideProjection.yearly.length - 1));
+  const at = (v) => (v == null ? "—" : fmtMoney(v * factor));
+  const retirementLine = comparison.capitalAtRetirement == null
+    ? "This person's own retirement falls beyond this projection, so no retirement-age figure is shown."
+    : `At retirement, the glide path leaves ${at(Math.abs(comparison.capitalAtRetirement.diff))} ${comparison.capitalAtRetirement.diff >= 0 ? "more" : "less"} than the static profile (${at(comparison.capitalAtRetirement.glide)} vs ${at(comparison.capitalAtRetirement.static)}).`;
+  const leLine = `By life expectancy (age ${comparison.capitalAtLE.age}), the glide path leaves ${at(Math.abs(comparison.capitalAtLE.diff))} ${comparison.capitalAtLE.diff >= 0 ? "more" : "less"} than the static profile (${at(comparison.capitalAtLE.glide)} vs ${at(comparison.capitalAtLE.static)}).`;
+  const presetNote = comparison.glideIsPreset ? ` (generated for this comparison only — not yet saved to the plan)` : "";
+  return `
+    <p class="helper-text">Comparing this plan under <strong>${escapeHTML(comparison.glideLabel)}</strong>${presetNote} against a fixed <strong>${escapeHTML(comparison.staticLabel)}</strong> profile — everything else about the plan (balance, salary, contributions, drawdown) is identical in both.</p>
+    <p class="helper-text">${escapeHTML(retirementLine)}</p>
+    <p class="helper-text">${escapeHTML(leLine)}</p>
+  `;
+}
+
+function renderRetirementLifecycleChart(comparison) {
+  const el = $("retirementLifecycleChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  if (!comparison) { el.innerHTML = ""; return; }
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => comparison.glideProjection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const glideSeries = yearIdxs.map((y) => comparison.glideProjection.yearly[y].netAssets * factor(y));
+  const staticSeries = yearIdxs.map((y) => comparison.staticProjection.yearly[y].netAssets * factor(y));
+  const traces = [
+    { x: ages, y: glideSeries, mode: "lines", name: `Glide path (${comparison.glideLabel})`,
+      line: { color: "rgb(28, 90, 180)", width: 2.5 }, hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Glide path</extra>" },
+    { x: ages, y: staticSeries, mode: "lines", name: `Static (${comparison.staticLabel})`,
+      line: { color: "#dc5a28", width: 2.5, dash: "dash" }, hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Static</extra>" },
+  ];
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.2, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+// Distribution comparison — separate module state from the shared
+// mcResult above (this compares TWO runs at once).
+let rpCompareResult = null; // { glide, static } | null — each a runMonteCarlo() result
+let rpCompareFingerprint = null;
+let rpCompareRunning = false;
+let rpCompareProgress = null; // { glide: {done,total}|null, static: {done,total}|null }
+let rpCompareWorkers = null; // { glide: Worker, static: Worker } | null
+let rpCompareRenderCache = null; // { owner, comparison } — set once per full view render
+
+function stopRetirementCompareWorkers() {
+  if (rpCompareWorkers) {
+    rpCompareWorkers.glide?.terminate();
+    rpCompareWorkers.static?.terminate();
+    rpCompareWorkers = null;
+  }
+  rpCompareRunning = false;
+  rpCompareProgress = null;
+}
+
+function invalidateRetirementCompareResult() {
+  rpCompareResult = null;
+  rpCompareFingerprint = null;
+  stopRetirementCompareWorkers();
+}
+
+function renderRetirementCompareFromCache() {
+  if (!rpCompareRenderCache) return;
+  renderRetirementCompareSection(rpCompareRenderCache.comparison);
+}
+
+function renderRetirementCompareSection(comparison) {
+  const runBtn = $("retirementCompareRunBtn"), cancelBtn = $("retirementCompareCancelBtn"), statusEl = $("retirementCompareStatus");
+  if (!runBtn || !cancelBtn || !statusEl) return;
+  runBtn.hidden = rpCompareRunning;
+  cancelBtn.hidden = !rpCompareRunning;
+  if (rpCompareRunning) {
+    const done = (rpCompareProgress?.glide?.done ?? 0) + (rpCompareProgress?.static?.done ?? 0);
+    const total = (rpCompareProgress?.glide?.total ?? DEFAULT_NUM_PATHS) + (rpCompareProgress?.static?.total ?? DEFAULT_NUM_PATHS);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    statusEl.textContent = `Simulating both arms — ${done.toLocaleString()} / ${total.toLocaleString()} paths (${pct}%).`;
+  } else if (!rpCompareResult) {
+    statusEl.textContent = "";
+  } else {
+    statusEl.textContent = "Re-run after changing the plan — this result is a snapshot, not live.";
+  }
+  const bothDone = !!(rpCompareResult?.glide && rpCompareResult?.static);
+  const resultsEl = $("retirementCompareResults");
+  if (!resultsEl) return;
+  resultsEl.hidden = !bothDone;
+  if (!bothDone) return;
+  renderRetirementCompareChart(comparison);
+  $("retirementCompareStats").innerHTML = retirementCompareStatsHTML();
+}
+
+function renderRetirementCompareChart(comparison) {
+  const el = $("retirementCompareChart");
+  if (!el) return;
+  if (typeof Plotly === "undefined") { el.innerHTML = chartUnavailableHTML(); return; }
+  if (!comparison) return;
+  const yearIdxs = selectedYearIndices();
+  const ages = yearIdxs.map((y) => comparison.glideProjection.schedule.clientAges[y]);
+  const factor = (y) => displayFactor(endMonthOfYear(y));
+  const band = (result, key) => yearIdxs.map((y) => result.netAssets[key][y] * factor(y));
+  const glideOuter = "rgba(28, 90, 180, 0.12)", glideInner = "rgba(28, 90, 180, 0.28)";
+  const staticOuter = "rgba(220, 90, 40, 0.10)", staticInner = "rgba(220, 90, 40, 0.22)";
+  const traces = [
+    { x: ages, y: band(rpCompareResult.static, "p10"), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: band(rpCompareResult.static, "p90"), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: staticOuter,
+      name: "Static — 10th–90th", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: band(rpCompareResult.glide, "p10"), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: ages, y: band(rpCompareResult.glide, "p90"), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: glideOuter,
+      name: "Glide path — 10th–90th", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+    { x: ages, y: band(rpCompareResult.static, "p50"), mode: "lines", line: { color: "#dc5a28", width: 2, dash: "dash" },
+      name: "Static — median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Static median</extra>" },
+    { x: ages, y: band(rpCompareResult.glide, "p50"), mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
+      name: "Glide path — median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Glide path median</extra>" },
+  ];
+  Plotly.react(el, traces, {
+    margin: { l: 70, r: 20, t: 24, b: 50 },
+    paper_bgcolor: "white", plot_bgcolor: "white",
+    hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", y: -0.25, x: 0.5, xanchor: "center" },
+    xaxis: { title: "Age", showgrid: false, zeroline: false, dtick: ages.length > 20 ? 5 : 1 },
+    yaxis: {
+      title: { text: `Net assets (${isNominal() ? "future" : "today's"} dollars)`, standoff: 10 },
+      tickformat: "$,.2s", gridcolor: "rgba(0,0,0,0.06)", zeroline: true, zerolinecolor: "rgba(0,0,0,0.3)",
+    },
+    font: BASE_CHART_FONT,
+  }, { displayModeBar: false, responsive: true });
+}
+
+function retirementCompareStatsHTML() {
+  const y = rpCompareResult.glide.years - 1;
+  const glideSpread = rpCompareResult.glide.netAssets.p90[y] - rpCompareResult.glide.netAssets.p10[y];
+  const staticSpread = rpCompareResult.static.netAssets.p90[y] - rpCompareResult.static.netAssets.p10[y];
+  const narrower = glideSpread < staticSpread;
+  const narrowingLine = narrower
+    ? `The glide path's own final-year spread (10th–90th percentile) is ${fmtMoney(staticSpread - glideSpread)} narrower than the static profile's — a narrower distribution, the outcome lifecycle investing is meant to produce.`
+    : `In this run, the glide path's own final-year spread is NOT narrower than the static profile's (${fmtMoney(glideSpread)} vs ${fmtMoney(staticSpread)}) — reported as run, not forced to the usually-expected shape.`;
+  const stats = [
+    retirementStatHTML("Glide path — median ending net assets", fmtMoney(rpCompareResult.glide.netAssets.p50[y])),
+    retirementStatHTML("Static — median ending net assets", fmtMoney(rpCompareResult.static.netAssets.p50[y])),
+    retirementStatHTML("Glide path — ruin probability", `${Math.round(rpCompareResult.glide.ruinProbability * 100)}%`),
+    retirementStatHTML("Static — ruin probability", `${Math.round(rpCompareResult.static.ruinProbability * 100)}%`),
+  ];
+  return `<div class="summary-strip">${stats.join("")}</div><p class="helper-text">${escapeHTML(narrowingLine)}</p>`;
+}
+
+function startRetirementCompareRun(owner) {
+  if (rpCompareRunning || !owner) return;
+  const comparison = buildLifecycleComparison(state, owner, PROFILES);
+  if (!comparison) return;
+  rpCompareRunning = true;
+  rpCompareFingerprint = planFingerprint();
+  rpCompareProgress = { glide: { done: 0, total: DEFAULT_NUM_PATHS }, static: { done: 0, total: DEFAULT_NUM_PATHS } };
+  renderRetirementCompareFromCache();
+
+  const glideWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
+  const staticWorker = new Worker(new URL("./monteCarloWorker.js", import.meta.url), { type: "module" });
+  rpCompareWorkers = { glide: glideWorker, static: staticWorker };
+
+  const onArmMessage = (arm) => (e) => {
+    const msg = e.data;
+    if (msg.type === "progress") {
+      rpCompareProgress = { ...rpCompareProgress, [arm]: { done: msg.done, total: msg.total } };
+      renderRetirementCompareFromCache();
+    } else if (msg.type === "done") {
+      rpCompareResult = { ...(rpCompareResult ?? {}), [arm]: msg.result };
+      if (rpCompareResult.glide && rpCompareResult.static) stopRetirementCompareWorkers();
+      renderRetirementCompareFromCache();
+    } else if (msg.type === "error") {
+      invalidateRetirementCompareResult();
+      renderRetirementCompareFromCache();
+      const statusEl = $("retirementCompareStatus");
+      if (statusEl) statusEl.textContent = `Comparison failed: ${msg.message}`;
+    }
+  };
+  glideWorker.onmessage = onArmMessage("glide");
+  staticWorker.onmessage = onArmMessage("static");
+  const onArmError = () => {
+    invalidateRetirementCompareResult();
+    renderRetirementCompareFromCache();
+    const statusEl = $("retirementCompareStatus");
+    if (statusEl) statusEl.textContent = "Comparison failed.";
+  };
+  glideWorker.onerror = onArmError;
+  staticWorker.onerror = onArmError;
+  glideWorker.postMessage({ state: comparison.glideState, profiles: PROFILES, options: {} });
+  staticWorker.postMessage({ state: comparison.staticState, profiles: PROFILES, options: {} });
+}
+
+function cancelRetirementCompareRun() {
+  invalidateRetirementCompareResult();
+  renderRetirementCompareFromCache();
+  const statusEl = $("retirementCompareStatus");
+  if (statusEl) statusEl.textContent = "Cancelled.";
+}
+
+function renderRetirementLifecycleView() {
+  const couple = isCouple();
+  const owner = couple ? retirementLifecycleOwner : "client";
+  const comparison = buildLifecycleComparison(state, owner, PROFILES);
+
+  const toggleEl = $("retirementLifecycleOwnerToggle");
+  if (toggleEl) {
+    toggleEl.hidden = !couple;
+    if (couple) {
+      toggleEl.innerHTML = [["client", clientName()], ["partner", partnerName()]].map(([v, l]) => `
+        <button class="seg-option${owner === v ? " active" : ""}" type="button" role="tab" aria-selected="${owner === v}" data-owner="${v}">${escapeHTML(l)}</button>
+      `).join("");
+    }
+  }
+  $("retirementLifecycleComparison").innerHTML = retirementLifecycleComparisonHTML(comparison, owner === "partner" ? partnerName() : clientName());
+  renderRetirementLifecycleChart(comparison);
+  rpCompareRenderCache = { owner, comparison };
+  renderRetirementCompareSection(comparison);
+}
+
+$("retirementLifecycleOwnerToggle")?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-owner]");
+  if (!btn) return;
+  const target = btn.dataset.owner;
+  if (target === retirementLifecycleOwner) return;
+  retirementLifecycleOwner = target;
+  invalidateRetirementCompareResult();
+  renderRetirementLifecycleView();
+});
+
+$("retirementCompareRunBtn")?.addEventListener("click", () => startRetirementCompareRun(rpCompareRenderCache?.owner ?? "client"));
+$("retirementCompareCancelBtn")?.addEventListener("click", cancelRetirementCompareRun);
 
 function renderFocusRetirementView() {
   const analytics = computeRetirementAnalytics(state, projection);
@@ -18010,6 +16914,7 @@ els.exportBtn.addEventListener("click", () => {
   else if (activeView === "whatif-crash") exportWhatIfCrashCSV();
   else if (activeView === "whatif-income-gap") exportWhatIfIncomeGapCSV();
   else if (activeView === "whatif-expense-shock") exportWhatIfExpenseShockCSV();
+  else if (activeView === "retirement-table") exportRetirementTableCSV();
 });
 
 els.showAssetsToggle.addEventListener("change", () => {

@@ -95,6 +95,21 @@ const CHECKS = {
   "whatif-crash": ({ state }) => (state.assets ?? []).some((a) => a.include && a.class !== "lifestyle"),
   "whatif-income-gap": ({ out }) => anyYear(out, (row) => row.income > 0),
   "whatif-expense-shock": ({ out }) => anyYear(out, (row) => row.expenses > 0),
+
+  // --- Retirement (docs/specs/35-retirement-output-view.md, Commit 1) —
+  // an output group over the SAME comprehensive inputs every other view
+  // reads, so every checker here is state/out-level, same convention as
+  // the rest of this file.
+  "retirement-projection": ({ out }) => out.yearly.length > 0, // Analytics/Goal-vs-position/Lifestyle band always render
+  "retirement-balances": ({ state }) => (state.plan.superAccounts ?? []).length > 0, // super/pension balance + allocation charts
+  "retirement-table": ({ out }) => out.yearly.length > 0, // year-by-year table always renders
+  // Monte Carlo never pre-runs for a demo client (a live "Run" click is
+  // required) — same convention as the existing "monte-carlo" checker
+  // above: has the INPUTS a run would use, not "has already run".
+  "retirement-monte-carlo": ({ state }) => (state.assets ?? []).length > 0,
+  // Mirrors buildLifecycleComparison's own null-return gate exactly
+  // ("returns null when the owner has no super account at all").
+  "retirement-lifecycle": ({ state }) => (state.plan.superAccounts ?? []).some((s) => s.owner === "client"),
 };
 
 describe("Demo coverage — every router.js output view has at least one populating client/scenario", () => {
