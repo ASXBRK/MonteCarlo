@@ -3467,6 +3467,87 @@ the shared result the Graphs view also shows; zero console errors.
 
 ---
 
+### Retirement: input review panel (spec 35, Commit 2)
+
+"The commit that makes this work rather than being a relocation." A new
+panel inside Retirement > Projection, below the goal chart and
+lifestyle band, listing every input the projection actually uses,
+grouped in the spec's own order: income rows · super funds and fees ·
+contributions · pensions · financial assets · expenses · income
+required · retirement ages · glide path/risk profile. Each row edits in
+place (amount + one or two key fields), each of the four spec-named
+kinds (income, super, contributions, assets) gets an "+Add" inline, and
+every group carries an "Edit in full ▸" link that routes straight into
+that input section (`navigate()`, the same mechanism the sidebar itself
+uses) — the panel is for seeing what's feeding the projection and
+fixing the obvious, not a second input surface.
+
+**Derived, not hard-coded.** `src/retirementReviewPanel.js`
+(`buildRetirementReviewGroups`) is pure — no DOM — and reads straight
+off `state`: a group with nothing in it is simply absent from the
+result (assets/super filtered to `include !== false`, matching what the
+engine actually draws on; income required and retirement ages are
+always present, being singleton settings rather than collections that
+can be empty). 7 tests: populated collections appear in the spec's own
+order; an excluded (`include:false`) super account/asset drops out of
+every group it would otherwise populate; a lifestyle-class asset never
+populates the financial-assets group; every group's `sectionId` is a
+real `router.js` `INPUT_SECTIONS` id (the link-out target — verified
+against the real list, not duplicated by hand); group ids round-trip to
+real rows in state.
+
+**Every edit reaches the engine through the SAME function the real
+input section already uses** — `applyRowEdit`/`applyAssetEdit`/
+`applySuperAccountEdit`/`applyPensionEdit`/`handlePlanFieldChange`/
+`onIncomeRequiredChange` — keyed off the identical `data-kind`/`data-
+cfid`, `data-aid`, `data-said`/`data-sfield`, `data-pid`/`data-pfield`,
+or `data-plan-field` attributes those sections use. An edit through the
+review panel isn't a parallel implementation reaching a similar result;
+it's the same commit, from a second container.
+
+**Focus-safe wholesale re-render.** The panel is small enough to just
+rebuild its whole `innerHTML` on every change rather than the surgical
+per-row patches the large input tables use — except that
+`refreshOutputs()` re-renders the active output view (this one
+included) on every keystroke typed *anywhere* in the app, which would
+yank the cursor out of a field the adviser is mid-typing INSIDE this
+panel. `renderRetirementReviewPanel()` guards against exactly that one
+case — skip the rebuild only while a text/number `<input>` inside the
+panel has the caret — and nothing else: a button click (add-row/add-
+super/add-asset/link-out) or a `<select>`'s own "change" (which fires
+while the select is STILL focused, unlike a text input, which blurs
+first) both rebuild freely, which is what lets a pension's "Fixed
+amount" field appear the instant `drawdownOption` is switched to
+"fixed".
+
+**Add-inline** for the four spec-named kinds: income and contributions
+reuse `addRowBtn()`/`onCashflowSectionClick` (the exact button/handler
+the real Income and Super sections already use); super fund and
+financial asset get two small dedicated handlers that call
+`createSuperAccount`/`createAsset` the same way `addAssetBtn`'s own
+handler does. No remove — not one of the spec's three requirements, and
+a more consequential action better left to the real section.
+
+**Also fixed in this commit:** `styles.css`'s dangling `#pageRetirement`/
+`.rp-assumptions` print-scoped rules (leftover from Commit 1's page
+deletion — no element could match them any more) removed and replaced
+with the new panel's own `.rrp-*` rules.
+
+Browser-verified end to end on a real demo scenario carrying all nine
+groups at once: edited an income amount live (value persisted through
+add/blur), added an income row, a super fund, and a financial asset —
+each group's row count increased by exactly one and stayed increased
+(the wholesale-re-render bug the guard above fixes was caught HERE,
+live, before the fix); selected a pension's drawdown to "Fixed amount"
+and watched the amount field appear; edited a retirement age and
+watched it commit; clicked "Edit in full" on Retirement ages and
+landed on the Setup input section. Zero console errors throughout.
+
+Tests: `retirementReviewPanel.test.js` 7/7 (new). Full suite 2053/2053
+(up from 2046: the 7 new tests, no regressions), build green.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

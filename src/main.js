@@ -57,6 +57,7 @@ import {
   isCoupleHousehold, defaultReportPeriod,
 } from "./planState.js";
 import { singleStepGlidePathPreset, gradualGlidePathPreset } from "./glidePaths.js";
+import { buildRetirementReviewGroups } from "./retirementReviewPanel.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { resolveGiftDeprivation, GIFT_ANNUAL_LIMIT, GIFT_FIVE_YEAR_LIMIT } from "./gifting.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -15109,6 +15110,355 @@ function renderRetirementProjectionView() {
   $("retirementSummary").innerHTML = retirementSummaryHTML(analytics);
   $("retirementLifestyleBand").innerHTML = retirementBandHTML(analytics, household, tenure);
   renderFocusRetirementGoalChart(analytics, household, tenure, "retirementGoalChart", "retirementGoalSentence");
+  renderRetirementReviewPanel();
+}
+
+// --- Retirement: input review panel (docs/specs/35-retirement-output-
+// view.md, Commit 2) --------------------------------------------------
+//
+// "The commit that makes this work rather than being a relocation":
+// every input the projection actually reads, grouped (buildRetirement-
+// ReviewGroups, retirementReviewPanel.js — pure, derives the list off
+// state itself, never a hard-coded set), editable in place. Every field
+// here is committed through the SAME function the real input section
+// already uses (applyRowEdit/applyAssetEdit/applySuperAccountEdit/
+// applyPensionEdit/handlePlanFieldChange/onIncomeRequiredChange), keyed
+// off the SAME data-* attributes those sections use — an edit here
+// reaches the engine exactly the way an edit in the real section would,
+// because it IS that same code path, just reached from a second
+// container. Nothing here re-implements a commit.
+//
+// This panel re-renders itself WHOLESALE on every change rather than
+// the surgical single-row DOM patches the real (much larger) tables
+// use — simple, and always correct for a panel this small. The one
+// place that needs guarding is renderRetirementReviewPanel() itself:
+// refreshOutputs() re-renders this view (and so this panel) on EVERY
+// keystroke typed anywhere else in the app too, which is harmless
+// there (nothing here has focus) — but if the keystroke was typed
+// INSIDE this panel's own input, a wholesale innerHTML replace would
+// yank the cursor out from under it. The guard — skip the rebuild
+// while focus is already inside this panel — covers that without
+// needing a live/commit distinction here at all.
+
+function retirementReviewRowHTML(labelText, controlsHTML) {
+  return `
+    <div class="rrp-row">
+      <span class="rrp-row-label">${escapeHTML(labelText)}</span>
+      <div class="rrp-row-controls">${controlsHTML}</div>
+    </div>
+  `;
+}
+
+function retirementReviewFreqOptionsHTML(selected) {
+  return `
+    <option value="monthly"${selected === "monthly" ? " selected" : ""}>Monthly</option>
+    <option value="annual"${selected === "annual" ? " selected" : ""}>Annual</option>
+  `;
+}
+
+// `dataAttrsHTML` carries whichever id/field attributes the field's own
+// real section already keys its commit off (data-kind+cfid+field,
+// data-said+sfield, or data-pid+pfield) — see this section's own header.
+function retirementReviewAmountInputHTML(value, dataAttrsHTML) {
+  return `<input type="text" inputmode="decimal" class="cf-amount-input rrp-amount" value="${fmtAmountValue(value)}"
+                 ${dataAttrsHTML} aria-label="Amount" />`;
+}
+
+const RETIREMENT_REVIEW_IR_SOURCE_LABELS = {
+  currentExpenses: "Current expenses", custom: "Custom amount",
+  asfaComfortable: "ASFA Comfortable", asfaModest: "ASFA Modest", asfaModestRenter: "ASFA Modest (renter)",
+};
+
+function retirementReviewGroupRowsHTML(group) {
+  switch (group.key) {
+    case "income":
+      return group.ids.map((id) => {
+        const r = findRow("income", id);
+        if (!r) return "";
+        const controls = `
+          ${retirementReviewAmountInputHTML(r.amount, `data-kind="income" data-cfid="${id}" data-field="amount"`)}
+          <select data-kind="income" data-cfid="${id}" data-field="frequency" aria-label="Frequency">${retirementReviewFreqOptionsHTML(r.frequency)}</select>
+        `;
+        return retirementReviewRowHTML(r.label || INCOME_CATEGORY_LABELS[r.category] || "Income", controls);
+      }).join("");
+
+    case "super":
+      return group.ids.map((id) => {
+        const sa = findSuperAccount(id);
+        if (!sa) return "";
+        const controls = `
+          ${retirementReviewAmountInputHTML(sa.balance, `data-said="${id}" data-sfield="balance"`)}
+          <input type="number" min="0" max="100" step="0.05" value="${sa.icrPct}"
+                 data-said="${id}" data-sfield="icrPct" aria-label="Indirect cost ratio, percent" title="Indirect cost ratio (fee), % p.a." />%
+        `;
+        return retirementReviewRowHTML(sa.name, controls);
+      }).join("");
+
+    case "contributions":
+      return group.ids.map((id) => {
+        const sc = findRow("superContributions", id);
+        if (!sc) return "";
+        const typeOptions = ENTERABLE_SUPER_TYPES.map((t) =>
+          `<option value="${t}"${sc.type === t ? " selected" : ""}>${SUPER_TYPE_LABELS[t]}</option>`
+        ).join("");
+        const controls = `
+          ${retirementReviewAmountInputHTML(sc.amount, `data-kind="superContributions" data-cfid="${id}" data-field="amount"`)}
+          <select data-kind="superContributions" data-cfid="${id}" data-field="type" aria-label="Contribution type">${typeOptions}</select>
+        `;
+        return retirementReviewRowHTML(sc.label || "Contribution", controls);
+      }).join("");
+
+    case "pensions":
+      return group.ids.map((id) => {
+        const pn = findPension(id);
+        if (!pn) return "";
+        const controls = `
+          <select data-pid="${id}" data-pfield="drawdownOption" aria-label="Drawdown">
+            <option value="minimum"${pn.drawdownOption === "minimum" ? " selected" : ""}>Minimum</option>
+            <option value="fixed"${pn.drawdownOption === "fixed" ? " selected" : ""}>Fixed amount</option>
+            <option value="expenditure"${pn.drawdownOption === "expenditure" ? " selected" : ""}>Fund expenditure shortfall</option>
+            ${pn.type === "ttr" ? `<option value="maximum"${pn.drawdownOption === "maximum" ? " selected" : ""}>Maximum (10% p.a.)</option>` : ""}
+          </select>
+          ${pn.drawdownOption === "fixed" ? retirementReviewAmountInputHTML(pn.fixedAmount, `data-pid="${id}" data-pfield="fixedAmount"`) : ""}
+        `;
+        return retirementReviewRowHTML(pn.name, controls);
+      }).join("");
+
+    case "assets":
+      return group.ids.map((id) => {
+        const a = findAsset(id);
+        if (!a) return "";
+        const controls = `
+          ${retirementReviewAmountInputHTML(a.balance, `data-aid="${id}" data-field="balance"`)}
+          ${isCouple() ? `<select data-aid="${id}" data-field="owner" aria-label="Owner">${ownerOptions(a.owner)}</select>` : ""}
+        `;
+        return retirementReviewRowHTML(a.name, controls);
+      }).join("");
+
+    case "expenses":
+      return group.ids.map((id) => {
+        const r = findRow("expenses", id);
+        if (!r) return "";
+        const catOptions = EXPENSE_CATEGORIES.map((c) =>
+          `<option value="${c}"${r.category === c ? " selected" : ""}>${escapeHTML(EXPENSE_CATEGORY_LABELS[c])}</option>`
+        ).join("");
+        const controls = `
+          ${retirementReviewAmountInputHTML(r.amount, `data-kind="expenses" data-cfid="${id}" data-field="amount"`)}
+          <select data-kind="expenses" data-cfid="${id}" data-field="category" aria-label="Category">${catOptions}</select>
+        `;
+        return retirementReviewRowHTML(r.label || EXPENSE_CATEGORY_LABELS[r.category] || "Expense", controls);
+      }).join("");
+
+    case "incomeRequired": {
+      const ir = state.plan.retirement.incomeRequired;
+      const isCustom = ir.source === "custom";
+      const sourceOptions = INCOME_REQUIRED_SOURCES.map((s) =>
+        `<option value="${s}"${ir.source === s ? " selected" : ""}>${RETIREMENT_REVIEW_IR_SOURCE_LABELS[s]}</option>`
+      ).join("");
+      const controls = `
+        <select data-field="irSource" aria-label="Income required source">${sourceOptions}</select>
+        ${isCustom ? retirementReviewAmountInputHTML(ir.customAmount, `data-field="irCustomAmount"`) : ""}
+      `;
+      return retirementReviewRowHTML("Target retirement income", controls);
+    }
+
+    case "retirementAges":
+      return group.ids.map((owner) => {
+        const person = owner === "partner" ? state.plan.partner : state.plan.client;
+        if (!person) return "";
+        const controls = `
+          <input type="number" min="${person.currentAge}" max="${state.plan.endAge}" step="1" value="${person.retirementAge}"
+                 data-plan-field="${owner}RetirementAge" aria-label="Retirement age" />
+        `;
+        return retirementReviewRowHTML(personDisplayName(person, owner === "partner" ? "Partner" : "Client"), controls);
+      }).join("");
+
+    case "glidePath":
+      return group.ids.map((id) => {
+        const sa = findSuperAccount(id);
+        if (!sa) return "";
+        const alloc = sa.allocation;
+        let controls;
+        if (alloc.mode === "profile") {
+          controls = `<select data-said="${id}" data-sfield="alloc.profile" aria-label="Risk profile">${profileOptions(alloc.profile)}</select>`;
+        } else if (alloc.mode === "glidePath") {
+          const gp = (state.plan.glidePaths ?? []).find((g) => g.id === alloc.glidePathId);
+          controls = `<span class="rrp-readonly">Glide path — ${escapeHTML(gp?.name ?? "unnamed")}</span>`;
+        } else {
+          controls = `<span class="rrp-readonly">Custom allocation</span>`;
+        }
+        return retirementReviewRowHTML(sa.name, controls);
+      }).join("");
+
+    default:
+      return "";
+  }
+}
+
+// Add-inline (spec's own three requirements): only the four kinds the
+// spec names — "a new income row, super fund, contribution or asset" —
+// everything else is edit-in-place or link-out only.
+function retirementReviewAddButtonHTML(group) {
+  if (group.key === "income") return addRowBtn("income", "Add income");
+  if (group.key === "contributions") return addRowBtn("superContributions", "Add contribution");
+  if (group.key === "super") return `<button type="button" class="btn-text" data-rrp-action="add-super">+ Add super fund</button>`;
+  if (group.key === "assets") return `<button type="button" class="btn-text" data-rrp-action="add-asset">+ Add financial asset</button>`;
+  return "";
+}
+
+function retirementReviewGroupHTML(group) {
+  return `
+    <div class="rrp-group">
+      <div class="rrp-group-head">
+        <span class="rrp-group-title">${escapeHTML(group.label)}</span>
+        <span class="rrp-group-actions">
+          ${retirementReviewAddButtonHTML(group)}
+          <button type="button" class="btn-text" data-rrp-linkout="${group.sectionId}">Edit in full ▸</button>
+        </span>
+      </div>
+      <div class="rrp-group-rows">${retirementReviewGroupRowsHTML(group)}</div>
+    </div>
+  `;
+}
+
+function retirementReviewPanelHTML() {
+  const groups = buildRetirementReviewGroups(state);
+  if (!groups.length) {
+    return `<p class="helper-text">Nothing feeds this projection yet — add income, super or an asset to see it reviewed here.</p>`;
+  }
+  return groups.map(retirementReviewGroupHTML).join("");
+}
+
+function renderRetirementReviewPanel() {
+  const el = $("retirementReviewPanel");
+  if (!el) return;
+  // See this section's own header: skip the rebuild only while an
+  // amount/number field inside this panel currently has the caret —
+  // that's the one case a wholesale rebuild would yank the cursor out
+  // from under a live keystroke. A button (add-row/add-super/add-asset/
+  // link-out) or a <select> mid-"change" are safe to rebuild under —
+  // nothing is "mid-edit" there, and a <select> stays focused through
+  // its own "change" (unlike a text input, which blurs first), so
+  // guarding on ANY focus-inside-panel would silently swallow every
+  // structural reveal a select-driven change is supposed to produce
+  // (e.g. a pension's "Fixed amount" field appearing).
+  const active = document.activeElement;
+  if (active && el.contains(active) && active.tagName === "INPUT" && (active.type === "text" || active.type === "number")) return;
+  el.innerHTML = retirementReviewPanelHTML();
+}
+
+// Field commits — one dispatch per attribute scheme, each routed to the
+// exact function the row's own real section already uses (see this
+// section's own header). `e` is the real input/change event; only
+// "change" (commit=true) triggers the panel's own re-render — an
+// "input" (live-typing) event updates state/the live projection and
+// leaves this panel's DOM alone, matching every other live-typing field
+// in this app.
+function applyRetirementReviewFieldEdit(e, commit) {
+  const el = e.target;
+  if (el.dataset.rrpAction || el.dataset.rrpLinkout) return; // handled by the click listener below
+
+  if (el.dataset.planField) {
+    if (commit) handlePlanFieldChange(e); // its own renderAll() already re-renders this panel
+    return;
+  }
+
+  const field = el.dataset.field;
+  if (!el.dataset.kind && !el.dataset.aid && field && field.startsWith("ir")) {
+    if (commit) { onIncomeRequiredChange(el, field); renderRetirementReviewPanel(); }
+    return;
+  }
+
+  if (el.dataset.kind) {
+    const row = findRow(el.dataset.kind, el.dataset.cfid);
+    if (!row) return;
+    applyRowEdit(el.dataset.kind, row, field, el, commit);
+    saveState();
+    refreshOutputs();
+    if (commit) renderRetirementReviewPanel();
+    return;
+  }
+  if (el.dataset.aid) {
+    const a = findAsset(el.dataset.aid);
+    if (!a) return;
+    const structural = applyAssetEdit(a, field, el, commit);
+    saveState();
+    if (structural) { renderAssets(); renderSettings(); renderCashflows(); }
+    refreshOutputs();
+    if (commit) renderRetirementReviewPanel();
+    return;
+  }
+  if (el.dataset.said) {
+    const sa = findSuperAccount(el.dataset.said);
+    if (!sa) return;
+    const structural = applySuperAccountEdit(sa, el.dataset.sfield, el, commit);
+    saveState();
+    if (structural) renderSuper();
+    refreshOutputs();
+    if (commit) renderRetirementReviewPanel();
+    return;
+  }
+  if (el.dataset.pid) {
+    const pn = findPension(el.dataset.pid);
+    if (!pn) return;
+    const structural = applyPensionEdit(pn, el.dataset.pfield, el, commit);
+    saveState();
+    if (structural) renderPensions();
+    refreshOutputs();
+    if (commit) renderRetirementReviewPanel();
+    return;
+  }
+}
+
+function onRetirementReviewPanelClick(e) {
+  const linkout = e.target.closest("[data-rrp-linkout]");
+  if (linkout) {
+    const { client, scenario } = findActive(workspace);
+    navigate({ page: "workspace", clientId: client.id, scenarioId: scenario.id, area: "input", section: linkout.dataset.rrpLinkout });
+    return;
+  }
+  const addBtn = e.target.closest("[data-rrp-action]");
+  if (addBtn) {
+    if (addBtn.dataset.rrpAction === "add-super") {
+      const owner = isCouple() && (state.plan.superAccounts ?? []).some((s) => s.owner === "client") ? "partner" : "client";
+      state.plan.superAccounts = [...(state.plan.superAccounts ?? []), createSuperAccount(state.plan, state.plan.superAccounts, PROFILES, owner)];
+      saveState();
+      refreshOutputs();
+      renderSuper();
+      renderRetirementReviewPanel();
+    } else if (addBtn.dataset.rrpAction === "add-asset") {
+      const a = createAsset(state.plan, state.assets, PROFILES);
+      state.assets.push(a);
+      state.settings = normaliseSettings(state.settings, state.assets, state.plan, {
+        liabilities: state.liabilities, goals: state.goals, superContributions: state.cashflows.superContributions,
+      });
+      collapsed.set(a.id, false);
+      saveState();
+      renderAll();
+    }
+    return;
+  }
+  // "add-row" (income/superContributions), same action namespace/handler
+  // every real cashflow section already uses — see onCashflowSectionClick's
+  // own header.
+  onCashflowSectionClick(e);
+  renderRetirementReviewPanel();
+}
+
+const retirementReviewPanelMount = $("retirementReviewPanel");
+if (retirementReviewPanelMount) {
+  // Same comma-strip-on-focus affordance CF_MOUNTS gives every amount
+  // field elsewhere (see that loop's own comment) — this panel isn't
+  // one of those containers, so it needs its own copy.
+  retirementReviewPanelMount.addEventListener("focusin", (e) => {
+    if (e.target.matches(".cf-amount-input")) {
+      e.target.value = e.target.value.replaceAll(",", "");
+      e.target.select();
+    }
+  });
+  retirementReviewPanelMount.addEventListener("input", (e) => applyRetirementReviewFieldEdit(e, false));
+  retirementReviewPanelMount.addEventListener("change", (e) => applyRetirementReviewFieldEdit(e, true));
+  retirementReviewPanelMount.addEventListener("click", onRetirementReviewPanelClick);
 }
 
 // Super (accumulation) and pension (drawdown) balances, stacked — the

@@ -3060,20 +3060,42 @@ dialog.modal::backdrop {
 .mre-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 12px; }
 .mre-legend-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
 
-/* Retirement Projection — Standalone Surface: comparison support
-   (spec 33, Commit 3). The assumptions panel is a plain <details>
-   (native expand/collapse, no JS needed) using the existing .tl table
-   classes for visual consistency with the rest of the app's own
-   read-only tables. Print scoping is deliberately narrow (#pageRetirement
-   only) — this app has no other print stylesheet, and this one must
-   not affect the comprehensive workspace's own printing (untested,
-   out of this spec's scope). */
-.rp-assumptions { margin: 8px 0 4px; }
-.rp-assumptions summary { cursor: pointer; padding: 4px 0; }
-.rp-assumptions h4 { margin: 14px 0 4px; font-size: 13px; }
-.rp-assumptions table.tl { margin-bottom: 4px; }
-
-@media print {
-  #pageRetirement .page-actions,
-  #pageRetirement .rp-no-print { display: none; }
+/* Retirement: input review panel (docs/specs/35-retirement-output-
+   view.md, Commit 2). One .rrp-group per group (income rows, super
+   funds, ...), a plain flex row per item — deliberately lighter than
+   the .cf-section/.pcard input-section chrome it echoes, since this
+   panel is a review surface, not the input surface (edit-in-place +
+   add-inline + link-out only; the spec's own "not replacing the input
+   surface"). */
+.rrp-group { border-top: 1px dashed var(--line); padding-top: 10px; margin-top: 10px; }
+.rrp-group:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+.rrp-group-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 8px;
 }
+.rrp-group-title {
+  font-size: 12px; font-weight: 700; color: var(--ink-soft);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.rrp-group-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.rrp-group-actions .btn-text { font-size: 12px; padding: 4px 10px; }
+.rrp-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 0;
+}
+.rrp-row + .rrp-row { border-top: 1px solid var(--line); }
+.rrp-row-label { flex: 1 1 160px; min-width: 0; font-size: 13.5px; color: var(--ink); }
+.rrp-row-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rrp-row-controls input[type="number"],
+.rrp-row-controls input[type="text"],
+.rrp-row-controls select {
+  height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; font: inherit; font-size: 13px; color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.rrp-row-controls input[type="number"] { width: 90px; }
+.rrp-row-controls input.rrp-amount { width: 110px; }
+.rrp-row-controls input:focus, .rrp-row-controls select:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.rrp-readonly { font-size: 13px; color: var(--ink-soft); }
