@@ -545,6 +545,7 @@ export const COMMITTED_SHAPE ={
       },
       "deficitFundedFromAssets": "number",
       "definedBenefitDetail": {},
+      "excludedFromRetirementBalance": "number",
       "expenses": "number",
       "fees": "null",
       "fhsssDetail": {

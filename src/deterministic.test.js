@@ -230,6 +230,98 @@ describe("deficit funding (conventions 9d–e, 10)", () => {
   });
 });
 
+describe("Retirement exclusions (docs/specs/35-retirement-output-view.md, Commit 3)", () => {
+  it("an excluded asset is never drawn on for a deficit — even once every other asset is exhausted and a real shortfall bites", () => {
+    const excluded = mkAsset({ id: "excluded", balance: 24000, allocation: zeroRealAlloc(), excludeFromRetirement: true });
+    const ordinary = mkAsset({ id: "ordinary", balance: 100000, allocation: zeroRealAlloc() });
+    const s = mkState({
+      endAge: 44,
+      assets: [excluded, ordinary],
+      fundingOrder: ["excluded", "ordinary"], // excluded sits FIRST in the order — still skipped
+      cashflows: { expenses: [cf({ assetId: null, amount: 4000 })] },
+    });
+    const out = projectPlan(s);
+    // Ordinary alone funds the deficit — despite being SECOND in the
+    // order — until it runs out at exactly month 25 ($100,000 / $4,000),
+    // then the deficit goes genuinely unfunded rather than reaching into
+    // the excluded asset, which sits untouched (zero real return) for
+    // the whole 60-month projection, shortfall or not.
+    expect(out.monthly.perAsset.ordinary[25]).toBeCloseTo(0, 6);
+    expect(out.shortfall).not.toBeNull();
+    expect(out.shortfall.firstMonth).toBe(25);
+    expect(out.monthly.perAsset.excluded[60]).toBeCloseTo(24000, 6);
+  });
+
+  it("an excluded asset still grows, is still taxed, and still appears in net worth — only the funding-order draw stops", () => {
+    const excluded = mkAsset({
+      id: "excluded", balance: 100000, excludeFromRetirement: true,
+      allocation: { mode: "custom", incomePct: 4, growthPct: 2, frankingPct: 0, volBasis: "Balanced" },
+    });
+    const s = mkState({ endAge: 50, assets: [excluded], fundingOrder: [] }); // not even in the order
+    const out = projectPlan(s);
+    // Ordinary compounding — bit-identical to the SAME asset with the
+    // flag off (checked below), proving exclusion touches nothing but
+    // eligibility for a deficit draw.
+    const withoutFlag = projectPlan(mkState({ endAge: 50, assets: [{ ...excluded, excludeFromRetirement: false }], fundingOrder: [] }));
+    expect(out.monthly.combined[out.schedule.months]).toBeCloseTo(withoutFlag.monthly.combined[out.schedule.months], 6);
+    expect(out.monthly.combined[out.schedule.months]).toBeGreaterThan(100000);
+  });
+
+  it("excludeFromRetirement is independent of include — excluding an asset does not remove it from net worth (unlike include:false)", () => {
+    const base = { endAge: 44, cashflows: { expenses: [cf({ assetId: null, amount: 1000 })] } };
+    const withExclude = projectPlan(mkState({
+      ...base,
+      assets: [mkAsset({ id: "a1", balance: 50000, excludeFromRetirement: true }), mkAsset({ id: "a2", balance: 50000 })],
+      fundingOrder: ["a2"],
+    }));
+    // a1 (excluded, not in fundingOrder) still counts toward net worth.
+    expect(withExclude.monthly.combined[1]).toBeGreaterThan(50000);
+    const withIncludeFalse = projectPlan(mkState({
+      ...base,
+      assets: [mkAsset({ id: "a1", balance: 50000, include: false }), mkAsset({ id: "a2", balance: 50000 })],
+      fundingOrder: ["a2"],
+    }));
+    // a1 (scenario-wide excluded) is invisible everywhere, per CLAUDE.md's
+    // own locked convention — net worth is a2 alone, modulo the same
+    // small Working Cash Account interest residue the existing "surplus
+    // invest" test above documents (asserting the shape, not bit-identity).
+    expect(withIncludeFalse.monthly.combined[1]).toBeGreaterThan(48500);
+    expect(withIncludeFalse.monthly.combined[1]).toBeLessThan(49500);
+  });
+
+  it("a pension sourced from an excluded super account pays its own statutory minimum but never shares in the income-driven household target", () => {
+    const excludedAcct = superAcct({ id: "su_ex", owner: "client", balance: 500000, excludeFromRetirement: true });
+    const ordinaryAcct = superAcct({ id: "su_ok", owner: "client", balance: 500000 });
+    const commonPension = {
+      name: "P", owner: "client", type: "abp", commenceAt: { kind: "age", age: 40 },
+      commenceAmount: null, reversionary: false, taxFreeProportion: null,
+      allocation: zeroRealAlloc(), icrPct: 0, drawdownOption: "expenditure", fixedAmount: 0,
+      indexBasis: "none", indexExtraPct: 0, commutations: [],
+    };
+    const s = mkState({
+      endAge: 41,
+      assets: [mkAsset({ balance: 0 })],
+      plan: {
+        superAccounts: [excludedAcct, ordinaryAcct],
+        pensions: [
+          { ...commonPension, id: "pn_ex", sourceAccountId: "su_ex" },
+          { ...commonPension, id: "pn_ok", sourceAccountId: "su_ok" },
+        ],
+        retirement: { incomeRequired: { source: "custom", customAmount: 120000, indexBasis: "none", indexExtraPct: 0, startAt: { kind: "age", age: 40 }, stepDownAtAge: null, stepDownPct: 100 }, incomeDrivenDrawdown: true },
+      },
+    });
+    const out = projectPlan(s);
+    const exPaid = out.yearly[0].pensionDetail.pn_ex.payments;
+    const okPaid = out.yearly[0].pensionDetail.pn_ok.payments;
+    // The excluded pension pays only its own statutory minimum (a small
+    // fraction of a $500k balance); the ordinary one is pulled up toward
+    // the $120k household target since it alone carries the whole gap.
+    expect(exPaid).toBeLessThan(50000);
+    expect(okPaid).toBeGreaterThan(exPaid);
+    expect(okPaid).toBeGreaterThan(100000);
+  });
+});
+
 describe("aggregation + partial first year", () => {
   it("combined = Σ per-asset every year in a 3-asset plan", () => {
     const s = mkState({
@@ -3110,6 +3202,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       allocation: randomAllocation(),
       icrPct: 0,
       costBase: cgtAsset ? balance * rand(0.3, 1) : null,
+      // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+      // Commit 3) — a new money-ROUTING flag (deterministic.js's own
+      // fundingOrder filter), so it needs live coverage in the sweep
+      // like any other: 30% of assets excluded, so both the "eligible"
+      // and "skipped, unfunded shortfall or fell to the next asset in
+      // the order" paths get exercised.
+      excludeFromRetirement: Math.random() < 0.3,
+      excludeFromRetirementReason: Math.random() < 0.5 ? "Earmarked for the kids" : "",
     });
   };
 
@@ -3244,6 +3344,12 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // regression gate) and the new untaxed mechanics both get
       // reliably exercised across the sweep.
       taxedStatus: Math.random() < 0.3 ? "untaxed" : "taxed",
+      // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+      // Commit 3) — a pension sourced from an excluded account is
+      // dropped from the shared income-driven-drawdown target (below);
+      // 30% of accounts excluded so that interaction gets real coverage.
+      excludeFromRetirement: Math.random() < 0.3,
+      excludeFromRetirementReason: "",
     }));
     // Rollovers (spec 26, Commit 1) — a second account per person, 30%
     // of the time, purely so there's somewhere for a same-person
@@ -3468,6 +3574,12 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           etpTaxableComponent: rand(0, 320000), // spans under/over both caps
           unusedLeave: rand(0, 20000),
         } : { enabled: false, at: { kind: "age", age: startAge }, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 },
+        // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+        // Commit 3) — display-side only (retirementAnalytics.js's own
+        // income aggregation), but generated here anyway so the flag
+        // itself is never a value this generator can't reach.
+        excludeFromRetirement: Math.random() < 0.3,
+        excludeFromRetirementReason: "",
       });
     });
 
@@ -4147,6 +4259,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           client, partner, children,
           superAccounts, pensions, definedBenefits, agedCare, gifts, heas, workingCash: { balance: rand(0, 50000), minimumBalance: rand(0, 10000), ratePct: rand(1, 4) },
           adviserFees, adjustments, employers, novatedLeases,
+          // Income-driven drawdown (spec 32, Commit 4) — never randomised
+          // before this commit, so the shared-target loop it gates
+          // (deterministic.js) went completely unexercised by this sweep;
+          // needed now regardless to reach retirement exclusions' own
+          // "excluded pension skips the shared target" interaction
+          // (Commit 3). resolveIncomeRequired's own defensive default
+          // covers incomeRequired's absence here.
+          retirement: { incomeDrivenDrawdown: Math.random() < 0.3 },
         },
         cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows, bondContributions, superRollovers },
         surplus,

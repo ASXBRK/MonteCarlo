@@ -466,3 +466,36 @@ describe("computeRetirementAnalytics — sustainable income to LE", () => {
     }
   });
 });
+
+describe("computeRetirementAnalytics — excludedFromRetirementBalance (docs/specs/35-retirement-output-view.md, Commit 3)", () => {
+  it("is zero when nothing is excluded", () => {
+    const state = mkState({});
+    const result = projectPlan(state, PROFILES);
+    expect(computeRetirementAnalytics(state, result).excludedFromRetirementBalance).toBe(0);
+  });
+
+  it("sums today's balance of every excluded asset, straight off the engine's own year-0 close — the analytics card's own disclosure figure", () => {
+    // incomePct === cpi*100, growthPct: 0 is what actually holds REAL
+    // value flat (this engine works in real terms throughout — CLAUDE.md
+    // — so a literal 0%/0% allocation still declines in real terms via
+    // Fisher deflation; see deterministic.test.js's own zeroRealAlloc()).
+    const zeroReal = { mode: "custom", incomePct: 2.5, growthPct: 0, frankingPct: 0, volBasis: "Balanced" };
+    const state = mkState({
+      assets: [
+        {
+          id: "a1", name: "Ordinary", include: true, owner: "client", distributions: "reinvest",
+          balance: 500000, allocation: zeroReal, icrPct: 0, cgtAsset: false, costBase: null,
+        },
+        {
+          id: "a2", name: "Earmarked for the kids", include: true, owner: "client", distributions: "reinvest",
+          balance: 340000, allocation: zeroReal, icrPct: 0, cgtAsset: false, costBase: null,
+          excludeFromRetirement: true, excludeFromRetirementReason: "For the grandkids",
+        },
+      ],
+    });
+    const result = projectPlan(state, PROFILES);
+    const a = computeRetirementAnalytics(state, result);
+    expect(a.excludedFromRetirementBalance).toBeCloseTo(340000, 6);
+    expect(a.excludedFromRetirementBalance).toBeCloseTo(result.yearly[0].excludedFromRetirementBalance, 6);
+  });
+});

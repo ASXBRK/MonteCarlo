@@ -364,6 +364,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       payout,
       cgt: a.class !== "lifestyle" && a.cgtAsset === true,
       lifestyle: a.class === "lifestyle",
+      // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+      // Commit 3) — read by the fundingOrder filter below only; nothing
+      // else about this asset changes (still grows, still taxed, still
+      // eligible for explicit contributions/withdrawals/lump sums).
+      excludeFromRetirement: a.excludeFromRetirement === true,
       shares: ownerShares(a, couple),
       // Per-plan-year {rate, incomeNominal, frankingPct}, precomputed
       // ONCE here from glidePaths.js's own precomputeGlideYearly — never
@@ -445,6 +450,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       grossRate,
       owner: s.owner,
       taxedStatus: untaxed ? "untaxed" : "taxed",
+      // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+      // Commit 3) — read by pensionMeta's own excludeFromRetirement
+      // derivation below (a pension sourced from this account inherits
+      // it). Growth/tax/fees are all unaffected.
+      excludeFromRetirement: s.excludeFromRetirement === true,
       // Per-plan-year {rate, grossRate}, precomputed once — see the
       // financial-asset meta block above for why this is precomputed
       // rather than resolved inline. `null` for every ordinary
@@ -608,6 +618,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       retirementPhaseFromAge: superReleaseAge(ownerPerson?.retirementAge),
       owner: pn.owner,
       sourceAccountId: pn.sourceAccountId,
+      // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+      // Commit 3) — inherited from the SOURCE super account (the flag
+      // lives on the account, not the pension); a pension has no own
+      // exclude field. Read only by the income-driven-drawdown block
+      // below — this pension still pays its own statutory minimum as
+      // normal, it just never shares in the household's Income-Required
+      // top-up. `superMeta[id]` is absent for an excluded (include:false)
+      // account, in which case optional chaining reads as not-excluded —
+      // fine, since clampPension already drops a dangling sourceAccountId
+      // in that case (no pension can point at a non-existent account).
+      excludeFromRetirement: superMeta[pn.sourceAccountId]?.excludeFromRetirement === true,
       type: pn.type,
       drawdownOption: pn.drawdownOption,
       fixedAmount: pn.fixedAmount,
@@ -1470,8 +1491,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // "they are liquid" (the spec's own words) — subject to the SAME
   // funding order and minimum balances as an ordinary financial asset,
   // so a bond id may sit anywhere in the adviser's own chosen order.
+  // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+  // Commit 3) — an excludeFromRetirement asset is dropped from this
+  // list outright: "not drawn on to fund retirement" (the spec's own
+  // words) reads as never sold to cover a shortfall, not phase-gated —
+  // the asset still receives whatever contributions/lump sums are
+  // explicitly targeted at it, still grows, still taxed; conservation
+  // holds because the money is simply never routed here, not created
+  // or destroyed. Bonds have no such flag (spec scopes this to asset/
+  // superAccount/incomeRow only) — `meta[id]` is undefined for a bond
+  // id, so the optional chaining below reads as not-excluded for them.
   const fundingOrder = state.settings.fundingOrder.filter(
-    (id) => (id in bal && !meta[id].lifestyle) || id in bondBal
+    (id) => ((id in bal && !meta[id].lifestyle) || id in bondBal) && !meta[id]?.excludeFromRetirement
   );
   // Deficit side (Surplus and Deficit Allocation spec, Commit 1):
   // per-asset minimum balances and the sell-rule choice. fundingOrder
@@ -4139,17 +4170,24 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           const target = incomeRequiredForDrawdown(y) ?? 0;
           let paidSoFar = 0;
           for (const pn of pensionRows) {
+            // Retirement exclusions (docs/specs/35-retirement-output-
+            // view.md, Commit 3) — an excluded pension neither counts
+            // toward nor draws down the shared household target; it
+            // keeps paying its own statutory minimum only, same as
+            // incomeDriven being off for it specifically.
+            if (pensionMeta[pn.id].excludeFromRetirement) continue;
             if (pensionMeta[pn.id].drawdownOption === "expenditure") paidSoFar += pensionPaidYtd[pn.id];
           }
           remainingTarget = Math.max(0, target - paidSoFar);
         }
         for (const pn of pensionRows) {
           if (!pensionCommenced[pn.id] || pensionMeta[pn.id].drawdownOption !== "expenditure") continue;
+          const sharesTarget = incomeDriven && !pensionMeta[pn.id].excludeFromRetirement;
           let owed = pensionMinThisYear[pn.id] - pensionPaidYtd[pn.id];
-          if (incomeDriven) owed = Math.max(owed, remainingTarget);
+          if (sharesTarget) owed = Math.max(owed, remainingTarget);
           if (owed <= 0) continue;
           const paid = withdrawFromPension(pn.id, owed);
-          if (incomeDriven) remainingTarget = Math.max(0, remainingTarget - paid);
+          if (sharesTarget) remainingTarget = Math.max(0, remainingTarget - paid);
           if (paid <= 0) continue;
           wcaBal += paid;
           const pm = pensionMeta[pn.id];
@@ -5834,6 +5872,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.superDetail[id].taxFreeClosing = superTaxFree[id];
       row.superClosing += superSeries[id][yearEnd(y)];
     }
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — "the year table and charts show excluded balances as
+    // a separate band" (the spec's own words): a pure read of balances
+    // already tracked above (perAssetClosing/superDetail), never a new
+    // money flow of its own, so it needs no conservation-invariant
+    // treatment beyond what those totals already receive. Income rows
+    // have no balance to sum here — their own exclusion is a display-
+    // side concern for retirementAnalytics.js instead (disclosed: see
+    // that module's own header).
+    row.excludedFromRetirementBalance =
+      ids.reduce((s, id) => s + (meta[id].excludeFromRetirement ? series[id][yearEnd(y)] : 0), 0) +
+      superIds.reduce((s, id) => s + (superMeta[id].excludeFromRetirement ? superSeries[id][yearEnd(y)] : 0), 0);
     for (const b of bonds) {
       row.bondDetail[b.id].closing = bondSeries[b.id][yearEnd(y)];
       row.bondDetail[b.id].costBase = bondCostBase[b.id];

@@ -5443,6 +5443,15 @@ function applyAssetEdit(a, field, el, commit) {
       a.costBase = clampNumber(el.value, 0);
       if (commit) el.value = a.costBase;
       return false;
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — see applyRowEdit's own case for the full rationale.
+    case "excludeFromRetirement":
+      a.excludeFromRetirement = el.checked;
+      return false;
+    case "excludeFromRetirementReason":
+      a.excludeFromRetirementReason = commit ? el.value.trim().slice(0, 200) : el.value;
+      if (commit) el.value = a.excludeFromRetirementReason;
+      return false;
     case "alloc.profile":
       if (a.allocation.mode === "profile" && PROFILE_KEYS.includes(el.value)) {
         a.allocation.profile = el.value;
@@ -5693,6 +5702,18 @@ function applyRowEdit(kind, row, field, el, commit) {
       break;
     case "fhsssEligible":
       row.fhsssEligible = el.checked;
+      break;
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — income rows only, in practice (the review panel is
+    // the only place this renders, and it only offers this control on
+    // "income"), but harmless to accept generically like every other
+    // case in this switch.
+    case "excludeFromRetirement":
+      row.excludeFromRetirement = el.checked;
+      break;
+    case "excludeFromRetirementReason":
+      row.excludeFromRetirementReason = commit ? el.value.trim().slice(0, 200) : el.value;
+      if (commit) el.value = row.excludeFromRetirementReason;
       break;
     case "category": {
       if (kind === "income") {
@@ -7111,6 +7132,15 @@ function applySuperAccountEdit(sa, field, el, commit) {
     case "icrPct":
       sa.icrPct = clampNumber(el.value, 0, 100);
       if (commit) el.value = sa.icrPct;
+      return false;
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — see applyRowEdit's own case for the full rationale.
+    case "excludeFromRetirement":
+      sa.excludeFromRetirement = el.checked;
+      return false;
+    case "excludeFromRetirementReason":
+      sa.excludeFromRetirementReason = commit ? el.value.trim().slice(0, 200) : el.value;
+      if (commit) el.value = sa.excludeFromRetirementReason;
       return false;
     case "alloc.profile":
       sa.allocation = clampAllocation({ mode: "profile", profile: el.value }, PROFILES);
@@ -14933,7 +14963,13 @@ function retirementSummaryHTML(analytics) {
   const warning = analytics.materialLEDifference
     ? `<p class="helper-warning">Sustainable income to LE and LE+5 differ by more than 10% — outliving the average life expectancy materially changes what's sustainable, so both are shown rather than one headline figure.</p>`
     : "";
-  return `<div class="summary-strip">${stats}</div>${warning}`;
+  // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+  // Commit 3) — "the analytics card carries a line when anything is
+  // excluded" (the spec's own words): visible, not silent.
+  const exclusionNote = analytics.excludedFromRetirementBalance > 0
+    ? `<p class="helper-text">${fmtMoney(analytics.excludedFromRetirementBalance)} excluded from retirement funding.</p>`
+    : "";
+  return `<div class="summary-strip">${stats}</div>${warning}${exclusionNote}`;
 }
 
 // Household after-tax income by source (spec 32, Commit 5a) — the
@@ -15140,12 +15176,32 @@ function renderRetirementProjectionView() {
 // while focus is already inside this panel — covers that without
 // needing a live/commit distinction here at all.
 
-function retirementReviewRowHTML(labelText, controlsHTML) {
+function retirementReviewRowHTML(labelText, controlsHTML, excluded = false) {
+  // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+  // Commit 3) — "excluded rows render distinctly in the panel" (the
+  // spec's own words): a dedicated class, not just the reason text
+  // beside it, so an excluded row reads as different at a glance.
   return `
-    <div class="rrp-row">
+    <div class="rrp-row${excluded ? " rrp-row-excluded" : ""}">
       <span class="rrp-row-label">${escapeHTML(labelText)}</span>
       <div class="rrp-row-controls">${controlsHTML}</div>
     </div>
+  `;
+}
+
+// Retirement exclusions (docs/specs/35-retirement-output-view.md,
+// Commit 3) — the checkbox + (when checked) free-text reason field,
+// shared by the three kinds the flag lives on (income/super/assets).
+// `kindAttrs` carries whichever id-attribute the row's own real commit
+// path keys off (data-kind=... data-cfid=..., or data-said=...).
+function retirementReviewExclusionControlsHTML(excluded, reason, kindAttrs) {
+  return `
+    <label class="rrp-exclude-toggle">
+      <input type="checkbox"${excluded ? " checked" : ""} ${kindAttrs} data-field="excludeFromRetirement" />
+      <span>Exclude from retirement</span>
+    </label>
+    ${excluded ? `<input type="text" maxlength="200" placeholder="Reason (optional)" class="rrp-exclude-reason"
+                          value="${escapeHTML(reason ?? "")}" ${kindAttrs} data-field="excludeFromRetirementReason" />` : ""}
   `;
 }
 
@@ -15175,23 +15231,27 @@ function retirementReviewGroupRowsHTML(group) {
       return group.ids.map((id) => {
         const r = findRow("income", id);
         if (!r) return "";
+        const excluded = r.excludeFromRetirement === true;
         const controls = `
           ${retirementReviewAmountInputHTML(r.amount, `data-kind="income" data-cfid="${id}" data-field="amount"`)}
           <select data-kind="income" data-cfid="${id}" data-field="frequency" aria-label="Frequency">${retirementReviewFreqOptionsHTML(r.frequency)}</select>
+          ${retirementReviewExclusionControlsHTML(excluded, r.excludeFromRetirementReason, `data-kind="income" data-cfid="${id}"`)}
         `;
-        return retirementReviewRowHTML(r.label || INCOME_CATEGORY_LABELS[r.category] || "Income", controls);
+        return retirementReviewRowHTML(r.label || INCOME_CATEGORY_LABELS[r.category] || "Income", controls, excluded);
       }).join("");
 
     case "super":
       return group.ids.map((id) => {
         const sa = findSuperAccount(id);
         if (!sa) return "";
+        const excluded = sa.excludeFromRetirement === true;
         const controls = `
           ${retirementReviewAmountInputHTML(sa.balance, `data-said="${id}" data-sfield="balance"`)}
           <input type="number" min="0" max="100" step="0.05" value="${sa.icrPct}"
                  data-said="${id}" data-sfield="icrPct" aria-label="Indirect cost ratio, percent" title="Indirect cost ratio (fee), % p.a." />%
+          ${retirementReviewExclusionControlsHTML(excluded, sa.excludeFromRetirementReason, `data-said="${id}"`)}
         `;
-        return retirementReviewRowHTML(sa.name, controls);
+        return retirementReviewRowHTML(sa.name, controls, excluded);
       }).join("");
 
     case "contributions":
@@ -15228,11 +15288,13 @@ function retirementReviewGroupRowsHTML(group) {
       return group.ids.map((id) => {
         const a = findAsset(id);
         if (!a) return "";
+        const excluded = a.excludeFromRetirement === true;
         const controls = `
           ${retirementReviewAmountInputHTML(a.balance, `data-aid="${id}" data-field="balance"`)}
           ${isCouple() ? `<select data-aid="${id}" data-field="owner" aria-label="Owner">${ownerOptions(a.owner)}</select>` : ""}
+          ${retirementReviewExclusionControlsHTML(excluded, a.excludeFromRetirementReason, `data-aid="${id}"`)}
         `;
-        return retirementReviewRowHTML(a.name, controls);
+        return retirementReviewRowHTML(a.name, controls, excluded);
       }).join("");
 
     case "expenses":
@@ -15357,6 +15419,16 @@ function renderRetirementReviewPanel() {
 function applyRetirementReviewFieldEdit(e, commit) {
   const el = e.target;
   if (el.dataset.rrpAction || el.dataset.rrpLinkout) return; // handled by the click listener below
+  // A checkbox fires BOTH "input" and "change" for one click, back to
+  // back, synchronously — if the "input" handler's own re-render
+  // cascade replaces this checkbox's parent's innerHTML first (see
+  // renderRetirementReviewPanel's own guard: a checkbox is neither a
+  // text nor a number input, so nothing exempts it), the original
+  // checkbox node is detached before "change" can bubble to this
+  // listener at all, and the edit is silently lost. Only "change" is
+  // this control's real commit anyway — there's no live-typing concept
+  // for a checkbox — so "input" is simply skipped for one.
+  if (el.type === "checkbox" && !commit) return;
 
   if (el.dataset.planField) {
     if (commit) handlePlanFieldChange(e); // its own renderAll() already re-renders this panel
@@ -15440,7 +15512,14 @@ function onRetirementReviewPanelClick(e) {
   }
   // "add-row" (income/superContributions), same action namespace/handler
   // every real cashflow section already uses — see onCashflowSectionClick's
-  // own header.
+  // own header. Gated on a REAL [data-action] target — a bare click
+  // anywhere else in the panel (an exclusion checkbox, a label, empty
+  // space) must fall through as a true no-op: "click" fires BEFORE
+  // "input"/"change" for a checkbox, so an unconditional render() here
+  // would detach the checkbox from the DOM before the browser's own
+  // native toggle even reaches this listener — the exact bug this
+  // guard exists to prevent (found live, browser-verified).
+  if (!e.target.closest("[data-action]")) return;
   onCashflowSectionClick(e);
   renderRetirementReviewPanel();
 }
@@ -15474,6 +15553,7 @@ function renderRetirementBalanceChart() {
   const factor = (y) => displayFactor(endMonthOfYear(y));
   const superSeries = yearIdxs.map((y) => (projection.yearly[y].superClosing ?? 0) * factor(y));
   const pensionSeries = yearIdxs.map((y) => (projection.yearly[y].pensionClosing ?? 0) * factor(y));
+  const excludedSeries = yearIdxs.map((y) => (projection.yearly[y].excludedFromRetirementBalance ?? 0) * factor(y));
 
   const traces = [];
   if (!seriesIsAllZero(superSeries)) {
@@ -15488,6 +15568,18 @@ function renderRetirementBalanceChart() {
       x: ages, y: pensionSeries, name: "Pension (drawdown)", type: "scatter", mode: "lines",
       stackgroup: "balance", fill: "tonexty", line: { color: "#6b8e23", width: 1 },
       hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Pension</extra>",
+    });
+  }
+  // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+  // Commit 3) — "the year table and charts show excluded balances as a
+  // separate band or series" (the spec's own words): deliberately NOT
+  // in the same stackgroup — this money is visibly there, but visibly
+  // untouched, not part of what funds retirement.
+  if (!seriesIsAllZero(excludedSeries)) {
+    traces.push({
+      x: ages, y: excludedSeries, name: "Excluded from retirement funding", type: "scatter", mode: "lines",
+      line: { color: "#b8860b", width: 2, dash: "dot" },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Excluded</extra>",
     });
   }
   if (traces.length === 0) {
@@ -15584,12 +15676,18 @@ function retirementYearTableRows() {
       otherIncome: (s.employment + s.investmentIncome + s.assetDrawdown) * factor,
       totalIncome: s.grossTotal * factor,
       incomeRequired: row.incomeRequired == null ? null : row.incomeRequired * factor,
+      // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+      // Commit 3) — "the year table... show[s] excluded balances as a
+      // separate band" (the spec's own words).
+      excludedBalance: (row.excludedFromRetirementBalance ?? 0) * factor,
     };
   });
 }
 
 function retirementYearTableHTML() {
-  const rows = retirementYearTableRows().map((r) => `
+  const allRows = retirementYearTableRows();
+  const showExcluded = allRows.some((r) => r.excludedBalance !== 0);
+  const rows = allRows.map((r) => `
       <tr>
         <td>${r.age}</td>
         <td class="tl-num">${fmtMoney(r.superBalance)}</td>
@@ -15599,6 +15697,7 @@ function retirementYearTableHTML() {
         <td class="tl-num">${fmtMoney(r.otherIncome)}</td>
         <td class="tl-num">${fmtMoney(r.totalIncome)}</td>
         <td class="tl-num">${r.incomeRequired == null ? "—" : fmtMoney(r.incomeRequired)}</td>
+        ${showExcluded ? `<td class="tl-num">${fmtMoney(r.excludedBalance)}</td>` : ""}
       </tr>
     `).join("");
   return `
@@ -15610,6 +15709,7 @@ function retirementYearTableHTML() {
             <th class="tl-num">Drawdown</th><th class="tl-num">Age pension</th>
             <th class="tl-num">Other income</th><th class="tl-num">Total income</th>
             <th class="tl-num">Income required</th>
+            ${showExcluded ? `<th class="tl-num">Excluded from retirement</th>` : ""}
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -15625,13 +15725,20 @@ function renderRetirementTableView() {
 function exportRetirementTableCSV() {
   const esc = (s) => `"${String(s).replaceAll('"', '""')}"`;
   const rows = retirementYearTableRows();
+  const showExcluded = rows.some((r) => r.excludedBalance !== 0);
+  const header = ["Age", "Super", "Pension", "Drawdown", "Age pension", "Other income", "Total income", "Income required"];
+  if (showExcluded) header.push("Excluded from retirement");
   const lines = [
-    ["Age", "Super", "Pension", "Drawdown", "Age pension", "Other income", "Total income", "Income required"].map(esc).join(","),
-    ...rows.map((r) => [
-      r.age, r.superBalance.toFixed(2), r.pensionBalance.toFixed(2), r.drawdown.toFixed(2),
-      r.agePension.toFixed(2), r.otherIncome.toFixed(2), r.totalIncome.toFixed(2),
-      r.incomeRequired == null ? "" : r.incomeRequired.toFixed(2),
-    ].join(",")),
+    header.map(esc).join(","),
+    ...rows.map((r) => {
+      const cells = [
+        r.age, r.superBalance.toFixed(2), r.pensionBalance.toFixed(2), r.drawdown.toFixed(2),
+        r.agePension.toFixed(2), r.otherIncome.toFixed(2), r.totalIncome.toFixed(2),
+        r.incomeRequired == null ? "" : r.incomeRequired.toFixed(2),
+      ];
+      if (showExcluded) cells.push(r.excludedBalance.toFixed(2));
+      return cells.join(",");
+    }),
   ];
   downloadCSV("retirement-year-by-year", lines);
 }

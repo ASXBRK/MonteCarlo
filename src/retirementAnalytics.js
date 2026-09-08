@@ -244,6 +244,13 @@ export function computeRetirementAnalytics(state, result) {
     capitalAtRetirement,
     le, lePlus5,
     materialLEDifference,
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — "the analytics card carries a line when anything is
+    // excluded" (the spec's own words). TODAY's total (year 0's own
+    // close), the same figure the year table's own excluded band starts
+    // from — a straight read of the engine's own already-computed sum,
+    // never re-derived.
+    excludedFromRetirementBalance: yearly[0]?.excludedFromRetirementBalance ?? 0,
   };
 }
 

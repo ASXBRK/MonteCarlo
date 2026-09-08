@@ -3548,6 +3548,107 @@ Tests: `retirementReviewPanel.test.js` 7/7 (new). Full suite 2053/2053
 
 ---
 
+### Retirement: exclude assets from retirement funding (spec 35, Commit 3)
+
+`excludeFromRetirement` (bool, default false) + `excludeFromRetirementReason`
+(string) added to asset, superAccount and incomeRow. Retirement-scoped,
+distinct from `include`: an excluded item still exists, still grows,
+still appears in net assets and every other view — it is simply never
+drawn on to fund retirement.
+
+**Engine (`deterministic.js`).** An excluded **asset** is dropped from
+`fundingOrder` outright — never sold to cover a deficit — unconditionally
+for the whole projection, not phase-gated ("not drawn on to fund
+retirement" reads as a permanent exclusion, not a pre/post-retirement
+switch; matches the spec's own worked examples, which are both about
+balances set aside entirely, not phase-timed). A pension sourced from an
+excluded **super account** is dropped from the shared income-driven-
+drawdown target only (`incomeDrivenDrawdown`, spec 32 Commit 4) — it
+still pays its own statutory minimum, it just never shares in the
+household's Income-Required top-up, and never counts toward what the
+OTHER pensions are measured against. An excluded **income row**'s own
+effect is display-side only (see below) — income rows were never part of
+`fundingOrder` to begin with, so there is no engine-level "drawdown" for
+one to be removed from.
+
+**Engine result shape (`v1.5.0`, additive).** New yearly-row field
+`excludedFromRetirementBalance` — the sum of every excluded asset/super
+balance at that year's close, read straight off `perAssetClosing`/
+`superDetail` (already tracked elsewhere on the same row) rather than
+computed independently, so it can never disagree with them. A pure
+aggregation of existing balances, never a new money flow — no new
+conservation-invariant category needed (documented in the field's own
+comment, so the next reader doesn't wonder why CLAUDE.md's rule wasn't
+followed literally: the rule exists to catch NEW leaks/transfers, and
+this introduces neither).
+
+**Visible, not silent** (the spec's own requirement):
+- Review panel (Commit 2): income/super/asset rows each carry an
+  "Exclude from retirement" checkbox and (once checked) a free-text
+  reason field; an excluded row renders in a distinct amber band
+  (`.rrp-row-excluded`).
+- Analytics card: "$X excluded from retirement funding" line, shown only
+  when the total is nonzero — today's balance, the same figure the year
+  table's own excluded band starts from.
+- Year table + CSV export: an "Excluded from retirement" column, shown
+  only when at least one visible row is nonzero (matches this table's
+  own existing hide-if-empty convention elsewhere).
+- Balance chart: a dashed reference line, deliberately NOT in the same
+  stackgroup as super/pension — the money is visibly there, visibly
+  untouched, never implied to be part of what funds retirement.
+
+**A real bug found and fixed during browser verification, not by unit
+tests:** the review panel's own click handler (Commit 2) unconditionally
+re-rendered the whole panel after ANY click that wasn't a recognised
+add/link-out button — including a click on the new exclusion checkbox
+itself. Since a checkbox's native "click" fires before "input"/"change",
+that unconditional re-render detached the checkbox from the DOM before
+the browser's own toggle could reach it, silently discarding every
+exclude/reason edit. Fixed by gating the fallback on an actual
+`[data-action]` target, so an unrecognised click (a checkbox, a label,
+empty space) is a true no-op — caught live, with the checkbox visibly
+refusing to stay checked, before being traced to the exact interaction.
+A second, smaller defensive fix alongside it: `applyRetirementReviewFieldEdit`
+now skips a checkbox's own "input" event entirely (only "change" commits
+it) — belt-and-braces against the same class of event-ordering issue,
+since a checkbox has no live-typing concept for "input" to usefully serve
+anyway.
+
+**randomScenario() extended** (CLAUDE.md's own rule): assets/super
+accounts/income rows get `excludeFromRetirement` on a 30% coin flip each;
+`plan.retirement.incomeDrivenDrawdown` — never randomised before this
+commit, despite existing since spec 32 Commit 4 — now flips 30% of the
+time too, since without it the shared-drawdown-target loop this commit's
+own pension exclusion lives inside went completely unexercised by the
+sweep. Conservation invariant re-verified across the full
+threshold-stratified sweep (3000+ scenarios) with all of the above live —
+holds throughout, as expected (exclusion only re-routes which pocket
+funds a shortfall; it never creates, destroys, or duplicates money).
+
+4 new engine-level tests (deterministic.test.js): an excluded asset never
+drawn on even once every other asset is exhausted and a real shortfall
+bites; an excluded asset still grows/taxes/counts in net worth
+identically to the same asset unflagged; `excludeFromRetirement` is
+independent of `include`; a pension sourced from an excluded account pays
+its own minimum but never the shared top-up. 2 new analytics tests
+(retirementAnalytics.test.js): zero when nothing's excluded; sums
+today's balance of every excluded asset exactly matching the engine's own
+year-0 figure (caught and fixed one test-construction mistake along the
+way — a literal 0%/0% allocation still declines in REAL terms via Fisher
+deflation in this engine; needed `zeroRealAlloc`-equivalent incomePct ===
+cpi to hold flat, same trap that module's own existing helper exists to
+avoid).
+
+Browser-verified end to end: checked an asset's exclude box, watched the
+row turn amber and the reason field appear, typed a reason, confirmed it
+persisted; watched the analytics disclosure line and the year table's own
+"Excluded from retirement" column both appear. Zero console errors.
+
+Tests: `deterministic.test.js` +4, `retirementAnalytics.test.js` +2. Full
+suite 2059/2059 (up from 2053), build green.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

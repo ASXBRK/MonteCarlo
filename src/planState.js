@@ -711,6 +711,14 @@ export function createIncomeRow(plan, existing = []) {
     // Redundancy and ETP (spec 19 Commit 3) — disabled by default; see
     // clampIncomeRow's own header for the field-by-field rationale.
     termination: { enabled: false, at: null, completedYearsOfService: 0, type: "genuineRedundancy", etpTaxableComponent: 0, unusedLeave: 0 },
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — see createAsset's own comment for the full shape. For
+    // an income row specifically: dropped from retirementAnalytics.js's
+    // own household-income aggregation (the goal-vs-position figures) —
+    // still earns, still taxed, exactly as before; it is the DISPLAYED
+    // "is retirement funded" comparison that stops counting it.
+    excludeFromRetirement: false,
+    excludeFromRetirementReason: "",
   };
 }
 
@@ -923,6 +931,15 @@ export function createAsset(plan, existing = [], profiles = {}) {
     icrPct: 0,
     cgtAsset: true,
     costBase: balance,
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — retirement-scoped, distinct from `include` (which
+    // removes an item from the SCENARIO entirely). An excluded asset
+    // still exists, still grows, still appears everywhere else; it is
+    // simply never drawn on to fund retirement (deterministic.js's own
+    // fundingOrder filter). Default false/"" — every existing asset is
+    // unaffected until an adviser opts one out.
+    excludeFromRetirement: false,
+    excludeFromRetirementReason: "",
   };
 }
 
@@ -1566,6 +1583,14 @@ export function createSuperAccount(plan, existing = [], profiles = {}, owner = "
     // has ever modelled) — see clampSuperAccount for the enum-membership
     // clamp, the same shape clampPension's own `type` uses.
     taxedStatus: "taxed",
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — see createAsset's own comment for the full shape of
+    // what this means. For a super account specifically: any pension
+    // sourced from it is dropped from the SHARED income-driven-drawdown
+    // target (still pays its own statutory minimum, never the topped-up
+    // share) — deterministic.js's own incomeDriven block.
+    excludeFromRetirement: false,
+    excludeFromRetirementReason: "",
   };
 }
 
@@ -1591,6 +1616,8 @@ export function clampSuperAccount(sa, plan, profiles = {}) {
     // exactly the "looks entered but does nothing" state CLAUDE.md's
     // input-integrity section rules out).
     contributionSplitPct: plan.partner ? clampNumber(sa.contributionSplitPct, 0, 85) : 0,
+    excludeFromRetirement: sa.excludeFromRetirement === true,
+    excludeFromRetirementReason: typeof sa.excludeFromRetirementReason === "string" ? sa.excludeFromRetirementReason.slice(0, 200) : "",
   };
 }
 
