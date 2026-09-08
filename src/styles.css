@@ -3110,3 +3110,14 @@ dialog.modal::backdrop {
 }
 .rrp-exclude-toggle input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
 .rrp-exclude-reason { width: 180px; }
+
+/* Retirement outcome buckets (docs/specs/36-retirement-outputs.md,
+   Commit 1) — a labelled horizontal bar per bucket, leading the Monte
+   Carlo stats block ("the buckets lead" — the spec's own words). */
+.rp-outcome-buckets { margin-bottom: 18px; }
+.rp-bucket-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+.rp-bucket-label { flex: 0 0 190px; font-size: 13.5px; color: var(--ink); }
+.rp-bucket-track { flex: 1 1 auto; height: 10px; background: var(--accent-soft); border-radius: 5px; overflow: hidden; }
+.rp-bucket-fill { height: 100%; background: var(--accent); border-radius: 5px; }
+.rp-bucket-pct { flex: 0 0 44px; text-align: right; font-weight: 600; font-size: 13.5px; color: var(--ink); }
+.rp-bucket-sub { margin: 0 0 4px 190px; padding-left: 10px; }

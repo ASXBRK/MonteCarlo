@@ -102,6 +102,7 @@
 import { PROFILES } from "./profiles.js";
 import { profileForAllocation } from "./allocation.js";
 import { projectPlan } from "./deterministic.js";
+import { meanOverWindow, minOverWindow, householdCashIncome } from "./retirementAnalytics.js";
 
 export const DEFAULT_NUM_PATHS = 2000;
 export const MARKET_RHO = 0.85;
@@ -295,6 +296,18 @@ function generatePathShocks(holdings, months, rng, rho) {
 //   samplePaths: [projectPlan() output, ...]  — sampleCount full path outputs, for
 //     spot-checking (e.g. the conservation invariant) or deeper inspection; NOT a
 //     representative percentile sample, just an unbiased random draw of raw outputs.
+//   retirementWindow: null, or { fromPlanYear, toPlanYear, pathAvgIncome,
+//     pathMinIncome, pathRuined } — present only when options.retirementWindow
+//     was given (docs/specs/36-retirement-outputs.md, Commit 1). pathAvgIncome/
+//     pathMinIncome are Float64Array[numPaths]: EVERY path's own average/minimum
+//     household after-tax income over [fromPlanYear, toPlanYear] (the SAME
+//     window/measure retirementAnalytics.js's averageRetirementIncome uses, via
+//     the same meanOverWindow/householdCashIncome — never a second, independently
+//     -derived figure). pathRuined is Uint8Array[numPaths]: this path's own
+//     out.shortfall !== null, the single locked ruin definition above, per path
+//     (ruinCount/ruinProbability only ever summarised it before this). Retained
+//     for every path, not just the small samplePaths draw, because outcome-bucket
+//     classification needs the whole distribution, not a sample of it.
 // }
 //
 // options:
@@ -319,6 +332,13 @@ function generatePathShocks(holdings, months, rng, rho) {
 //     reaches the main thread immediately, since postMessage queues
 //     rather than blocks, which is what lets a long run report progress
 //     without needing to chunk the loop itself.
+//   retirementWindow — { fromPlanYear, toPlanYear } (docs/specs/36-
+//     retirement-outputs.md, Commit 1). When given, every path's own
+//     average/minimum household after-tax income over that window is
+//     retained (see the result shape above) for outcome-bucket
+//     classification. Omitted by every caller that doesn't need it (the
+//     levers solver, scenario comparison) — no extra work or memory
+//     when absent.
 export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
   const {
     numPaths = DEFAULT_NUM_PATHS,
@@ -331,6 +351,7 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
     neutralRealRate = DEFAULT_NEUTRAL_REAL_RATE,
     mortgageMargin = DEFAULT_MORTGAGE_MARGIN,
     onProgress = null,
+    retirementWindow = null,
   } = options;
   const progressEvery = Math.max(1, Math.floor(numPaths / 100));
   const rng = rngOverride ?? (seed != null ? createRng(seed) : Math.random);
@@ -349,6 +370,14 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
   const netAssetsAll = new Float64Array(numPaths * years); // [path*years + y]
   let ruinCount = 0;
   const shortfallAges = [];
+  // Outcome buckets (docs/specs/36-retirement-outputs.md, Commit 1) —
+  // allocated only when a caller actually asked for them (see this
+  // function's own header comment: no cost for the levers solver/
+  // scenario comparison, which never read these fields).
+  const pathAvgIncome = retirementWindow ? new Float64Array(numPaths) : null;
+  const pathMinIncome = retirementWindow ? new Float64Array(numPaths) : null;
+  const pathRuined = retirementWindow ? new Uint8Array(numPaths) : null;
+  const incomeSelector = (r) => householdCashIncome(r) - r.tax;
   const sampleIdx = new Set();
   const targetSamples = Math.min(sampleCount, numPaths);
   while (sampleIdx.size < targetSamples) sampleIdx.add(Math.floor(rng() * numPaths));
@@ -375,6 +404,11 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
     if (out.shortfall) {
       ruinCount++;
       shortfallAges.push(out.shortfall.clientAge);
+    }
+    if (retirementWindow) {
+      pathAvgIncome[path] = meanOverWindow(out.yearly, retirementWindow.fromPlanYear, retirementWindow.toPlanYear, incomeSelector) ?? 0;
+      pathMinIncome[path] = minOverWindow(out.yearly, retirementWindow.fromPlanYear, retirementWindow.toPlanYear, incomeSelector) ?? 0;
+      pathRuined[path] = out.shortfall ? 1 : 0;
     }
     if (sampleIdx.has(path)) samplePaths.push(out);
     if (onProgress && ((path + 1) % progressEvery === 0 || path + 1 === numPaths)) {
@@ -413,5 +447,8 @@ export function runMonteCarlo(state, profiles = PROFILES, options = {}) {
     medianShortfallAge: median(shortfallAges),
     customHoldings: customAllocationHoldings(state, profiles),
     samplePaths,
+    retirementWindow: retirementWindow
+      ? { fromPlanYear: retirementWindow.fromPlanYear, toPlanYear: retirementWindow.toPlanYear, pathAvgIncome, pathMinIncome, pathRuined }
+      : null,
   };
 }

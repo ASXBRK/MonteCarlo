@@ -3869,6 +3869,80 @@ via the `run` skill.
 
 ---
 
+### Retirement: lifestyle-anchored outcome buckets (spec 36, Commit 1)
+
+**Replaces one success number with four that describe the shape of the
+distribution**, on Retirement > Monte Carlo, above the existing ruin
+stats ("both are shown; the buckets lead" — the spec's own words).
+Every simulated path is classified by the average household after-tax
+income it sustains from retirement to life expectancy — the SAME
+window/measure the lifestyle band already uses — against three
+boundaries (high to low): ASFA Comfortable, ASFA Modest (or Modest
+(renter), matching whichever standard the lifestyle band itself
+selects for this household's tenure), and the full Age Pension rate.
+The minimum renders alongside the average per bucket ("of those, N%
+drop to the Age Pension floor for a period") — a path averaging
+Comfortable while spending five years at the floor is not a
+Comfortable retirement.
+
+- `src/retirementOutcomeBuckets.js` (new, pure) — boundary resolution
+  (`resolveOutcomeThresholds`, reusing `asfaAnnual`/`agePensionRatesFor`
+  directly, never a duplicated figure), classification
+  (`classifyOutcome`), aggregation (`computeOutcomeBuckets`), and the
+  Age-Pension-excluded household check (`agePensionExcludedFor`).
+- `src/monteCarlo.js` — `runMonteCarlo` gained an optional
+  `retirementWindow` option: when given, every path's own
+  average/minimum household after-tax income over that window is
+  retained (`pathAvgIncome`/`pathMinIncome`/`pathRuined`, one entry per
+  path, not just the small `samplePaths` draw) — required because
+  bucket classification needs the WHOLE distribution. Absent for every
+  other caller (the levers solver, scenario comparison) — no added
+  cost when unused.
+- `src/retirementAnalytics.js` — `retirementAnchor`/`leAnchor` exported
+  (previously module-private) and a new `minOverWindow`, mirroring the
+  existing `meanOverWindow`, so main.js can resolve the SAME window the
+  lifestyle band uses without duplicating that resolution.
+- `src/main.js`, `src/styles.css` — the buckets render as a labelled
+  horizontal bar per bucket, ahead of the existing ruin-probability
+  block.
+
+**"When the Age Pension is excluded"** (spec 21a's own per-person "Age
+pension eligible" toggle, off for the whole household): the floor
+boundary does not exist, so the bottom bucket's definition swaps from
+a dollar comparison to the engine's own single locked ruin definition
+(`out.shortfall !== null`) and displays as "Portfolio exhausted"
+rather than silently reporting a switched-off floor — verified live
+(client and partner both turned off, plan worsened to genuine ruin):
+the bottom bucket relabelled correctly and every `dropsToFloorPct`
+went `null` (there is no dollar floor to drop to in that mode).
+
+Provenance: `docs/reference/assumptions-provenance.md` §7.7 — the
+three boundaries classified DERIVED (composed of the ASFA figures,
+RESEARCHED/quarterly, and the Age Pension rate, LEGISLATED), and the
+Age-Pension-excluded bottom-bucket swap classified HOUSE VIEW (no
+published standard exists for "the floor" once the floor is removed).
+
+No engine change (buckets are computed entirely from a Monte Carlo
+run's own already-produced per-path yearly rows) — `ENGINE_VERSION`
+untouched. No new money flow — `randomScenario()`/
+`conservationCheck.js` untouched, per the same reasoning spec 35's own
+commits used.
+
+Tests: 28 new (`retirementOutcomeBuckets.test.js` — boundary
+classification at every threshold, renter-standard selection, the
+Age-Pension-excluded reclassification, bucket percentages summing to
+100, the empty-path edge case) + 5 new (`minOverWindow` in
+`retirementAnalytics.test.js`, mirroring `meanOverWindow`'s own cases)
++ 2 new (`monteCarlo.test.js` — `retirementWindow` absent by default;
+present, every path's own figures matching a direct recompute off that
+SAME path's full output). Full suite 2112/2112, build green.
+Browser-verified end to end (buckets render correctly for both a
+Comfortable-throughout plan and, separately, an Age-Pension-excluded
+plan worsened to genuine ruin; zero console errors) via the `run`
+skill.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

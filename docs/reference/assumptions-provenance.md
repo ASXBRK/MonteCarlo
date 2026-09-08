@@ -463,6 +463,40 @@ materially more accurate past the late 40s.
 | Retirement age | 65 | Conventional default; user-entered. |
 | Settlement costs on sale | $2,000 | Conveyancing and settlement agent. |
 
+## 7.7 Retirement outcome bucket boundaries (`docs/specs/36-retirement-outputs.md`, Commit 1)
+**DERIVED** — composed entirely of figures already in this document's or the
+codebase's own primary sources, never a fresh assumption of its own. Every
+simulated path is classified into one of four buckets by the average
+household after-tax income it sustains from retirement to life expectancy,
+against three boundaries:
+
+| Boundary | Value (single / couple) | Classification | Source |
+|---|---|---|---|
+| ASFA Comfortable | $55,923 / $78,566 | **RESEARCHED**, quarterly | `data/asfaStandards.js` — firm-supplied, March quarter 2026 (see that module's own header; not web-searched) |
+| ASFA Modest (or Modest (renter) for a renting household) | $36,434 / $52,473 (homeowner); $51,164 / $69,002 (renter) | **RESEARCHED**, quarterly | Same source, same quarter |
+| Full Age Pension rate | `data/agePension.js`'s own `single.rate` / `couple.rateCombined`, today's (year 0) real dollars | **LEGISLATED**, AWOTE-indexed | `data/agePension.js` — Services Australia published rates, 20 March 2026 rate period |
+
+**Why DERIVED rather than a fresh classification each:** the boundaries are
+not chosen independently for this feature — they are the SAME three figures
+the deterministic lifestyle band (`lifestyleBand.js`, spec 32 Commit 5b)
+already uses, read via the identical `asfaAnnual`/`agePensionRatesFor` calls,
+so a path's bucket can never disagree with the lifestyle band shown
+elsewhere on the same plan. All three are held at their TODAY (year 0)
+real-dollar value for the whole retirement-to-LE window — the same
+convention ASFA's own figures already use throughout this codebase (a
+stamped-quarter anchor, not one that drifts year to year within a single
+comparison).
+
+**When the Age Pension is excluded** (both household members' "Age pension
+eligible" toggle is off — spec 21a) the floor boundary does not exist; the
+bottom bucket's definition swaps to the engine's own single locked ruin
+definition (`out.shortfall !== null`) instead of a dollar comparison, and
+displays as "Portfolio exhausted" rather than silently reporting a floor
+that has been switched off. This is a **HOUSE VIEW** modelling choice (there
+is no published standard for "the floor" once the floor is removed), stated
+in-product wherever it applies (see `retirementOutcomeBuckets.js`'s own
+header for the full reasoning).
+
 ---
 
 # 8. INDEXATION BASES

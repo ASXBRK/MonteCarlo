@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  computeRetirementAnalytics, superPensionExhaustionAge, meanOverWindow, isMaterialLEDifference,
+  computeRetirementAnalytics, superPensionExhaustionAge, meanOverWindow, minOverWindow, isMaterialLEDifference,
   householdCashIncome, sgFor, ageYear, preservationAgeFor, agePensionAgeFor, capHeadroomFor,
   firstDiv293Year, agePensionEligibilityFor,
 } from "./retirementAnalytics.js";
@@ -40,6 +40,36 @@ describe("meanOverWindow", () => {
 
   it("accepts fromYear/toYear in either order", () => {
     expect(meanOverWindow(yearly, 3, 1, selector)).toBeCloseTo((20 + 30 + 40) / 3, 6);
+  });
+});
+
+// minOverWindow (docs/specs/36-retirement-outputs.md, Commit 1) — same
+// window/clamping as meanOverWindow, MIN not mean. Mirrors that
+// describe block's own cases so the two can never silently diverge on
+// window handling.
+describe("minOverWindow", () => {
+  const yearly = [{ v: 10 }, { v: 20 }, { v: 5 }, { v: 40 }, { v: 50 }];
+  const selector = (r) => r.v;
+
+  it("the minimum of a normal window, inclusive of both endpoints", () => {
+    expect(minOverWindow(yearly, 1, 3, selector)).toBe(5);
+  });
+
+  it("a single-year window returns that year's own value", () => {
+    expect(minOverWindow(yearly, 4, 4, selector)).toBe(50);
+  });
+
+  it("clamps into the array's own bounds rather than reading past it", () => {
+    expect(minOverWindow(yearly, -3, 1, selector)).toBe(10);
+    expect(minOverWindow(yearly, 3, 99, selector)).toBe(40);
+  });
+
+  it("an inverted or empty window returns null, never a minimum over nothing", () => {
+    expect(minOverWindow([], 0, 3, selector)).toBeNull();
+  });
+
+  it("accepts fromYear/toYear in either order", () => {
+    expect(minOverWindow(yearly, 3, 1, selector)).toBe(5);
   });
 });
 

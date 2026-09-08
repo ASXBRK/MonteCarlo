@@ -3,6 +3,7 @@ import { runMonteCarlo, holdingsFor, createRng, MARKET_RHO } from "./monteCarlo.
 import { checkYearConservation } from "./conservationCheck.js";
 import { projectPlan } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
+import { meanOverWindow, minOverWindow, householdCashIncome } from "./retirementAnalytics.js";
 
 // Minimal v3-shaped state factory — mirrors deterministic.test.js's
 // mkAsset/mkState conventions so a reviewer doesn't have to learn a
@@ -482,6 +483,49 @@ describe("Monte Carlo paths satisfy the conservation invariant", () => {
       for (let y = 0; y < out.yearly.length - 1; y++) {
         checkYearConservation(out, y, `sampled path ${i}, year ${y}`);
       }
+    }
+  });
+});
+
+// retirementWindow (docs/specs/36-retirement-outputs.md, Commit 1) —
+// per-path average/minimum household income, retained for EVERY path
+// (not just the small samplePaths draw), for outcome-bucket
+// classification.
+describe("runMonteCarlo — retirementWindow", () => {
+  it("is absent when no caller asked for it — no cost for the levers solver/scenario comparison", () => {
+    const state = mkState({ cashflows: { income: [employmentRow()] } });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 10, sampleCount: 0, rng: createRng(7) });
+    expect(result.retirementWindow).toBeNull();
+  });
+
+  it("computes every path's own average/minimum household after-tax income over the window, matching a direct recompute off that SAME path's full output — never a second, independently-derived figure", () => {
+    const state = mkState({
+      endAge: 50,
+      cashflows: { income: [employmentRow({ amount: 90000 })] },
+    });
+    const numPaths = 8;
+    // sampleCount = numPaths guarantees every path index is retained in
+    // samplePaths, in path-index order (see monteCarlo.js's own sampleIdx
+    // construction: with targetSamples === numPaths, the Set of distinct
+    // draws in [0, numPaths) must eventually cover every index).
+    const result = runMonteCarlo(state, PROFILES, {
+      numPaths, sampleCount: numPaths, rng: createRng(19),
+      retirementWindow: { fromPlanYear: 1, toPlanYear: 999 }, // clamped to the projection's own last year
+    });
+    expect(result.retirementWindow).not.toBeNull();
+    expect(result.retirementWindow.pathAvgIncome.length).toBe(numPaths);
+    expect(result.retirementWindow.pathMinIncome.length).toBe(numPaths);
+    expect(result.retirementWindow.pathRuined.length).toBe(numPaths);
+    expect(result.samplePaths.length).toBe(numPaths);
+
+    const selector = (r) => householdCashIncome(r) - r.tax;
+    for (let i = 0; i < numPaths; i++) {
+      const out = result.samplePaths[i];
+      const expectedAvg = meanOverWindow(out.yearly, 1, 999, selector) ?? 0;
+      const expectedMin = minOverWindow(out.yearly, 1, 999, selector) ?? 0;
+      expect(result.retirementWindow.pathAvgIncome[i]).toBeCloseTo(expectedAvg, 6);
+      expect(result.retirementWindow.pathMinIncome[i]).toBeCloseTo(expectedMin, 6);
+      expect(!!result.retirementWindow.pathRuined[i]).toBe(out.shortfall != null);
     }
   });
 });

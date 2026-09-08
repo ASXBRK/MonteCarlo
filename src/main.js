@@ -72,9 +72,10 @@ import {
   ASFA_STANDARDS_BASE, asfaAnnual, asfaStandardLabel, asfaStalenessWarning, ASFA_HOMEOWNER_ASSUMPTION_NOTE,
 } from "./data/asfaStandards.js";
 import { deriveHomeownerStatus, resolveIncomeRequired } from "./retirement.js";
-import { computeRetirementAnalytics } from "./retirementAnalytics.js";
+import { computeRetirementAnalytics, retirementAnchor, leAnchor } from "./retirementAnalytics.js";
 import { goalVsPositionSummary } from "./goalVsPosition.js";
 import { resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors } from "./lifestyleBand.js";
+import { agePensionExcludedFor, resolveOutcomeThresholds, computeOutcomeBuckets } from "./retirementOutcomeBuckets.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
@@ -9898,9 +9899,23 @@ function startMonteCarloRun() {
     els.monteCarloTableStatus.textContent = `Monte Carlo run failed: ${e.message}`;
     if (els.retirementMcStatus) els.retirementMcStatus.textContent = `Simulation failed: ${e.message}`;
   };
+  // Outcome buckets (docs/specs/36-retirement-outputs.md, Commit 1) —
+  // the SAME retirement-to-LE window retirementAnalytics.js's own
+  // averageRetirementIncome/lifestyle band use (retirementAnchor/
+  // leAnchor at offset 0), so a path's bucket can never disagree with
+  // the deterministic lifestyle band shown elsewhere on this plan.
+  // Computed for every Monte Carlo run (this result is shared between
+  // the What-if "Monte Carlo" page and the Retirement group's own
+  // page) — cheap (two resolveRef lookups), and only the Retirement
+  // group's own stats block ever reads mcResult.retirementWindow.
+  const retRef = retirementAnchor(state.plan, projection.schedule);
+  const leRef = leAnchor(state.plan, projection.schedule, 0);
   // state/PROFILES are plain data (no functions, no DOM) — structured-
   // clone across the worker boundary without loss.
-  mcWorker.postMessage({ state, profiles: PROFILES, options: {} });
+  mcWorker.postMessage({
+    state, profiles: PROFILES,
+    options: { retirementWindow: { fromPlanYear: retRef.planYear, toPlanYear: leRef.planYear } },
+  });
 }
 
 function cancelMonteCarloRun() {
@@ -15873,6 +15888,51 @@ function renderRetirementMcChart() {
   }, { displayModeBar: false, responsive: true });
 }
 
+// Outcome buckets (docs/specs/36-retirement-outputs.md, Commit 1) —
+// "replace one success number with four that describe the shape of the
+// distribution." EVERY simulated path, classified by the average
+// household after-tax retirement income it sustains from retirement to
+// life expectancy — the SAME window/measure retirementAnalytics.js's
+// own averageRetirementIncome (and the lifestyle band built on it)
+// already use, via mcResult.retirementWindow (monteCarlo.js's own
+// per-path arrays), so this can never disagree with either. Ruin
+// probability is not replaced by this — it still renders, unchanged,
+// directly below (retirementMcStatsHTML) — the spec's own words: "Both
+// are shown; the buckets lead."
+function retirementOutcomeBucketsHTML() {
+  const rw = mcResult.retirementWindow;
+  if (!rw) return ""; // defensive only — every run started via startMonteCarloRun() supplies this
+  const household = isCouple() ? "couple" : "single";
+  const tenure = derivedHomeownerStatus();
+  const thresholds = resolveOutcomeThresholds(state, household, tenure);
+  const agePensionExcluded = agePensionExcludedFor(state.plan);
+  const result = computeOutcomeBuckets(rw, thresholds, agePensionExcluded);
+  const rows = result.buckets.map((b) => `
+    <div class="rp-bucket-row">
+      <div class="rp-bucket-label">${escapeHTML(b.label)}</div>
+      <div class="rp-bucket-track"><div class="rp-bucket-fill" style="width:${Math.min(100, Math.max(0, b.pct)).toFixed(1)}%"></div></div>
+      <div class="rp-bucket-pct">${Math.round(b.pct)}%</div>
+    </div>
+    ${b.dropsToFloorPct != null
+      ? `<p class="helper-text rp-bucket-sub">Of those, ${Math.round(b.dropsToFloorPct)}% drop to the Age Pension floor for a period.</p>`
+      : ""}
+  `).join("");
+  // "When the Age Pension is excluded... the bottom bucket must SAY SO,
+  // rather than silently reporting a floor that has been switched off"
+  // (the spec's own words) — outcomeBucketLabel already relabels the
+  // bucket itself ("Portfolio exhausted"); this note explains why.
+  const excludedNote = agePensionExcluded
+    ? `<p class="helper-text">The Age Pension is switched off for this household (both members' "Age pension eligible" toggle is off), so there is no pension-supported floor — the bottom bucket reports paths whose portfolio actually ran dry, not a dollar figure.</p>`
+    : "";
+  return `
+    <div class="rp-outcome-buckets">
+      <p class="helper-text">Every simulated path, classified by the lifestyle its own average household after-tax income sustains from retirement to life expectancy.</p>
+      ${rows}
+      ${excludedNote}
+    </div>
+  `;
+}
+
 // Probability of ruin, framed for the client first ("in about 1 in N
 // simulations, this plan runs short before age X" leads; the raw ruin
 // percentage and its success-framed restatement stated beside it) — the
@@ -15901,6 +15961,7 @@ function retirementMcStatsHTML() {
     ? `<p class="helper-text">${mcResult.customHoldings.length} asset(s) use custom returns; their variability is modelled on the volatility basis profile selected for each — ${mcResult.customHoldings.map((h) => `${escapeHTML(h.name)} (${escapeHTML(h.volBasis)})`).join(", ")}.</p>`
     : "";
   return `
+    ${retirementOutcomeBucketsHTML()}
     <p class="helper-text rp-mc-headline"><strong>${escapeHTML(plain)}</strong></p>
     <div class="summary-strip">${stats.join("")}</div>
     <p class="helper-text">Ruin probability: the fraction of simulated paths with any unfunded cashflow before this plan's own projection end — the single definition used everywhere in this tool. "Lasts to life expectancy" restates the same figure the way a client hears it.</p>

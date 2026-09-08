@@ -57,13 +57,17 @@ import { firstFyStartYear } from "./schedule.js";
 // own returned age is always expressed as an addition to the CLIENT's
 // current age regardless of anchor, so no partner-specific resolution
 // is needed here).
-function leAnchor(plan, schedule, offsetYears) {
+// Exported (docs/specs/36-retirement-outputs.md, Commit 1) — the outcome
+// buckets need the SAME retirement-to-LE window this module's own
+// averageRetirementIncome uses (never a second, independently-resolved
+// window that could silently disagree with the lifestyle band).
+export function leAnchor(plan, schedule, offsetYears) {
   const { endAge, anchor } = resolveEndBasis({ mode: "le", offset: offsetYears }, plan.client, plan.partner);
   const resolved = resolveRef({ kind: "age", age: endAge }, plan, schedule, "client");
   return { ...resolved, anchor };
 }
 
-function retirementAnchor(plan, schedule) {
+export function retirementAnchor(plan, schedule) {
   return resolveRef({ kind: "anchor", anchorId: "retirement-client" }, plan, schedule, "client");
 }
 
@@ -107,6 +111,21 @@ export function meanOverWindow(yearly, fromYear, toYear, selector) {
   let sum = 0, n = 0;
   for (let y = from; y <= to; y++) { sum += selector(yearly[y]); n++; }
   return n > 0 ? sum / n : null;
+}
+
+// Same window/clamping as meanOverWindow, but the MINIMUM rather than
+// the mean (docs/specs/36-retirement-outputs.md, Commit 1) — "report
+// the minimum alongside the average, because average hides the
+// question that matters" (the spec's own words: a path averaging
+// Comfortable while spending five years at the floor is not a
+// Comfortable retirement). `null` on the same empty-window condition.
+export function minOverWindow(yearly, fromYear, toYear, selector) {
+  const from = Math.max(0, Math.min(fromYear, toYear));
+  const to = Math.min(yearly.length - 1, Math.max(fromYear, toYear));
+  if (to < from) return null;
+  let min = Infinity;
+  for (let y = from; y <= to; y++) { const v = selector(yearly[y]); if (v < min) min = v; }
+  return min;
 }
 
 // Household age pension paid this row — both persons summed (a single
