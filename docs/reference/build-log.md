@@ -3649,6 +3649,73 @@ suite 2059/2059 (up from 2053), build green.
 
 ---
 
+### Threshold indexation toggle (spec 35, Commit 4)
+
+A projection reaching 2056 was showing a transfer balance cap around
+$20m — technically correct, useless in a client conversation. New
+`state.assumptions.indexSuperThresholds` (bool, default true) controls
+it: on, the legislated super thresholds keep indexing on their own
+legislated basis; off, they freeze at today's nominal value.
+
+**The key finding, before writing any code:** `state.assumptions.
+bracketMode` was already a single toggle driving THREE things at once —
+tax brackets (`Tax/annual.js`), super thresholds (`data/superRates.js`),
+AND Age Pension rates/thresholds (`data/agePension.js`) — all sharing one
+switch. The spec's own requirement ("index legislated thresholds... not
+tax brackets... not age pension") is really asking to SPLIT one shared
+toggle into two independent ones for the super-threshold piece
+specifically. `superRatesFor`'s own freeze mechanism (`nominalOf`,
+rounding-then-deflating) was already exactly right and needed zero
+changes — only its CALLERS needed to stop passing the shared
+`bracketMode` and start passing a value sourced from the new field
+instead. `Tax/annual.js` and `data/agePension.js` are untouched, so tax
+brackets and Age Pension stay on `bracketMode` alone, genuinely
+unaffected — not just documented as unaffected.
+
+**Six call sites updated** (deterministic.js) to a new local
+`superIndexMode`, computed once alongside the existing `bracketMode` and
+passed ONLY to `superRatesFor`; three more in `retirementAnalytics.js`/
+`main.js` (`sgFor`, `firstDiv293Year`, the employer SG note, the
+Assumptions view's own Super thresholds table) for the same reason —
+each reads a figure genuinely derived from an indexed super threshold
+(`sgMaximumSalary` derives from the concessional cap).
+
+**Division 293 deliberately excluded**, despite the spec's own prose
+listing "Division 293 and Division 296 thresholds" together: Div293's
+$250,000 threshold has never been indexed in Australian tax law under
+ANY setting — `superRates.js`'s own pre-existing header already
+documents this as a source-verified fact, predating this commit. Making
+it toggle-responsive now would be legally wrong just to match loose
+spec wording; Div296 (which genuinely is CPI-indexed) is fully covered.
+A test asserts this explicitly so it can't regress silently.
+
+**One toggle, two locations, no sync code.** The Retirement view and the
+Parameters modal render two `<input name="indexSuperThresholds">` radio
+groups with the SAME name; `document.querySelectorAll` picks up both at
+once, so one wiring block drives both — genuinely one toggle shown
+twice, not two toggles an adviser could set differently.
+
+**5 new engine tests**: the concessional cap freezes exactly at its
+FY2026–27 nominal value when off, keeps compounding (crossing its own
+$2,500 rounding step) when on; TBC/NCC/untaxed-plan-cap/TSB-thresholds/
+Div296 all move together with the SAME toggle (superRatesFor itself,
+confirming the function's pre-existing behaviour is what's now correctly
+wired); Div293's threshold is identical either way; tax (fixed nominal
+income, 15 years out) is bit-identical on/off; Age Pension entitlement
+and assessable assets (a retiree scenario) are bit-identical on/off.
+`randomScenario()` extended: 30% frozen (matching CLAUDE.md's own rule —
+a new threshold the engine branches on).
+
+Browser-verified: toggled to "No indexation" from the Retirement view,
+confirmed the state change, opened Parameters and confirmed its own copy
+of the same radio group reflected it without any extra step. Zero
+console errors.
+
+Tests: `deterministic.test.js` +5. Full suite 2064/2064 (up from 2059),
+build green.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

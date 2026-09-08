@@ -2574,7 +2574,10 @@ export function defaultState(profiles = {}, now = new Date()) {
     // legislated basis. See deterministic.js/schedule.js's own
     // wageGrowthAssum-vs-awoteAssum split for exactly which figure each
     // consumer uses.
-    assumptions: { cpi: 0.025, awote: 0.032, wageGrowth: 0.027, mortgageRate: 0.06, bracketMode: "indexed", fhsssEarningsRate: 0.0743 },
+    assumptions: {
+      cpi: 0.025, awote: 0.032, wageGrowth: 0.027, mortgageRate: 0.06, bracketMode: "indexed",
+      indexSuperThresholds: true, fhsssEarningsRate: 0.0743,
+    },
     // A newly created scenario starts fully untouched — correct, since
     // nobody has reviewed it yet (Input Usability spec, Commit 2).
     meta: { touched: [] },
@@ -4062,6 +4065,21 @@ export function hydrate(json, profiles = {}) {
         wageGrowth: clampNumber(raw.assumptions?.wageGrowth ?? 0.027, 0, 0.2),
         mortgageRate: clampNumber(raw.assumptions?.mortgageRate ?? 0.06, 0, 0.3),
         bracketMode: raw.assumptions?.bracketMode === "frozen" ? "frozen" : "indexed",
+        // Threshold indexation toggle (docs/specs/35-retirement-output-
+        // view.md, Commit 4) — a SECOND, independent toggle from
+        // bracketMode above: whether the legislated SUPER thresholds
+        // (transfer balance cap, concessional/non-concessional caps, TSB
+        // bring-forward thresholds, Division 296, the untaxed plan cap)
+        // index going forward, or freeze at their current nominal value.
+        // Default true (index — matches every existing projection's
+        // current behaviour, so this defaults bit-identical). Explicitly
+        // NOT tax brackets (bracketMode's own job) and NOT age pension
+        // rates/thresholds (data/agePension.js never reads this field —
+        // both keep moving on bracketMode alone, unaffected). Also not
+        // Division 293 — see superRates.js's own header: that threshold
+        // has never been indexed in law under either setting, a fact
+        // this toggle doesn't change.
+        indexSuperThresholds: raw.assumptions?.indexSuperThresholds !== false,
         // Document Set Commit 3 (FHSSS) — the deemed rate associated
         // earnings accrue at: the ATO Shortfall Interest Charge rate
         // (90-day BAB + 3%), reset QUARTERLY (assumptions-provenance.md

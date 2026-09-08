@@ -268,7 +268,11 @@ export function computeRetirementAnalytics(state, result) {
 export function sgFor(state, salary) {
   const a = state.assumptions;
   const f0 = firstFyStartYear(state.plan.start);
-  const mode = a.bracketMode === "frozen" ? "frozen" : "indexed";
+  // Threshold indexation toggle (docs/specs/35-retirement-output-view.md,
+  // Commit 4) — sgMaximumSalary is derived from the concessional cap, an
+  // indexed SUPER threshold, so this reads indexSuperThresholds, not
+  // bracketMode (see deterministic.js's own header on the split).
+  const mode = a.indexSuperThresholds === false ? "frozen" : "indexed";
   const rates = superRatesFor(f0, mode, a.cpi, a.awote ?? 0.032);
   const isCapped = salary > rates.sgMaximumSalary;
   const base = Math.min(salary, rates.sgMaximumSalary);
@@ -326,7 +330,12 @@ export function capHeadroomFor(projection, owner) {
 export function firstDiv293Year(state, projection, owner) {
   const a = state.assumptions;
   const f0 = firstFyStartYear(state.plan.start);
-  const mode = a.bracketMode === "frozen" ? "frozen" : "indexed";
+  // Threshold indexation toggle (docs/specs/35-retirement-output-view.md,
+  // Commit 4) — same super-threshold toggle as sgFor's own, for
+  // consistency, though it has no visible effect on the two fields read
+  // below (div293Threshold/div293Rate are never indexed under EITHER
+  // mode — superRates.js's own header explains why).
+  const mode = a.indexSuperThresholds === false ? "frozen" : "indexed";
   const ages = owner === "partner" ? projection.schedule.partnerAges : projection.schedule.clientAges;
   for (let y = 0; y < projection.yearly.length; y++) {
     const row = projection.yearly[y];

@@ -331,6 +331,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const schedule = buildSchedules(state);
   const cpi = state.assumptions.cpi;
   const bracketMode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
+  // Threshold indexation toggle (docs/specs/35-retirement-output-view.md,
+  // Commit 4) — a SECOND, independent freeze mode, passed ONLY to
+  // superRatesFor (the six call sites below): transfer balance cap,
+  // concessional/non-concessional caps, TSB bring-forward thresholds,
+  // Division 296, the untaxed plan cap. Every OTHER *RatesFor call in
+  // this file (age pension, aged care, HELP, MLS, ETP, spouse super,
+  // CSHC) and every tax assessment call keeps using `bracketMode` alone,
+  // completely unaffected by this toggle — "not affected: tax brackets,
+  // age pension rates and thresholds" (the spec's own words).
+  const superIndexMode = state.assumptions.indexSuperThresholds === false ? "frozen" : "indexed";
   const included = state.assets.filter((a) => a.include);
   const ids = included.map((a) => a.id);
   const months = schedule.months;
@@ -426,7 +436,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const ownerAges = ageArrayFor(s.owner);
     const { incomeNominal, growthNominal } = assetReturnComponents(s, profiles, glidePaths, ownerAges?.[0]);
     const icr = s.icrPct / 100;
-    const rates = superRatesFor(fy0, bracketMode, cpi); // flat rates — FY-invariant, safe to fix once
+    const rates = superRatesFor(fy0, superIndexMode, cpi); // flat rates — FY-invariant, safe to fix once
     const growthTaxRate = rates.earningsTaxRate * (2 / 3);
     // Untaxed elements (spec 26, Commit 1) — an untaxed-status account
     // (public-sector schemes like West State Super) pays NO 15%/10%
@@ -603,7 +613,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const ownerAges = ageArrayFor(pn.owner);
     const { incomeNominal, growthNominal } = assetReturnComponents(pn, profiles, glidePaths, ownerAges?.[0]);
     const icr = pn.icrPct / 100;
-    const rates = superRatesFor(fy0, bracketMode, cpi);
+    const rates = superRatesFor(fy0, superIndexMode, cpi);
     const growthTaxRate = rates.earningsTaxRate * (2 / 3);
     const ownerPerson = pn.owner === "partner" ? state.plan.partner : state.plan.client;
     const taxedRateOf = (inc, gro) => toMonthlyReal(inc * (1 - rates.earningsTaxRate) + gro * (1 - growthTaxRate) - icr, cpi);
@@ -754,7 +764,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // TTR's own (single, at-conversion) credit from firing more than
   // once — an ABP credits immediately at commencement instead (see the
   // commencement block below), so it never needs this guard.
-  const transferBalanceCap0 = superRatesFor(fy0, bracketMode, cpi).generalTransferBalanceCap;
+  const transferBalanceCap0 = superRatesFor(fy0, superIndexMode, cpi).generalTransferBalanceCap;
   const tba = { client: createTransferBalanceAccount(transferBalanceCap0), partner: null };
   if (state.plan.partner) tba.partner = createTransferBalanceAccount(transferBalanceCap0);
   let lastTransferBalanceCap = transferBalanceCap0;
@@ -2180,7 +2190,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // withdrawal, and rollover sites below — one place computing the
     // cap boundary, so all three treat a client already near the cap
     // identically.
-    const untaxedPlanCapY = superRatesFor(fyStart, bracketMode, cpi, awoteAssum).untaxedPlanCap;
+    const untaxedPlanCapY = superRatesFor(fyStart, superIndexMode, cpi, awoteAssum).untaxedPlanCap;
     const creditUntaxedCap = (owner, amount) => {
       if (!(amount > 0)) return { withinCap: 0, excess: 0 };
       const remaining = Math.max(0, untaxedPlanCapY - untaxedCapUsed[owner]);
@@ -4994,7 +5004,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // (contributions tax rate, the accepted NCC fraction, dynamic
     // "toConcessionalCap" fills, excess CC, and the Div293 inputs) is
     // handed to runYear for crediting in the real pass only.
-    const superRatesY = superRatesFor(fyStart, bracketMode, cpi, awoteAssum);
+    const superRatesY = superRatesFor(fyStart, superIndexMode, cpi, awoteAssum);
 
     // Transfer balance cap indexation (spec 20, Commit 4) — applied
     // ONCE per FY, before either pass (a pure recompute against
@@ -5706,7 +5716,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               // recurring contribution row).
               const age = p === "partner" ? schedule.partnerAges?.[y] : schedule.clientAges[y];
               const workTestMet = (p === "partner" ? state.plan.partner?.super?.workTestMet : state.plan.client?.super?.workTestMet) !== false;
-              const gateResult = superContributionAllowed("personalNonDeductible", age, workTestMet, superRatesFor(fyStart, bracketMode, cpi));
+              const gateResult = superContributionAllowed("personalNonDeductible", age, workTestMet, superRatesFor(fyStart, superIndexMode, cpi));
               if (!gateResult.ok) {
                 superWarnings.push({
                   fyLabel: schedule.fyLabels[y], owner: p, type: "bonusSuperContribution", reason: gateResult.reason,

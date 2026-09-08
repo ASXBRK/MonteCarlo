@@ -65,7 +65,14 @@ function mkState(over = {}) {
       fundingOrder: over.fundingOrder ?? assets.filter((a) => a.include).map((a) => a.id),
       deficit: over.deficit ?? { minimumBalances: {}, sellRule: "order" },
     },
-    assumptions: { cpi: over.cpi ?? 0.025, bracketMode: over.bracketMode ?? "indexed", awote: over.awote },
+    assumptions: {
+      cpi: over.cpi ?? 0.025, bracketMode: over.bracketMode ?? "indexed", awote: over.awote,
+      // Threshold indexation toggle (docs/specs/35-retirement-output-
+      // view.md, Commit 4) — defaults true (indexed), matching every
+      // pre-existing test's own implicit assumption; bit-identical
+      // unless a test explicitly overrides it.
+      indexSuperThresholds: over.indexSuperThresholds ?? true,
+    },
     display: { units: "real" },
   };
 }
@@ -319,6 +326,99 @@ describe("Retirement exclusions (docs/specs/35-retirement-output-view.md, Commit
     expect(exPaid).toBeLessThan(50000);
     expect(okPaid).toBeGreaterThan(exPaid);
     expect(okPaid).toBeGreaterThan(100000);
+  });
+});
+
+describe("Threshold indexation toggle (docs/specs/35-retirement-output-view.md, Commit 4)", () => {
+  // 15 years out, the concessional cap has compounded at AWOTE (3.2%)
+  // for long enough to have crossed at least one $2,500 rounding step
+  // from its $32,500 base (32500 × 1.032^15 ≈ 53,100) — superRatesFor's
+  // own unit tests (data/superRates.test.js) already prove the FUNCTION
+  // freezes correctly; this proves the ENGINE actually wires this
+  // commit's NEW, independent toggle to it (not the pre-existing
+  // bracketMode, which stays untouched throughout this block).
+  const YEARS_OUT = 15;
+  function scenarioAt(indexSuperThresholds) {
+    return mkState({
+      endAge: 40 + YEARS_OUT,
+      assets: [mkAsset({ balance: 0 })],
+      plan: {
+        superAccounts: [{ ...superAcct({ id: "su1", owner: "client", balance: 100000 }) }],
+      },
+      cashflows: {
+        income: [employmentRow({ id: "sal", owner: "client", amount: 300000, to: { kind: "age", age: 40 + YEARS_OUT } })],
+        superContributions: [{
+          id: "sc1", label: "SS", owner: "client", accountId: "su1", type: "salarySacrifice", basis: "toConcessionalCap",
+          amount: 0, percent: 0, incomeRowId: "sal", frequency: "monthly",
+          from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 + YEARS_OUT },
+          indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+      indexSuperThresholds,
+    });
+  }
+
+  it("freezes the concessional cap at today's nominal value when off; keeps indexing it (own legislated AWOTE basis) when on", () => {
+    const indexed = projectPlan(scenarioAt(true));
+    const frozen = projectPlan(scenarioAt(false));
+    const capAt = (out, y) => out.yearly[y].superCapUsage.client.cap;
+    // Year 0: both start from the SAME FY2026-27 base — identical.
+    expect(capAt(indexed, 0)).toBeCloseTo(capAt(frozen, 0), 2);
+    expect(capAt(indexed, 0)).toBeCloseTo(32500, 2);
+    // Year 15: indexed has compounded upward past at least one $2,500
+    // rounding step; frozen has not moved AT ALL in nominal terms — its
+    // REAL value has only drifted down by CPI deflation (same
+    // "nominal frozen, real declines" shape superRatesFor's own tests
+    // already establish for bracketMode "frozen").
+    expect(capAt(indexed, YEARS_OUT)).toBeGreaterThan(capAt(indexed, 0));
+    const cpi = 0.025; // mkState's own default
+    expect(capAt(frozen, YEARS_OUT)).toBeCloseTo(32500 / Math.pow(1 + cpi, YEARS_OUT), 2);
+    expect(capAt(indexed, YEARS_OUT)).toBeGreaterThan(capAt(frozen, YEARS_OUT));
+  });
+
+  it("transfer balance cap, non-concessional cap, and untaxed plan cap all move together with the same toggle", () => {
+    const indexedRates = superRatesFor(2026 + YEARS_OUT, "indexed", 0.025, 0.032);
+    const frozenRates = superRatesFor(2026 + YEARS_OUT, "frozen", 0.025, 0.032);
+    // Direct confirmation the underlying function (unchanged by this
+    // commit — only ITS CALLERS changed which value they pass) still
+    // moves every one of the spec's named thresholds together.
+    expect(indexedRates.generalTransferBalanceCap).toBeGreaterThan(frozenRates.generalTransferBalanceCap);
+    expect(indexedRates.nonConcessionalCap).toBeGreaterThan(frozenRates.nonConcessionalCap);
+    expect(indexedRates.untaxedPlanCap).toBeGreaterThan(frozenRates.untaxedPlanCap);
+    expect(indexedRates.bringForwardTsbThresholds.full).toBeGreaterThan(frozenRates.bringForwardTsbThresholds.full);
+    expect(indexedRates.div296LowerThreshold).toBeGreaterThan(frozenRates.div296LowerThreshold);
+    expect(indexedRates.div296UpperThreshold).toBeGreaterThan(frozenRates.div296UpperThreshold);
+  });
+
+  it("Division 293's threshold is never indexed under either setting — the toggle has no effect on it (it never has, in law)", () => {
+    const indexedRates = superRatesFor(2026 + YEARS_OUT, "indexed", 0.025, 0.032);
+    const frozenRates = superRatesFor(2026 + YEARS_OUT, "frozen", 0.025, 0.032);
+    expect(indexedRates.div293Threshold).toBeCloseTo(frozenRates.div293Threshold, 6);
+  });
+
+  it("tax brackets are completely unaffected — identical net tax with the same fixed income, on or off", () => {
+    const fixedIncome = mkState({
+      endAge: 40 + YEARS_OUT,
+      assets: [mkAsset({ balance: 0 })],
+      cashflows: { income: [employmentRow({ id: "sal", owner: "client", amount: 120000, to: { kind: "age", age: 40 + YEARS_OUT } })] },
+    });
+    const indexed = projectPlan({ ...fixedIncome, assumptions: { ...fixedIncome.assumptions, indexSuperThresholds: true } });
+    const frozen = projectPlan({ ...fixedIncome, assumptions: { ...fixedIncome.assumptions, indexSuperThresholds: false } });
+    expect(indexed.yearly[YEARS_OUT].tax).toBeCloseTo(frozen.yearly[YEARS_OUT].tax, 6);
+    expect(indexed.yearly[YEARS_OUT].taxDetail.client.taxableIncome).toBeCloseTo(frozen.yearly[YEARS_OUT].taxDetail.client.taxableIncome, 6);
+  });
+
+  it("Age Pension rates and thresholds are completely unaffected", () => {
+    const retiree = mkState({
+      endAge: 70,
+      assets: [mkAsset({ balance: 400000, allocation: { mode: "custom", incomePct: 3, growthPct: 0, frankingPct: 0, volBasis: "Balanced" } })],
+      plan: { client: { currentAge: 68, sex: "male" } },
+    });
+    const indexed = projectPlan({ ...retiree, assumptions: { ...retiree.assumptions, indexSuperThresholds: true } });
+    const frozen = projectPlan({ ...retiree, assumptions: { ...retiree.assumptions, indexSuperThresholds: false } });
+    const lastY = indexed.yearly.length - 1;
+    expect(indexed.yearly[lastY].agePensionDetail.client.paid).toBeCloseTo(frozen.yearly[lastY].agePensionDetail.client.paid, 2);
+    expect(indexed.yearly[lastY].agePensionDetail.assessableAssets).toBeCloseTo(frozen.yearly[lastY].agePensionDetail.assessableAssets, 2);
   });
 });
 
@@ -4254,6 +4354,12 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         endAge, cpi: rand(0.02, 0.04), assets,
         start: planStart,
         bonds,
+        // Threshold indexation toggle (docs/specs/35-retirement-output-
+        // view.md, Commit 4) — 30% frozen, exercising the class of
+        // scenarios this feature exists for (a long horizon, thresholds
+        // pinned at today's nominal value) alongside the default-indexed
+        // majority every pre-existing scenario already covered.
+        indexSuperThresholds: Math.random() < 0.7,
         plan: {
           household: couple ? "couple" : "single",
           client, partner, children,

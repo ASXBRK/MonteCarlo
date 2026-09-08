@@ -501,6 +501,7 @@ function mountWorkspace(clientId, scenarioId) {
   mortgageRateInput.value = ((state.assumptions.mortgageRate ?? 0.06) * 100).toFixed(2);
   fhsssEarningsRateInput.value = ((state.assumptions.fhsssEarningsRate ?? 0.0743) * 100).toFixed(2);
   syncBracketModeInputs();
+  syncIndexSuperThresholdsInputs();
   els.chartTreatmentSelects.forEach((sel) => { sel.value = state.display.chartTreatment[sel.dataset.treatment]; });
 }
 
@@ -3442,7 +3443,9 @@ function sgNoteHTML(r) {
   const totalFy = siblings.reduce((s, row) => s + (rt[row.id]?.[0] ?? 0), 0);
   if (!(totalFy > 0)) return "";
   const f0 = firstFyStartYear(state.plan.start);
-  const mode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
+  // Threshold indexation toggle (docs/specs/35-retirement-output-view.md,
+  // Commit 4) — sgMaximumSalary derives from the concessional cap.
+  const mode = state.assumptions.indexSuperThresholds === false ? "frozen" : "indexed";
   const rates = superRatesFor(f0, mode, state.assumptions.cpi, state.assumptions.awote ?? 0.032);
   const sg = Math.min(totalFy, rates.sgMaximumSalary) * rates.sgRate;
   return `<p class="helper-inline">SG ${(rates.sgRate * 100).toFixed(0)}% on ${fmtMoney(totalFy)}, capped at the maximum contribution base for this employer ≈ ${fmtMoney(sg)}/yr.</p>`;
@@ -13133,6 +13136,11 @@ function buildAssumptionsGroups() {
   const included = state.assets.filter((a) => a.include);
   const cpi = state.assumptions.cpi;
   const mode = state.assumptions.bracketMode === "frozen" ? "frozen" : "indexed";
+  // Threshold indexation toggle (docs/specs/35-retirement-output-view.md,
+  // Commit 4) — a SECOND, independent freeze mode for the "Super
+  // thresholds" group below only; every other group here (tax brackets)
+  // keeps using `mode` (bracketMode) alone, unaffected.
+  const superMode = state.assumptions.indexSuperThresholds === false ? "frozen" : "indexed";
   const f0 = firstFyStartYear(state.plan.start);
   const thr = (nominal) => (y) => realThreshold(nominal, f0 + y, mode, cpi);
 
@@ -13204,7 +13212,7 @@ function buildAssumptionsGroups() {
   // rounding thresholds are crossed.
   if ((state.plan.superAccounts ?? []).length) {
     const awote = state.assumptions.awote ?? 0.032;
-    const sr = (y) => superRatesFor(f0 + y, mode, cpi, awote);
+    const sr = (y) => superRatesFor(f0 + y, superMode, cpi, awote);
     groups.push({
       title: "Super thresholds",
       rows: [
@@ -13227,7 +13235,8 @@ function buildAssumptionsGroups() {
 }
 
 function renderAssumptionsView() {
-  const caption = `<p class="chart-note-inline">Under “Indexed”, threshold rows are flat in today's dollars — that is what CPI-indexed tax settings mean. Under “No indexation” they shrink in real terms each year after FY2027–28 (bracket creep). Future dollars shows the nominal picture. The bracket mode is set in Parameters.</p>`;
+  const caption = `<p class="chart-note-inline">Under “Indexed”, threshold rows are flat in today's dollars — that is what CPI-indexed tax settings mean. Under “No indexation” they shrink in real terms each year after FY2027–28 (bracket creep). Future dollars shows the nominal picture. The bracket mode is set in Parameters.
+    Super thresholds (transfer balance cap, concessional/non-concessional caps, TSB bring-forward thresholds, Division 296, the untaxed plan cap) have their OWN separate toggle, also in Parameters — freezing them is a deliberately conservative assumption (more clients breach caps over time), not a neutral one. Tax brackets and age pension rates/thresholds are never affected by it.</p>`;
   renderTransposed(els.viewAssumptions, buildAssumptionsGroups(), caption);
 }
 
@@ -17780,6 +17789,26 @@ bracketModeInputs.forEach((r) => {
   r.addEventListener("change", () => {
     if (!r.checked) return;
     state.assumptions.bracketMode = r.value === "frozen" ? "frozen" : "indexed";
+    saveState();
+    refreshOutputs();
+  });
+});
+
+// Threshold indexation toggle (docs/specs/35-retirement-output-view.md,
+// Commit 4) — a SECOND, independent toggle from bracketMode above: see
+// its own Parameters-modal paragraph for what it covers. Same wiring
+// shape as bracketModeInputs, deliberately — a distinct scenario-level
+// assumption, not a variant of the existing one.
+const indexSuperThresholdsInputs = document.querySelectorAll('input[name="indexSuperThresholds"]');
+function syncIndexSuperThresholdsInputs() {
+  indexSuperThresholdsInputs.forEach((r) => {
+    r.checked = r.value === (state.assumptions.indexSuperThresholds === false ? "frozen" : "indexed");
+  });
+}
+indexSuperThresholdsInputs.forEach((r) => {
+  r.addEventListener("change", () => {
+    if (!r.checked) return;
+    state.assumptions.indexSuperThresholds = r.value !== "frozen";
     saveState();
     refreshOutputs();
   });
