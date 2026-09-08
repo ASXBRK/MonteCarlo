@@ -8,6 +8,7 @@
 import { PROFILES, realMu, impliedFrankingPct, ASSET_CLASS_KEYS, ASSET_CLASS_LABELS } from "./profiles.js";
 import { allocationSeries } from "./allocation.js";
 import { runMonteCarlo, DEFAULT_NUM_PATHS } from "./monteCarlo.js";
+import { RUIN_THRESHOLD_DEFAULT } from "./retirementLevers.js";
 import { buildLifecycleComparison } from "./retirementLifecycleComparison.js";
 import {
   defaultState, createAsset, createLifestyleAsset, createCashflow, createLumpSum,
@@ -314,7 +315,6 @@ const els = {
   viewFocusDebtPayoff: $("viewFocusDebtPayoff"),
   viewFocusDebtRecycling: $("viewFocusDebtRecycling"),
   viewFocusEducationFunding: $("viewFocusEducationFunding"),
-  viewFocusRetirement: $("viewFocusRetirement"),
   viewFocusSurplusAllocation: $("viewFocusSurplusAllocation"),
   viewFocusPprExemption: $("viewFocusPprExemption"),
   viewFocusAgePension: $("viewFocusAgePension"),
@@ -585,7 +585,9 @@ const OUTPUT_NAV = {
     { id: "focus-lookups", label: "Stamp duty & LMI" },
     { id: "focus-equity", label: "Usable equity" },
     { id: "focus-transfer-schedule", label: "Transfer schedule" },
-    { id: "focus-retirement", label: "Retirement" },
+    // Retirement (docs/specs/32-retirement-phase-one.md, Commit 5) removed
+    // (docs/specs/35-retirement-output-view.md, Commit 6): its figures are
+    // a strict subset of Retirement > Projection now that group is complete.
     // Compare scenarios relocated to its own client-level Compare page
     // (Clients > client > Compare) — no longer a workspace Focus view.
   ],
@@ -8835,6 +8837,20 @@ let snapshotPersonEntity = "all";
 // actual bug. An in-flight run IS still terminated when the plan
 // itself changes (its result would be for a plan that no longer
 // exists) — see refreshOutputs below.
+// Levers panel (docs/specs/35-retirement-output-view.md, Commit 6) —
+// same "invalidate on plan change, not on every refresh" shape as
+// mcResult itself, one level downstream: leversResults answers "what
+// would help THIS mcResult", so it's invalidated whenever mcResult
+// itself is (a fresh run makes any prior lever solve stale) as well as
+// on its own plan-fingerprint check. leversThreshold is a tool
+// preference, not part of the financial plan — kept in memory only,
+// not persisted to state/localStorage, same as activeOutputSubject.
+let leversResults = null;
+let leversResultFingerprint = null; // planFingerprint() this leversResults is valid for
+let leversRunning = false;
+let leversWorker = null;
+let leversThreshold = RUIN_THRESHOLD_DEFAULT;
+
 let mcResult = null;
 // The planFingerprint() the current mcResult (or in-flight run) is
 // valid for — null when there is neither. Compared against the live
@@ -8891,6 +8907,9 @@ function refreshOutputs() {
   if (rpCompareFingerprint !== null && rpCompareFingerprint !== planFingerprint()) {
     invalidateRetirementCompareResult();
   }
+  if (leversResultFingerprint !== null && leversResultFingerprint !== planFingerprint()) {
+    invalidateLeversResult();
+  }
   renderPeriodSelector();
   renderSummaryStrip();
   renderActiveView();
@@ -8943,7 +8962,6 @@ const VIEW_MOUNTS = {
   "focus-lookups": () => els.viewFocusLookups,
   "focus-equity": () => els.viewFocusEquity,
   "focus-transfer-schedule": () => els.viewFocusTransferSchedule,
-  "focus-retirement": () => els.viewFocusRetirement,
   "whatif-rate-shock": () => els.viewWhatIfRateShock,
   "whatif-crash": () => els.viewWhatIfCrash,
   "whatif-income-gap": () => els.viewWhatIfIncomeGap,
@@ -9028,7 +9046,6 @@ function renderActiveView() {
   else if (activeView === "focus-lookups") renderFocusLookupsView();
   else if (activeView === "focus-equity") renderFocusEquityView();
   else if (activeView === "focus-transfer-schedule") renderFocusTransferScheduleView();
-  else if (activeView === "focus-retirement") renderFocusRetirementView();
   else if (activeView === "whatif-rate-shock") renderWhatIfRateShockView();
   else if (activeView === "whatif-crash") renderWhatIfCrashView();
   else if (activeView === "whatif-income-gap") renderWhatIfIncomeGapView();
@@ -15013,12 +15030,13 @@ const GOAL_CHART_SEGMENTS = [
   { key: "assetDrawdown", name: "Asset drawdown", color: "#5e60ce" },
 ];
 
-// `chartElId`/`sentenceElId` default to the Focus view's own mount ids
-// — every existing call site omits them and behaves exactly as before.
-// The Retirement output group (docs/specs/35-retirement-output-view.md,
-// Commit 1) passes its own ids so the identical chart-building logic
-// mounts a second time without duplicating it.
-function renderFocusRetirementGoalChart(analytics, household, tenure, chartElId = "focusRetirementGoalChart", sentenceElId = "focusRetirementSentence") {
+// `chartElId`/`sentenceElId` are the Retirement > Projection view's own
+// mount ids (docs/specs/35-retirement-output-view.md, Commit 1). This
+// used to also serve Focus > Retirement (docs/specs/32, Commit 5) with a
+// second pair of default ids; that view was removed in Commit 6 once its
+// figures became a strict subset of the Retirement output group, leaving
+// this as the one caller.
+function renderRetirementGoalChart(analytics, household, tenure, chartElId, sentenceElId) {
   const el = $(chartElId);
   const sentenceEl = $(sentenceElId);
   if (!el) return;
@@ -15154,7 +15172,7 @@ function retirementBandHTML(analytics, household, tenure) {
 // A fifth output group over the SAME comprehensive state/projection
 // every other view already reads — "one set of inputs, nothing that
 // can disagree." Every function below reuses an EXISTING builder
-// (retirementSummaryHTML, renderFocusRetirementGoalChart,
+// (retirementSummaryHTML, renderRetirementGoalChart,
 // retirementBandHTML, allocationSeries, runMonteCarlo,
 // buildLifecycleComparison) rather than re-deriving a figure — this
 // spec is composition, not new engine work. Every dollar figure
@@ -15170,7 +15188,7 @@ function renderRetirementProjectionView() {
   const tenure = derivedHomeownerStatus();
   $("retirementSummary").innerHTML = retirementSummaryHTML(analytics);
   $("retirementLifestyleBand").innerHTML = retirementBandHTML(analytics, household, tenure);
-  renderFocusRetirementGoalChart(analytics, household, tenure, "retirementGoalChart", "retirementGoalSentence");
+  renderRetirementGoalChart(analytics, household, tenure, "retirementGoalChart", "retirementGoalSentence");
   renderRetirementReviewPanel();
 }
 
@@ -15812,6 +15830,7 @@ function renderRetirementMonteCarloView() {
     statusEl.textContent = `${mcResult.numPaths.toLocaleString()} paths in ${(mcResult.elapsedMs / 1000).toFixed(1)}s. Re-run after changing the plan — this result is a snapshot, not live.`;
   }
   if (els.retirementMcResults) els.retirementMcResults.hidden = !mcResult;
+  renderRetirementLeversSection(); // spec 35, Commit 6 — visible only once mcResult exists and crosses its own threshold
   if (!mcResult) return;
   renderRetirementMcChart();
   $("retirementMcStats").innerHTML = retirementMcStatsHTML();
@@ -15891,6 +15910,166 @@ function retirementMcStatsHTML() {
 
 els.retirementMcRunBtn?.addEventListener("click", startMonteCarloRun);
 els.retirementMcCancelBtn?.addEventListener("click", cancelMonteCarloRun);
+
+// --- Levers panel (docs/specs/35-retirement-output-view.md, Commit 6) -----
+//
+// "From the tool's original design... when a plan does not reach its
+// goal, what would fix it." Shown only once mcResult exists AND its
+// ruin probability exceeds leversThreshold — never automatically
+// computed (runs behind its own button, see retirementLevers.js's own
+// header on why: each lever is dozens of Monte Carlo evaluations).
+// Non-prescriptive by construction: every lever states its own effect;
+// none is labelled "recommended", and the order is by effect on ruin
+// probability ONLY (solveAllLevers' own sort), stated as such below.
+
+function stopLeversWorker() {
+  if (leversWorker) { leversWorker.terminate(); leversWorker = null; }
+  leversRunning = false;
+}
+
+function invalidateLeversResult() {
+  leversResults = null;
+  leversResultFingerprint = null;
+  stopLeversWorker();
+}
+
+function retirementLeverLabel(lever) {
+  return {
+    contributeMore: "Contribute more", retireLater: "Retire later",
+    spendLess: "Spend less", takeMoreRisk: "Take more risk",
+  }[lever] ?? lever;
+}
+
+const LEVER_NONCONVERGED_REASON_TEXT = {
+  "out-of-bounds": "reaches nowhere in the range this lever searched",
+  "non-monotonic": "produced an inconsistent result across its own search",
+  "iteration-cap": "did not settle within the search's own iteration limit",
+  "time-cap": "did not settle within the search's own time limit",
+};
+
+function retirementLeverStatementHTML(r) {
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  if (r.available === false) {
+    return `<p class="helper-text">Not available — the client has no super account to contribute into.</p>`;
+  }
+  if (!r.converged) {
+    const reasonText = LEVER_NONCONVERGED_REASON_TEXT[r.reason] ?? "did not converge";
+    return `<p class="helper-text">This lever alone ${reasonText} — even at its own outer bound, the effect on ruin probability isn't enough by itself.</p>`;
+  }
+  switch (r.lever) {
+    case "contributeMore": {
+      const capNote = r.capExceeded
+        ? ` <strong>This exceeds the client's own remaining concessional cap headroom (${fmtMoney(r.capHeadroom)}/yr).</strong>`
+        : r.capHeadroom != null ? ` (cap headroom: ${fmtMoney(r.capHeadroom)}/yr)` : "";
+      return `<p class="helper-text">Contributing ${fmtMoney(r.extraAnnual)} more a year (salary sacrifice) moves ruin from ${pct(r.beforeRuin)} to ${pct(r.afterRuin)}.${capNote}</p>`;
+    }
+    case "retireLater":
+      return `<p class="helper-text">Retiring at age ${r.age} moves ruin from ${pct(r.beforeRuin)} to ${pct(r.afterRuin)}.</p>`;
+    case "spendLess":
+      return `<p class="helper-text">Reducing the target retirement income to ${fmtMoney(r.incomeRequiredAnnual)}/yr moves ruin from ${pct(r.beforeRuin)} to ${pct(r.afterRuin)}.</p>`;
+    case "takeMoreRisk":
+      return `<p class="helper-text">Moving the whole portfolio to a ${escapeHTML(r.profile)} risk profile moves ruin from ${pct(r.beforeRuin)} to ${pct(r.afterRuin)}.</p>`;
+    default:
+      return "";
+  }
+}
+
+// "WITH the distribution shown, because more risk widens the spread as
+// well as lifting the median and presenting it as a free improvement
+// would be dishonest" (the spec's own words) — a plain percentile
+// readout, the same figures the Monte Carlo stats block above already
+// surfaces for the household's own plan.
+function retirementLeverDistributionHTML(dist) {
+  if (!dist) return "";
+  return `<p class="helper-text">Ending balance distribution at this risk level: 10th percentile ${fmtMoney(dist.p10)} · median ${fmtMoney(dist.p50)} · 90th percentile ${fmtMoney(dist.p90)}. More risk widens this spread as well as lifting the median.</p>`;
+}
+
+function retirementLeversResultsHTML(results) {
+  return results.map((r) => `
+    <div class="rrp-group">
+      <div class="rrp-group-title">${escapeHTML(retirementLeverLabel(r.lever))}</div>
+      ${retirementLeverStatementHTML(r)}
+      ${r.lever === "takeMoreRisk" && r.converged ? retirementLeverDistributionHTML(r.distribution) : ""}
+    </div>
+  `).join("");
+}
+
+function renderRetirementLeversSection() {
+  const section = $("retirementLevers");
+  if (!section) return;
+  const show = !!mcResult && mcResult.ruinProbability > leversThreshold;
+  section.hidden = !show;
+  if (!show) { invalidateLeversResult(); return; }
+
+  const intro = $("retirementLeversIntro");
+  if (intro) {
+    intro.textContent = `This plan's probability of ruin (${Math.round(mcResult.ruinProbability * 100)}%) is above the ${Math.round(leversThreshold * 100)}% threshold below. Each lever is a real re-run, ranked by its own effect on that probability — not a recommendation.`;
+  }
+  const thresholdInput = $("retirementLeversThreshold");
+  if (thresholdInput && document.activeElement !== thresholdInput) thresholdInput.value = Math.round(leversThreshold * 100);
+
+  const runBtn = $("retirementLeversRunBtn"), cancelBtn = $("retirementLeversCancelBtn"), statusEl = $("retirementLeversStatus");
+  if (runBtn) runBtn.hidden = leversRunning;
+  if (cancelBtn) cancelBtn.hidden = !leversRunning;
+  if (statusEl) {
+    statusEl.textContent = leversRunning
+      ? "Solving — each lever is several re-runs of its own; this can take a minute or two."
+      : "";
+  }
+  const resultsEl = $("retirementLeversResults");
+  if (resultsEl) resultsEl.innerHTML = leversResults ? retirementLeversResultsHTML(leversResults) : "";
+}
+
+function startLeversRun() {
+  if (leversRunning || !mcResult) return;
+  leversRunning = true;
+  leversResultFingerprint = planFingerprint();
+  renderRetirementLeversSection();
+
+  leversWorker = new Worker(new URL("./retirementLeversWorker.js", import.meta.url), { type: "module" });
+  leversWorker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === "done") {
+      leversResults = msg.results;
+      stopLeversWorker();
+      renderRetirementLeversSection();
+    } else if (msg.type === "error") {
+      invalidateLeversResult();
+      renderRetirementLeversSection();
+      const statusEl = $("retirementLeversStatus");
+      if (statusEl) statusEl.textContent = `Solve failed: ${msg.message}`;
+    }
+  };
+  leversWorker.onerror = (e) => {
+    invalidateLeversResult();
+    renderRetirementLeversSection();
+    const statusEl = $("retirementLeversStatus");
+    if (statusEl) statusEl.textContent = `Solve failed: ${e.message}`;
+  };
+  // state/PROFILES are plain data — structured-clone across the worker
+  // boundary without loss, same as startMonteCarloRun's own postMessage.
+  leversWorker.postMessage({
+    state, profiles: PROFILES,
+    options: { threshold: leversThreshold, baselineRuin: mcResult.ruinProbability },
+  });
+}
+
+function cancelLeversRun() {
+  invalidateLeversResult();
+  renderRetirementLeversSection();
+  const statusEl = $("retirementLeversStatus");
+  if (statusEl) statusEl.textContent = "Cancelled.";
+}
+
+$("retirementLeversRunBtn")?.addEventListener("click", startLeversRun);
+$("retirementLeversCancelBtn")?.addEventListener("click", cancelLeversRun);
+$("retirementLeversThreshold")?.addEventListener("change", (e) => {
+  const pct = clampNumber(e.target.value, 1, 99);
+  e.target.value = pct;
+  leversThreshold = pct / 100;
+  invalidateLeversResult(); // a changed threshold invalidates any prior solve — it targeted the OLD one
+  renderRetirementLeversSection();
+});
 
 // --- Lifecycle vs static (item 1 of the original brief) -----------------
 //
@@ -16142,33 +16321,6 @@ $("retirementLifecycleOwnerToggle")?.addEventListener("click", (e) => {
 
 $("retirementCompareRunBtn")?.addEventListener("click", () => startRetirementCompareRun(rpCompareRenderCache?.owner ?? "client"));
 $("retirementCompareCancelBtn")?.addEventListener("click", cancelRetirementCompareRun);
-
-function renderFocusRetirementView() {
-  const analytics = computeRetirementAnalytics(state, projection);
-  const household = isCouple() ? "couple" : "single";
-  const tenure = derivedHomeownerStatus();
-
-  els.viewFocusRetirement.innerHTML = `
-    <h2 class="section-heading">Retirement</h2>
-    <div class="focus-panel">
-      <div class="focus-section">
-        <h3>Summary</h3>
-        ${retirementSummaryHTML(analytics)}
-      </div>
-      <div class="focus-section">
-        <h3>Goal versus position</h3>
-        <p class="helper-text">Household after-tax income by source, against your stated Income Required. Bars are gross by source; the line is after tax — compare the shapes, not the exact gap, in a year tax is material.</p>
-        <div id="focusRetirementGoalChart" class="chart-mount"></div>
-        <p id="focusRetirementSentence" class="helper-text"></p>
-      </div>
-      <div class="focus-section">
-        <h3>Lifestyle band</h3>
-        ${retirementBandHTML(analytics, household, tenure)}
-      </div>
-    </div>
-  `;
-  renderFocusRetirementGoalChart(analytics, household, tenure);
-}
 
 function transferScheduleToHTML(f, factor) {
   const row = (label, amt) => `<tr><td>${escapeHTML(label)}</td><td>${fmtMoney(cadenceConvert(amt * factor))}</td></tr>`;

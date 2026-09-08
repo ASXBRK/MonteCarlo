@@ -183,7 +183,6 @@ describe("known section/view ids", () => {
       "focus-aged-care-planning",
       "focus-debt-recycling",
       "focus-education-funding",
-      "focus-retirement",
       "monte-carlo", "monte-carlo-table",
       "whatif-rate-shock", "whatif-crash", "whatif-income-gap", "whatif-expense-shock",
       "retirement-projection", "retirement-balances", "retirement-table", "retirement-monte-carlo", "retirement-lifecycle",

@@ -264,7 +264,10 @@
               <div id="viewFocusLookups" hidden></div>
               <div id="viewFocusEquity" hidden></div>
               <div id="viewFocusTransferSchedule" hidden></div>
-              <div id="viewFocusRetirement" hidden></div>
+              <!-- Focus > Retirement (docs/specs/32-retirement-phase-one.md,
+                   Commit 5) removed (docs/specs/35-retirement-output-view.md,
+                   Commit 6) — its figures were a strict subset of the
+                   completed Retirement output group. -->
               <!-- Scenario comparison relocated to its own client-level
                    Compare page (#pageCompare, #/clients/<cid>/compare) —
                    no longer a workspace output view. -->
@@ -343,6 +346,24 @@
                 <div id="retirementMcResults" hidden>
                   <div id="retirementMcChart"></div>
                   <div id="retirementMcStats"></div>
+                </div>
+                <!-- Levers panel (docs/specs/35-retirement-output-view.md,
+                     Commit 6) — "when a plan does not reach its goal,
+                     what would fix it." Shown only once a run exists AND
+                     its ruin probability exceeds the threshold below;
+                     each lever is a real re-run, computed on demand. -->
+                <div id="retirementLevers" hidden>
+                  <h3 class="mc-subheading">What would help</h3>
+                  <p class="helper-text" id="retirementLeversIntro"></p>
+                  <div class="mc-controls">
+                    <label>Ruin threshold
+                      <input type="number" id="retirementLeversThreshold" min="1" max="99" step="1" value="20" style="width:4em" />%
+                    </label>
+                    <button id="retirementLeversRunBtn" class="btn-text" type="button">Show what would help</button>
+                    <button id="retirementLeversCancelBtn" class="btn-text" type="button" hidden>Cancel</button>
+                    <span id="retirementLeversStatus" class="mc-status"></span>
+                  </div>
+                  <div id="retirementLeversResults"></div>
                 </div>
               </div>
               <div id="viewRetirementLifecycle" hidden>

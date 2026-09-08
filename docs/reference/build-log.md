@@ -3776,6 +3776,99 @@ above). Full suite 2064/2064, build green.
 
 ---
 
+### Retirement: levers panel, and Focus > Retirement removed (spec 35, Commit 6 — closes spec 35)
+
+**What it does.** On Retirement > Monte Carlo, once a run's ruin
+probability crosses an adjustable threshold (default 20%), a new
+"What would help" panel appears below the results. Four levers —
+Contribute more, Retire later, Spend less, Take more risk — each solve
+independently for the smallest change that would bring ruin probability
+down to the threshold, and report it as a plain before/after statement
+("Moving the whole portfolio to a [profile] risk profile moves ruin
+from 57% to 12%"), ranked by effect size, largest first. A lever that
+can't reach the threshold anywhere in its own search range says so
+plainly rather than reporting a number. Non-prescriptive throughout —
+no "you should", no winner-labelling, matching every other Retirement
+output.
+
+**Explicitly does NOT persist anything.** Every lever runs against a
+CLONED plan state inside a solve; nothing it computes is ever written
+back to the real plan. This was a deliberate design choice made and
+confirmed correct mid-build: an earlier direction that would have had
+a lever auto-provision a pension account was dropped precisely because
+a view that silently mutates state is the failure mode this whole spec
+exists to prevent. The user must apply a change themselves, in the
+actual input sections, if they want it.
+
+**Solver**: new `retirementLevers.js` (pure) wraps the existing generic
+`bisectScalar` (`solve.js`) around a full `runMonteCarlo` evaluation —
+each `f(x)` call is a complete simulation run, not a cheap formula, so
+two disclosed tradeoffs keep it tractable: search-time evaluations use
+a reduced path count (200, down from an initial 800 — see the module's
+own header) with a fixed seed for internal consistency, then the
+lever's FINAL reported figure re-runs at the full path count for
+accuracy; and `bisectScalar`'s own default 2-second time budget was
+raised to an explicit 45-second `maxMs` override (`LEVER_MAX_MS`),
+since the default would have cut the search off after 1-2 evaluations.
+"Take more risk" moves the whole portfolio to one profile from the
+existing `RISK_RUNGS` ladder rather than optimising per-holding;
+"Spend less" trials with `incomeDrivenDrawdown` forced on. Both
+disclosed in-line rather than silently assumed.
+
+**Worker**: `retirementLeversWorker.js` mirrors `monteCarloWorker.js`'s
+exact protocol (one `{state, profiles, options}` in, one `{type:"done"}`
+or `{type:"error"}` out) so the four-lever solve — dozens of Monte
+Carlo evaluations — never blocks the UI thread. No per-lever progress
+stream (an indeterminate "Solving…" status instead) since
+`solveAllLevers` has no natural finer-grained hook without invasively
+threading a callback through `bisectScalar` itself.
+
+**Verified the non-convergence path is correct, not a bug.** Browser
+verification first used a deliberately hopeless scenario (assets and
+super shrunk to near zero, a $150,000/yr forced expense layered on
+top) — genuine 100% ruin, and all four levers correctly reported
+"reaches nowhere in the range this lever searched." Re-tested with a
+more realistic forced-ruin scenario (moderate balances, a $35,000/yr
+added expense, 57% ruin) to confirm the solve genuinely converges when
+a scenario IS fixable by some lever: "Take more risk" converged (57%
+→ 12%, with a real ending-balance distribution alongside it), the other
+three correctly reported non-convergence for THIS scenario. Both
+outcomes are the solver telling the truth about the scenario in front
+of it, not a defect.
+
+**Focus > Retirement removed.** This view (spec 32 Commit 5) had become
+a strict subset of Retirement > Projection now that the Retirement
+output group is complete — the same summary, the same goal-versus-
+position chart, the same lifestyle band, with no adjustments/review
+panel/levers of its own. Removed per direct instruction ("there is no
+reason to keep both once the Retirement group is complete"):
+- `renderFocusRetirementView` (main.js) — deleted outright.
+- `"focus-retirement"` — removed from `router.js`'s `OUTPUT_VIEWS`,
+  main.js's Focus nav list and `VIEW_MOUNTS`/`renderActiveView()`
+  dispatch, `index.html`'s `#viewFocusRetirement` mount div,
+  `router.test.js`'s view-list assertion, and `demo/coverage.test.js`'s
+  checker map.
+- `renderFocusRetirementGoalChart` — kept (Retirement > Projection is
+  still a live caller) but renamed to `renderRetirementGoalChart` since
+  Focus > Retirement was its only other caller; its Focus-view-specific
+  default element ids were dropped since the one remaining call site
+  always passes its own.
+
+No engine change (levers run through a separate module/worker and never
+touch `projectPlan`'s own published output shape) — `ENGINE_VERSION`
+untouched. No new money flow (a what-if solve against a cloned,
+never-persisted state) — `randomScenario()`/`conservationCheck.js`
+untouched, per the same reasoning.
+
+Tests: 14 new (`retirementLevers.test.js` — each lever's convergence
+and non-convergence paths, cap-headroom flagging on Contribute more,
+`solveAllLevers`'s own ranking-by-effect-size). Full suite 2077/2077,
+build green. Browser-verified end to end (levers panel visibility gate,
+run/cancel, converged and non-converged rendering, zero console errors)
+via the `run` skill.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

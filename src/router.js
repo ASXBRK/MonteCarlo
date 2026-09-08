@@ -58,7 +58,9 @@ export const OUTPUT_VIEWS = [
   // with zero new UI/engine code.
   "focus-debt-recycling",                                                                                                                                     // Focus (docs/specs/24-drawdowns-debt-recycling.md, Commit 3)
   "focus-education-funding",                                                                                                                                   // Focus (docs/specs/25-investment-education-bonds.md, Commit 3)
-  "focus-retirement",                                                                                                                                          // Focus (docs/specs/32-retirement-phase-one.md, Commit 5)
+  // "focus-retirement" (docs/specs/32-retirement-phase-one.md, Commit 5)
+  // removed (docs/specs/35-retirement-output-view.md, Commit 6) — its
+  // figures were a strict subset of the completed Retirement output group.
   // "focus-compare-scenarios" relocated to its own client-level Compare
   // page (#/clients/<cid>/compare) — no longer a workspace output view.
   // What if (docs/specs/14-what-if.md) — "what if the world is different"

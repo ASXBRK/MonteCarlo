@@ -83,10 +83,9 @@ const CHECKS = {
   "focus-aged-care-planning": ({ state }) => (state.plan.agedCare ?? []).length > 0,
   "focus-debt-recycling": ({ state }) => (state.liabilities ?? []).some((l) => l.recycling?.enabled),
   "focus-education-funding": ({ state }) => (state.plan.children ?? []).some((c) => (c.education ?? []).length > 0),
-  // No null-return gate (spec 32, Commit 5) — the view always renders,
-  // falling back to plain-text messages for a degenerate case rather
-  // than refusing to mount at all, so any real client/scenario counts.
-  "focus-retirement": ({ out }) => out.yearly.length > 0,
+  // focus-retirement (spec 32, Commit 5) removed (docs/specs/35-
+  // retirement-output-view.md, Commit 6) — its figures were a strict
+  // subset of the completed Retirement output group.
 
   // --- What if (docs/specs/14-what-if.md) ---
   "monte-carlo": ({ state }) => (state.assets ?? []).length > 0,
