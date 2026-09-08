@@ -497,6 +497,24 @@ is no published standard for "the floor" once the floor is removed), stated
 in-product wherever it applies (see `retirementOutcomeBuckets.js`'s own
 header for the full reasoning).
 
+## 7.8 Ruin tolerance levels — 5% / 10% / 20% (`docs/specs/36-retirement-outputs.md`, Commit 2)
+**RESEARCHED**, three fixed levels, **10% the default**. Powers the
+"maximum sustainable spend" solve (`retirementLevers.js`'s own
+`RUIN_TOLERANCE_LEVELS`/`RUIN_TOLERANCE_DEFAULT`) — the highest Income
+Required at which no more than the chosen share of paths run short.
+
+| Level | Basis |
+|---|---|
+| **5%** | Conservative — roughly 1 in 20 paths run short. Defensible where there is no Age Pension backstop or a strong bequest motive. |
+| **10% (default)** | The common planning benchmark in the retirement literature — Pfau, Vanguard, Schwab, and Morningstar's annual safe-withdrawal-rate work each converge on a figure in this range. |
+| **20%** | Accepts 1 in 5 paths running short, on the basis that real retirees adjust spending rather than continuing blindly into ruin — an assumption about CLIENT BEHAVIOUR (they will actually adjust), not simply a looser risk tolerance. Stated as such wherever this level is selected, per the spec's own instruction. |
+
+Not a single authoritative source for the exact percentages (no regulator
+publishes a "correct" ruin tolerance); the three levels and the 10% default
+reflect where the safe-withdrawal-rate literature's own commonly-cited
+figures cluster, which is the same standard the industry sources this kind
+of number from.
+
 ---
 
 # 8. INDEXATION BASES

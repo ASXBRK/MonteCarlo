@@ -3943,6 +3943,95 @@ skill.
 
 ---
 
+### Retirement: maximum sustainable spend at a ruin tolerance (spec 36, Commit 2)
+
+**The headline figure** — on Retirement > Monte Carlo, below the
+outcome buckets: at a stated ruin tolerance (5% / 10% / 20%, default
+10%), the most this plan could spend a year and stay within it.
+"$72,000 a year — between ASFA Modest and Comfortable for a couple",
+never a bare dollar figure.
+
+**No second solver built.** "The highest Income Required at which no
+more than the chosen share of paths run short" is EXACTLY what
+`retirementLevers.js`'s own `solveSpendLess` (spec 35 Commit 6, the
+"Spend less" lever) already computes — this commit reuses it verbatim
+with an adviser-chosen `threshold` instead of the levers panel's own
+fixed one, via a new dedicated worker
+(`retirementSustainableSpendWorker.js`, same protocol shape as
+`monteCarloWorker.js`/`retirementLeversWorker.js`) rather than a
+duplicated solve. Same disclosed accuracy tradeoff as the levers panel
+throughout: reduced search-path count with a full-path confirmation
+run, the same explicit `LEVER_MAX_MS` time budget — no new machinery,
+per direct instruction.
+
+- `src/retirementLevers.js` — `RUIN_TOLERANCE_LEVELS`
+  (`[0.05, 0.10, 0.20]`) and `RUIN_TOLERANCE_DEFAULT` (`0.10`) added
+  alongside the existing `RUIN_THRESHOLD_DEFAULT`; `solveSpendLess`'s
+  own header comment extended to document the reuse.
+- `src/retirementSustainableSpendWorker.js` (new) — calls
+  `solveSpendLess` inside a worker; nothing new to solve.
+- `src/lifestyleBand.js` — new `asfaBandPhrase(amount, household,
+  tenure)`, reusing `resolveLifestyleBand` directly, reproducing the
+  spec's own worked phrase verbatim ("between ASFA Modest and
+  Comfortable for a couple").
+- `src/main.js`, `index.html`, `docs/reference/assumptions-provenance.md`
+  §7.8 — tolerance selector with an info tooltip per level (each
+  level's own basis, quoting the spec almost verbatim, including the
+  20% level's own "this assumes a client who will adjust" caveat),
+  button-triggered solve with progress/cancel, caching + fingerprint
+  invalidation on plan change (mirrors the levers panel's own shape)
+  AND on tolerance change (a changed tolerance targets a different
+  threshold — the prior solve no longer answers the current question).
+  The existing deterministic sustainable-income figure gets an explicit
+  one-line distinction wherever this one renders, per the spec's own
+  instruction ("state the difference wherever both appear").
+
+**Bug found and fixed during browser verification, not by a unit
+test.** `solveSpendLess`'s underlying `bisectScalar` reports
+"out-of-bounds" whenever no crossing point exists in the search
+range — which covers TWO different situations it can't tell apart on
+its own: a plan genuinely unfixable at any spend, OR (newly reachable
+here, since this section isn't gated on already-high ruin the way the
+levers panel is) a plan already safely below the tolerance at EVERY
+spend level, because Income Required has no effect on it at all
+(`applySpendLess` forces `incomeDrivenDrawdown` on, but that only
+drives a pension whose OWN `drawdownOption` is `"expenditure"` —
+`deterministic.js`'s own gate; a plan with no such pension sees a
+flat ruin probability regardless of the target). The generic
+"reaches nowhere in the range this lever searched" wording, correct
+for the levers panel (which only appears when ruin is ALREADY high),
+would have been actively misleading here — reported as if the plan
+couldn't sustain even $0 a year when the true state was the opposite.
+Fixed by reading `result.beforeRuin` (the baseline, unmodified plan's
+own ruin) against the chosen tolerance and rendering a distinct,
+accurate statement when the plan is already safe throughout. This is
+presentation-layer only — `solveSpendLess`/`bisectScalar` themselves
+are untouched, correctly shared with the levers panel.
+
+No engine change and no new money flow (a what-if solve against a
+cloned, never-persisted state, identical in kind to the existing
+levers) — `ENGINE_VERSION`, `randomScenario()`, and
+`conservationCheck.js` untouched.
+
+Tests: 3 new (`retirementLevers.test.js` — `solveSpendLess` converges
+correctly at each of 5/10/20%, its own confirmation run landing close
+to the stated tolerance) + 5 new (`lifestyleBand.test.js` —
+`asfaBandPhrase` at every position on the scale, including the spec's
+own worked phrase verbatim). Full suite 2120/2120, build green.
+Browser-verified end to end: section visibility gated on an existing
+run, tolerance-change cache invalidation (confirmed the result clears
+immediately), the "already safe" non-converged case (post-fix,
+accurate wording), and the "genuinely unfixable" non-converged case
+(existing wording, correctly triggered by a synthetic forced expense);
+zero console errors throughout. The "converged, positive figure"
+render path was not separately scenario-hunted in the browser beyond
+this — its own two inputs (the solved dollar figure, `asfaBandPhrase`)
+are each independently unit-tested, and the underlying solve's own
+convergence-to-tolerance accuracy is confirmed by the new
+`retirementLevers.test.js` cases above.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

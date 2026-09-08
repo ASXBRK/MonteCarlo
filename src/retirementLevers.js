@@ -30,6 +30,14 @@ import { RISK_RUNGS } from "./profiles.js";
 import { capHeadroomFor } from "./retirementAnalytics.js";
 
 export const RUIN_THRESHOLD_DEFAULT = 0.2;
+// Sustainable-spend ruin tolerance levels (docs/specs/36-retirement-
+// outputs.md, Commit 2) — 5/10/20%, defaulting to 10% (the common
+// planning benchmark in the retirement literature — Pfau, Vanguard,
+// Schwab, Morningstar's annual safe-withdrawal work). See
+// docs/reference/assumptions-provenance.md for full sourcing and
+// classification of each level.
+export const RUIN_TOLERANCE_LEVELS = [0.05, 0.10, 0.20];
+export const RUIN_TOLERANCE_DEFAULT = 0.10;
 // Well under the caller's own full path count — each search-time
 // evaluation is a full runMonteCarlo call, expensive enough (unlike
 // the deterministic engine solve.js was built for) that bisectScalar's
@@ -181,6 +189,14 @@ export function solveRetireLater(state, profiles, {
 // search-time ruin probability crosses `threshold` (spending less ⇒
 // lower ruin, so this is the MOST the household could spend and stay
 // at/under it — the max sustainable Income Required, not a minimum).
+//
+// Reused verbatim (docs/specs/36-retirement-outputs.md, Commit 2) as
+// the "maximum sustainable spend at a stated ruin tolerance" headline
+// — "the highest Income Required at which no more than the chosen
+// share of paths run short" IS exactly this solve; Commit 2 is a
+// standalone caller passing an adviser-chosen `threshold` (5/10/20%,
+// RUIN_TOLERANCE_LEVELS above) via its own worker
+// (retirementSustainableSpendWorker.js) rather than a second solver.
 export function solveSpendLess(state, profiles, {
   threshold, baselineRuin, numPaths = DEFAULT_NUM_PATHS, seed = LEVER_SEED,
   searchPaths = LEVER_SEARCH_PATHS, searchSeed = LEVER_SEED,

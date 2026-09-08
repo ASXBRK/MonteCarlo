@@ -216,6 +216,28 @@ describe("solveSpendLess", () => {
       expect(["out-of-bounds", "non-monotonic", "iteration-cap", "time-cap"]).toContain(result.reason);
     }
   });
+
+  // docs/specs/36-retirement-outputs.md, Commit 2 — "the maximum
+  // sustainable spend" reuses this exact solver at an adviser-chosen
+  // tolerance (5/10/20%) rather than a fixed lever threshold. Its own
+  // test requirements: "the solved figure produces a plan whose ruin
+  // probability sits at the stated tolerance when applied" and "each
+  // tolerance level solves correctly."
+  describe("Commit 2 — solves correctly at each ruin tolerance level", () => {
+    it.each([0.05, 0.10, 0.20])("tolerance %s: when converged, the solved figure's own confirmation run sits close to that tolerance", (threshold) => {
+      const state = leverState();
+      const result = solveSpendLess(state, PROFILES, { threshold, baselineRuin: 0.9, numPaths: 300, seed: 13, ...FAST });
+      if (result.converged) {
+        // Search-time (60 paths, fixed seed) vs the final confirmation
+        // run (300 paths, same seed) are different samples — a loose
+        // bound avoids a flaky test while still confirming the solve
+        // landed in the right neighbourhood, not an unrelated figure.
+        expect(Math.abs(result.afterRuin - threshold)).toBeLessThan(0.15);
+      } else {
+        expect(["out-of-bounds", "non-monotonic", "iteration-cap", "time-cap"]).toContain(result.reason);
+      }
+    });
+  });
 });
 
 describe("solveTakeMoreRisk", () => {

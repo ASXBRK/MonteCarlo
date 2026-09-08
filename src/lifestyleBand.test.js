@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors, descriptorsForStandard, LIFESTYLE_CATEGORIES,
+  asfaBandPhrase,
 } from "./lifestyleBand.js";
 import { ASFA_LIFESTYLE_DESCRIPTORS, asfaAnnual } from "./data/asfaStandards.js";
 
@@ -124,5 +125,29 @@ describe("currentLevelDescriptors / deltaDescriptors — defensive", () => {
   it("atOrAboveTop band → no delta (nextStandard null)", () => {
     const band = resolveLifestyleBand(200000, "couple", "homeowner");
     expect(deltaDescriptors(band)).toEqual([]);
+  });
+});
+
+// asfaBandPhrase (docs/specs/36-retirement-outputs.md, Commit 2) —
+// "report against the ASFA bands, not as a bare figure."
+describe("asfaBandPhrase", () => {
+  it("reproduces the spec's own worked example phrase verbatim (docs/specs/36, Commit 2: '$72,000 a year — between ASFA Modest and Comfortable for a couple')", () => {
+    expect(asfaBandPhrase(61400, "couple", "homeowner")).toBe("between ASFA Modest and Comfortable for a couple");
+  });
+
+  it("above the top of the scale", () => {
+    expect(asfaBandPhrase(60000, "single", "homeowner")).toBe("above ASFA Comfortable for a single");
+  });
+
+  it("below the floor, homeowner — plain 'Modest', no renter suffix", () => {
+    expect(asfaBandPhrase(40000, "couple", "homeowner")).toBe("below ASFA Modest for a couple");
+  });
+
+  it("below the floor, renter — the renter-specific standard named", () => {
+    expect(asfaBandPhrase(5000, "single", "renter")).toBe("below ASFA Modest (renter) for a single");
+  });
+
+  it("no average income to place (resolveLifestyleBand's own null case) → empty string, never a malformed phrase", () => {
+    expect(asfaBandPhrase(null, "single", "homeowner")).toBe("");
   });
 });

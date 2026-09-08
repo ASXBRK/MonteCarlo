@@ -347,6 +347,31 @@
                   <div id="retirementMcChart"></div>
                   <div id="retirementMcStats"></div>
                 </div>
+                <!-- Maximum sustainable spend (docs/specs/36-retirement-
+                     outputs.md, Commit 2) — the highest Income Required
+                     at which no more than the chosen ruin tolerance's
+                     share of paths run short; a real solve over the
+                     distribution (reuses the "spend less" lever's own
+                     solver), computed on demand behind a button, never
+                     a live figure. -->
+                <div id="retirementSustainableSpend" hidden>
+                  <h3 class="mc-subheading">Maximum sustainable spend</h3>
+                  <p class="helper-text">At a stated ruin tolerance, the most this plan could spend a year and stay within it — a real re-run, not an estimate.</p>
+                  <div class="mc-controls">
+                    <label>Ruin tolerance
+                      <select id="retirementSustainableSpendTolerance">
+                        <option value="5">5%</option>
+                        <option value="10" selected>10%</option>
+                        <option value="20">20%</option>
+                      </select>
+                    </label>
+                    <span id="retirementSustainableSpendToleranceInfo"></span>
+                    <button id="retirementSustainableSpendRunBtn" class="btn-text" type="button">Solve</button>
+                    <button id="retirementSustainableSpendCancelBtn" class="btn-text" type="button" hidden>Cancel</button>
+                    <span id="retirementSustainableSpendStatus" class="mc-status"></span>
+                  </div>
+                  <div id="retirementSustainableSpendResult"></div>
+                </div>
                 <!-- Levers panel (docs/specs/35-retirement-output-view.md,
                      Commit 6) — "when a plan does not reach its goal,
                      what would fix it." Shown only once a run exists AND

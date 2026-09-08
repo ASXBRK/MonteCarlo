@@ -138,3 +138,27 @@ export function deltaDescriptors(band) {
     : LIFESTYLE_CATEGORIES;
   return descriptorsForStandard(band.nextStandard, categories);
 }
+
+// Short standard names for a compact, single-line phrase — deliberately
+// NOT asfaStandardLabel's own "(household, tenure)" suffix (that
+// context is stated once at the end of the phrase instead, matching
+// the spec's own worked example verbatim: "$72,000 a year — between
+// ASFA Modest and Comfortable for a couple.", docs/specs/36-
+// retirement-outputs.md, Commit 2).
+const ASFA_SHORT_NAME = { comfortable: "Comfortable", modest: "Modest", modestRenter: "Modest (renter)" };
+
+// asfaBandPhrase(amount, household, tenure) → "between ASFA Modest and
+// Comfortable for a couple" | "above ASFA Comfortable for a single" |
+// "below ASFA Modest (renter) for a couple" | "" (no average income to
+// place — resolveLifestyleBand's own null case). Reuses
+// resolveLifestyleBand directly — never a second placement of the same
+// figure on the same scale.
+export function asfaBandPhrase(amount, household, tenure) {
+  const band = resolveLifestyleBand(amount, household, tenure);
+  if (!band) return "";
+  const householdWord = household === "couple" ? "couple" : "single";
+  const name = (s) => ASFA_SHORT_NAME[s] ?? s;
+  if (band.position === "atOrAboveTop") return `above ASFA ${name(band.currentStandard)} for a ${householdWord}`;
+  if (band.position === "belowLower") return `below ASFA ${name(band.nextStandard)} for a ${householdWord}`;
+  return `between ASFA ${name(band.currentStandard)} and ${name(band.nextStandard)} for a ${householdWord}`;
+}

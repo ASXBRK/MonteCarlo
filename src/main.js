@@ -8,7 +8,7 @@
 import { PROFILES, realMu, impliedFrankingPct, ASSET_CLASS_KEYS, ASSET_CLASS_LABELS } from "./profiles.js";
 import { allocationSeries } from "./allocation.js";
 import { runMonteCarlo, DEFAULT_NUM_PATHS } from "./monteCarlo.js";
-import { RUIN_THRESHOLD_DEFAULT } from "./retirementLevers.js";
+import { RUIN_THRESHOLD_DEFAULT, RUIN_TOLERANCE_LEVELS, RUIN_TOLERANCE_DEFAULT } from "./retirementLevers.js";
 import { buildLifecycleComparison } from "./retirementLifecycleComparison.js";
 import {
   defaultState, createAsset, createLifestyleAsset, createCashflow, createLumpSum,
@@ -74,7 +74,7 @@ import {
 import { deriveHomeownerStatus, resolveIncomeRequired } from "./retirement.js";
 import { computeRetirementAnalytics, retirementAnchor, leAnchor } from "./retirementAnalytics.js";
 import { goalVsPositionSummary } from "./goalVsPosition.js";
-import { resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors } from "./lifestyleBand.js";
+import { resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors, asfaBandPhrase } from "./lifestyleBand.js";
 import { agePensionExcludedFor, resolveOutcomeThresholds, computeOutcomeBuckets } from "./retirementOutcomeBuckets.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
@@ -8852,6 +8852,20 @@ let leversRunning = false;
 let leversWorker = null;
 let leversThreshold = RUIN_THRESHOLD_DEFAULT;
 
+// Maximum sustainable spend (docs/specs/36-retirement-outputs.md,
+// Commit 2) — same shape as the levers state immediately above, one
+// level downstream of mcResult in the same way. sustainableSpendResult
+// is retirementLevers.js's own solveSpendLess() return value, reused
+// verbatim (see that function's own header on why this is not a
+// second solver). sustainableSpendTolerance is a tool preference, not
+// part of the financial plan — kept in memory only, matching
+// leversThreshold's own convention.
+let sustainableSpendResult = null;
+let sustainableSpendResultFingerprint = null;
+let sustainableSpendRunning = false;
+let sustainableSpendWorker = null;
+let sustainableSpendTolerance = RUIN_TOLERANCE_DEFAULT;
+
 let mcResult = null;
 // The planFingerprint() the current mcResult (or in-flight run) is
 // valid for — null when there is neither. Compared against the live
@@ -8910,6 +8924,9 @@ function refreshOutputs() {
   }
   if (leversResultFingerprint !== null && leversResultFingerprint !== planFingerprint()) {
     invalidateLeversResult();
+  }
+  if (sustainableSpendResultFingerprint !== null && sustainableSpendResultFingerprint !== planFingerprint()) {
+    invalidateSustainableSpendResult();
   }
   renderPeriodSelector();
   renderSummaryStrip();
@@ -15845,6 +15862,7 @@ function renderRetirementMonteCarloView() {
     statusEl.textContent = `${mcResult.numPaths.toLocaleString()} paths in ${(mcResult.elapsedMs / 1000).toFixed(1)}s. Re-run after changing the plan — this result is a snapshot, not live.`;
   }
   if (els.retirementMcResults) els.retirementMcResults.hidden = !mcResult;
+  renderRetirementSustainableSpendSection(); // spec 36, Commit 2 — visible only once mcResult exists
   renderRetirementLeversSection(); // spec 35, Commit 6 — visible only once mcResult exists and crosses its own threshold
   if (!mcResult) return;
   renderRetirementMcChart();
@@ -15971,6 +15989,151 @@ function retirementMcStatsHTML() {
 
 els.retirementMcRunBtn?.addEventListener("click", startMonteCarloRun);
 els.retirementMcCancelBtn?.addEventListener("click", cancelMonteCarloRun);
+
+// --- Maximum sustainable spend (docs/specs/36-retirement-outputs.md,
+// Commit 2) ------------------------------------------------------------
+//
+// "The headline figure" — at a stated ruin tolerance, the most this
+// plan could spend and stay within it. Shown once mcResult exists (a
+// baseline to solve against), computed on demand behind its own button
+// — "a button with progress and cancel, not a live figure" (the
+// spec's own words), same discipline as the levers panel immediately
+// below. Reuses retirementLevers.js's own solveSpendLess() directly —
+// see that function's own header for why this is not a second solver
+// — via a dedicated worker (retirementSustainableSpendWorker.js) so a
+// tolerance change doesn't have to wait on all four levers the way
+// solveAllLevers() would.
+
+const RUIN_TOLERANCE_INFO = {
+  5: "Conservative. Roughly 1 in 20 paths run short. Defensible where there is no Age Pension backstop or a strong bequest motive.",
+  10: "The common planning benchmark in the retirement literature (Pfau, Vanguard, Schwab, Morningstar's annual safe-withdrawal work). Default.",
+  20: "Accepts 1 in 5 paths running short, on the basis that real retirees adjust spending rather than continuing blindly into ruin. This assumes a client who will adjust — a different assumption about behaviour, not simply more risk tolerance.",
+};
+
+function stopSustainableSpendWorker() {
+  if (sustainableSpendWorker) { sustainableSpendWorker.terminate(); sustainableSpendWorker = null; }
+  sustainableSpendRunning = false;
+}
+
+function invalidateSustainableSpendResult() {
+  sustainableSpendResult = null;
+  sustainableSpendResultFingerprint = null;
+  stopSustainableSpendWorker();
+}
+
+// "State the difference wherever both appear" (the spec's own words,
+// distinguishing this from the existing deterministic sustainable-
+// income figure, retirementAnalytics.js's own sustainableIncomeToLE) —
+// this is the ONE place both would plausibly be read together, so the
+// distinguishing sentence lives here rather than duplicated per view.
+const SUSTAINABLE_SPEND_VS_DETERMINISTIC_NOTE =
+  "Distinct from the sustainable-income figure on the summary card above: that one solves against a single deterministic projection; this one solves against the full simulated distribution, at a stated tolerance for paths that run short.";
+
+function retirementSustainableSpendResultHTML(r) {
+  if (!r) return "";
+  if (!r.converged) {
+    // "out-of-bounds" covers TWO different situations bisectScalar
+    // can't tell apart on its own (it only knows no crossing point
+    // exists in range): genuinely unfixable at any spend, OR — just as
+    // reachable here since, unlike the levers panel, this section
+    // isn't gated on high ruin — a plan already safely below the
+    // tolerance at every spend level, because Income Required has no
+    // effect on it at all (applySpendLess forces incomeDrivenDrawdown
+    // on, but that only drives a pension whose OWN drawdownOption is
+    // "expenditure" — deterministic.js's own gate; a plan with no such
+    // pension sees a genuinely FLAT ruin probability across the whole
+    // search range, so no crossing point can exist either way).
+    // r.beforeRuin (the CURRENT, unmodified plan's own baseline ruin)
+    // distinguishes the two without guessing.
+    if (r.beforeRuin != null && r.beforeRuin <= sustainableSpendTolerance) {
+      return `<p class="helper-text">This plan's ruin probability (${Math.round(r.beforeRuin * 100)}%) is already at or below the ${Math.round(sustainableSpendTolerance * 100)}% tolerance at every spend level searched — Income Required doesn't drive this plan's own drawdown (no pension here draws to a target), so there is no distinct spend figure to solve for.</p>`;
+    }
+    const reasonText = LEVER_NONCONVERGED_REASON_TEXT[r.reason] ?? "did not converge";
+    return `<p class="helper-text">This search ${reasonText} — even at $0 a year, this plan's own ruin probability does not fall to the chosen tolerance.</p>`;
+  }
+  const household = isCouple() ? "couple" : "single";
+  const tenure = derivedHomeownerStatus();
+  const bandPhrase = asfaBandPhrase(r.incomeRequiredAnnual, household, tenure);
+  return `
+    <p class="helper-text rp-mc-headline"><strong>${fmtMoney(r.incomeRequiredAnnual)} a year</strong>${bandPhrase ? ` — ${escapeHTML(bandPhrase)}` : ""}.</p>
+    <p class="helper-text">${ASFA_HOMEOWNER_ASSUMPTION_NOTE}</p>
+    <p class="helper-text">${SUSTAINABLE_SPEND_VS_DETERMINISTIC_NOTE}</p>
+  `;
+}
+
+function renderRetirementSustainableSpendSection() {
+  const section = $("retirementSustainableSpend");
+  if (!section) return;
+  section.hidden = !mcResult;
+  if (!mcResult) { invalidateSustainableSpendResult(); return; }
+
+  const toleranceSelect = $("retirementSustainableSpendTolerance");
+  const tolerancePct = Math.round(sustainableSpendTolerance * 100);
+  if (toleranceSelect && document.activeElement !== toleranceSelect) toleranceSelect.value = String(tolerancePct);
+  const infoEl = $("retirementSustainableSpendToleranceInfo");
+  if (infoEl) infoEl.innerHTML = tooltipHTML(RUIN_TOLERANCE_INFO[tolerancePct] ?? "");
+
+  const runBtn = $("retirementSustainableSpendRunBtn"), cancelBtn = $("retirementSustainableSpendCancelBtn"), statusEl = $("retirementSustainableSpendStatus");
+  if (runBtn) runBtn.hidden = sustainableSpendRunning;
+  if (cancelBtn) cancelBtn.hidden = !sustainableSpendRunning;
+  if (statusEl) {
+    statusEl.textContent = sustainableSpendRunning
+      ? "Solving — roughly 15 re-runs of the full simulation; this can take a minute or two."
+      : "";
+  }
+  const resultEl = $("retirementSustainableSpendResult");
+  if (resultEl) resultEl.innerHTML = sustainableSpendResult ? retirementSustainableSpendResultHTML(sustainableSpendResult) : "";
+}
+
+function startSustainableSpendRun() {
+  if (sustainableSpendRunning || !mcResult) return;
+  sustainableSpendRunning = true;
+  sustainableSpendResultFingerprint = planFingerprint();
+  renderRetirementSustainableSpendSection();
+
+  sustainableSpendWorker = new Worker(new URL("./retirementSustainableSpendWorker.js", import.meta.url), { type: "module" });
+  sustainableSpendWorker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === "done") {
+      sustainableSpendResult = msg.result;
+      stopSustainableSpendWorker();
+      renderRetirementSustainableSpendSection();
+    } else if (msg.type === "error") {
+      invalidateSustainableSpendResult();
+      renderRetirementSustainableSpendSection();
+      const statusEl = $("retirementSustainableSpendStatus");
+      if (statusEl) statusEl.textContent = `Solve failed: ${msg.message}`;
+    }
+  };
+  sustainableSpendWorker.onerror = (e) => {
+    invalidateSustainableSpendResult();
+    renderRetirementSustainableSpendSection();
+    const statusEl = $("retirementSustainableSpendStatus");
+    if (statusEl) statusEl.textContent = `Solve failed: ${e.message}`;
+  };
+  // state/PROFILES are plain data — structured-clone across the worker
+  // boundary without loss, same as startLeversRun's own postMessage.
+  sustainableSpendWorker.postMessage({
+    state, profiles: PROFILES,
+    options: { threshold: sustainableSpendTolerance, baselineRuin: mcResult.ruinProbability },
+  });
+}
+
+function cancelSustainableSpendRun() {
+  invalidateSustainableSpendResult();
+  renderRetirementSustainableSpendSection();
+  const statusEl = $("retirementSustainableSpendStatus");
+  if (statusEl) statusEl.textContent = "Cancelled.";
+}
+
+$("retirementSustainableSpendRunBtn")?.addEventListener("click", startSustainableSpendRun);
+$("retirementSustainableSpendCancelBtn")?.addEventListener("click", cancelSustainableSpendRun);
+$("retirementSustainableSpendTolerance")?.addEventListener("change", (e) => {
+  const pct = Number(e.target.value);
+  sustainableSpendTolerance = (RUIN_TOLERANCE_LEVELS.includes(pct / 100) ? pct : Math.round(RUIN_TOLERANCE_DEFAULT * 100)) / 100;
+  invalidateSustainableSpendResult(); // a changed tolerance invalidates any prior solve — it targeted the OLD one
+  renderRetirementSustainableSpendSection();
+});
 
 // --- Levers panel (docs/specs/35-retirement-output-view.md, Commit 6) -----
 //
