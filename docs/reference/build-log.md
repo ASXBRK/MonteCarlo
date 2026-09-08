@@ -4090,6 +4090,69 @@ Carlo pages; zero console errors.
 
 ---
 
+### Retirement: stat box (spec 36, Commit 4 — closes spec 36)
+
+**A row of figures at the top of Retirement > Projection**, at the same
+visual weight as the existing analytics card below it — "not a banner
+— a number in a box gets read." | Savings last through 88 | Providing
+$62,219 a year | Age Pension share 65% | Max sustainable spend $X at
+Y% |. Every figure already existed; this is arrangement, not
+computation — `retirementStatBoxHTML` reads `analytics.firstShortfallAge`
+(falling back to the projection's own final age when no shortfall ever
+occurs — a positive framing, never an unbounded "never runs out"
+claim), `analytics.le.averageRetirementIncome`,
+`analytics.le.averageAgePensionPctOfIncome` (all three already computed
+by `computeRetirementAnalytics`, spec 32 Commit 3), and the SAME cached
+`sustainableSpendResult`/`sustainableSpendTolerance` module state the
+Retirement > Monte Carlo page itself shows (Commit 2) — "—" until that
+page's own button has actually been used, never a silent re-solve
+here. New `.summary-strip-4` CSS (four columns, same `.stat` cells the
+existing three-column `.summary-strip` already uses).
+
+**No counterfactual duplicated.** "Work two more years and it lasts
+until 93" is the retire-later LEVER with its answer filled in (spec 35
+Commit 6, "What would help") — the spec's own explicit instruction not
+to rebuild it here, so the box states only what the CURRENT plan does,
+never a what-if.
+
+**Age Pension in its own colour, consistently.** Found and fixed a
+real inconsistency while implementing this: the Composite chart's own
+Age Pension bar used a teal (`rgb(28, 150, 150)`) nobody else in the
+tool used, while the Income sources chart and the goal-versus-position
+chart already agreed on an orange (`#dc5a28`) — three charts, two
+different colours for the same series, silently. New shared
+`AGE_PENSION_CHART_COLOR` constant, all three sites now reading from
+it, so a viewer tracking the Age Pension band by eye across different
+charts sees the same colour everywhere, not a per-chart accident.
+
+No engine change and no new money flow (pure arrangement of existing
+analytics plus one shared chart-colour constant) — `ENGINE_VERSION`,
+`randomScenario()`, and `conservationCheck.js` untouched. No new
+provenance entries either — every figure in the box was already
+classified in an earlier commit's own §7.7/§7.8 entry.
+
+Tests: none new (no new pure logic — `retirementStatBoxHTML` is
+template arrangement over already-tested figures, the same convention
+spec 35 Commit 5 used for its own main.js-only wiring). Full suite
+2127/2127, build green. Browser-verified end to end: the box's own
+four figures cross-checked exactly against the existing analytics
+card on the same page (Savings-last-through/Capital-at-LE age,
+Providing/Average-retirement-income, Age-Pension-share both reading
+65%); "Max sustainable spend" correctly showed "—" before a Monte
+Carlo solve had ever run, and continued reading the shared cached
+result afterward (this demo client's own solve was the Commit 2
+"already safe, no pension draws to a target" non-converged case, so
+the dollar figure itself wasn't separately exercised here — its
+formatting is a single `fmtMoney` call, already covered elsewhere).
+The Age Pension colour fix was verified by direct code inspection
+(all three trace sites now reference the one shared constant) rather
+than a rendered screenshot — this environment's Plotly CDN is
+unavailable ("Chart unavailable" shows in every chart mount here),
+which has been true throughout this whole spec's own verification.
+Zero console errors.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

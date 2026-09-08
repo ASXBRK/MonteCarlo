@@ -1053,9 +1053,24 @@ html, body {
   margin-bottom: 16px;
 }
 
+/* Retirement stat box (docs/specs/36-retirement-outputs.md, Commit 4)
+   — "a row of figures at the top of Retirement > Projection, at the
+   same visual weight as the existing analytics card. Not a banner." */
+.summary-strip-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 900px) {
+  .summary-strip-4 { grid-template-columns: repeat(2, 1fr); }
+}
+
 @media (max-width: 720px) {
   .pcard-details, .pcard-fees { grid-template-columns: 1fr; }
   .summary-strip { grid-template-columns: 1fr; }
+  .summary-strip-4 { grid-template-columns: 1fr; }
   .plan-derived { margin-left: 0; width: 100%; }
 }
 

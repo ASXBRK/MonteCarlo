@@ -9337,7 +9337,7 @@ function renderCompositeChart() {
   if (hasAgePension) {
     traces.push({
       x: ages, y: agePensionArea, name: "Age pension", type: "bar",
-      marker: { color: "rgb(28, 150, 150)", opacity: 0.55 }, yaxis: "y2",
+      marker: { color: AGE_PENSION_CHART_COLOR, opacity: 0.55 }, yaxis: "y2",
       hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Age pension</extra>",
     });
   }
@@ -10255,7 +10255,7 @@ function renderIncomeSourcesChart() {
   const agePensionSeries = yearIdxs.map((y) => (projection.yearly[y].agePensionDetail?.entitlement ?? 0) * factor(y));
   if (!seriesIsAllZero(agePensionSeries)) {
     traces.push({
-      x: ages, y: agePensionSeries, name: "Age pension", type: "bar", marker: { color: "#dc5a28" },
+      x: ages, y: agePensionSeries, name: "Age pension", type: "bar", marker: { color: AGE_PENSION_CHART_COLOR },
       hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Age pension</extra>",
     });
   }
@@ -15036,6 +15036,52 @@ function retirementStatHTML(label, value, headline = false) {
   `;
 }
 
+// The stat box (docs/specs/36-retirement-outputs.md, Commit 4) — "a
+// row of figures at the top of Retirement > Projection, at the same
+// visual weight as the existing analytics card [retirementSummaryHTML
+// below]... not a banner — a number in a box gets read." Every figure
+// already exists elsewhere in this module or retirementAnalytics.js;
+// this is purely arrangement, never a new computation. Counterfactuals
+// deliberately excluded — "work two more years and it lasts until 93"
+// is the retire-later LEVER with its answer filled in (spec 35 Commit
+// 6, "What would help"), not this box's job; duplicating it here was
+// the one thing the spec explicitly said not to do.
+function retirementStatBoxHTML(analytics) {
+  const le = analytics.le;
+  // "Savings last until" — this plan's own first shortfall age
+  // (analytics.firstShortfallAge, already computed) when one occurs.
+  // When it never does within the projection, the honest POSITIVE
+  // framing is the final age this plan was actually modelled to — not
+  // an unbounded "never runs out" claim this tool never makes anywhere
+  // else either.
+  const shortfallAge = analytics.firstShortfallAge;
+  const lastAge = shortfallAge ?? projection.schedule.clientAges[projection.yearly.length - 1];
+  const lastAgeLabel = shortfallAge != null ? "Savings last until" : "Savings last through";
+
+  const providing = le.averageRetirementIncome;
+  const agePensionSharePct = le.averageAgePensionPctOfIncome;
+
+  // Max sustainable spend (Commit 2) — reads the SAME cached solve/
+  // tolerance the Retirement > Monte Carlo page itself shows (never a
+  // silent re-solve here); "—" until that page's own button has
+  // actually been used. This is what makes "the box reflects tolerance
+  // changes" true: a changed tolerance invalidates the cached solve
+  // (Commit 2's own fingerprint check), and this box reads the SAME
+  // module state, so the next render — navigating here, or the
+  // tolerance's own re-solve completing — always shows the current one.
+  const spendCell = sustainableSpendResult && sustainableSpendResult.converged
+    ? `${fmtMoney(sustainableSpendResult.incomeRequiredAnnual)} at ${Math.round(sustainableSpendTolerance * 100)}%`
+    : "—";
+
+  const stats = [
+    retirementStatHTML(lastAgeLabel, lastAge != null ? Math.round(lastAge) : "—", true),
+    retirementStatHTML("Providing", providing != null ? `${fmtMoney(providing)} a year` : "—"),
+    retirementStatHTML("Age Pension share", agePensionSharePct != null ? `${agePensionSharePct.toFixed(0)}%` : "—"),
+    retirementStatHTML("Max sustainable spend", spendCell),
+  ];
+  return `<div class="summary-strip-4">${stats.join("")}</div>`;
+}
+
 function retirementSummaryHTML(analytics) {
   const moneyAt = (v, y) => (v == null ? "—" : fmtMoney(v * displayFactor(endMonthOfYear(y))));
   const ageOrDash = (v) => (v == null ? "—" : Math.round(v));
@@ -15081,11 +15127,21 @@ function retirementSummaryHTML(analytics) {
 // deliveredIncome (gross total less that year's tax) — the one
 // apples-to-apples comparison this module makes, since Income Required
 // is itself an after-tax figure (retirement.js's own interpretation).
+// The Age Pension's own colour (docs/specs/36-retirement-outputs.md,
+// Commit 4) — "in its own colour on the income stack, so the floor
+// rising as the portfolio draws down is visible without words. A
+// chart property, not a callout." ONE colour, shared across every
+// income chart this tool has (this goal chart, the Income sources
+// chart, and the Composite chart below) — a viewer tracking the Age
+// Pension band by eye across different charts needs it to mean the
+// same colour everywhere, not a per-chart palette accident.
+const AGE_PENSION_CHART_COLOR = "#dc5a28";
+
 const GOAL_CHART_SEGMENTS = [
   { key: "employment", name: "Employment", color: "#1c5ab4" },
   { key: "pensionDrawdown", name: "Pension drawdown", color: "#6b8e23" },
   { key: "investmentIncome", name: "Investment income", color: "#2e8a8a" },
-  { key: "agePension", name: "Age pension", color: "#dc5a28" },
+  { key: "agePension", name: "Age pension", color: AGE_PENSION_CHART_COLOR },
   { key: "assetDrawdown", name: "Asset drawdown", color: "#5e60ce" },
 ];
 
@@ -15245,6 +15301,7 @@ function renderRetirementProjectionView() {
   const analytics = computeRetirementAnalytics(state, projection);
   const household = isCouple() ? "couple" : "single";
   const tenure = derivedHomeownerStatus();
+  $("retirementStatBox").innerHTML = retirementStatBoxHTML(analytics);
   $("retirementSummary").innerHTML = retirementSummaryHTML(analytics);
   $("retirementLifestyleBand").innerHTML = retirementBandHTML(analytics, household, tenure);
   renderRetirementGoalChart(analytics, household, tenure, "retirementGoalChart", "retirementGoalSentence");
