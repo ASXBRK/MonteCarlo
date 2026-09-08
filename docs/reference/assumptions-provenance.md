@@ -515,6 +515,22 @@ reflect where the safe-withdrawal-rate literature's own commonly-cited
 figures cluster, which is the same standard the industry sources this kind
 of number from.
 
+## 7.9 The 99% display cap and 1% rounding (`docs/specs/36-retirement-outputs.md`, Commit 3)
+**HOUSE VIEW**, precedent cited directly: Timeline (a retirement-planning
+tool named in the spec) caps its own success rate at 99% and rounds to the
+nearest 1%, stating outright that this is to avoid implying a guarantee —
+the identical rationale applies here. Every simulation-derived probability
+this tool displays (ruin probability, "lasts to life expectancy", each
+outcome bucket's own share, a lever's before/after figure, the sustainable-
+spend baseline) is capped at "99%+" rather than ever showing 100%, and
+rounded to the nearest 1% — 2,000 paths cannot support finer precision than
+that. `src/simDisplay.js`'s own `formatSimPct` is the single place this is
+implemented; every display site routes through it. **Caps the DISPLAY
+STRING only** — the underlying value stays exact wherever a solver or
+scenario comparison reads it directly (never through `simDisplay.js`). A
+CSV export is treated as data for further analysis, not a client-facing
+display, so it keeps the raw, unrounded figure.
+
 ---
 
 # 8. INDEXATION BASES

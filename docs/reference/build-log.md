@@ -4032,6 +4032,64 @@ convergence-to-tolerance accuracy is confirmed by the new
 
 ---
 
+### Retirement: display honesty — 99% cap, rounding, worded bands (spec 36, Commit 3)
+
+Three small, cheap changes, all serving the non-prescriptive voice.
+
+**The 99% cap and 1% rounding.** No simulation-derived probability this
+tool displays ever shows above 99% — a genuine 100% (every path
+succeeded, or every path ruined) renders as "99%+", never a claim of
+certainty a 2,000-path simulation can't actually support. Every such
+figure also rounds to the nearest 1%. New `src/simDisplay.js`
+(`formatSimPct`, pure) is the single place this lives; `main.js`'s own
+`simPctHTML` wraps it with a "why capped" tooltip when it actually
+capped. Applied at every display site found across the tool: ruin
+probability and "lasts to life expectancy" (both Monte Carlo pages),
+each outcome bucket's own share and its "drops to the floor" sub-stat
+(Commit 1), every lever's before/after figure and the levers intro
+sentence (spec 35 Commit 6), the sustainable-spend baseline (Commit
+2), and the lifecycle glide-path-vs-static comparison's own ruin
+stats (spec 34 Commit 3) — the spec's own explicit "everywhere", not
+just the one obvious spot. **Caps the display string only** — every
+solver, `mcResult`/`leversResults`/`sustainableSpendResult` themselves,
+and the ruin-probability CSV export (data for analysis, not a
+client-facing display) keep the exact, unrounded figure.
+
+**Worded confidence bands.** Every fan chart's own percentile-labelled
+bands ("10th–90th percentile", "25th–75th percentile", "Median")
+renamed to say what each means: "Wide range (most outcomes)", "Narrow
+range (plan against this)", "Median (unlikely exact)" — shared
+constants (`FAN_BAND_WIDE_NAME`/`FAN_BAND_NARROW_NAME`/
+`FAN_BAND_MEDIAN_NAME`) so the three charts using them can't drift
+apart. A caption using the spec's own exact wording ("The wide band
+holds most outcomes, but it is too wide to plan a lifestyle around.
+The narrow band is what to plan against. The median line is possible,
+but almost certainly not exactly what happens.") sits under both
+Monte Carlo pages' own fan chart; the lifecycle comparison chart (two
+series, no narrow band) gets an adapted two-sentence version of the
+same idea.
+
+Provenance: `docs/reference/assumptions-provenance.md` §7.9 — the
+99% cap/1% rounding classified HOUSE VIEW, Timeline's own stated
+rationale (named directly in the spec) cited as precedent.
+
+No engine change and no new money flow — this commit touches only
+display formatting, never a value a solver or the engine itself
+reads. `ENGINE_VERSION`, `randomScenario()`, and
+`conservationCheck.js` untouched.
+
+Tests: 7 new (`simDisplay.test.js` — rounding, the exact-99%-vs-capped
+boundary, a genuine 100% still capping, defensive clamping/null
+handling). Full suite 2127/2127, build green. Browser-verified end to
+end via a deliberately hopeless scenario (genuine 100% ruin): every
+percentage in the Retirement Monte Carlo stats block read "99%+" or
+below (confirmed programmatically — no figure exceeded 99), the "why
+capped" tooltip showed the correct explanation text, and the worded
+fan-chart caption rendered on both the What-if and Retirement Monte
+Carlo pages; zero console errors.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

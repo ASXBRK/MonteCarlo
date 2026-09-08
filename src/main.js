@@ -76,6 +76,7 @@ import { computeRetirementAnalytics, retirementAnchor, leAnchor } from "./retire
 import { goalVsPositionSummary } from "./goalVsPosition.js";
 import { resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors, asfaBandPhrase } from "./lifestyleBand.js";
 import { agePensionExcludedFor, resolveOutcomeThresholds, computeOutcomeBuckets } from "./retirementOutcomeBuckets.js";
+import { formatSimPct, isSimPctCapped, SIM_PCT_CAP_EXPLANATION } from "./simDisplay.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
@@ -1451,6 +1452,17 @@ function tooltipHTML(text, unreviewedNote = false) {
       <span class="tt-bubble">${escapeHTML(text)}${unreviewedNote ? `<span class="tt-unreviewed">Not yet reviewed — this is a default.</span>` : ""}</span>
     </span>
   `;
+}
+
+// simPctHTML(p) — every simulation-derived probability's own display
+// site (docs/specs/36-retirement-outputs.md, Commit 3), wrapping
+// formatSimPct with the "why capped" tooltip ONLY when it actually
+// capped (isSimPctCapped) — the DOM-adjacent half of that pure module,
+// kept out of it since tooltipHTML needs escapeHTML/markup this
+// function's own module already has.
+function simPctHTML(p) {
+  const text = escapeHTML(formatSimPct(p));
+  return isSimPctCapped(p) ? `${text}${tooltipHTML(SIM_PCT_CAP_EXPLANATION)}` : text;
 }
 
 function wireTooltips() {
@@ -9691,6 +9703,16 @@ function refreshMonteCarloViews() {
   renderRetirementMonteCarloView();
 }
 
+// Worded confidence bands (docs/specs/36-retirement-outputs.md, Commit
+// 3) — "the existing fan chart labels its bands by percentile. Replace
+// with wording that says what each means, and warn against the median
+// explicitly." Shared across every fan chart in this tool (both Monte
+// Carlo pages below, and renderRetirementCompareChart's own two-series
+// variant) — one set of names, never independently reworded per chart.
+const FAN_BAND_WIDE_NAME = "Wide range (most outcomes)";
+const FAN_BAND_NARROW_NAME = "Narrow range (plan against this)";
+const FAN_BAND_MEDIAN_NAME = "Median (unlikely exact)";
+
 function renderMonteCarloView() {
   renderMonteCarloControls(els.runMonteCarloBtn, els.cancelMonteCarloBtn, els.monteCarloStatus);
   els.monteCarloResults.hidden = !mcResult;
@@ -9718,12 +9740,12 @@ function renderMonteCarloChart() {
   const traces = [
     { x: ages, y: p10, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
     { x: ages, y: p90, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: outer,
-      name: "10th–90th percentile", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+      name: FAN_BAND_WIDE_NAME, hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
     { x: ages, y: p25, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
     { x: ages, y: p75, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: inner,
-      name: "25th–75th percentile", hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
+      name: FAN_BAND_NARROW_NAME, hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
     { x: ages, y: p50, mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
-      name: "Median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
+      name: FAN_BAND_MEDIAN_NAME, hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
     { x: ages, y: deterministic, mode: "lines", line: { color: "#444", width: 1.5, dash: "dash" },
       name: "Deterministic projection", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Deterministic</extra>" },
   ];
@@ -9750,7 +9772,6 @@ function renderMonteCarloChart() {
 function renderMonteCarloStats() {
   const years = mcResult.years;
   const factor = displayFactor(endMonthOfYear(years - 1));
-  const ruinPct = (mcResult.ruinProbability * 100).toFixed(0);
   const shortfallAgeStat = mcResult.medianShortfallAge != null ? `
     <div class="stat">
       <div class="stat-label">Median first-shortfall age</div>
@@ -9760,7 +9781,7 @@ function renderMonteCarloStats() {
   els.monteCarloStats.innerHTML = `
     <div class="stat stat-headline">
       <div class="stat-label">Ruin probability</div>
-      <div class="stat-value">${ruinPct}%</div>
+      <div class="stat-value">${simPctHTML(mcResult.ruinProbability)}</div>
     </div>
     <div class="stat">
       <div class="stat-label">Median ending net assets</div>
@@ -9869,6 +9890,12 @@ function exportMonteCarloCSV() {
     lines.push([esc(label), (val * endFactor).toFixed(2)].join(","));
   }
   lines.push("");
+  // Deliberately the RAW figure, not formatSimPct's capped/rounded
+  // display string (docs/specs/36-retirement-outputs.md, Commit 3) — a
+  // CSV export is data for further analysis, not a client-facing
+  // display; the spec's own cap/rounding rule targets what a client
+  // reads, and "the underlying value stays exact for solvers and
+  // scenario comparison" applies here too.
   lines.push([esc("Ruin probability (%)"), (mcResult.ruinProbability * 100).toFixed(1)].join(","));
   if (mcResult.medianShortfallAge != null) {
     lines.push([esc("Median first-shortfall age"), mcResult.medianShortfallAge].join(","));
@@ -15883,12 +15910,12 @@ function renderRetirementMcChart() {
   const traces = [
     { x: ages, y: p10, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
     { x: ages, y: p90, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: outer,
-      name: "10th–90th percentile", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+      name: FAN_BAND_WIDE_NAME, hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
     { x: ages, y: p25, mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
     { x: ages, y: p75, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: inner,
-      name: "25th–75th percentile", hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
+      name: FAN_BAND_NARROW_NAME, hovertemplate: "Age %{x}<br>P75 %{y:$,.0f}<extra></extra>" },
     { x: ages, y: p50, mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
-      name: "Median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
+      name: FAN_BAND_MEDIAN_NAME, hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Median</extra>" },
     { x: ages, y: deterministic, mode: "lines", line: { color: "#444", width: 1.5, dash: "dash" },
       name: "Deterministic projection", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Deterministic</extra>" },
   ];
@@ -15929,10 +15956,10 @@ function retirementOutcomeBucketsHTML() {
     <div class="rp-bucket-row">
       <div class="rp-bucket-label">${escapeHTML(b.label)}</div>
       <div class="rp-bucket-track"><div class="rp-bucket-fill" style="width:${Math.min(100, Math.max(0, b.pct)).toFixed(1)}%"></div></div>
-      <div class="rp-bucket-pct">${Math.round(b.pct)}%</div>
+      <div class="rp-bucket-pct">${simPctHTML(b.pct / 100)}</div>
     </div>
     ${b.dropsToFloorPct != null
-      ? `<p class="helper-text rp-bucket-sub">Of those, ${Math.round(b.dropsToFloorPct)}% drop to the Age Pension floor for a period.</p>`
+      ? `<p class="helper-text rp-bucket-sub">Of those, ${simPctHTML(b.dropsToFloorPct / 100)} drop to the Age Pension floor for a period.</p>`
       : ""}
   `).join("");
   // "When the Age Pension is excluded... the bottom bucket must SAY SO,
@@ -15960,17 +15987,20 @@ function retirementMcStatsHTML() {
   const years = mcResult.years;
   const endAge = projection.schedule.clientAges[years - 1];
   const ruinProbability = mcResult.ruinProbability;
-  const ruinPct = Math.round(ruinProbability * 100);
-  const successPct = Math.round((1 - ruinProbability) * 100);
   const n = approxOneInN(ruinProbability);
   const plain = n == null
     ? `This plan lasted the whole way, to age ${endAge}, in every one of the ${mcResult.numPaths.toLocaleString()} simulations run.`
     : n <= 1
       ? `This plan ran short before age ${endAge} in every simulation run.`
       : `In about 1 in ${n} simulations, this plan runs short before age ${endAge}.`;
+  // Built directly rather than via retirementStatHTML (docs/specs/36-
+  // retirement-outputs.md, Commit 3) — simPctHTML's own output can
+  // carry a tooltip's raw markup when capped, which retirementStatHTML's
+  // own escapeHTML(String(value)) would otherwise mangle into visible
+  // tags.
   const stats = [
-    retirementStatHTML("Ruin probability", `${ruinPct}%`, true),
-    retirementStatHTML("Lasts to life expectancy", `${successPct}% of simulations`),
+    `<div class="stat stat-headline"><div class="stat-label">Ruin probability</div><div class="stat-value">${simPctHTML(ruinProbability)}</div></div>`,
+    `<div class="stat"><div class="stat-label">Lasts to life expectancy</div><div class="stat-value">${simPctHTML(1 - ruinProbability)} of simulations</div></div>`,
   ];
   if (mcResult.medianShortfallAge != null) {
     stats.push(retirementStatHTML("Median first-shortfall age", Math.round(mcResult.medianShortfallAge)));
@@ -16046,7 +16076,7 @@ function retirementSustainableSpendResultHTML(r) {
     // r.beforeRuin (the CURRENT, unmodified plan's own baseline ruin)
     // distinguishes the two without guessing.
     if (r.beforeRuin != null && r.beforeRuin <= sustainableSpendTolerance) {
-      return `<p class="helper-text">This plan's ruin probability (${Math.round(r.beforeRuin * 100)}%) is already at or below the ${Math.round(sustainableSpendTolerance * 100)}% tolerance at every spend level searched — Income Required doesn't drive this plan's own drawdown (no pension here draws to a target), so there is no distinct spend figure to solve for.</p>`;
+      return `<p class="helper-text">This plan's ruin probability (${simPctHTML(r.beforeRuin)}) is already at or below the ${Math.round(sustainableSpendTolerance * 100)}% tolerance at every spend level searched — Income Required doesn't drive this plan's own drawdown (no pension here draws to a target), so there is no distinct spend figure to solve for.</p>`;
     }
     const reasonText = LEVER_NONCONVERGED_REASON_TEXT[r.reason] ?? "did not converge";
     return `<p class="helper-text">This search ${reasonText} — even at $0 a year, this plan's own ruin probability does not fall to the chosen tolerance.</p>`;
@@ -16172,7 +16202,7 @@ const LEVER_NONCONVERGED_REASON_TEXT = {
 };
 
 function retirementLeverStatementHTML(r) {
-  const pct = (x) => `${Math.round(x * 100)}%`;
+  const pct = simPctHTML; // docs/specs/36-retirement-outputs.md, Commit 3 — capped + rounded, everywhere a simulation-derived probability appears
   if (r.available === false) {
     return `<p class="helper-text">Not available — the client has no super account to contribute into.</p>`;
   }
@@ -16227,7 +16257,14 @@ function renderRetirementLeversSection() {
 
   const intro = $("retirementLeversIntro");
   if (intro) {
-    intro.textContent = `This plan's probability of ruin (${Math.round(mcResult.ruinProbability * 100)}%) is above the ${Math.round(leversThreshold * 100)}% threshold below. Each lever is a real re-run, ranked by its own effect on that probability — not a recommendation.`;
+    // innerHTML, not textContent (docs/specs/36-retirement-outputs.md,
+    // Commit 3) — simPctHTML's own output can carry the "why capped"
+    // tooltip's markup when the ruin figure hits the 99% cap, which is
+    // genuinely reachable here (this panel only shows once ruin is
+    // already above the threshold — the high end is exactly where it
+    // matters most). Every other word in this string is plain, already-
+    // safe English, so no escaping is lost by the switch.
+    intro.innerHTML = `This plan's probability of ruin (${simPctHTML(mcResult.ruinProbability)}) is above the ${Math.round(leversThreshold * 100)}% threshold below. Each lever is a real re-run, ranked by its own effect on that probability — not a recommendation.`;
   }
   const thresholdInput = $("retirementLeversThreshold");
   if (thresholdInput && document.activeElement !== thresholdInput) thresholdInput.value = Math.round(leversThreshold * 100);
@@ -16423,14 +16460,14 @@ function renderRetirementCompareChart(comparison) {
   const traces = [
     { x: ages, y: band(rpCompareResult.static, "p10"), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
     { x: ages, y: band(rpCompareResult.static, "p90"), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: staticOuter,
-      name: "Static — 10th–90th", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+      name: `Static — ${FAN_BAND_WIDE_NAME}`, hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
     { x: ages, y: band(rpCompareResult.glide, "p10"), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
     { x: ages, y: band(rpCompareResult.glide, "p90"), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: glideOuter,
-      name: "Glide path — 10th–90th", hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
+      name: `Glide path — ${FAN_BAND_WIDE_NAME}`, hovertemplate: "Age %{x}<br>P90 %{y:$,.0f}<extra></extra>" },
     { x: ages, y: band(rpCompareResult.static, "p50"), mode: "lines", line: { color: "#dc5a28", width: 2, dash: "dash" },
-      name: "Static — median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Static median</extra>" },
+      name: `Static — ${FAN_BAND_MEDIAN_NAME}`, hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Static median</extra>" },
     { x: ages, y: band(rpCompareResult.glide, "p50"), mode: "lines", line: { color: "rgb(28, 90, 180)", width: 2.5 },
-      name: "Glide path — median", hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Glide path median</extra>" },
+      name: `Glide path — ${FAN_BAND_MEDIAN_NAME}`, hovertemplate: "Age %{x}<br><b>%{y:$,.0f}</b><extra>Glide path median</extra>" },
   ];
   Plotly.react(el, traces, {
     margin: { l: 70, r: 20, t: 24, b: 50 },
@@ -16454,11 +16491,16 @@ function retirementCompareStatsHTML() {
   const narrowingLine = narrower
     ? `The glide path's own final-year spread (10th–90th percentile) is ${fmtMoney(staticSpread - glideSpread)} narrower than the static profile's — a narrower distribution, the outcome lifecycle investing is meant to produce.`
     : `In this run, the glide path's own final-year spread is NOT narrower than the static profile's (${fmtMoney(glideSpread)} vs ${fmtMoney(staticSpread)}) — reported as run, not forced to the usually-expected shape.`;
+  // The two ruin-probability stats are built directly, not via
+  // retirementStatHTML (docs/specs/36-retirement-outputs.md, Commit 3
+  // — same reason as retirementMcStatsHTML's own stats above:
+  // simPctHTML's tooltip markup, when capped, would otherwise be
+  // escaped into visible tags).
   const stats = [
     retirementStatHTML("Glide path — median ending net assets", fmtMoney(rpCompareResult.glide.netAssets.p50[y])),
     retirementStatHTML("Static — median ending net assets", fmtMoney(rpCompareResult.static.netAssets.p50[y])),
-    retirementStatHTML("Glide path — ruin probability", `${Math.round(rpCompareResult.glide.ruinProbability * 100)}%`),
-    retirementStatHTML("Static — ruin probability", `${Math.round(rpCompareResult.static.ruinProbability * 100)}%`),
+    `<div class="stat"><div class="stat-label">Glide path — ruin probability</div><div class="stat-value">${simPctHTML(rpCompareResult.glide.ruinProbability)}</div></div>`,
+    `<div class="stat"><div class="stat-label">Static — ruin probability</div><div class="stat-value">${simPctHTML(rpCompareResult.static.ruinProbability)}</div></div>`,
   ];
   return `<div class="summary-strip">${stats.join("")}</div><p class="helper-text">${escapeHTML(narrowingLine)}</p>`;
 }
