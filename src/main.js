@@ -4956,6 +4956,7 @@ function commitGlidePaths(next) {
   saveState();
   refreshOutputs();
   renderSettings();
+  renderRetirementGlidePaths(); // spec 35, Commit 5 — the Retirement view's own mount of this SAME section
   // Assets/super/pensions each render their OWN "Glide path" seg-toggle
   // option (enabled/disabled by whether any glide path exists at all)
   // and, once assigned, a live dropdown of glide path NAMES — both
@@ -4967,6 +4968,83 @@ function commitGlidePaths(next) {
   renderAssets();
   renderSuper();
   renderPensions();
+}
+
+// Glide path field commits — extracted from the Settings section's own
+// inline "change" dispatch (docs/specs/35-retirement-output-view.md,
+// Commit 5) so the Retirement view's own builder mount can share it
+// verbatim rather than duplicating the commit logic; only the DISPATCH
+// (which container an event came from) differs between the two call
+// sites, never the state mutation itself. Returns true if this event
+// was a glide-path field and has been handled (commitGlidePaths already
+// called); false otherwise, so a caller with its own OTHER fields to
+// check can fall through.
+function applyGlidePathFieldEdit(e) {
+  const gpid = e.target.dataset.gpid;
+  const gpField = e.target.dataset.gpField;
+  if (!gpid || !gpField) return false;
+  const gp = findGlidePath(gpid);
+  if (!gp) return true;
+  const next = (state.plan.glidePaths ?? []).map((x) => x.id === gpid ? { ...x, steps: x.steps.map((s) => ({ ...s })) } : x);
+  const target = next.find((x) => x.id === gpid);
+  if (gpField === "name") {
+    target.name = e.target.value.trim().slice(0, 60) || target.name;
+  } else if (gpField === "rebalance") {
+    target.rebalance = GLIDE_PATH_REBALANCE_MODES.includes(e.target.value) ? e.target.value : "annual";
+  } else if (gpField === "fromAge" || gpField === "profile") {
+    const i = Number(e.target.dataset.stepIdx);
+    if (!target.steps[i]) return true;
+    if (gpField === "fromAge") target.steps[i].fromAge = clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge);
+    else target.steps[i].profile = e.target.value;
+  } else {
+    return true;
+  }
+  commitGlidePaths(next);
+  return true;
+}
+
+// Same extraction, for the "click" dispatch (add/add-preset/remove/
+// add-step/remove-step) — see applyGlidePathFieldEdit's own header.
+function onGlidePathAction(e) {
+  const gpBtn = e.target.closest("[data-gp-action]");
+  if (!gpBtn) return false;
+  const gpAction = gpBtn.dataset.gpAction;
+  const gps = state.plan.glidePaths ?? [];
+  if (gpAction === "add") {
+    commitGlidePaths([...gps, createGlidePath(state.plan, gps, PROFILES)]);
+  } else if (gpAction === "add-preset-single") {
+    commitGlidePaths([...gps, clampGlidePath(singleStepGlidePathPreset(state.plan), state.plan, PROFILES)]);
+  } else if (gpAction === "add-preset-gradual") {
+    commitGlidePaths([...gps, clampGlidePath(gradualGlidePathPreset(state.plan), state.plan, PROFILES)]);
+  } else if (gpAction === "remove") {
+    const gp = findGlidePath(gpBtn.dataset.gpid);
+    if (!gp) return true;
+    const inUse = [
+      ...state.assets.filter((a) => a.allocation?.mode === "glidePath" && a.allocation.glidePathId === gp.id),
+      ...(state.plan.superAccounts ?? []).filter((s) => s.allocation?.mode === "glidePath" && s.allocation.glidePathId === gp.id),
+      ...(state.plan.pensions ?? []).filter((p) => p.allocation?.mode === "glidePath" && p.allocation.glidePathId === gp.id),
+    ];
+    const msg = inUse.length > 0
+      ? `Remove "${gp.name}"? It is assigned to ${inUse.length} holding(s) — they will fall back to a firm profile.`
+      : `Remove "${gp.name}"?`;
+    if (!window.confirm(msg)) return true;
+    commitGlidePaths(gps.filter((x) => x.id !== gp.id));
+  } else if (gpAction === "add-step") {
+    const gp = findGlidePath(gpBtn.dataset.gpid);
+    if (!gp) return true;
+    const lastAge = gp.steps[gp.steps.length - 1]?.fromAge ?? state.plan.client.currentAge;
+    const lastProfile = gp.steps[gp.steps.length - 1]?.profile ?? PROFILE_KEYS[0];
+    const nextAge = clampInt(lastAge + 5, state.plan.client.currentAge, state.plan.endAge);
+    const next = gps.map((x) => x.id === gp.id ? { ...x, steps: [...x.steps, createGlidePathStep(nextAge, lastProfile)] } : x);
+    commitGlidePaths(next);
+  } else if (gpAction === "remove-step") {
+    const gp = findGlidePath(gpBtn.dataset.gpid);
+    if (!gp || gp.steps.length <= 1) return true;
+    const i = Number(gpBtn.dataset.stepIdx);
+    const next = gps.map((x) => x.id === gp.id ? { ...x, steps: x.steps.filter((_, k) => k !== i) } : x);
+    commitGlidePaths(next);
+  }
+  return true;
 }
 
 function glidePathStepRowHTML(gp, step, i) {
@@ -5052,28 +5130,7 @@ function heasSectionHTML() {
 }
 
 els.settingsPanel.addEventListener("change", (e) => {
-  const gpid = e.target.dataset.gpid;
-  const gpField = e.target.dataset.gpField;
-  if (gpid && gpField) {
-    const gp = findGlidePath(gpid);
-    if (!gp) return;
-    const next = (state.plan.glidePaths ?? []).map((x) => x.id === gpid ? { ...x, steps: x.steps.map((s) => ({ ...s })) } : x);
-    const target = next.find((x) => x.id === gpid);
-    if (gpField === "name") {
-      target.name = e.target.value.trim().slice(0, 60) || target.name;
-    } else if (gpField === "rebalance") {
-      target.rebalance = GLIDE_PATH_REBALANCE_MODES.includes(e.target.value) ? e.target.value : "annual";
-    } else if (gpField === "fromAge" || gpField === "profile") {
-      const i = Number(e.target.dataset.stepIdx);
-      if (!target.steps[i]) return;
-      if (gpField === "fromAge") target.steps[i].fromAge = clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge);
-      else target.steps[i].profile = e.target.value;
-    } else {
-      return;
-    }
-    commitGlidePaths(next);
-    return;
-  }
+  if (applyGlidePathFieldEdit(e)) return;
   const gid = e.target.dataset.gid;
   const gfield = e.target.dataset.gfield;
   if (gid && gfield) {
@@ -5228,48 +5285,7 @@ els.settingsPanel.addEventListener("click", (e) => {
     renderSettings();
     return;
   }
-  const gpBtn = e.target.closest("[data-gp-action]");
-  if (gpBtn) {
-    const gpAction = gpBtn.dataset.gpAction;
-    const gps = state.plan.glidePaths ?? [];
-    if (gpAction === "add") {
-      commitGlidePaths([...gps, createGlidePath(state.plan, gps, PROFILES)]);
-    } else if (gpAction === "add-preset-single") {
-      commitGlidePaths([...gps, clampGlidePath(singleStepGlidePathPreset(state.plan), state.plan, PROFILES)]);
-    } else if (gpAction === "add-preset-gradual") {
-      commitGlidePaths([...gps, clampGlidePath(gradualGlidePathPreset(state.plan), state.plan, PROFILES)]);
-    } else if (gpAction === "remove") {
-      const gp = findGlidePath(gpBtn.dataset.gpid);
-      if (!gp) return;
-      const inUse = [
-        ...state.assets.filter((a) => a.allocation?.mode === "glidePath" && a.allocation.glidePathId === gp.id),
-        ...(state.plan.superAccounts ?? []).filter((s) => s.allocation?.mode === "glidePath" && s.allocation.glidePathId === gp.id),
-        ...(state.plan.pensions ?? []).filter((p) => p.allocation?.mode === "glidePath" && p.allocation.glidePathId === gp.id),
-      ];
-      const msg = inUse.length > 0
-        ? `Remove "${gp.name}"? It is assigned to ${inUse.length} holding(s) — they will fall back to a firm profile.`
-        : `Remove "${gp.name}"?`;
-      if (!window.confirm(msg)) return;
-      commitGlidePaths(gps.filter((x) => x.id !== gp.id));
-    } else if (gpAction === "add-step") {
-      const gp = findGlidePath(gpBtn.dataset.gpid);
-      if (!gp) return;
-      const lastAge = gp.steps[gp.steps.length - 1]?.fromAge ?? state.plan.client.currentAge;
-      const lastProfile = gp.steps[gp.steps.length - 1]?.profile ?? PROFILE_KEYS[0];
-      const nextAge = clampInt(lastAge + 5, state.plan.client.currentAge, state.plan.endAge);
-      const next = gps.map((x) => x.id === gp.id ? { ...x, steps: [...x.steps, createGlidePathStep(nextAge, lastProfile)] } : x);
-      commitGlidePaths(next);
-    } else if (gpAction === "remove-step") {
-      const gp = findGlidePath(gpBtn.dataset.gpid);
-      if (!gp || gp.steps.length <= 1) return;
-      const i = Number(gpBtn.dataset.stepIdx);
-      const next = gps.map((x) => x.id === gp.id ? { ...x, steps: x.steps.filter((_, k) => k !== i) } : x);
-      commitGlidePaths(next);
-    } else {
-      return;
-    }
-    return;
-  }
+  if (onGlidePathAction(e)) return;
   const btn = e.target.closest("[data-action], [data-paction]");
   if (!btn) return;
   const { action, paction, pid, said } = btn.dataset;
@@ -15659,7 +15675,21 @@ function renderRetirementAllocationChart() {
 function renderRetirementBalancesView() {
   renderRetirementBalanceChart();
   renderRetirementAllocationChart();
+  renderRetirementGlidePaths();
 }
+
+// Glide path builder (docs/specs/35-retirement-output-view.md, Commit 5)
+// — the Retirement view's own mount of the SAME glidePathsSectionHTML()
+// the Super section already renders; commitGlidePaths() (main.js, see
+// its own header) keeps both in sync from the one canonical function,
+// so this is a second VIEW of one set of glide paths, not a duplicate.
+function renderRetirementGlidePaths() {
+  const el = $("retirementGlidePaths");
+  if (!el) return;
+  el.innerHTML = glidePathsSectionHTML();
+}
+$("retirementGlidePaths")?.addEventListener("change", applyGlidePathFieldEdit);
+$("retirementGlidePaths")?.addEventListener("click", onGlidePathAction);
 
 // Age · super · pension · drawdown · age pension · other income · total
 // income · income required — the SAME columns/sourcing the standalone

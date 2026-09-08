@@ -317,6 +317,18 @@
                 <p class="helper-text">Defensive rising over time under a glide path, flat under a static profile.</p>
                 <div id="retirementAllocationChart" class="chart-mount"></div>
                 <p id="retirementAllocationNote" class="chart-note-inline"></p>
+                <!-- Glide path builder (docs/specs/35-retirement-output-
+                     view.md, Commit 5) — the SAME builder as the Super
+                     section's own (Parameters modal is now retired from
+                     owning this; this mount and that one share every
+                     commit function verbatim, see main.js's own
+                     applyGlidePathFieldEdit/onGlidePathAction). Presets
+                     SEED a ladder rather than replacing the freeform
+                     builder — risk profile stays a separate control
+                     (each asset/super/pension's own allocation card). -->
+                <h3 class="mc-subheading">Glide paths</h3>
+                <p class="helper-text">A starting profile plus a row per step — the profile it moves to, and the age it takes effect. Assign one to a super account (Super funds and fees, above) in place of a fixed risk profile — a static profile stays a valid, separate choice, not a degenerate glide path.</p>
+                <div id="retirementGlidePaths"></div>
               </div>
               <div id="viewRetirementTable" hidden>
                 <div id="retirementYearTable"></div>

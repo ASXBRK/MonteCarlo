@@ -3716,6 +3716,66 @@ build green.
 
 ---
 
+### Retirement: glide path builder (spec 35, Commit 5)
+
+**The builder already existed.** Spec 32 Commit 4 had already built the
+full thing in the Settings section — name, rebalance mode, per-step
+age+profile rows, add/remove step, and three ways to seed one (blank,
+single-step preset, gradual preset). Spec 35 Commit 5's actual job was
+narrower than its own title suggests: get this SAME builder reachable
+from the Retirement view too, without duplicating it — "one glide path
+builder, nothing that can disagree" (the same principle spec 35 already
+applies everywhere else in this feature).
+
+**Extracted, not duplicated.** The Settings section's own `change`/
+`click` dispatch had the glide-path logic inlined directly in two large
+anonymous listeners. Pulled the glide-path-specific branches out into
+two named functions — `applyGlidePathFieldEdit(e)` and
+`onGlidePathAction(e)` — with the Settings section's own listeners now
+just calling them (zero behaviour change, confirmed by the full suite
+staying green throughout). The Retirement view's own new mount
+(`#retirementGlidePaths`, inside Retirement > Balances, beside the
+allocation chart it's meant to explain) attaches the SAME two functions
+to its own container. `commitGlidePaths()` — the one function either
+listener ultimately calls — now also refreshes the Retirement mount
+alongside Settings/Assets/Super/Pensions, so an edit from either surface
+shows up on both immediately.
+
+**Placement**: Retirement > Balances, directly below the allocation
+chart — "the picture that justifies the strategy" sits right next to
+the thing that builds it. Risk profile and glide path stay separate
+controls, unchanged — each asset/super/pension's own allocation card
+still offers "profile" or "glide path" as a mode choice, never merged.
+
+**Link-out fixed as a side effect.** Commit 2's own review-panel
+"glide path / risk profile" group linked "Edit in full" to the Super
+input section — wrong; the actual glide-path builder lives in Settings,
+Super only lets you ASSIGN one. Corrected to "settings".
+
+**No new pure-function tests needed.** Every property the spec's own
+test list names — a custom ladder producing the expected profile at each
+age, interpolation between adjacent steps, presets generating the
+described ladders, removing a step leaving a valid path — was already
+fully and correctly covered by spec 32 Commit 4's own suite
+(`glidePaths.test.js`'s `glidePathWindow`/`blendAtAge`/`presets` blocks;
+`planState.test.js`'s "clampGlidePath supplies a default single step
+when given none at all — never an empty, unusable glide path"), all
+re-confirmed green. The genuinely new surface here — a second UI mount,
+two extracted dispatch functions — is main.js wiring, this codebase's
+own convention for browser verification rather than unit tests.
+
+Browser-verified end to end: added the gradual preset from the
+Retirement view (5 steps appeared), added a step (6), removed one (5),
+confirmed `state.plan.glidePaths` held the new glide path, then
+confirmed the Settings input section rendered the IDENTICAL step count
+from the same live state — one glide path, two views, no sync code of
+its own required. Zero console errors.
+
+Tests: none new (pre-existing coverage confirmed sufficient — see
+above). Full suite 2064/2064, build green.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

@@ -57,7 +57,14 @@ export const RETIREMENT_REVIEW_GROUP_SECTIONS = {
   expenses: "expenses",
   incomeRequired: "settings", // Income Required lives in the Surplus & deficit settings section
   retirementAges: "setup",
-  glidePath: "super", // glide path / risk profile is a per-super-account allocation setting
+  // (glidePath below, out of alphabetical order in the source object but
+  // matching RETIREMENT_REVIEW_GROUP_ORDER's own position) — the actual
+  // glide path BUILDER (steps, rebalance mode) lives in the Surplus &
+  // deficit settings section (docs/specs/32-retirement-phase-one.md,
+  // Commit 4); also reachable without leaving the Retirement group at
+  // all via Retirement > Balances' own mount of the identical builder
+  // (docs/specs/35-retirement-output-view.md, Commit 5).
+  glidePath: "settings",
 };
 
 export function buildRetirementReviewGroups(state) {
