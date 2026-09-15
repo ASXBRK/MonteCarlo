@@ -12,12 +12,20 @@ from that directory with `node <name>.mjs`. Nothing here rests on reading
 alone. Where a hand calculation is given it is in real (today's) dollars,
 the engine's own unit.
 
-Scope not covered, stated plainly so nobody assumes it was: the chart and
-table renderers in `main.js`, the CSV export, the what-if / focus /
-comparison arms, and the non-prescriptive-voice audit. Four parallel
-auditors were assigned to those areas and all four were terminated by an
-API rate limit before doing any work. Section 7 lists what I looked at
-briefly in those areas without being able to verify.
+Scope. Two passes. The first covered the engine's money movement, the
+Australian rules, plan-state hydration and the Monte Carlo core (findings
+1.1–1.9, 2.1–2.4). The second pass, done serially after four parallel
+auditors were lost to an API rate limit, covered the chart and table
+renderers in `main.js` and the pure series modules behind them, the CSV
+exports, every comparison / what-if / focus arm, the non-prescriptive-voice
+audit, the edge-case probes the first pass had listed but not run, and the
+section 7 suspicions (each now confirmed or cleared). `main.js` imports the
+DOM and Plotly so it cannot be executed in Node; its renderers were read
+line by line and every series they plot was reproduced through the pure
+module it calls (`outputSeries.js`, `chartSeries.js`,
+`cashflowCategories.js`, `cashflowStatement.js`, `snapshot.js`) and
+reconciled against the ledger by probe. Findings from the second pass are
+1.10–1.14, 2.5–2.9, and the additions to sections 3–8.
 
 ---
 
@@ -310,6 +318,138 @@ deflated once), or to index the personal cap by the unused proportion of
 the **nominal** step and hold it in nominal terms alongside nominal
 credits.
 
+### 1.10 Every cashflow-side output omits pension payments, and the age pension is in `row.income` but not in any category
+
+**Where.** Pension payments are credited straight to the working cash
+account (`deterministic.js` c-pension block, ~3660: "NOT folded into
+`inc`/row.income"), as are the released-super deficit draws (line 4140)
+and "expenditure" pension draws (line 4060). Nothing on the display side
+adds them back:
+
+- `cashflowStatement.js` has no pension-payment or super-withdrawal line
+  at all (grep for `pensionDetail`/`payments`/`withdrawals` finds only
+  comments). "Cash Received" is take-home pay + tax return + after-tax
+  bonus + other tax-free income; "SURPLUS INCOME" = cash received − expenses.
+  The age pension is placed in the Assessable Income section as
+  "Government/Centrelink Payments" but deliberately excluded from every
+  total (line 127 comment).
+- `cashflowCategories.js` `incomeCategorySums` (line 56) sums employment,
+  rental, distributions, WCA interest and "other"; the age pension is in
+  none of them, although `row.income` includes it. The module header
+  claims the categories "reproduce the engine's row.income exactly".
+- `main.js` `buildKeyFiguresGroups` "Total income" (line 11134) and
+  "Surplus / (deficit)" read those sums and `row.surplusOrDeficit`; the
+  Cashflow bars chart (10160) and Income sources chart (10236) read the
+  same sums (Income sources adds the age pension as its own band; Cashflow
+  bars does not).
+
+**Reproduction.** `probes/probeL.mjs`, `probes/probeK.mjs`. Client 70,
+$600k ABP paying the minimum, $40k savings, $45k/yr living expenses, July
+start. The working cash account grows every year.
+
+| FY2026–27 | Ledger | Cashflow statement / Snapshot | Key figures |
+|---|---|---|---|
+| Pension payments received | $30,000 | not shown | not shown |
+| Age pension received | $24,429 | shown in Assessable Income, excluded from totals | not in Total income |
+| Cash Received total | | **$0** | Total income **$42** (WCA interest) |
+| Expenses | $45,000 | $45,000 | $45,000 |
+| SURPLUS INCOME / Surplus (deficit) | WCA +$9,471 | **($45,000)** | **($20,529)** |
+
+The Snapshot view is the table the build log describes as the one pasted
+into the file note. For a retiree it shows a $45,000 annual deficit while
+the household's cash rises. The Cashflow bars chart shows income bars of
+$42, expense bars of $45,000 and a surplus line at −$20,529; the composite
+chart (2.5) shows nothing at all for the $30,000 of pension drawdown.
+
+**Correct.** Pension payments, expenditure-pension draws and released-super
+draws are household cash receipts and belong in Cash Received (and in a
+drawdown category on the charts); the age pension belongs in every income
+total that claims to reconcile to `row.income`. Until then the reconciliation
+claims in `cashflowCategories.js` and `outputSeries.js` are false for any
+household past age pension age.
+
+### 1.11 "Total assets", "Super balance" and two charts omit pension-phase and bond balances
+
+**Where.** `main.js` 11104 (Key figures, Total assets): `closingBalance +
+propertyClosing + superClosing + wcaClosing`; 11143 (Key figures, Super
+balance): `superClosing`; 16738 (Scenario comparison "total-assets" and
+"super-balance" series): the same two formulas; `chartSeries.js` 63–101
+(`debtVsAssetsSeries`, `superVsNonSuperSeries`): the same, so the Debt vs
+assets and Super vs non-super charts inherit it. `pensionClosing` and
+`bondsClosing` are part of `row.netAssets` (engine-api §4) but not of any of
+these.
+
+**Reproduction.** `probes/probeK.mjs`, same retiree plus a $100k bond:
+
+| FY2026–27 | Value |
+|---|---|
+| `row.netAssets` (no liabilities) | $746,846 |
+| Key figures / Debt vs assets "Total assets" | **$51,582** |
+| Key figures "Super balance" / Super vs non-super "Super" | **$1,720** |
+| Pension closing (omitted) | $592,722 |
+| Bond closing (omitted) | $102,543 |
+
+Key figures shows Total assets $51,582 and NET ASSETS $746,846 on adjacent
+rows with no liabilities to explain the gap. Every retiree with an
+account-based pension is affected; the Scenario comparison page compares
+scenarios on the same wrong series.
+
+### 1.12 The deficit fallback drains a super account that is excluded from retirement funding
+
+**Where.** `deterministic.js` 4136: the released-super fallback iterates
+`superIds` and checks only `superReleased[owner]`; it never reads
+`superMeta[id].excludeFromRetirement`. The same flag is honoured for
+financial assets (1514, dropped from `fundingOrder`) and for the
+income-driven pension top-up (~4175). The Setup control says the account is
+"excluded from retirement funding".
+
+**Reproduction.** `probes/probeR.mjs`. Client 66, Super A $300k marked
+excluded ("Legacy for children"), Super B $20k, cash $100k marked excluded,
+$60k/yr spend, no other income.
+
+| | Excluded cash | Excluded Super A |
+|---|---|---|
+| Drawn on to fund the deficit | never ($100k → $121k over 20 years) | **$60,000 in year 1, then ~$30k/yr until empty in FY2036–37** |
+
+Once Super A and Super B are exhausted the projection reports unfunded
+cashflow of ~$25k/yr while $120k of cash sits excluded — the two exclusion
+flags behave oppositely. This was section 7's second item; confirmed.
+
+### 1.13 Comparison arms that produce the same projection as their baseline
+
+This is the failure mode the brief said had happened twice before. It has
+happened again, in four places. `probes/probeM.mjs` runs every arm listed
+in section 8 and prints the maximum year-by-year net-assets difference
+between arm and baseline; `probes/probeO.mjs` covers the aged care
+accommodation arms.
+
+| Arm | Scenario | Difference | Cause |
+|---|---|---|---|
+| Aged care planning, "Gift N years before entry" | Modest retiree demo (Sept start), entry at 76, default 6 years → gift at current age 70 | **0** in every year and in cost of care | 1.1: gift resolves to plan year 0 of a partial year, never fires. `focusAgedCarePlanning.js` 62 clamps the gift age up to `currentAge`, not to the first year that has a July |
+| Aged care accommodation, RAD vs DAP vs combination | Same demo, entry at current age 70 | RAD arm pays **no RAD** ($500,000 lump sum at `age: entryAge` never fires); fees start a year late | 1.1 again (`focusAgedCareAccommodation.js` 118–147). The RAD arm then shows the *most* remaining assets ($1,095,315 vs DAP $1,077,561 in FY2027–28) and an estate of $1,182,971 that includes a real-adjusted refund of a RAD that was never paid — the RAD is presented as free |
+| Retirement lever "Retire later" (65 → 68) | Comprehensive pre-retiree demo | **0** | `applyRetireLater` changes `plan.client.retirementAge` only. It bites only through rows anchored to the retirement key date. The demo's salary rows run start → end (see 2.8), and any client whose salary row ends at an explicit age gets the same nothing |
+| Retirement lever "Spend less" ($40k / $30k) | Pre-retiree demo; Modest retiree demo | **0** and **0** | `applySpendLess` sets Income Required and `incomeDrivenDrawdown`, which only alter "Fund expenditure shortfall" pensions. Expense rows are untouched, so spending, shortfall and ruin cannot change for any plan without such a pension. `solveSpendLess` then bisects a flat function |
+
+The levers panel reports a non-converged lever as "This lever alone did not
+converge — even at its own outer bound, the effect on ruin probability isn't
+enough by itself" (`main.js` 16268). For the two levers above the effect is
+zero because the lever changed nothing, and the sentence says otherwise.
+
+The focus age-pension-strategy gift arm handles the partial first year
+correctly (`focusAgePensionStrategy.js` 47 bumps the gift to year 1) —
+the fix exists in one module and not in the other two.
+
+### 1.14 The crash what-if inherits 1.6: a 30% crash barely moves a pension-phase retiree
+
+`sequenceRisk.js` `crashHoldings` (line 65) builds the crash set from
+assets and accumulation accounts only, like `monteCarlo.js` `holdingsFor`.
+`probes/probeM.mjs`: client 66 with $800k in a High Growth ABP, 30% drop
+with a 3-year recovery at every representative age → maximum net-assets
+difference **$357** (the single July month before commencement). The same
+money left in accumulation moves by $632k–$840k in the pre-retiree demo.
+The What-if crash view for a retiree is a chart of three near-identical
+lines labelled "Early", "Mid-career" and "Near retirement" (see 2.7).
+
 ---
 
 ## 2. Serious — misleading output
@@ -348,6 +488,62 @@ the firing month.
 
 See 1.9 — `personalCap` and `remainingCap` are displayed and wrong.
 
+### 2.5 The composite chart's flow bars do not include pension drawdown; the Expense funding chart calls it "met from income"
+
+`outputSeries.js`: `compositeIncome` = `row.income − agePension`,
+`compositeDrawdown` = `withdrawals + deficitFundedFromAssets`. Pension
+payments are in neither. `probes/probeK.mjs` (same retiree as 1.10):
+composite bars Income $0, Age pension $24,429, Capital drawdown $0, against
+an expenditure line of $45,000, every year — $30,000 of drawdown is
+missing from the chart that is the tool's headline picture.
+`chartSeries.js` `expenseFundingSeries` relies on the identity
+`deficitFundedFromAssets + unfundedCashflow = −surplusOrDeficit`, which
+pension payments break (they refill the WCA outside both channels): the
+Expense funding chart shows "Met from income" $44,958 of a $44,958 need
+when income was $24,429 and the rest was drawn from the pension. Same
+root cause as 1.10; listed here because the fix is in the series
+modules, not the statement.
+
+### 2.6 Monte Carlo percentiles shown to the dollar
+
+`monteCarloPercentileGroups` renders through `renderTransposed`
+(`Math.round`, en-AU), so the 10th percentile of net assets from 2,000
+(or fewer — the control is user-set) paths reads as, e.g., "514,764". The
+CSV export writes the same figures to the cent (`toFixed(2)`). The
+Retirement page's own "display honesty" work (spec 36 Commit 3) capped and
+rounded the ruin figure; the percentile table and its CSV were not
+included. The deterministic tables share the to-the-dollar convention, and
+for them it is defensible; for a sampled quantile it is not.
+
+### 2.7 Crash timing labels for a retiree
+
+`whatIfCrash.js` `representativeCrashAges` derives "Early", "Mid-career"
+and "Near retirement" from the span `retirementAge − currentAge`, floored
+at 2. For the Modest retiree demo (70, retired at 70) all three resolve to
+age 71 (`probes/probeM.mjs`: three identical runs, Δ $83,329 each), so the
+view draws three coincident lines labelled with working-life stages for
+a 71-year-old.
+
+### 2.8 The "Comprehensive pre-retiree" demo never retires
+
+Both salary rows in every scenario of that demo run from the `start`
+anchor to the `end` anchor, so the household earns $493,000 a year at ages
+65, 75 and 85 (`probes/probeO.mjs`) while `retirementAge` is 65 and the
+"Retire at 60" scenario changes nothing about income. The demo presents a
+retirement picture that has no retirement in it, and it is why the
+"Retire later" lever shows zero effect on it (1.13).
+
+### 2.9 Table and CSV of the same view use different rounding and sign conventions
+
+`renderTransposed` shows `Math.round(|v|)` in en-AU with negatives in
+parentheses and anything under $0.005 as "–"; `exportTransposedCSV` writes
+the same cells as `toFixed(2)` with a leading minus and "0.00". Row set,
+column set, thinning and the real/nominal factor are identical (both go
+through `visibleTransposed`), so the CSV is the table to two more decimal
+places than the table shows. The Snapshot CSV (`snapshot.js` 151) rounds
+to the dollar like its HTML, so the two exports disagree with each other on
+precision. The death-benefits and focus CSVs also write cents.
+
 ---
 
 ## 3. Edge cases that break
@@ -361,11 +557,38 @@ See 1.9 — `personalCap` and `remainingCap` are displayed and wrong.
   accumulation earnings — $485 of tax on a mixed basis, then nothing.
 - **Whole-balance commencement residual** (2.3).
 
-Probes I intended to run but could not (auditor lost): zero/negative
-balances, client past life-table end, 25-year couple age gap, death in
-year 0, same-month buy/sell, early loan repayment, fixed-rate rollover in
-the final month, six super accounts, leap-year stepping. None of these is
-claimed sound.
+The deferred probes, now run (`probes/probeP.mjs`; every case: no
+`errors`, no NaN/Infinity anywhere in `yearly`, conservation holds):
+
+- **Negative asset balance is accepted and projected.** `clampAsset` does
+  not floor `balance` at 0 (unlike liabilities at `planState.js` 1436 and
+  bonds at 1701). An asset entered at −$50,000 — reachable by JSON import
+  or a programmatic edit; the UI input carries `min="0"` — earns negative
+  growth (−$1,634 in year 1), and `closingBalance` and `netAssets` go
+  negative, against the "balances floor at 0" convention. Repro in the
+  probe's section (a).
+- **Client aged 104 at start** (past the ABS table): endAge resolves to
+  102, below the current age; the engine projects 3 years anyway with the
+  age pension paid. No crash, but an end age below the start age is an
+  impossible state that was accepted.
+- **Couple 67 / 42**: end age 108 on the client (partner's LE, correctly
+  the longer), partner's accumulation super correctly exempt from the
+  assets test, salary row clamped to the partner's own age. Sound.
+- **One-year projection** (endAge = currentAge, July and September starts):
+  2 rows, death-benefit detail present, no NaN. Sound.
+- **Same-month buy and sell** of a CGT asset: pool and gain behave. Sound.
+- **Early repayment larger than the balance**: closing exactly 0,
+  `extraRepayment` capped at the balance, no interest afterwards. Sound.
+- **Fixed rate rolling over in the final year**: rollover recorded, rate
+  moves 5% → 7% in the final row. Sound.
+- **Six super accounts, one owner, salary above the maximum contribution
+  base**: SG $32,500 (cap honoured), all of it to the first-listed
+  account, nothing to the other five. A convention, not a defect, but the
+  Setup UI does not say which account receives SG.
+- **Leap years / February**: no day-of-month arithmetic anywhere in the
+  monthly stepping (`schedule.js`, `deterministic.js`, `liabilities.js`
+  build only `Date(y, m, 1)` for labels and the aged care regime date).
+  Sound by inspection; nothing to probe.
 
 ---
 
@@ -388,8 +611,16 @@ claimed sound.
   super is capped when entered as an NCC row and uncapped when entered as
   a bonus destination.
 
-Not audited (auditor lost): comparison/what-if/focus arms, routing,
-workspace import/export, smart defaults disclosure.
+- **Comparison arms** — see 1.13 (four arms that do nothing) and 1.14.
+  Every other arm changes the projection in the expected direction; the
+  list is in section 8.
+- **CSV exports** — row set, column set, period thinning and the
+  real/nominal factor match the visible table exactly for every
+  `exportTransposedCSV` view and for the Monte Carlo and Snapshot exports;
+  labels are quoted and escaped; the adjustments footer is carried. The
+  only mismatch is precision and sign convention (2.9). Not audited:
+  routing, workspace import/export beyond `hydrate` (1.3), smart-defaults
+  disclosure.
 
 ---
 
@@ -409,7 +640,36 @@ workspace import/export, smart defaults disclosure.
 - **Division 293 timing** (1.8): spec and code agree with each other;
   the brief's "known discrepancy" is not a timing disagreement in this
   codebase. The rule error is the income base.
-- **Non-prescriptive voice**: not audited.
+- **Non-prescriptive voice** — audited: every template literal and label
+  in `main.js` and every generated sentence in the pure output modules
+  (`whatIfCashflowLens.js`, `goalVsPosition.js`, `retirementAnalytics.js`,
+  `retirementOutcomeBuckets.js`, `lifestyleBand.js`, `simDisplay.js`,
+  `focus*.js`, `divergence*.js`) grepped for recommending, ranking and
+  evaluative language and each hit read in context. The convention is
+  well kept: the levers panel says "ranked by its own effect on that
+  probability — not a recommendation"; the ASFA block says "for
+  comparison, not a recommendation"; education funding says "nothing here
+  recommends the structure"; outcome buckets are named by what they are
+  ("Above Comfortable", "At the Age Pension floor"). Three passages lean
+  toward advice and should be reworded:
+  - `main.js` 16095, ruin-tolerance descriptors: "Conservative. Roughly 1
+    in 20 paths run short. **Defensible where** there is no Age Pension
+    backstop or a strong bequest motive." and "The common planning
+    benchmark ... **Default.**" — the first tells the reader when a
+    tolerance is justified. State the consequence only: "Roughly 1 in 20
+    paths run short."
+  - `main.js` 13833, salary-sacrifice empty state: "**Whether salary
+    sacrifice is worth it** for this client — income tax saved, HELP
+    repayment unchanged, super gained net of contributions tax". Say what
+    the view shows: "Income tax, HELP repayment and super balance with and
+    without the salary sacrifice row".
+  - `main.js` 14550–14560, surplus allocation: "Non-deductible interest is
+    paid from after-tax income; deductible interest is not — **that is the
+    basis for prioritising it**". This argues for a strategy. Keep the
+    first clause (a fact) and drop the second.
+  - `main.js` 6389 tooltip "Use the actual unimproved value ... it always
+    beats either ratio" is an instruction about data entry, not advice
+    about the client's affairs; left as is.
 
 ---
 
@@ -442,22 +702,53 @@ workspace import/export, smart defaults disclosure.
   income for the partial first year (convention). The only cue is the
   in-grid tooltip on one-off cells ("already made earlier in the FY"),
   which is not true of salary. The demos avoid it with monthly rows.
+- **Monte Carlo CPI path reaches only liabilities and planned-property
+  pricing.** Confirmed by `probes/probeQ.mjs`: a plan with an AWOTE-indexed
+  salary, CPI-indexed expenses and no debt gives byte-identical p10/p50/p90
+  at CPI σ = 0 and σ = 2%. In a real-terms engine that is a coherent
+  choice (the real wage margin and real returns are the stochastic
+  variables), and `monteCarlo.js`'s header states it — but no user-facing
+  text does. The Parameters modal and the fan chart should say that the
+  inflation draw moves nominal debt only. This was section 7's first item;
+  cleared as a disclosed-in-code design choice with a missing disclosure,
+  not a wrong number.
+- **Which account receives SG** is not stated anywhere in Setup: the
+  first-listed included account for the owner gets all of it (probe P,
+  six accounts).
+- **Pension payments are absent from every cashflow view** (1.10) with no
+  note on the Cashflow view, Snapshot or Key figures saying so; the only
+  footer on the Cashflow view concerns the 50/50 split of pooled items.
 
 ---
 
 ## 7. Suspected, unverified
 
-- **Monte Carlo CPI path does not feed indexation or real returns.** The
-  header says the randomised CPI affects "liabilities and planned-property
-  pricing only"; income/expense indexation `((1+g)/(1+cpi))` and the real
-  asset return keep the deterministic CPI. For a plan with wage-indexed
-  income this understates dispersion. Read only; not quantified.
-- **`superReleased` fallback and the `excludeFromRetirement` flag.** The
-  deficit fallback (line 4136) draws from any released super account; it
-  does not check the account's `excludeFromRetirement` flag, while
-  `fundingOrder` does drop excluded assets. Read only.
-- **Charts, tables, CSV, comparison arms, non-prescriptive voice**: not
-  examined. The auditors assigned to them were terminated before starting.
+The first pass's three items are settled: the Monte Carlo CPI path is
+quantified and moved to section 6 (zero effect outside liabilities — a
+design choice lacking disclosure, not a wrong number); the released-super
+fallback is confirmed and is now 1.12; charts, tables, CSV, arms and voice
+are covered above. What remains unverified:
+
+- **Education funding arms.** `probes/probeM.mjs`: the "savings outside a
+  bond" baseline ends $650k ahead of both bond arms for the Family demo
+  (baseline $8.27m, investment bond $7.62m, education bond $7.64m). The
+  baseline asset is placed first in `fundingOrder` while the bonds are
+  drawn only for fees, so the arms differ in more than tax treatment. I did
+  not establish whether the gap is the intended comparison or an artefact
+  of the funding-order placement; worth a hand check.
+- **Non-deductible-first "interest saved" is negative on the Family demo**
+  (−$110,419: paying non-deductible debt first costs more total interest
+  than pro-rata). The view's wording handles a negative result, and the
+  sign may well be right (the fixed-rate portion sits in the pro-rata
+  arm), but I did not trace the figure.
+- **Div 296 earnings and TSB measurement** (first pass): gross smooth
+  earnings versus the law's taxable-income-plus-ECPI, and max(opening,
+  closing) versus closing TSB. Disclosed in `div296.js`; not quantified.
+- **`clampSuperWithdrawal` coerces `frequency: "once"` to monthly** (line
+  1967) — reached only by import or programmatic construction (the UI
+  offers monthly/annual), where a one-off $120k becomes $120k a month. Not
+  user-reachable as far as I could see; noted because the recontribution
+  focus builds its withdrawal from the same row shape.
 
 ---
 
@@ -505,3 +796,41 @@ workspace import/export, smart defaults disclosure.
 - **Hydrate round-trip** is numerically identical for 14 of 15 demo
   scenarios (the 15th is 1.3).
 - **Test suite**: 2,127 tests pass.
+
+Second pass:
+
+- **Comparison arms that do change the projection** (`probes/probeM.mjs`,
+  `probeN.mjs`; maximum year-by-year |Δ net assets| in brackets): age
+  pension strategy gift arm ($10k) and both work-income arms ($107k, $208k);
+  aged care planning gift arm when the gift lands in a full year ($17k);
+  salary sacrifice with vs without ($2.8k on the demo's window); FHSSS
+  inside vs outside ($49k vs $62k); surplus allocation single-destination
+  alternative ($194k); levers "contribute more" ($230k) and "take more
+  risk" ($426k); what-if rate shock ($404k), revert-rate shock ($164k),
+  income gap ($215k), expense shock ($776k); crash timing on accumulation
+  holdings ($632k–$840k); recontribution focus (death-benefit tax $140k →
+  $106k); debt payoff counterfactual ($171k); debt recycling with vs
+  without ($468k); glide-versus-static lifecycle comparison ($2.3m); RAD /
+  DAP / combination arms when entry lands in a full year (distinct costs
+  and estates).
+- **Chart construction**: balance charts pin the y-axis at zero
+  (`rangemode: "tozero"`); the composite chart's dual axes share a zero
+  baseline (`sharedZeroRanges`) and confine ticks to each axis's own data
+  range; all-zero series are dropped from legend and stack
+  (`seriesIsAllZero`); every chart's axis title carries "today's" or
+  "future" dollars from the same `displayFactor` the tables use; Plotly
+  absent degrades to a message, not a blank; hover formats are `$,.0f`
+  throughout. The Retirement balances chart does include pensions and
+  excluded balances as their own bands.
+- **Stacked-chart double counting**: none found. The composite chart's
+  Income and Age pension bands sum to `row.income`; the cashflow
+  categories and the Cashflow table read the same functions; the Super
+  balances chart stacks accumulation and pension accounts once each.
+- **CSV parity** with the on-screen table on rows, columns, thinning and
+  units (2.9 is the only difference).
+- **Edge cases** listed in section 3 that passed: couple age gap, one-year
+  projection, same-month buy/sell, early repayment beyond balance,
+  fixed-rate rollover in the final year, six accounts, leap years, the
+  zero plan.
+- **`hydrate` on super accounts** keeps `excludeFromRetirement` (only the
+  asset and income-row copies lose it, 1.3).

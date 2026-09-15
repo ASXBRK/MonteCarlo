@@ -10,7 +10,7 @@ export function basePlan({ age = 70, retirementAge = 65, startYear = 2026, start
     client: { currentAge: age, retirementAge },
     partner: partner ? { currentAge: partner.age, retirementAge: partner.retirementAge ?? 65 } : null,
     start: { year: startYear, month: startMonth },
-    ...(endAge ? { endAge, endBasis: { mode: "fixed", age: endAge } } : {}),
+    ...(endAge ? { endAge, endBasis: { mode: "fixedAge", fixedAge: endAge, offset: 0 } } : {}),
   }, PROFILES);
   return { base, plan };
 }
