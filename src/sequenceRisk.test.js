@@ -35,6 +35,7 @@ function mkState(over = {}) {
       ...over.plan,
     },
     assets,
+    bonds: over.bonds ?? [],
     goals: [],
     liabilities: [],
     properties: [],
@@ -63,6 +64,50 @@ describe("crashHoldings", () => {
     expect(ids).toContain("su1");
     expect(ids).not.toContain("a2");
     expect(ids).not.toContain("su2");
+  });
+
+  // docs/specs/37-review-remediation.md, Commit 3 — adversarial review
+  // finding 1.14: pensions and bonds were absent here too, so a 30%
+  // crash barely moved a pension-phase retiree at all (the review's own
+  // figure: $357, the single month before commencement).
+  it("includes pensions (no include flag — always crashable) and included bonds, excludes an excluded bond", () => {
+    const state = mkState({
+      assets: [],
+      plan: { pensions: [{ id: "pn1", owner: "client", sourceAccountId: "su1", commenceAt: { kind: "age", age: 40 }, type: "abp", commenceAmount: null, reversionary: false, taxFreeProportion: null, allocation: flatAlloc("Balanced"), icrPct: 0, drawdownOption: "minimum", fixedAmount: 0, indexBasis: "cpi", indexExtraPct: 0, commutations: [] }] },
+      bonds: [
+        { id: "bd1", name: "Bond", type: "investment", owner: "client", include: true, balance: 50000, startDate: "2020-01-01", allocation: flatAlloc("Balanced"), icrPct: 0, beneficiaryChildId: null },
+        { id: "bd2", name: "Bond excluded", type: "investment", owner: "client", include: false, balance: 50000, startDate: "2020-01-01", allocation: flatAlloc("Balanced"), icrPct: 0, beneficiaryChildId: null },
+      ],
+    });
+    const ids = crashHoldings(state).map((h) => h.id);
+    expect(ids).toContain("pn1");
+    expect(ids).toContain("bd1");
+    expect(ids).not.toContain("bd2");
+  });
+});
+
+describe("runCrashShock — pension and bond materiality (docs/specs/37-review-remediation.md, Commit 3)", () => {
+  it("a 30% crash moves a pension-only retiree's net assets materially, not the ~$357 the bug produced", () => {
+    const state = mkState({
+      endAge: 76,
+      assets: [],
+      plan: {
+        client: { currentAge: 66, retirementAge: 65 },
+        superAccounts: [{ id: "su1", owner: "client", include: true, balance: 800000, taxFreeComponent: 0, icrPct: 0, allocation: flatAlloc("Balanced") }],
+        pensions: [{
+          id: "pn1", owner: "client", sourceAccountId: "su1", commenceAt: { kind: "age", age: 66 },
+          type: "abp", commenceAmount: null, reversionary: false, taxFreeProportion: null,
+          allocation: flatAlloc("Balanced"), icrPct: 0, drawdownOption: "minimum",
+          fixedAmount: 0, indexBasis: "cpi", indexExtraPct: 0, commutations: [],
+        }],
+      },
+      cashflows: { expenses: [{ id: "e1", label: "Living", category: "nonDiscretionary", amount: 70000 / 12, frequency: "monthly", from: { kind: "age", age: 66 }, to: { kind: "age", age: 120 }, indexBasis: "cpi", indexExtraPct: 0 }] },
+    });
+    const result = runCrashShock(state, { dropPct: 30, atAge: 67, recoveryYears: 0 }, undefined);
+    expect(result).not.toBeNull();
+    const ly = result.base.yearly.length - 1;
+    const diff = Math.abs(result.base.yearly[ly].netAssets - result.shocked.yearly[ly].netAssets);
+    expect(diff).toBeGreaterThan(20000); // orders of magnitude past the $357 the bug produced
   });
 });
 

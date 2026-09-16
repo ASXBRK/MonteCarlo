@@ -62,12 +62,21 @@ function growthFraction(allocation, profiles) {
 // super accounts — exactly allocation.js's own allocationSeries scope
 // ("lifestyle assets and properties are excluded... neither carries a
 // profile or a classWeights split").
+// Every holding this what-if can crash — same set, same reasoning, as
+// monteCarlo.js's own holdingsFor (docs/specs/37-review-remediation.md,
+// Commit 3; adversarial review finding 1.14): pensions and bonds were
+// omitted, so a 30% crash barely moved a pension-phase retiree at all
+// (the single month before commencement was the only exposure it found).
 export function crashHoldings(state) {
   return [
     ...(state.assets ?? []).filter((a) => a.include && a.class !== "lifestyle")
       .map((a) => ({ id: a.id, allocation: a.allocation })),
     ...(state.plan.superAccounts ?? []).filter((sa) => sa.include)
       .map((sa) => ({ id: sa.id, allocation: sa.allocation })),
+    ...(state.plan.pensions ?? [])
+      .map((p) => ({ id: p.id, allocation: p.allocation })),
+    ...(state.bonds ?? []).filter((b) => b.include)
+      .map((b) => ({ id: b.id, allocation: b.allocation })),
   ];
 }
 

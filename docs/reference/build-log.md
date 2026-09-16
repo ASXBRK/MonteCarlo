@@ -4326,6 +4326,59 @@ the review's B1/B2 probe scenarios reproduced directly; a client with no
 pension confirmed unaffected (carry-forward still available exactly as
 before). Full suite 2147/2147, build green.
 
+### Review remediation, Commit 3: Monte Carlo shocks pensions and bonds (spec 37b) — DELIBERATE TIGHTENING, EVERY RETIREMENT OUTPUT CHANGES
+
+**Client-facing numbers change — this is the largest tightening in this
+spec.** Fixes findings 1.6 and 1.14. `monteCarlo.js`'s `holdingsFor` and
+`sequenceRisk.js`'s `crashHoldings` built their shock set from financial
+assets and super accounts only; `deterministic.js` already calls
+`shockFor(pensionId, m)` and `shockFor(bondId, m)` in its own growth
+code, but no series ever existed for either id, so the shock was always
+0. **Every retiree whose wealth sits in pension phase — this tool's core
+audience — got a probability of ruin and a fan chart carrying no market
+risk at all.**
+
+Measured, before → after, on the review's own probe (client 66, $800k
+High Growth, commenced as an ABP at 66 vs the same money left in
+accumulation, 300 paths, seed 7):
+
+| | Before (bug) | After (fixed) |
+|---|---|---|
+| ABP p10 at year 13 | $514,764 | comparable in width to accumulation's own fan (this repo's own reproduction: p10/p50/p90 spread ~40%, matching accumulation's ~44%, not the prior ~±3%) |
+| ABP probability of ruin | 0.0% | now reflects real market exposure |
+| 30% crash, pension-only retiree @67, net assets moved | $357 | $121,457 |
+
+**What changed and why**: `holdingsFor` and `crashHoldings` now also
+enumerate `state.plan.pensions` (no `include` flag — a pension is always
+shockable, the same convention super accounts use once included) and
+`state.bonds` (filtered on `.include`, same as every other bond
+operation in this engine). Both resolve to a profile exactly the way
+assets/super already do (`profileForAllocation`), so a pension or bond
+on a custom allocation now also counts toward the "N asset(s) use custom
+returns" disclosure correctly, a side benefit of using the same
+resolution path rather than a parallel one.
+
+**This changes every output built on Monte Carlo or the crash what-if**:
+the Retirement page's probability-of-ruin, maximum-sustainable-spend
+solver, and outcome buckets (specs 34–36) all read `runMonteCarlo`'s
+output directly — a pension-phase client's own figures on all of these
+will now be materially different (correctly). Per the spec's own
+instruction, specs 34–36's documented example figures are NOT
+re-verified in this commit — that is deliberately left for the display
+work that follows, so the new figures can be reviewed first rather than
+silently baked into another spec's own "matches the documented figures"
+test.
+
+Tests: a pension-only scenario producing a fan comparable in order of
+magnitude to the same money in accumulation (`monteCarlo.test.js`); a
+bond-holding scenario likewise; the crash what-if moving a pension-only
+retiree by six figures, not $357 (`sequenceRisk.test.js`); a registry-
+style guard asserting every balance type this engine calls `shockFor`
+against — assets, super, pensions, bonds — actually appears in the shock
+set, so a future balance type added to the engine without a matching
+entry here fails this test rather than silently shocking nothing. Full
+suite 2153/2153, build green.
+
 ---
 
 ## WHERE WE'RE GOING

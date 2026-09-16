@@ -188,14 +188,25 @@ function median(values) {
 }
 
 // Every holding this plan can shock: included, non-lifestyle financial
-// assets and included super accounts, each resolved to the profile
-// that governs its σ/regime parameters (a custom allocation via its
-// volatility-basis profile — the same resolution the allocation chart
-// uses, from allocation.js, so the two features can never disagree
-// about which profile a holding is "really" on). Lifestyle assets
-// carry no profile and are left deterministic (they simply never
+// assets, included super accounts, pensions, and included bonds — every
+// balance type that carries genuine market exposure, each resolved to
+// the profile that governs its σ/regime parameters (a custom allocation
+// via its volatility-basis profile — the same resolution the allocation
+// chart uses, from allocation.js, so the two features can never
+// disagree about which profile a holding is "really" on). Lifestyle
+// assets carry no profile and are left deterministic (they simply never
 // appear here, so deterministic.js's default shockFor(id, m) = 0
 // applies to them by construction, same as an asset excluded entirely).
+//
+// Pensions and bonds (docs/specs/37-review-remediation.md, Commit 3;
+// adversarial review findings 1.6/1.14) were omitted entirely — a
+// retirement-phase pension (deterministic.js's own commencement-phase
+// growth block, and sequenceRisk.js's crash model) already calls
+// shockFor(pensionId, m)/shockFor(bondId, m), but this generator never
+// produced a series for either id, so the shock was always 0. Every
+// retiree whose wealth sits in pension phase — this tool's core
+// audience — got a probability of ruin and a fan chart carrying no
+// market risk at all.
 export function holdingsFor(state, profiles = PROFILES) {
   const assets = state.assets
     .filter((a) => a.include && a.class !== "lifestyle")
@@ -203,7 +214,12 @@ export function holdingsFor(state, profiles = PROFILES) {
   const supers = (state.plan.superAccounts ?? [])
     .filter((s) => s.include)
     .map((s) => ({ id: s.id, name: s.name, allocation: s.allocation }));
-  return [...assets, ...supers]
+  const pensions = (state.plan.pensions ?? [])
+    .map((p) => ({ id: p.id, name: p.name, allocation: p.allocation }));
+  const bonds = (state.bonds ?? [])
+    .filter((b) => b.include)
+    .map((b) => ({ id: b.id, name: b.name, allocation: b.allocation }));
+  return [...assets, ...supers, ...pensions, ...bonds]
     .map((h) => ({ ...h, profile: profileForAllocation(h.allocation, profiles) }))
     .filter((h) => h.profile); // a stale/unknown profile reference shocks nothing, same as allocation.js
 }

@@ -29,6 +29,7 @@ function mkState(over = {}) {
       ...over.plan,
     },
     assets,
+    bonds: over.bonds ?? [],
     cashflows: {
       income: [], expenses: [], contributions: [], withdrawals: [], lumpSums: [],
       ...over.cashflows,
@@ -57,6 +58,26 @@ function employmentRow(over = {}) {
     ...over,
   };
 }
+function pensionRow(over = {}) {
+  return {
+    id: "pn1", name: "Pension", owner: "client", sourceAccountId: "su1",
+    commenceAt: { kind: "age", age: 40 }, type: "abp", commenceAmount: null,
+    reversionary: false, taxFreeProportion: null,
+    allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0,
+    drawdownOption: "minimum", fixedAmount: 0, indexBasis: "cpi", indexExtraPct: 0,
+    commutations: [],
+    ...over,
+  };
+}
+function bondRow(over = {}) {
+  return {
+    id: "bd1", name: "Bond", type: "investment", owner: "client", include: true,
+    balance: 50000, startDate: "2020-01-01",
+    allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0,
+    beneficiaryChildId: null,
+    ...over,
+  };
+}
 
 describe("holdingsFor", () => {
   it("includes profile-mode financial assets and super accounts, resolved to their profile", () => {
@@ -68,6 +89,38 @@ describe("holdingsFor", () => {
     expect(holdings.map((h) => h.id).sort()).toEqual(["a1", "su1"]);
     expect(holdings.find((h) => h.id === "a1").profile).toBe(PROFILES["Balanced"]);
     expect(holdings.find((h) => h.id === "su1").profile).toBe(PROFILES["Cash"]);
+  });
+
+  // docs/specs/37-review-remediation.md, Commit 3 — adversarial review
+  // findings 1.6/1.14: pensions and bonds were entirely absent from the
+  // shock set, so deterministic.js's own shockFor(pensionId, m)/
+  // shockFor(bondId, m) calls always got 0. This is the registry-style
+  // guard the spec asks for: every balance type this engine calls
+  // shockFor(...) against, enumerated here explicitly, so a FUTURE
+  // balance type added to the engine without a matching entry here
+  // fails this test rather than silently shocking nothing.
+  it("includes every balance type this engine calls shockFor(...) against — assets, super, pensions, and bonds", () => {
+    const state = mkState({
+      assets: [mkAsset({ id: "a1", allocation: { mode: "profile", profile: "Balanced" } })],
+      plan: {
+        superAccounts: [superAcct({ id: "su1", allocation: { mode: "profile", profile: "Cash" } })],
+        pensions: [pensionRow({ id: "pn1", allocation: { mode: "profile", profile: "Moderate Growth" } })],
+      },
+      bonds: [bondRow({ id: "bd1", allocation: { mode: "profile", profile: "High Growth – Capital" } })],
+    });
+    const holdings = holdingsFor(state, PROFILES);
+    expect(holdings.map((h) => h.id).sort()).toEqual(["a1", "bd1", "pn1", "su1"]);
+    expect(holdings.find((h) => h.id === "pn1").profile).toBe(PROFILES["Moderate Growth"]);
+    expect(holdings.find((h) => h.id === "bd1").profile).toBe(PROFILES["High Growth – Capital"]);
+  });
+
+  it("excludes a bond marked not included, but a pension has no such flag and is always shockable", () => {
+    const state = mkState({
+      assets: [],
+      plan: { pensions: [pensionRow({ id: "pn1" })] },
+      bonds: [bondRow({ id: "bd1", include: false })],
+    });
+    expect(holdingsFor(state, PROFILES).map((h) => h.id)).toEqual(["pn1"]);
   });
 
   it("resolves a custom allocation to its volatility-basis profile, same as the allocation chart", () => {
@@ -124,6 +177,52 @@ describe("runMonteCarlo", () => {
       expect(p50[y]).toBeLessThanOrEqual(p75[y]);
       expect(p75[y]).toBeLessThanOrEqual(p90[y]);
     }
+  });
+
+  // docs/specs/37-review-remediation.md, Commit 3 — adversarial review
+  // finding 1.6. Before this fix the SAME balance held as a
+  // commenced pension showed a ±3% fan after 14 years of a High Growth
+  // allocation, against −45%/+58% for identical money left in
+  // accumulation — a retiree's probability of ruin and fan chart
+  // carried no market risk at all.
+  it("a pension-only scenario now carries real market risk — the fan is comparable in width to the same money in accumulation, not the ~flat fan the bug produced", () => {
+    const commonPlan = {
+      client: { currentAge: 66, retirementAge: 65 },
+      superAccounts: [superAcct({ id: "su1", balance: 500000, allocation: { mode: "profile", profile: "High Growth – Capital" } })],
+    };
+    const pensionState = mkState({
+      endAge: 76, assets: [],
+      plan: {
+        ...commonPlan,
+        pensions: [pensionRow({
+          id: "pn1", sourceAccountId: "su1", commenceAt: { kind: "age", age: 66 }, commenceAmount: null,
+          allocation: { mode: "profile", profile: "High Growth – Capital" },
+        })],
+      },
+    });
+    const accumulationState = mkState({ endAge: 76, assets: [], plan: { ...commonPlan } });
+    const pensionResult = runMonteCarlo(pensionState, PROFILES, { numPaths: 100, sampleCount: 5, rng: createRng(7) });
+    const accumResult = runMonteCarlo(accumulationState, PROFILES, { numPaths: 100, sampleCount: 5, rng: createRng(7) });
+    const ly = pensionResult.years - 1;
+    const spreadFrac = (na) => (na.p90[ly] - na.p10[ly]) / na.p50[ly];
+    const pensionSpread = spreadFrac(pensionResult.netAssets);
+    const accumSpread = spreadFrac(accumResult.netAssets);
+    expect(pensionSpread).toBeGreaterThan(0.2); // a real fan, not the ±3% the bug produced
+    // Same order of magnitude as the identical balance in accumulation —
+    // not the two-decades-apart gap the bug produced (accumulation's
+    // fan was 15-20× wider before this fix).
+    expect(pensionSpread).toBeGreaterThan(accumSpread * 0.3);
+    expect(pensionSpread).toBeLessThan(accumSpread * 3);
+  });
+
+  it("a bond-holding scenario now carries real market risk — the fan is not flat", () => {
+    const state = mkState({
+      endAge: 50, assets: [],
+      bonds: [bondRow({ id: "bd1", balance: 200000, allocation: { mode: "profile", profile: "High Growth – Capital" } })],
+    });
+    const result = runMonteCarlo(state, PROFILES, { numPaths: 100, sampleCount: 5, rng: createRng(3) });
+    const ly = result.years - 1;
+    expect(result.netAssets.p90[ly] - result.netAssets.p10[ly]).toBeGreaterThan(result.netAssets.p50[ly] * 0.2);
   });
 
   it("endDistribution matches the final year's netAssets bands, and min ≤ p10 ≤ ... ≤ p90 ≤ max, mean inside the range", () => {
