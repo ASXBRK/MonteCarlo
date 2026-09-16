@@ -327,6 +327,38 @@ describe("Retirement exclusions (docs/specs/35-retirement-output-view.md, Commit
     expect(okPaid).toBeGreaterThan(exPaid);
     expect(okPaid).toBeGreaterThan(100000);
   });
+
+  // docs/specs/37-review-remediation.md, Commit 5, finding 1.12 — the
+  // ordinary fundingOrder filter already excludes excludeFromRetirement
+  // super accounts (proven above for financial assets/pensions); the
+  // DEFICIT FALLBACK — the separate "Tier 1.2, Commit 3" loop that
+  // drains released super once fundingOrder itself is exhausted — used
+  // to have no such check, so an account marked "never touch" was
+  // drained anyway the moment ordinary funding ran dry.
+  it("the deficit fallback never drains a super account excluded from retirement funding — even once released and every other source is exhausted", () => {
+    const excludedAcct = superAcct({ id: "su_ex", owner: "client", balance: 300000, excludeFromRetirement: true });
+    const ordinaryAcct = superAcct({ id: "su_ok", owner: "client", balance: 20000 });
+    const s = mkState({
+      plan: { client: { currentAge: 66, retirementAge: 65 }, superAccounts: [excludedAcct, ordinaryAcct] },
+      endAge: 70,
+      assets: [mkAsset({ id: "cash", balance: 100000, excludeFromRetirement: true })],
+      fundingOrder: [], // nothing in the ordinary order — every deficit falls straight to the fallback
+      cashflows: { expenses: [cf({ assetId: null, amount: 60000 / 12 })] },
+    });
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      expect(row.superDetail.su_ex.withdrawals).toBe(0);
+    }
+    // The excluded cash asset is likewise never DRAWN ON (Commit 3's own
+    // fundingOrder-level guarantee, re-asserted here as a control) — it
+    // only grows, never falls below its opening balance — while the
+    // ordinary super account is the one actually drawn, and a real
+    // shortfall still bites once it, too, is exhausted.
+    expect(out.monthly.perAsset.cash[out.schedule.months]).toBeGreaterThanOrEqual(100000);
+    expect(out.yearly[0].superDetail.su_ok.withdrawals).toBeGreaterThan(0);
+    expect(out.yearly.some((row) => row.unfundedCashflow > 0)).toBe(true);
+    expect(out.yearly[out.yearly.length - 1].superDetail.su_ex.closing).toBeGreaterThan(0);
+  });
 });
 
 describe("Threshold indexation toggle (docs/specs/35-retirement-output-view.md, Commit 4)", () => {
@@ -2363,6 +2395,39 @@ describe("Tier 1.2 — Super (Commit 2): caps, carry-forward, contributions tax,
     const out = projectPlan(s);
     expect(out.yearly[1].taxDetail.client.div293).toBeGreaterThan(0); // year 0's assessment, paid year 1
     expect(out.accruedDiv293AtEnd).toBeGreaterThan(0); // year 1's own assessment, unpayable within the projection
+  });
+
+  // docs/specs/37-review-remediation.md, Commit 5, finding 1.8 —
+  // adversarial review probe D: $230k salary (SG $27,600), sells $400k
+  // of a $500k share portfolio with $100k cost base in July of year 0
+  // (discounted gain $159,918). Div 293 income must include this FY's
+  // REAL net capital gain, not the pre-CGT measurement-pass figure —
+  // hand-calc: 233,815 (taxable, ex-gain) + 159,918 (gain) + 27,600
+  // (low-tax contributions) = 421,333 > $250k threshold → Div 293 =
+  // 15% × 27,600 = $4,140, paid July of the FOLLOWING FY (same
+  // deferred-to-next-July convention as CGT itself — this is a fix to
+  // the INCOME BASE, not a timing change).
+  it("Division 293 income includes the year's own realised net capital gain, not just the pre-CGT measurement-pass figure", () => {
+    const s = mkState({
+      endAge: 54,
+      plan: { client: { currentAge: 50 }, superAccounts: [superAcct({ balance: 300000, allocation: zeroRealSuperAlloc() })] },
+      assets: [
+        mkAsset({ id: "shares", balance: 500000, cgtAsset: true, costBase: 100000, allocation: growthOnlyAlloc() }),
+        mkAsset({ id: "cash", balance: 50000, cgtAsset: false, costBase: null, allocation: zeroRealAlloc() }),
+      ],
+      cashflows: {
+        income: [employmentRow({ amount: 230000, from: { kind: "age", age: 50 }, to: { kind: "age", age: 54 } })],
+        withdrawals: [{ id: "wd1", assetId: "shares", amount: 400000, frequency: "annual", fromAge: 50, toAge: 50, indexBasis: "none", indexExtraPct: 0 }],
+      },
+    });
+    const out = projectPlan(s);
+    expect(out.yearly[0].taxDetail.client.netCapitalGain).toBeGreaterThan(150000);
+    expect(out.yearly[0].taxDetail.client.div293).toBe(0); // pending, not yet paid
+    // Paid the FOLLOWING FY, sized on the taxable income INCLUDING the
+    // realised gain — close to the review's own $4,140 hand-calc, not
+    // the ~$0 a pre-CGT income base would have produced (the salary and
+    // SG alone sit below the $250k Division 293 threshold).
+    expect(out.yearly[1].taxDetail.client.div293).toBeCloseTo(4140, -1);
   });
 
   it("regression gate: no-super scenarios are still bit-identical after the full Commit 2 cap/tax integration", () => {
@@ -8573,7 +8638,17 @@ describe("Pension phase (spec 20, Commit 4): transfer balance cap and account", 
     }
   });
 
-  it("a member at 100% used gets no further personal-cap indexation, ever, even across many years", () => {
+  // docs/specs/37-review-remediation.md, Commit 5, finding 1.9 changed
+  // what "no further indexation" means for a 100%-used member: the
+  // personal cap's NOMINAL value freezes forever (unusedProportion is
+  // 0, so it never grows again) — but its REAL-dollar EXPRESSION still
+  // declines with CPI, exactly like the general cap's own real value
+  // would at a frozen nominal point. "Frozen" was never a claim that
+  // the REAL figure stays flat; a frozen nominal figure's real value
+  // erodes by construction. The pre-fix engine held the real figure
+  // static instead (finding 1.9's own bug), which is what this test
+  // used to assert.
+  it("a member at 100% used gets no further NOMINAL personal-cap indexation, ever — but its real-dollar value still erodes with CPI, like any frozen nominal figure", () => {
     const out = projectPlan(mkState({
       endAge: 90,
       plan: {
@@ -8582,9 +8657,40 @@ describe("Pension phase (spec 20, Commit 4): transfer balance cap and account", 
         pensions: [pensionRow({ type: "abp", commenceAmount: 2100000 })], // exactly 100% of the FY2026/27 general cap
       },
     }));
-    const cap0 = out.yearly[0].transferBalance.client.personalCap;
     const capLast = out.yearly[out.yearly.length - 1].transferBalance.client.personalCap;
-    expect(capLast).toBeCloseTo(cap0, 0); // frozen for the ENTIRE 30-year run
+    // 30 years of pure 2.5% CPI decay on a nominal figure frozen at
+    // $2.1m: 2,100,000 / 1.025^30 ≈ $1,001,160 — not the $2.1m a
+    // stayed-flat real figure would show.
+    expect(capLast).toBeCloseTo(2100000 / Math.pow(1.025, 30), -3);
+  });
+
+  // docs/specs/37-review-remediation.md, Commit 5, finding 1.9 —
+  // adversarial review's own tbc-ratchet.mjs probe: comparing two REAL
+  // (deflated) GTBC snapshots years apart added every upward $100k
+  // jump but never subtracted the real-terms drift down in between —
+  // a personal cap 23% overstated after 40 years for a member who has
+  // used NONE of it (0% used — the exact case that should just track
+  // the real GTBC, per the review's own analysis: "a real personal cap
+  // that simply STAYS at its plan-start value would have been
+  // approximately right"). Fixed by computing the delta in nominal
+  // dollars; a genuinely unused member's own personal cap should now
+  // stay close to the CURRENT real GTBC every year, not run away above
+  // it.
+  it("a 0%-used member's personal cap tracks the real general transfer balance cap over a long projection — no compounding real-terms ratchet", () => {
+    const out = projectPlan(mkState({
+      endAge: 100,
+      plan: {
+        client: { currentAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })], // never commences — 0% used throughout
+      },
+    }));
+    for (let y = 0; y < out.yearly.length; y += 5) {
+      const realGtbc = superRatesFor(2026 + y, "indexed", 0.025).generalTransferBalanceCap;
+      const personalCap = out.yearly[y].transferBalance.client.personalCap;
+      // Within a few percent of the true real GTBC at every check —
+      // the pre-fix engine was 23% over after 40 years and growing.
+      expect(personalCap).toBeLessThan(realGtbc * 1.05);
+    }
   });
 
   it("excess is flagged at the right amount when a commencement exceeds the personal cap", () => {
@@ -9778,6 +9884,59 @@ describe("Death benefits (spec 22, Commit 1): engine integration", () => {
     expect(b.net).toBeCloseTo(500000 - 68000, 2);
   });
 
+  // docs/specs/37-review-remediation.md, Commit 5, finding 1.7 —
+  // adversarial review probe F: an untaxed-status account's taxable
+  // component was always reported as taxableTaxed (15% + Medicare),
+  // understating the death benefit tax by ~$130,000 on a $500k account.
+  // GESB West State Super (WA public sector) is an untaxed scheme.
+  it("an untaxed-status account's taxable component is taxed at 30% plus Medicare, not the taxed-element 15% rate", () => {
+    const s = mkState({
+      endAge: 41, assets: [],
+      plan: {
+        // Plain zeroRealAlloc, not zeroRealSuperAlloc's grossed-up one —
+        // an untaxed account pays no earnings tax at all, so the plain
+        // cpi-matching allocation already gives exactly 0% real growth
+        // (zeroRealSuperAlloc's own gross-up is specifically for a
+        // TAXED account's 15% earnings-tax haircut).
+        superAccounts: [superAcct({ balance: 500000, taxFreeComponent: 100000, taxedStatus: "untaxed", allocation: zeroRealAlloc() })],
+        client: { currentAge: 40, deathBenefit: { beneficiaries: [beneficiary({ relationship: "adultChild" })] } },
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[out.yearly.length - 1].deathBenefitDetail.client;
+    const b = d.byBeneficiary[0];
+    expect(b.isDependant).toBe(false);
+    // The taxable component (400,000) now reports as taxableUntaxed,
+    // not taxableTaxed — the account-level shape the tax rate reads.
+    const account = d.accounts[0];
+    expect(account.taxableTaxed).toBeCloseTo(0, 2);
+    expect(account.taxableUntaxed).toBeCloseTo(400000, 2);
+    // 400,000 × (30% + 2% Medicare) = 128,000 — not the taxed-element
+    // 68,000 the pre-fix engine reported.
+    expect(b.tax).toBeCloseTo(400000 * 0.32, 2);
+    expect(b.net).toBeCloseTo(500000 - 128000, 2);
+  });
+
+  // A pension has no taxedStatus of its own — it inherits its SOURCE
+  // account's, since the untaxed-ness is a property of the fund the
+  // money sits in, not of the pension wrapper drawing on it.
+  it("a pension sourced from an untaxed-status account also taxes its taxable component at the untaxed rate", () => {
+    const s = mkState({
+      endAge: 63,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60, deathBenefit: { beneficiaries: [beneficiary({ relationship: "adultChild" })] } },
+        superAccounts: [superAcct({ balance: 500000, taxFreeComponent: 0, taxedStatus: "untaxed", allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow()], // commences immediately (client 60 === retirementAge)
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[out.yearly.length - 1].deathBenefitDetail.client;
+    const account = d.accounts.find((a) => a.kind === "pension");
+    expect(account).toBeTruthy();
+    expect(account.taxableUntaxed).toBeGreaterThan(0);
+    expect(account.taxableTaxed).toBeCloseTo(0, 2);
+  });
+
   it("the estate is taxed at 15% with NO Medicare — the real, frequently-missed distinction", () => {
     const s = mkState({
       endAge: 41, assets: [],
@@ -10155,6 +10314,66 @@ describe("Bonus, allowance and overtime income (spec 23, Commit 2)", () => {
     expect(d.contributions).toBeGreaterThan(0);
     // Non-concessional — no fund-tax skim, unlike SG/salary sacrifice.
     expect(d.contributionsTax).toBe(0);
+    // Finding 2.2 — the credit shows on the NCC line too, not only the
+    // generic "contributions" total.
+    expect(d.nonConcessional).toBeCloseTo(d.contributions, 2);
+  });
+
+  // docs/specs/37-review-remediation.md, Commit 5, finding 1.4 —
+  // adversarial review probe E: a bonus redirected to super bypassed
+  // the non-concessional cap entirely, crediting the full after-tax
+  // amount regardless of TSB or the person's own ordinary NCC rows
+  // this same FY. "Two entry paths must not give two answers" — the
+  // same after-tax dollar entered as an ordinary NCC row is capped;
+  // this must be too.
+  it("a bonus directed to super is capped by the SAME non-concessional cap logic an ordinary NCC row uses — nil once TSB reaches the general transfer balance cap", () => {
+    const bonusRow = {
+      ...employmentRow({ id: "b1", amount: 300000, frequency: "annual", from: { kind: "age", age: 55 }, to: { kind: "age", age: 55 } }),
+      category: "bonus", bonusMonth: 6, sgApplies: false,
+      bonusDestination: { type: "superContribution", targetId: "su1" },
+    };
+    const s = mkState({
+      endAge: 56,
+      // TSB $2.6m — past the general transfer balance cap (~$2.1m
+      // FY2026-27), so the law's answer is nil, whether the NCC comes
+      // from an ordinary row or a bonus redirect.
+      plan: { client: { currentAge: 55 }, superAccounts: [superAcct({ balance: 2600000, allocation: zeroRealSuperAlloc() })] },
+      cashflows: { income: [bonusRow] },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    // Nothing credited as NCC — the whole after-tax bonus stays
+    // ordinary household cash instead (not lost, not taxed twice —
+    // conservation still holds, checked separately).
+    expect(d.nonConcessional).toBeCloseTo(0, 2);
+    expect(out.superWarnings.some((w) => w.type === "nonConcessional")).toBe(true);
+  });
+
+  it("a bonus redirect and an ordinary NCC row for the SAME person share the ONE cap this FY, not two independent caps", () => {
+    const bonusRow = {
+      ...employmentRow({ id: "b1", amount: 100000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+      category: "bonus", bonusMonth: 6, sgApplies: false,
+      bonusDestination: { type: "superContribution", targetId: "su1" },
+    };
+    const s = mkState({
+      endAge: 41,
+      plan: { superAccounts: [superAcct({ allocation: zeroRealSuperAlloc() })] },
+      cashflows: {
+        income: [bonusRow],
+        superContributions: [{
+          id: "sc1", owner: "client", accountId: "su1", type: "personalNonDeductible", basis: "amount",
+          amount: 120000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          fhsssEligible: false, indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+    });
+    const out = projectPlan(s);
+    const d = out.yearly[0].superDetail.su1;
+    // Standard cap ~$130,000 (FY2026-27): the $120,000 ordinary NCC row
+    // already consumes most of it, leaving little headroom for the
+    // bonus's own (much smaller, after-tax) redirect — total NCC
+    // credited across BOTH sources must not exceed the one cap.
+    expect(d.nonConcessional).toBeLessThan(135000);
   });
 
   it("a bonus directed to an asset credits it, funded from household cash (not conjured — see conservationCheck.js)", () => {

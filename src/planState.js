@@ -4434,6 +4434,13 @@ function hydrateAsset(a, i, profiles, glidePaths = []) {
     costBase: cgtAsset
       ? clampNumber(a.costBase ?? balance, 0)
       : (a.costBase == null ? null : clampNumber(a.costBase, 0)),
+    // Retirement exclusions (docs/specs/35-retirement-output-view.md,
+    // Commit 3) — restored (docs/specs/37-review-remediation.md, Commit
+    // 5, finding 1.3): this field-by-field reconstruction dropped it
+    // entirely, so a saved exclusion silently reverted to false on
+    // every reload (the asset reappearing in deficit funding).
+    excludeFromRetirement: a.excludeFromRetirement === true,
+    excludeFromRetirementReason: typeof a.excludeFromRetirementReason === "string" ? a.excludeFromRetirementReason.slice(0, 200) : "",
   };
 }
 
@@ -4485,6 +4492,13 @@ function hydrateSuperContributions(arr, plan, superAccountOwnerById, incomeRowId
     to: sc.to,
     indexBasis: sc.indexBasis,
     indexExtraPct: sc.indexExtraPct,
+    // Restored (docs/specs/37-review-remediation.md, Commit 5, finding
+    // 1.3) — clampSuperContribution's own fhsssEligible validation
+    // (above in this file) reads this straight off its input; omitting
+    // it here forced every reload to false regardless of what was
+    // saved (probeJ.mjs's own reproduction: First home buyer's "Buy
+    // 2030 with FHSSS" scenario, $192,213 max netAssets difference).
+    fhsssEligible: sc.fhsssEligible,
   }, plan, superAccountOwnerById, incomeRowIds));
 }
 
@@ -4524,6 +4538,13 @@ function hydrateIncomeRows(arr, plan) {
     taxable: r.taxable,
     bonusMonth: r.bonusMonth,
     bonusDestination: r.bonusDestination,
+    // Restored (docs/specs/37-review-remediation.md, Commit 5, finding
+    // 1.3) — see hydrateAsset's own comment; clampIncomeRow spreads
+    // whatever it's given straight through (`...rest`), so omitting
+    // these here silently reverted a saved exclusion to false/"" on
+    // every reload.
+    excludeFromRetirement: r.excludeFromRetirement,
+    excludeFromRetirementReason: r.excludeFromRetirementReason,
   }, plan));
 }
 

@@ -524,6 +524,64 @@ describe("persistence round-trip (v3)", () => {
     const back = hydrate(serialize(s), PROFILES);
     expect(back.assets[0].owner).toBe("client");
   });
+
+  // docs/specs/37-review-remediation.md, Commit 5, finding 1.3 —
+  // hydrate()'s hydrateAsset/hydrateIncomeRows/hydrateSuperContributions
+  // each reconstruct their row from an explicit field list, which had
+  // silently lagged the schema three times (excludeFromRetirement on
+  // assets AND income rows, fhsssEligible on super contributions);
+  // clampAllToPlan's own equivalent step just spreads the row through
+  // untouched, so it never drops a field. This guard compares the two
+  // paths directly on the SAME input, on every field BOTH agree an
+  // asset/income row/super contribution carries — so the NEXT field
+  // added to one of these rows and forgotten in hydrate's own
+  // reconstruction fails this test, not just a silent reload.
+  it("hydrate and clampAllToPlan agree on every asset/income-row/super-contribution field they both know about", () => {
+    const s = defaultState(PROFILES, NOW);
+    const sup = createSuperAccount(s.plan, [], PROFILES, "client");
+    s.plan = { ...s.plan, superAccounts: [sup] };
+
+    const a2 = createAsset(s.plan, s.assets, PROFILES);
+    Object.assign(a2, {
+      name: "Retirement-excluded asset", balance: 55000, distributions: "cash",
+      allocation: { mode: "profile", profile: "Balanced" }, icrPct: 0.3, cgtAsset: true, costBase: 40000,
+      excludeFromRetirement: true, excludeFromRetirementReason: "Legacy for children",
+    });
+    s.assets.push(a2);
+
+    const inc = createIncomeRow(s.plan, []);
+    Object.assign(inc, {
+      owner: "client", amount: 12000, incomeType: "otherTaxable", category: "otherTaxable",
+      excludeFromRetirement: true, excludeFromRetirementReason: "One-off, not recurring income",
+    });
+    s.cashflows.income.push(inc);
+
+    const sc = createSuperContribution(s.plan, [sup], "client");
+    Object.assign(sc, { type: "personalDeductible", basis: "amount", amount: 5000, fhsssEligible: true });
+    s.cashflows.superContributions.push(sc);
+
+    const clamped = clampAllToPlan(s, PROFILES);
+    const back = hydrate(serialize(s), PROFILES);
+    expect(back).not.toBeNull();
+
+    const clampedAsset = clamped.assets.find((a) => a.id === a2.id);
+    const backAsset = back.assets.find((a) => a.id === a2.id);
+    for (const key of ["balance", "distributions", "icrPct", "cgtAsset", "costBase", "excludeFromRetirement", "excludeFromRetirementReason"]) {
+      expect(backAsset[key], `asset.${key}`).toEqual(clampedAsset[key]);
+    }
+
+    const clampedIncome = clamped.cashflows.income.find((r) => r.id === inc.id);
+    const backIncome = back.cashflows.income.find((r) => r.id === inc.id);
+    for (const key of ["owner", "amount", "incomeType", "category", "excludeFromRetirement", "excludeFromRetirementReason"]) {
+      expect(backIncome[key], `income.${key}`).toEqual(clampedIncome[key]);
+    }
+
+    const clampedSc = clamped.cashflows.superContributions.find((r) => r.id === sc.id);
+    const backSc = back.cashflows.superContributions.find((r) => r.id === sc.id);
+    for (const key of ["type", "basis", "amount", "fhsssEligible"]) {
+      expect(backSc[key], `superContribution.${key}`).toEqual(clampedSc[key]);
+    }
+  });
 });
 
 describe("summaries", () => {

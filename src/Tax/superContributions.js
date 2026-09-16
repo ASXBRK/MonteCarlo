@@ -110,7 +110,15 @@ export function processNonConcessionalCap({ requestedNCC, baseCap, tsbPriorJune,
 
   let capThisYear;
   if (bf) {
-    capThisYear = bf.remaining;
+    // docs/specs/37-review-remediation.md, Commit 5, finding 1.5 —
+    // s292-85(2): the cap for a year is NIL if TSB immediately before
+    // that year's start is at/above the general transfer balance cap,
+    // whether or not a bring-forward window is running. An OPEN window
+    // used to ignore this entirely and keep honouring its own remaining
+    // $ balance regardless of how far TSB had since grown (probe: a
+    // window opened at $1.8m TSB still accepted $190k two years later
+    // at $2.14m TSB, when the law's answer is nil).
+    capThisYear = tsbPriorJune >= thresholds.one ? 0 : bf.remaining;
   } else {
     const tier = bringForwardTierFor(tsbPriorJune, thresholds, baseCap);
     if (requestedNCC > baseCap && tier.years > 1) {
@@ -124,7 +132,15 @@ export function processNonConcessionalCap({ requestedNCC, baseCap, tsbPriorJune,
   const accepted = Math.max(0, Math.min(requestedNCC, capThisYear));
   const rejected = Math.max(0, requestedNCC - accepted);
   const newBringForward = bf ? { ...bf, remaining: Math.max(0, capThisYear - accepted) } : null;
-  return { accepted, rejected, bringForward: newBringForward };
+  // capThisYear (docs/specs/37-review-remediation.md, Commit 5, finding
+  // 1.4) — the year's own approved cap regardless of how much was
+  // actually REQUESTED by ordinary NCC rows, so a caller with a SECOND,
+  // same-year claim on the same person's headroom (a bonus redirected
+  // to super, which bypasses schedule.js's own superFlows entirely —
+  // see deterministic.js's bonusCredits block) can compute what's left
+  // (capThisYear − accepted) without a second, drifting cap
+  // computation of its own.
+  return { accepted, rejected, bringForward: newBringForward, capThisYear };
 }
 
 // --- Division 293 -------------------------------------------------------

@@ -200,9 +200,12 @@ function ownerShares(asset, couple) {
 // itself.
 //
 // The untaxed element applies only to untaxed-source funds (some
-// public sector); NOT modelled (disclosed) — this tool has no
-// untaxed-source fund concept anywhere — so taxableUntaxed is always
-// 0, reported as its own column rather than silently omitted.
+// public sector) — an account/pension with taxedStatus "untaxed" (spec
+// 26, Commit 1) reports its taxable component as taxableUntaxed instead
+// of taxableTaxed; every other account reports taxableUntaxed 0, its
+// own column rather than silently omitted (docs/specs/
+// 37-review-remediation.md, Commit 5, finding 1.7 — this comment
+// predates spec 26 and was never updated when taxedStatus landed).
 //
 // Tax (Commit 1's own table): a dependant (spouse/minor child/
 // interdependent/financial dependant) receives every component NANE,
@@ -275,7 +278,19 @@ function computeDeathBenefitForPerson(owner, person, superAccounts, pensionRows,
     const d = finalRow.superDetail[s.id];
     if (!d) continue;
     const taxFree = Math.min(Math.max(0, d.taxFreeClosing), d.closing);
-    accounts.push({ id: s.id, name: s.name, kind: "super", closing: d.closing, taxFree, taxableTaxed: Math.max(0, d.closing - taxFree), taxableUntaxed: 0 });
+    const taxableAmount = Math.max(0, d.closing - taxFree);
+    // Untaxed-source funds (docs/specs/37-review-remediation.md, Commit
+    // 5, finding 1.7; spec 26, Commit 1's own taxedStatus, added AFTER
+    // this function's original "no untaxed-source fund concept
+    // anywhere" comment) — an untaxed account's taxable component is
+    // taxableUNTAXED (30% + Medicare to a non-dependant), not
+    // taxableTaxed (15% + Medicare). GESB West State Super is an
+    // untaxed scheme.
+    const untaxed = s.taxedStatus === "untaxed";
+    accounts.push({
+      id: s.id, name: s.name, kind: "super", closing: d.closing, taxFree,
+      taxableTaxed: untaxed ? 0 : taxableAmount, taxableUntaxed: untaxed ? taxableAmount : 0,
+    });
   }
   for (const pn of pensionRows) {
     if (pn.owner !== owner) continue;
@@ -283,7 +298,15 @@ function computeDeathBenefitForPerson(owner, person, superAccounts, pensionRows,
     const d = finalRow.pensionDetail[pn.id];
     if (!d) continue;
     const taxFree = Math.min(Math.max(0, d.taxFreeClosing), d.closing);
-    accounts.push({ id: pn.id, name: pn.name, kind: "pension", closing: d.closing, taxFree, taxableTaxed: Math.max(0, d.closing - taxFree), taxableUntaxed: 0 });
+    const taxableAmount = Math.max(0, d.closing - taxFree);
+    // A pension inherits its untaxed status from its SOURCE account —
+    // the pension row itself carries no taxedStatus of its own.
+    const sourceAccount = superAccounts.find((s) => s.id === pn.sourceAccountId);
+    const untaxed = sourceAccount?.taxedStatus === "untaxed";
+    accounts.push({
+      id: pn.id, name: pn.name, kind: "pension", closing: d.closing, taxFree,
+      taxableTaxed: untaxed ? 0 : taxableAmount, taxableUntaxed: untaxed ? taxableAmount : 0,
+    });
   }
 
   const byBeneficiary = beneficiaries.map((b) => {
@@ -767,7 +790,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const transferBalanceCap0 = superRatesFor(fy0, superIndexMode, cpi).generalTransferBalanceCap;
   const tba = { client: createTransferBalanceAccount(transferBalanceCap0), partner: null };
   if (state.plan.partner) tba.partner = createTransferBalanceAccount(transferBalanceCap0);
-  let lastTransferBalanceCap = transferBalanceCap0;
+  // NOMINAL, not real (docs/specs/37-review-remediation.md, Commit 5,
+  // finding 1.9) — real == nominal at plan start (inflAt(0) === 1), so
+  // this is the same starting value either way; see the yearly
+  // computation below for why it must stay nominal from here on.
+  let lastNominalTransferBalanceCap = transferBalanceCap0;
   const pensionTbaCredited = {};
   for (const pn of pensionRows) pensionTbaCredited[pn.id] = false;
 
@@ -4250,7 +4277,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               row.liabilities[credit.targetId].extraRepayment += consumed;
             }
           } else if (credit.type === "superContribution") {
-            const consumed = Math.min(available, credit.amount);
+            // docs/specs/37-review-remediation.md, Commit 5, finding
+            // 1.4 — capped at whatever NCC headroom this person's
+            // ORDINARY contributions haven't already consumed this FY
+            // (nonConcessionalHeadroomAfterFills, resolved once above,
+            // debited live here — the same same-year-second-claim
+            // pattern concessionalHeadroomAfterFills already guards).
+            // The excess is NOT credited (money bug 7's own rule:
+            // reject, don't create) — it simply falls through and
+            // stays ordinary household cash, exactly like an amount
+            // this month's wcaBal genuinely can't cover.
+            const creditOwner = superMeta[credit.targetId]?.owner;
+            const headroom = Math.max(0, superOutcome[creditOwner]?.nonConcessionalHeadroomAfterFills ?? 0);
+            const consumed = Math.min(available, credit.amount, headroom);
             if (consumed > 0) {
               // Non-concessional (post-tax) credit — the amount is
               // already net of the bonus's own income tax, so no
@@ -4260,6 +4299,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
               superTaxFree[credit.targetId] += consumed;
               wcaBal -= consumed;
               row.superDetail[credit.targetId].contributions += consumed;
+              row.superDetail[credit.targetId].nonConcessional += consumed;
+              superOutcome[creditOwner].nonConcessionalHeadroomAfterFills -= consumed;
+            }
+            if (headroom < credit.amount) {
+              superWarnings.push({
+                fyLabel: schedule.fyLabels[y], owner: creditOwner, type: "nonConcessional",
+                reason: `Bonus redirected to super exceeds the non-concessional cap — $${Math.round(credit.amount - Math.max(0, consumed))} not credited, stays as ordinary cash`,
+              });
             }
           } else if (credit.type === "asset") {
             const consumed = Math.min(available, credit.amount);
@@ -4377,6 +4424,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           for (const id of superIds) {
             if (shortfall <= 0) break;
             if (!superReleased[superMeta[id].owner]) continue;
+            // docs/specs/37-review-remediation.md, Commit 5, finding
+            // 1.12 — the ordinary fundingOrder filter (above, ~line
+            // 1584) already excludes excludeFromRetirement accounts;
+            // this fallback must honour the same flag, or an account
+            // marked "never touch for retirement funding" gets drained
+            // the moment the ordinary funding order runs dry.
+            if (superMeta[id].excludeFromRetirement) continue;
             const paid = withdrawFromSuperTaxed(id, shortfall, superMeta[id].owner);
             shortfall -= paid;
             wcaBal += paid;
@@ -5123,9 +5177,19 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // whatever each person's account already holds; no cash/balance
     // mutation, so it's safe to apply UNGATED, identically in both
     // passes — the same reasoning superRatesY's own resolution uses).
-    const generalCapDelta = superRatesY.generalTransferBalanceCap - lastTransferBalanceCap;
-    for (const p of persons) tba[p] = indexTransferBalanceCap(tba[p], generalCapDelta);
-    lastTransferBalanceCap = superRatesY.generalTransferBalanceCap;
+    //
+    // docs/specs/37-review-remediation.md, Commit 5, finding 1.9 — see
+    // indexTransferBalanceCap's own header (pensionTba.js) for the full
+    // reasoning. nominalStep is this FY's own increase in the general
+    // cap's NOMINAL value (0 in every year it doesn't step); inflNow
+    // lets that module re-derive each person's REAL personalCap fresh
+    // this year, not leave it static between steps the way the
+    // pre-fix engine did.
+    const nowMonth = yearStartIdx(y);
+    const nominalCapNow = superRatesY.generalTransferBalanceCap * inflAt(nowMonth);
+    const nominalStep = Math.max(0, nominalCapNow - lastNominalTransferBalanceCap);
+    for (const p of persons) tba[p] = indexTransferBalanceCap(tba[p], nominalStep, inflAt(nowMonth));
+    lastNominalTransferBalanceCap = nominalCapNow;
     // HELP indexes to the LOWER of CPI and WPI (assumptions-provenance
     // .md §5.3) — wageGrowthAssum is itself a WPI-basis rate now (the
     // §1.2 split), a materially closer proxy than the AWOTE figure
@@ -5248,6 +5312,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // exact class of bug reserveFromSuper closed for adviser fees/
         // Division 293/296/FHSSS sharing one account).
         concessionalHeadroomAfterFills: Math.max(0, superCapUsage[p].available - fillTotal),
+        // docs/specs/37-review-remediation.md, Commit 5, finding 1.4 —
+        // remaining non-concessional headroom after this FY's ordinary
+        // NCC rows (grossNCC, above), the SAME class of same-year-
+        // second-claim guard concessionalHeadroomAfterFills gives CC: a
+        // bonus redirected to super is a genuine second claim on this
+        // person's ONE cap, resolved later in the monthly loop
+        // (bonusCredits), and must not independently believe the FULL
+        // cap is still available.
+        nonConcessionalHeadroomAfterFills: Math.max(0, nccResult.capThisYear - nccResult.accepted),
       };
     }
 
@@ -5916,24 +5989,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       }
     }
 
-    // Division 293 (Tier 1.2, Commit 2): assessed this FY on the
-    // taxable income just computed, paid as a household outflow in
-    // July of FY t+1 (same convention as CGT — folded into cgtDue
-    // above, reported separately via div293DueDetail/taxDetail).
+    // Division 293 (Tier 1.2, Commit 2): assessed this FY, paid as a
+    // household outflow in July of FY t+1 (same convention as CGT —
+    // folded into cgtDue above, reported separately via
+    // div293DueDetail/taxDetail). Computed below, inside the a2 loop —
+    // NOT here from assessed[p].taxableIncome — see that loop's own
+    // comment (docs/specs/37-review-remediation.md, Commit 5, finding
+    // 1.8).
     const newPendingDiv293 = { client: 0, partner: 0 };
-    for (const p of persons) {
-      const outcome = superOutcome[p];
-      if (!outcome) continue;
-      const { tax } = div293Tax({
-        taxableIncome: assessed[p].taxableIncome,
-        reportableSuperContributions: outcome.reportableSuperContributions,
-        lowTaxContributions: outcome.lowTaxContributions,
-        reportableFringeBenefits: reportableFringeBenefits[p],
-        threshold: superRatesY.div293Threshold,
-        rate: superRatesY.div293Rate,
-      });
-      newPendingDiv293[p] = tax;
-    }
 
     // Pass 2 — the real year, with the PAYG spread applied.
     const row = mkYearRow(y);
@@ -6216,6 +6279,29 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       });
       lossCarryFwd[p] = a2.lossCarryFwd;
       newPending[p] = a2.cgtTax;
+      // docs/specs/37-review-remediation.md, Commit 5, finding 1.8 —
+      // Division 293 income is taxable income (here, a2.taxableIncome —
+      // includes this FY's REAL net capital gain, unlike the
+      // measurement pass's assessed[p].taxableIncome, which this used
+      // to read: CGT's own exact size isn't known until the real pass
+      // runs, same reason bond/untaxed-super tax above are also
+      // assessed from real[p], not measured[p]) plus reportable super
+      // contributions plus low-tax contributions plus reportable
+      // fringe benefits. Not a timing change — div293 already defers
+      // its cash effect to July of FY t+1 via this SAME newPendingDiv293
+      // ledger; only the INCOME BASE it's computed from moves later,
+      // to where the true figure exists.
+      if (superOutcome[p]) {
+        const { tax } = div293Tax({
+          taxableIncome: a2.taxableIncome,
+          reportableSuperContributions: superOutcome[p].reportableSuperContributions,
+          lowTaxContributions: superOutcome[p].lowTaxContributions,
+          reportableFringeBenefits: reportableFringeBenefits[p],
+          threshold: superRatesY.div293Threshold,
+          rate: superRatesY.div293Rate,
+        });
+        newPendingDiv293[p] = tax;
+      }
       if (bondDeficitAssessableWithdrawal > 0) {
         const withoutBond = assessPerson({
           fyStartYear: fyStart, bracketMode, cpi,

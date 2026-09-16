@@ -4502,6 +4502,125 @@ coverage. Full suite 2158/2158, build green, browser-verified (fresh
 load, adding a super account and a pension, and navigating ten output
 views — zero console errors).
 
+### Review remediation, Commit 5: rule corrections (spec 37b)
+
+Seven contained fixes (the spec's own table header says six; it lists
+seven — all seven are findings, all seven are fixed here).
+
+**1.3 — hydrate/clamp field drift.** `hydrateAsset` and
+`hydrateIncomeRows` were silently dropping `excludeFromRetirement`,
+`excludeFromRetirementReason` and (on super contributions)
+`fhsssEligible` on reopen, even though `clampAllToPlan` preserved them —
+a saved plan reopened with different numbers than the one that was
+saved. Added the missing fields to both hydrators, plus a new generic
+guard test that walks the hydrate and clamp field sets and fails if they
+ever diverge again, so the next field added to one and forgotten in the
+other is caught by construction, not by a user noticing their numbers
+changed.
+
+**1.4 / 2.2 — bonus-to-super bypasses the NCC cap.** The bonus-redirect-
+to-super credit path added money straight to the super balance without
+checking the non-concessional cap at all — a second, silent entry point
+to the same account the ordinary NCC row is capped through. Routed
+through the same `processNonConcessionalCap` headroom every ordinary NCC
+contribution draws down (`nonConcessionalHeadroomAfterFills`, the same
+"second same-year claim on a shared resource" pattern
+`concessionalHeadroomAfterFills` already established for a different
+cap) — a bonus that would breach the cap is only partly credited, the
+remainder stays as ordinary cash, and a warning names the amount
+rejected. This also closes **2.2** (the same rejected/accepted split now
+reports on the NCC line via `superDetail[...].nonConcessional`, where it
+was invisible before).
+
+**1.5 — bring-forward window vs a later TSB at the general cap.**
+`processNonConcessionalCap` ignored a mid-window TSB rise to at-or-above
+the general transfer balance cap; a member who crossed that threshold
+inside an open bring-forward window kept accruing cap room they were no
+longer entitled to. `capThisYear` (new field, also the mechanism 1.4
+consumes) is now nil once the open window's own TSB check trips, not
+just at a fresh cap evaluation.
+
+**1.7 — untaxed death benefit taxed at the wrong rate.** A super account
+or pension with `taxedStatus: "untaxed"` (spec 26 — GESB West State and
+similar) had its death benefit taxable component routed into
+`taxableTaxed` (15% + Medicare) instead of `taxableUntaxed` (30% +
+Medicare) — understating the tax by ~$130,000 on the review's own probe.
+`computeDeathBenefitForPerson` now checks `taxedStatus` for both the
+super-account path and the pension path (a pension carries no
+`taxedStatus` of its own — it inherits its source account's, via
+`sourceAccountId`).
+
+**1.8 — Division 293 and HELP exclude the year's net capital gain.**
+Division 293 fixed: moved its computation from the early, pre-CGT pass
+to inside the per-person `a2` loop, once `real[p].netCapitalGain` is
+final, so a year with a large realised gain now correctly contributes to
+the Division 293 income test. **HELP repayment left unfixed, deliberately
+scoped out**: HELP's income base has the identical omission, but HELP's
+tax is already cash-effected within the same FY via `spreadTax`, not
+deferred like Division 293's `pendingDiv293`/paid-July-of-FY-t+1
+pattern — correcting it would need a new deferred top-up mechanism
+(analogous to the existing `pendingBondTax`/`pendingUntaxedSuperTax`
+lagged-differencing pattern), which under CLAUDE.md's own money-flow
+rule would require a `randomScenario()` and `conservationCheck.js`
+extension for what is, on the review's own findings, a single line item.
+Recorded here rather than fixed silently narrow; worth its own follow-up
+if HELP-liable clients with large capital gains are a real segment.
+
+**1.9 — personal transfer balance cap ratchets upward in real terms.**
+The most structurally involved fix in this commit. The personal TBC was
+tracked directly in real terms, adding only the real-dollar-equivalent
+of a genuine nominal step and otherwise left untouched between steps —
+which silently assumed a real figure needs no adjustment between step
+years. It does: a nominal-flat quantity's real value must decline every
+year CPI erodes it, exactly like the general cap's own real value does.
+Left static between steps, a 0%-used member's personal cap only ever
+ratcheted upward relative to the true real general cap — **nearly double
+it after 40 years** on the review's own reproduction. `pensionTba.js`
+redesigned to track `personalCapNominal` explicitly (the nominal figure
+only ever moves at genuine $100,000 steps, weighted by the unused
+proportion) and re-derive `personalCap` (real) fresh on every call by
+deflating with the current year's own `inflAt` — not just at step years.
+`indexTransferBalanceCap`'s signature gained a third argument
+(`inflNow`); every caller updated. **This is a material tightening, not
+a cosmetic one** — any existing scenario whose output depends on a
+member's personal transfer balance cap in a plan year more than a few
+years past a general-cap step will show a materially lower personal cap
+than before this commit, for members who have used only part of their
+cap. A 0%-used member 40 years out previously saw a personal cap
+approaching 2× the true real general cap; correctly, they now track it
+at parity.
+
+**1.12 — deficit fallback drains an excluded super account.** The
+ordinary `fundingOrder` filter already excludes
+`excludeFromRetirement` accounts (spec 35, Commit 3) but the separate
+deficit-fallback loop — the one that drains *released* super only once
+`fundingOrder` itself is exhausted — had no such check, so an account
+marked "never touch" was drained the moment ordinary funding ran dry.
+One-line fix mirroring the existing `fundingOrder` filter's own
+`!meta[id]?.excludeFromRetirement` check.
+
+**Not a new money flow.** None of these seven touch a flow
+`randomScenario()`/`conservationCheck.js` don't already generate and
+account for (NCC, death benefits, Division 293, the transfer balance
+cap and the super deficit fallback are all pre-existing, already-
+registered flows) — no registry or invariant extension required per
+CLAUDE.md's own gate for this class of change.
+
+Tests: one dedicated test per finding (bonus-NCC cap + shared-headroom
+interaction for 1.4; bring-forward-nil-at-TSB for 1.5; both super-
+account and pension death-benefit paths for 1.7; Div293-includes-CGT for
+1.8; two new `pensionTba.test.js` cases proving the real-decline/
+nominal-frozen split for 1.9, five existing ones updated for the new
+`inflNow` argument, and `deterministic.test.js`'s own "100% used" test
+rewritten — it had encoded the pre-fix, buggy expectation, that the real
+cap stays frozen at parity forever, rather than the correct one, that
+the *nominal* cap freezes while its real expression keeps eroding with
+CPI; a new hydrate/clamp field-set guard for 1.3; a new deficit-fallback
+exclusion test for 1.12, mirroring the existing fundingOrder-level
+exclusion test). Full suite 2171/2171, build green.
+
+Commit: `Fix: rule corrections from the 2026-09 review`.
+
 ---
 
 ## WHERE WE'RE GOING

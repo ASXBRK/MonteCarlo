@@ -165,6 +165,45 @@ describe("processNonConcessionalCap", () => {
     expect(r.accepted).toBe(100000);
     expect(r.bringForward).toBeNull(); // back to the flat annual cap (no new trigger, since 100k <= 130k)
   });
+
+  // docs/specs/37-review-remediation.md, Commit 5, finding 1.5 —
+  // adversarial review probe C: an OPEN bring-forward window ignored a
+  // later TSB reaching the general transfer balance cap and kept
+  // honouring its own remaining $ balance regardless. s292-85(2): the
+  // cap is nil in ANY year TSB at prior 30 June is at/above the GTBC,
+  // whether or not a bring-forward period is running.
+  it("an open bring-forward window is capped NIL once TSB reaches the general transfer balance cap mid-window, regardless of its own remaining balance", () => {
+    const triggered = { triggeredYear: 0, years: 3, remaining: 190000 };
+    const r = processNonConcessionalCap({
+      requestedNCC: 190000, baseCap: BASE_CAP, tsbPriorJune: 2137215, thresholds: THRESHOLDS, bringForward: triggered, planYear: 2,
+    });
+    expect(r.accepted).toBe(0);
+    expect(r.rejected).toBe(190000);
+  });
+
+  it("an open bring-forward window still honours its own remaining balance when TSB stays below the general transfer balance cap", () => {
+    const triggered = { triggeredYear: 0, years: 3, remaining: 190000 };
+    const r = processNonConcessionalCap({
+      requestedNCC: 190000, baseCap: BASE_CAP, tsbPriorJune: 2000000, thresholds: THRESHOLDS, bringForward: triggered, planYear: 2,
+    });
+    expect(r.accepted).toBe(190000);
+    expect(r.rejected).toBe(0);
+  });
+
+  // capThisYear (finding 1.4) — exposed so a caller with a second,
+  // same-year claim on the same cap (a bonus redirected to super) can
+  // compute remaining headroom without a second cap computation.
+  it("capThisYear reports the year's own approved cap regardless of how much was actually requested", () => {
+    const partial = processNonConcessionalCap({
+      requestedNCC: 50000, baseCap: BASE_CAP, tsbPriorJune: 1000000, thresholds: THRESHOLDS, bringForward: null, planYear: 0,
+    });
+    expect(partial.capThisYear).toBe(BASE_CAP);
+    expect(partial.capThisYear - partial.accepted).toBe(80000); // headroom a second claimant could still use
+    const nil = processNonConcessionalCap({
+      requestedNCC: 50000, baseCap: BASE_CAP, tsbPriorJune: 2200000, thresholds: THRESHOLDS, bringForward: null, planYear: 0,
+    });
+    expect(nil.capThisYear).toBe(0);
+  });
 });
 
 describe("div293Tax", () => {

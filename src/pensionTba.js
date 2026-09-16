@@ -35,18 +35,52 @@
 // invariant needs to know about.
 
 export function createTransferBalanceAccount(generalCap) {
-  return { balance: 0, personalCap: generalCap, highestUsedPct: 0, hasBreached: false };
+  // personalCapNominal (docs/specs/37-review-remediation.md, Commit 5,
+  // finding 1.9) — real === nominal at plan start (the caller's own
+  // generalCap here is already the FY0 real figure, which equals
+  // nominal at t=0). See indexTransferBalanceCap's own header for why
+  // this field exists.
+  return { balance: 0, personalCap: generalCap, personalCapNominal: generalCap, highestUsedPct: 0, hasBreached: false };
 }
 
-// Applied once per FY, before that FY's own credit events — grows the
-// personal cap by the UNUSED proportion (1 − highestUsedPct, floored at
-// 0 so a member already over 100% gets none) of however much the
-// general cap itself increased since the last time this ran. A no-op
-// when the general cap hasn't moved (most years, between $100k steps).
-export function indexTransferBalanceCap(tba, generalCapDelta) {
-  if (!(generalCapDelta > 0)) return tba;
+// Applied once per FY, before that FY's own credit events. The
+// personal transfer balance cap is fundamentally a NOMINAL quantity
+// (docs/specs/37-review-remediation.md, Commit 5, finding 1.9) — it
+// starts at the general cap's own nominal value and grows ONLY via
+// discrete, $100,000-stepped nominal increases (weighted by the unused
+// proportion, 1 − highestUsedPct, floored at 0 so a member already
+// over 100% gets none) — held FLAT in nominal terms between steps,
+// exactly like the general cap itself. This function tracks that
+// nominal figure directly (personalCapNominal, inside tba) and
+// re-derives the REAL personalCap this engine reads everywhere else by
+// deflating it fresh EVERY call, not just at step years.
+//
+// This used to instead track personalCap directly in REAL terms,
+// adding only the real-dollar-equivalent of a genuine step and
+// otherwise leaving it untouched — which silently assumed a real
+// figure needs no further adjustment between steps. It does: a
+// nominal-flat quantity's REAL value drifts DOWN every year CPI erodes
+// it, exactly as the general cap's own real value does (compare
+// superRatesFor's own generalTransferBalanceCap across two adjacent
+// FYs) — for a 0%-used member, whose personal cap should track the
+// general cap's real value EXACTLY at every point (not just step
+// points, since nominal cap === general cap nominal at 100% unused),
+// leaving the real figure static between steps meant it only ever
+// ratcheted upward relative to the real general cap it's meant to
+// track — 40 years compounded a 0%-used member's cap to nearly DOUBLE
+// the true real general transfer balance cap.
+//
+// nominalStep: this FY's own increase in the general cap's NOMINAL
+// value (0 in every year it doesn't step — the general cap is
+// monotonic in nominal terms, so this is never negative).
+// inflNow: the cumulative nominal-to-real deflation factor at this
+// FY's own point (deterministic.js's inflAt(yearStartIdx(y))) — used
+// to re-derive personalCap in real terms from the tracked nominal
+// figure, THIS year, not whatever year personalCapNominal last moved.
+export function indexTransferBalanceCap(tba, nominalStep, inflNow) {
   const unusedProportion = Math.max(0, 1 - tba.highestUsedPct);
-  return { ...tba, personalCap: tba.personalCap + unusedProportion * generalCapDelta };
+  const personalCapNominal = tba.personalCapNominal + unusedProportion * nominalStep;
+  return { ...tba, personalCapNominal, personalCap: personalCapNominal / inflNow };
 }
 
 // A credit — pension commencement (ABP: always, at commencement; TTR:
