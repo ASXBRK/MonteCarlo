@@ -131,7 +131,13 @@ for the authoritative field list; nothing here is engine-specific.
 
 ### `settings` (optional)
 `{ surplus: { periods: [...] }, fundingOrder: [assetId, ...], deficit: { minimumBalances, sellRule } }`.
-Missing entirely is fine — `fundingOrder` defaults from `assets`.
+Missing entirely is fine — `fundingOrder` defaults from `assets`. Since
+`2.0.0`, `surplus.periods` is a condition-based cascade — an ordered array
+of steps `{ id, branches: [{ id, destination, pct, conditions }] }` — not
+the old time-bounded period/allocation shape; see the `2.0.0` versioning
+row below and docs/specs/37-surplus-cascade.md. `normaliseSettings`
+(`planState.js`) tolerates the old period shape and the pre-Commit-1
+`{mode, assetId}` shorthand as input, migrating both forward automatically.
 
 ### `display` (optional)
 `{ units: "real" | "nominal" }` — a UI display concern only; the engine
@@ -412,6 +418,7 @@ the STORED INPUT (the plan state schema; currently 18). Rule:
 | `1.3.0` | Additive: yearly-row `incomeRequired` (spec 32, Commit 1) — the household's stated Income Required, real $, resolved and indexed per `plan.retirement.incomeRequired`. A REFERENCE figure only, never fed back into projection arithmetic; `null` for every plan year before the requirement's own `startAt` (defaults to the client's own retirement key date). Compare it against `yearly[y].income - yearly[y].tax` (after-tax household income), never against gross drawdown — see docs/specs/32-retirement-phase-one.md's own "Interpretation to fix and state". |
 | `1.4.0` | Additive: top-level `retirementWarnings` (spec 32, Commit 2) — ASFA benchmark staleness, raised only when `plan.retirement.incomeRequired.source` is `asfaComfortable`/`asfaModest` AND the projection's own final calendar month falls past the loaded ASFA quarter's assumed validity window (same convention as `agedCareWarnings`' own staleness entry). `incomeRequired`'s own `source` enum widens to include `asfaComfortable`/`asfaModest`, now resolvable against `src/data/asfaStandards.js`. |
 | `1.5.0` | Additive: yearly-row `excludedFromRetirementBalance` (spec 35, Commit 3) — real $, the sum of every asset/super-account balance flagged `excludeFromRetirement` at that year's close. A pure read of balances already tracked elsewhere on the same row (`perAssetClosing`/`superDetail`), never a new money flow. `asset`/`superAccount`/`incomeRow` each gain `excludeFromRetirement` (bool, default false) and `excludeFromRetirementReason` (string) — retirement-scoped, distinct from `include`: an excluded item still exists, still grows, still appears in net assets and every other view; it is simply never drawn on to fund retirement (dropped from the `fundingOrder` deficit-draining list; a pension sourced from an excluded super account is dropped from the shared income-driven-drawdown target only, still paying its own statutory minimum). An excluded income row has no balance to report here — its own effect is display-side only (`retirementAnalytics.js`'s household-income aggregation), a disclosed simplification. |
+| `2.0.0` | **Breaking**: `schedule.surplusPeriods` renamed and restructured to `schedule.surplusCascade` (spec 37, Commit 1) — the period/allocation model (time-bounded periods, each with `payNonDeductibleDebtFirst`/`debtOrder`/`allocations`/`remainderTo`) is replaced by a condition-based cascade: an ordered array of steps, each `{ id, branches: [{ id, destination, pct, conditions }] }`. A branch's `destination` names where its share goes (`debt` — with `deductibility`/`loanIds`/`order`; `asset`; `superConcessional`; `goal`; `cash`; `expenditure`); its `conditions` (`repaid`, `balanceBelow`, `valueReaches`, `date`) gate whether the branch is open, re-evaluated fresh at every FY-end sweep — a condition can un-satisfy (e.g. an asset target met then lost to a later withdrawal) and the branch reopens. `settings.surplus.periods` (the wire/storage field name) is unchanged; existing stored periods migrate automatically and bit-identically (see docs/specs/37-surplus-cascade.md). |
 
 Any commit that changes the result shape must update `ENGINE_VERSION`,
 this table, and the Commit 4 contract-shape snapshot in the SAME commit

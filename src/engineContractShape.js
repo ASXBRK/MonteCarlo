@@ -403,27 +403,29 @@ export const COMMITTED_SHAPE ={
       "array",
       "empty"
     ],
-    "surplusPeriods": [
+    "surplusCascade": [
       "array",
       {
-        "allocations": [
+        "branches": [
           "array",
-          "empty"
+          {
+            "conditions": [
+              "array",
+              {
+                "kind": "string"
+              }
+            ],
+            "destination": {
+              "deductibility": "string",
+              "loanIds": "null",
+              "order": "string",
+              "type": "string"
+            },
+            "id": "string",
+            "pct": "number"
+          }
         ],
-        "debtOrder": "string",
-        "from": {
-          "anchorId": "string",
-          "kind": "string"
-        },
-        "fromYear": "number",
-        "id": "string",
-        "payNonDeductibleDebtFirst": "boolean",
-        "remainderTo": "string",
-        "to": {
-          "anchorId": "string",
-          "kind": "string"
-        },
-        "toYear": "number"
+        "id": "string"
       }
     ],
     "terminationEvents": [

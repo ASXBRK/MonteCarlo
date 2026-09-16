@@ -4159,17 +4159,83 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
     }
 
-    const surplus = {
-      periods: [{
-        id: "sp1",
-        from: { kind: "anchor", anchorId: "start" },
-        to: { kind: "anchor", anchorId: "end" },
-        payNonDeductibleDebtFirst: Math.random() < 0.5,
-        debtOrder: pick(["interestRate", "manual"]),
-        allocations,
-        remainderTo: pick(["cash", "expenditure"]),
-      }],
-    };
+    // Native cascade authoring (docs/specs/37-surplus-cascade.md, Commit
+    // 1) — half the time, bypass the old period/allocations shape above
+    // entirely and author a genuinely multi-step, split, conditioned
+    // cascade directly in the NEW vocabulary, drawing from the SAME
+    // candidate pools (assets/liabilities/superContributions/goals) the
+    // old-shape allocations above already use. This is what actually
+    // exercises splits, un-satisfying conditions (a valueReaches/
+    // balanceBelow target met one sweep and lost the next, to a later
+    // withdrawal or a sibling branch's own contribution), and a
+    // superConcessional branch capped/"rejected" at cap headroom with
+    // its remainder cascading on — none of which the old single-period
+    // shape above can express, migration-tolerance coverage
+    // notwithstanding. Per CLAUDE.md: "any commit that introduces a new
+    // money flow must extend randomScenario() ... in the SAME commit."
+    const eligibleSuperContributions = superContributions.filter(
+      (sc) => sc.type === "salarySacrifice" || sc.type === "personalDeductible"
+    );
+    function randomCascadeDestination() {
+      const options = [];
+      if (liabilities.length) options.push("debt");
+      if (assets.length) options.push("asset");
+      if (eligibleSuperContributions.length) options.push("superConcessional");
+      if (goals.length) options.push("goal");
+      options.push("cash", "expenditure");
+      const type = pick(options);
+      if (type === "debt") {
+        return {
+          type: "debt",
+          deductibility: pick(["nonDeductible", "deductible", "any"]),
+          loanIds: Math.random() < 0.3 ? [pick(liabilities).id] : null,
+          order: pick(["interestRate", "manual"]),
+        };
+      }
+      if (type === "asset") return { type: "asset", targetId: pick(assets).id };
+      if (type === "superConcessional") return { type: "superConcessional", targetId: pick(eligibleSuperContributions).id };
+      if (type === "goal") return { type: "goal", targetId: pick(goals).id };
+      return { type };
+    }
+    function randomCascadeConditions(destinationType) {
+      const conditions = [];
+      if (destinationType === "debt" && Math.random() < 0.5) conditions.push({ kind: "repaid" });
+      if (Math.random() < 0.3) conditions.push({ kind: "balanceBelow", amount: rand(0, 50000) });
+      if (Math.random() < 0.3) conditions.push({ kind: "valueReaches", amount: rand(0, 200000) });
+      // "atOrAfter" is migration-only, never hand-authored (see
+      // clampCascadeCondition's own header) — this generator authors
+      // cascades directly, so only "before" is ever drawn here.
+      if (Math.random() < 0.3) {
+        conditions.push({ kind: "date", ref: { kind: "age", age: randInt(startAge, endAge) }, direction: "before" });
+      }
+      return conditions;
+    }
+    function randomCascadeStep(i) {
+      const branchCount = Math.random() < 0.4 ? 2 : 1; // sometimes a split
+      const branches = [];
+      let remainingPct = 100;
+      for (let b = 0; b < branchCount; b++) {
+        if (remainingPct <= 0) break;
+        const destination = randomCascadeDestination();
+        const pct = b === branchCount - 1 ? remainingPct : rand(1, remainingPct);
+        remainingPct -= pct;
+        branches.push({ id: `cs${i}-b${b}`, destination, pct, conditions: randomCascadeConditions(destination.type) });
+      }
+      return { id: `cs${i}`, branches };
+    }
+    const surplus = Math.random() < 0.5
+      ? { periods: Array.from({ length: randInt(1, 3) }, (_, i) => randomCascadeStep(i)) }
+      : {
+          periods: [{
+            id: "sp1",
+            from: { kind: "anchor", anchorId: "start" },
+            to: { kind: "anchor", anchorId: "end" },
+            payNonDeductibleDebtFirst: Math.random() < 0.5,
+            debtOrder: pick(["interestRate", "manual"]),
+            allocations,
+            remainderTo: pick(["cash", "expenditure"]),
+          }],
+        };
 
     const deficitMinimumBalances = {};
     for (const a of assets) if (Math.random() < 0.3) deficitMinimumBalances[a.id] = rand(0, 5000);
@@ -6885,6 +6951,149 @@ describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, C
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `surplus-allocation combo fixture, year ${y}`);
   });
 
+  // --- Condition-based cascade (docs/specs/37-surplus-cascade.md,
+  // Commit 1) — the tests above all exercise the OLD period vocabulary
+  // through the tolerance/migration path (deliberately kept, not
+  // rewritten — they're the bit-identical regression proof). These
+  // exercise the NEW cascade vocabulary directly.
+  const branch = (over = {}) => ({ id: "b1", destination: { type: "cash" }, pct: 100, conditions: [], ...over });
+  const step = (branches) => ({ id: `cs${Math.random()}`, branches });
+
+  it("a valueReaches condition closes once met, then RE-OPENS if the balance later falls back below it — never permanently retired", () => {
+    const s = mkState({
+      endAge: 42,
+      assets: [mkAsset({ id: "a1", balance: 9000, allocation: zeroRealAlloc() })],
+      cashflows: {
+        income: [cf({ assetId: null, amount: 1000, toAge: 42 })], // ~$12,000/yr surplus
+        withdrawals: [cf({ id: "w1", assetId: "a1", amount: 10000, frequency: "annual", fromAge: 42, toAge: 42, indexBasis: "none", indexExtraPct: 0 })],
+      },
+      surplus: { periods: [step([branch({ destination: { type: "asset", targetId: "a1" }, conditions: [{ kind: "valueReaches", amount: 15000 }] })])] },
+    });
+    const out = projectPlan(s);
+    // Year 0: balance starts at 9000 (< 15000) — OPEN — invests this
+    // year's surplus, closing well past the target.
+    expect(out.yearly[0].perAssetDetail.a1.surplusInvested).toBeGreaterThan(9000);
+    expect(out.yearly[0].perAssetDetail.a1.closing).toBeGreaterThan(15000);
+    // Year 1: no withdrawal, balance is still above 15000 at sweep time
+    // — CLOSED — this year's surplus is NOT invested here; it falls to
+    // the implicit cash catch-all instead (no other step/branch to
+    // absorb it).
+    expect(out.yearly[1].perAssetDetail.a1.surplusInvested).toBeCloseTo(0, 6);
+    expect(out.yearly[1].surplusAccumulated).toBeGreaterThan(9000);
+    // Year 2: the $10,000 withdrawal (age 42, fires in July before the
+    // FY-end sweep) pulls the balance back under 15,000 — the SAME
+    // condition, re-evaluated fresh, is OPEN again this sweep.
+    expect(out.yearly[2].perAssetDetail.a1.surplusInvested).toBeGreaterThan(9000);
+  });
+
+  it("a multi-step cascade: debt first (until repaid), then an asset, then cash — each step receiving only what the one before it left", () => {
+    const s = {
+      ...mkState({
+        endAge: 40,
+        assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() })],
+        cashflows: { income: [cf({ assetId: null, amount: 2000, toAge: 40 })] }, // ~$24,000/yr surplus
+        surplus: { periods: [
+          step([branch({ destination: { type: "debt", deductibility: "nonDeductible", loanIds: null, order: "interestRate" }, conditions: [{ kind: "repaid" }] })]),
+          step([branch({ destination: { type: "asset", targetId: "a1" } })]),
+        ] },
+      }),
+      liabilities: [{
+        id: "lb1", name: "Loan", type: "personal", owner: "client", balance: 5000,
+        interestRatePct: 0, termYears: 25, repayment: "io", ioYears: 25, deductiblePct: 0,
+        linkedAssetId: null, offsetAssetId: null, extraRepayments: [], oneOffRepayments: [],
+        rateType: "variable", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: null, commencedOn: null,
+      }],
+    };
+    const out = projectPlan(s);
+    // The $5,000 loan is repaid in full from step 1; the ASSET (step 2)
+    // only ever sees what step 1 left — roughly $24,000 − $5,000, not
+    // the whole surplus.
+    expect(out.yearly[0].liabilities.lb1.surplusRepayment).toBeCloseTo(5000, 0);
+    expect(out.yearly[0].perAssetDetail.a1.surplusInvested).toBeGreaterThan(17000);
+    expect(out.yearly[0].perAssetDetail.a1.surplusInvested).toBeLessThan(20000);
+  });
+
+  it("a split step: a closed branch's own share cascades to the NEXT STEP, never redistributed to its sibling branch", () => {
+    const s = mkState({
+      endAge: 40,
+      assets: [
+        mkAsset({ id: "a1", balance: 20000, allocation: zeroRealAlloc() }), // already past its own target — closed from year 0
+        mkAsset({ id: "a2", balance: 0, allocation: zeroRealAlloc() }), // the fallback step
+      ],
+      cashflows: { income: [cf({ assetId: null, amount: 1000, toAge: 40 })] }, // ~$12,000/yr surplus
+      surplus: { periods: [
+        step([
+          branch({ destination: { type: "asset", targetId: "a1" }, pct: 50, conditions: [{ kind: "valueReaches", amount: 15000 }] }),
+          branch({ destination: { type: "cash" }, pct: 50 }),
+        ]),
+        step([branch({ destination: { type: "asset", targetId: "a2" } })]),
+      ] },
+    });
+    const out = projectPlan(s);
+    // a1's own branch is closed (already at 20,000 ≥ 15,000 target) —
+    // its 50% share is never subtracted from `remaining`, so the WHOLE
+    // pool reaches step 1's open sibling (cash, 50%) AND step 2 (a2) —
+    // never silently handed to a1 instead.
+    expect(out.yearly[0].perAssetDetail.a1.surplusInvested).toBeCloseTo(0, 6);
+    expect(out.yearly[0].perAssetDetail.a2.surplusInvested).toBeGreaterThan(0);
+    expect(out.yearly[0].surplusAccumulated).toBeGreaterThan(0);
+  });
+
+  it("a 'deductible' debt scope pays down only the deductible portion, leaving the non-deductible portion untouched — the mirror of the existing non-deductible-first case", () => {
+    const s = {
+      ...surplusState({
+        surplus: { periods: [step([branch({
+          destination: { type: "debt", deductibility: "deductible", loanIds: null, order: "interestRate" },
+          conditions: [{ kind: "repaid" }],
+        })])] },
+      }),
+      liabilities: [ioLoan({ balance: 10000, deductiblePct: 50 })], // 50% deductible — $5,000 eligible via this scope
+    };
+    const out = projectPlan(s);
+    expect(out.yearly[0].liabilities.lb1.surplusRepayment).toBeCloseTo(5000, 0);
+    expect(out.yearly[0].liabilities.lb1.closing).toBeCloseTo(5000 / 1.025, 0);
+  });
+
+  it("an explicit loanIds selection targets only the chosen loan(s), even when a higher-rate loan would otherwise sort first", () => {
+    const s = {
+      ...surplusState({
+        surplus: { periods: [step([branch({
+          destination: { type: "debt", deductibility: "any", loanIds: ["low"], order: "interestRate" },
+          conditions: [{ kind: "repaid" }],
+        })])] },
+      }),
+      liabilities: [
+        ioLoan({ id: "low", balance: 3000, interestRatePct: 2 }),
+        ioLoan({ id: "high", balance: 3000, interestRatePct: 8 }),
+      ],
+    };
+    const out = projectPlan(s);
+    expect(out.yearly[0].liabilities.low.surplusRepayment).toBeCloseTo(3000, 0);
+    expect(out.yearly[0].liabilities.high.surplusRepayment).toBeCloseTo(0, 6); // never selected — untouched despite its own higher rate
+  });
+
+  it("a balanceBelow condition stops once the target's OWN remaining balance falls to the stated amount — a partial paydown, not full repayment", () => {
+    const s = {
+      ...surplusState({
+        cashflows: { income: [cf({ assetId: null, amount: 2000, toAge: 40 })] }, // ~$24,000/yr — comfortably more than needed to reach the floor
+        surplus: { periods: [step([branch({
+          destination: { type: "debt", deductibility: "any", loanIds: ["lb1"], order: "interestRate" },
+          conditions: [{ kind: "balanceBelow", amount: 8000 }],
+        })])] },
+      }),
+      liabilities: [ioLoan({ balance: 10000 })],
+    };
+    const out = projectPlan(s);
+    // Stops at (approximately) the $8,000 floor, not fully repaid —
+    // the condition reads live, so it can't overshoot within one sweep
+    // either (paid in a single lump at FY-end, capped by the branch's
+    // own eligible balance which is the loan's FULL nominal balance,
+    // not the floor-aware amount — a disclosed simplification matching
+    // the pre-cascade "no separate non-deductible sub-balance" note).
+    expect(out.yearly[0].liabilities.lb1.surplusRepayment).toBeCloseTo(2000, 0);
+    expect(out.yearly[0].liabilities.lb1.closing).toBeCloseTo(8000 / 1.025, 0);
+  });
+
   it("migration bit-identity: a real hydrate()d v16 blob (mode invest) reaches the same figures as the equivalent v17 period", () => {
     const legacyState = {
       schemaVersion: 16,
@@ -6912,12 +7121,15 @@ describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, C
     };
     const hydrated = hydrate(JSON.stringify(legacyState), PROFILES);
     expect(hydrated).not.toBeNull();
+    // docs/specs/37-surplus-cascade.md, Commit 1: settings.surplus.periods
+    // now holds cascade STEPS, not time periods — a migrated {mode:
+    // "invest"} shorthand becomes a single unconditional step, one
+    // branch, targeting the nominated asset (no condition at all: the
+    // OLD mode had no stopping rule either).
     expect(hydrated.settings.surplus.periods).toHaveLength(1);
-    expect(hydrated.settings.surplus.periods[0]).toMatchObject({
-      payNonDeductibleDebtFirst: false,
-      allocations: [{ targetType: "asset", targetId: "a1", pct: 100 }],
-      remainderTo: "cash",
-    });
+    expect(hydrated.settings.surplus.periods[0].branches).toMatchObject([
+      { destination: { type: "asset", targetId: "a1" }, pct: 100, conditions: [] },
+    ]);
     const hydratedOut = projectPlan(hydrated);
     // The pre-existing "surplus invest routes to the nominated asset"
     // fixture (this same describe file, deficit funding block) asserts

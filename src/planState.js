@@ -2539,7 +2539,7 @@ export function defaultState(profiles = {}, now = new Date()) {
     goals: [],
     bonds: [],
     settings: {
-      surplus: { periods: [createSurplusPeriod()] },
+      surplus: { periods: [createCascadeStep()] },
       fundingOrder: [asset.id],
       deficit: { minimumBalances: {}, sellRule: "order" },
     },
@@ -3409,15 +3409,64 @@ export function clampAllToPlan(state, profiles = {}) {
 // validates each period's own shape, not coverage across the list.
 
 export const DEBT_ORDER_MODES = ["interestRate", "manual"];
-export const REMAINDER_TARGETS = ["cash", "expenditure"];
-export const ALLOCATION_TARGET_TYPES = ["asset", "liability", "superContribution", "goal"];
+export const REMAINDER_TARGETS = ["cash", "expenditure"]; // retained for legacySurplusPeriod's own old-shape callers only
+export const ALLOCATION_TARGET_TYPES = ["asset", "liability", "superContribution", "goal"]; // ditto
 export const DEFICIT_SELL_RULES = ["order", "minimumCapitalGain"];
 
-// New periods default to the two rules the spec calls out as worth
-// adopting outright (pay non-deductible debt first, interest-rate
-// ordering) — MIGRATED periods (below) deliberately override both to
-// false/inert, since a migrated scenario must project bit-identically
-// to its pre-migration self, not gain a new behaviour it never asked for.
+// --- Surplus cascade (docs/specs/37-surplus-cascade.md, Commit 1) --------
+//
+// Replaces the period-based model (a manually-chosen time window per
+// allocation profile) with an ordered, condition-based waterfall: each
+// STEP has one or more BRANCHES (a split), each branch a destination and
+// its own until-conditions, re-evaluated fresh every FY-end sweep — see
+// that spec's own header for the full design and why. The wire field
+// stays state.settings.surplus.periods (an array) — only what each
+// element MEANS changes; clampCascadeStep below auto-detects and
+// upgrades an old-shaped element, so every existing caller that still
+// writes {mode,assetId} shorthand or a full old period object keeps
+// working, unchanged, indefinitely (the established tolerance pattern
+// this file already uses for the pre-v17 shorthand itself).
+export const CASCADE_CONDITION_KINDS = ["repaid", "balanceBelow", "valueReaches", "date"];
+export const CASCADE_DESTINATION_TYPES = ["debt", "asset", "superConcessional", "goal", "cash", "expenditure"];
+export const LOAN_DEDUCTIBILITY_SCOPES = ["nonDeductible", "deductible", "any"];
+
+export function createCascadeCondition(kind = "date") {
+  return { kind: CASCADE_CONDITION_KINDS.includes(kind) ? kind : "date", amount: 0, ref: anchorRef("end"), direction: "before" };
+}
+
+export function createCascadeBranch(destinationType = "cash") {
+  return {
+    id: uid("cb"),
+    destination: createCascadeDestination(destinationType),
+    pct: 0,
+    conditions: [],
+  };
+}
+
+export function createCascadeDestination(type = "cash") {
+  if (type === "debt") return { type: "debt", deductibility: "nonDeductible", loanIds: null, order: "interestRate" };
+  if (type === "asset") return { type: "asset", targetId: null };
+  if (type === "superConcessional") return { type: "superConcessional", targetId: null };
+  if (type === "goal") return { type: "goal", targetId: null };
+  if (type === "expenditure") return { type: "expenditure" };
+  return { type: "cash" };
+}
+
+// New steps default to a single non-deductible-debt-first branch then
+// nothing — the closest single-step equivalent of the old "pay debt
+// first, accumulate the rest" default, matching createSurplusPeriod's
+// own former defaults (payNonDeductibleDebtFirst: true, remainderTo:
+// "cash") without inventing a NEW default behaviour nobody asked for.
+export function createCascadeStep() {
+  return { id: uid("cs"), branches: [{ ...createCascadeBranch("debt"), pct: 100, conditions: [{ kind: "repaid" }] }] };
+}
+
+// Old-shape factories, UNCHANGED — kept only for main.js's own pre-
+// Commit-4 UI, which still authors periods in this shape (it keeps
+// working: clampCascadeStep auto-upgrades whatever it produces, exactly
+// like the pre-v17 shorthand it already tolerated). Never called by
+// anything new in this module — createCascadeStep/createCascadeBranch
+// above are the canonical authoring API from this commit on.
 export function createSurplusPeriod() {
   return {
     id: uid("sp"),
@@ -3435,103 +3484,247 @@ export function createAllocationEntry() {
 }
 
 // Converts the pre-Commit-1 {mode, assetId} shape into an equivalent
-// single Start→End period — the migration's own conversion, factored
-// out so hydrate() and any raw-state test fixture built around the old
-// shorthand (this codebase's test suite has dozens) share the ONE
-// definition of "what accumulate/invest/spend used to mean" rather
-// than two independently-maintained copies drifting apart.
-// payNonDeductibleDebtFirst is always false here — this reproduces
-// EXISTING behaviour, never a new one a caller didn't ask for.
+// SINGLE unconditional cascade step — the migration's own conversion,
+// factored out so hydrate() and any raw-state test fixture built around
+// the old shorthand (this codebase's test suite has dozens) share the
+// ONE definition of "what accumulate/invest/spend used to mean" rather
+// than two independently-maintained copies drifting apart. No
+// conditions anywhere here — this reproduces EXISTING behaviour
+// (an unconditional whole-of-projection rule), never a new one a
+// caller didn't ask for.
 export function legacySurplusPeriod(old) {
-  const base = {
-    id: uid("sp"),
-    from: anchorRef("start"),
-    to: anchorRef("end"),
-    payNonDeductibleDebtFirst: false,
-    debtOrder: "interestRate",
-  };
+  // Fixed, not uid()-minted — schedule.js calls this fresh on every
+  // buildSchedules() run for a state still using the bare {mode,
+  // assetId} shorthand; a random id here would make identical input
+  // project to a different (id-bearing) schedule shape each call (see
+  // migratePeriodToStep's own header for the regression this class of
+  // bug caused).
+  const remainderType = old?.mode === "spend" ? "expenditure" : "cash"; // "accumulate"/unrecognised → cash
+  const branches = [];
   if (old?.mode === "invest" && old.assetId) {
-    return { ...base, allocations: [{ id: uid("sa"), targetType: "asset", targetId: old.assetId, pct: 100 }], remainderTo: "cash" };
+    branches.push({ id: "legacy-b", destination: { type: "asset", targetId: old.assetId }, pct: 100, conditions: [] });
+  } else {
+    branches.push({ id: "legacy-b", destination: { type: remainderType }, pct: 100, conditions: [] });
   }
-  if (old?.mode === "spend") {
-    return { ...base, allocations: [], remainderTo: "expenditure" };
-  }
-  return { ...base, allocations: [], remainderTo: "cash" }; // "accumulate" or unrecognised
+  return { id: "legacy", branches };
 }
 
-// A single allocation entry: dropped entirely (never coerced to a
-// fallback target) when its target doesn't resolve — an allocation
-// pointing at nothing would silently misdirect real money, unlike a
-// cosmetic field falling back to a default. `ctx` supplies the
-// candidate id sets to validate against (financial assets are the
-// only valid asset target — lifestyle assets are never a cash
-// destination, same rule fundingOrder/surplus-invest already enforce).
-function clampAllocationEntry(a, assets, ctx) {
-  const targetType = ALLOCATION_TARGET_TYPES.includes(a?.targetType) ? a.targetType : null;
-  if (!targetType) return null;
-  const pct = clampNumber(a?.pct, 0, 100);
-  if (pct <= 0) return null;
-  let targetId = null;
-  if (targetType === "asset") {
-    targetId = assets.some((x) => x.include && isFinancial(x) && x.id === a.targetId) ? a.targetId : null;
-  } else if (targetType === "liability") {
-    targetId = (ctx.liabilities ?? []).some((l) => l.id === a.targetId) ? a.targetId : null;
-  } else if (targetType === "superContribution") {
-    // Concessional types only (v1 — see spec's Commit 1 "State" section
-    // and this project's own scope note): a surplus top-up mirrors the
+// A single branch's destination: dropped entirely (never coerced to a
+// fallback target) when its target doesn't resolve — a branch pointing
+// at nothing would silently misdirect real money, unlike a cosmetic
+// field falling back to a default. `ctx` supplies the candidate id sets
+// to validate against (financial assets are the only valid asset
+// target — lifestyle assets are never a cash destination, same rule
+// fundingOrder/surplus-invest already enforce).
+function clampCascadeDestination(d, assets, ctx) {
+  const type = CASCADE_DESTINATION_TYPES.includes(d?.type) ? d.type : null;
+  if (!type) return null;
+  if (type === "cash" || type === "expenditure") return { type };
+  if (type === "debt") {
+    const deductibility = LOAN_DEDUCTIBILITY_SCOPES.includes(d?.deductibility) ? d.deductibility : "nonDeductible";
+    const order = DEBT_ORDER_MODES.includes(d?.order) ? d.order : "interestRate";
+    const liabIds = new Set((ctx.liabilities ?? []).map((l) => l.id));
+    const loanIds = Array.isArray(d?.loanIds) && d.loanIds.length > 0
+      ? d.loanIds.filter((id) => liabIds.has(id))
+      : null;
+    // An explicit selection that resolved to nothing (every id stale)
+    // is a real, dropped destination — not silently widened back to
+    // "every loan matching deductibility", which would target loans
+    // the adviser never chose.
+    if (Array.isArray(d?.loanIds) && d.loanIds.length > 0 && (!loanIds || loanIds.length === 0)) return null;
+    return { type: "debt", deductibility, loanIds, order };
+  }
+  if (type === "asset") {
+    const targetId = assets.some((x) => x.include && isFinancial(x) && x.id === d.targetId) ? d.targetId : null;
+    return targetId ? { type, targetId } : null;
+  }
+  if (type === "goal") {
+    const targetId = (ctx.goals ?? []).some((g) => g.id === d.targetId) ? d.targetId : null;
+    return targetId ? { type, targetId } : null;
+  }
+  if (type === "superConcessional") {
+    // Concessional types only (v1 — same scope note as the old
+    // allocation entry this replaces): a surplus top-up mirrors the
     // existing toConcessionalCap fill mechanism (fills to the person's
     // remaining concessional cap headroom, excess falls through), which
     // only makes sense for a salary-sacrifice or personal-deductible
-    // row. Salary sacrifice itself is pre-tax money that never became
-    // household cash, so in practice this targets a personal-deductible
-    // row — but any existing concessional row is accepted, not just
-    // that one, since the engine treats them identically for this cap.
-    const row = (ctx.superContributions ?? []).find((sc) => sc.id === a.targetId);
-    targetId = row && (row.type === "salarySacrifice" || row.type === "personalDeductible") ? a.targetId : null;
-  } else if (targetType === "goal") {
-    targetId = (ctx.goals ?? []).some((g) => g.id === a.targetId) ? a.targetId : null;
+    // row.
+    const row = (ctx.superContributions ?? []).find((sc) => sc.id === d.targetId);
+    const targetId = row && (row.type === "salarySacrifice" || row.type === "personalDeductible") ? d.targetId : null;
+    return targetId ? { type, targetId } : null;
   }
-  if (!targetId) return null;
-  return { id: typeof a.id === "string" && a.id ? a.id : uid("sa"), targetType, targetId, pct };
+  return null;
 }
 
-// Clamps one period's own shape. `used` allocations are processed in
-// order and capped so their SUM never exceeds 100% — an entry that
-// would push the total over 100% is truncated to whatever headroom
-// remains, and a zero-headroom entry is dropped outright, so there is
-// no state in which stored allocations sum to more than 100% (the
-// spec's own "incapable of displaying" requirement, enforced at the
-// data layer too, not just the UI).
-export function clampSurplusPeriod(p, plan, assets, ctx = {}) {
-  const { from, to } = clampFromTo(p ?? {}, plan.client.currentAge, plan.endAge, plan);
-  const raw = Array.isArray(p?.allocations) ? p.allocations : [];
-  let used = 0;
-  const allocations = [];
-  for (const a of raw) {
-    if (used >= 100) break;
-    const entry = clampAllocationEntry(a, assets, ctx);
-    if (!entry) continue;
-    const pct = Math.min(entry.pct, 100 - used);
-    if (pct <= 0) continue;
-    used += pct;
-    allocations.push({ ...entry, pct });
+// One condition. `ref` (a DateRef) is clamped the same way any other
+// client-anchored date field is; `amount` floors at 0 — a negative
+// balance/value target is not a real constraint anyone can mean.
+// `direction` defaults to "before" (the only value ever authored by
+// hand — "atOrAfter" is migration-only, see the spec's own header) so
+// a hand-built condition never needs to state it.
+function clampCascadeCondition(c, plan) {
+  const kind = CASCADE_CONDITION_KINDS.includes(c?.kind) ? c.kind : null;
+  if (!kind) return null;
+  if (kind === "date") {
+    const ref = clampDateRef(c?.ref, plan.client.currentAge, plan.endAge, plan);
+    const direction = c?.direction === "atOrAfter" ? "atOrAfter" : "before";
+    return { kind, ref, direction };
   }
-  return {
-    id: typeof p?.id === "string" && p.id ? p.id : uid("sp"),
-    from, to,
-    payNonDeductibleDebtFirst: p?.payNonDeductibleDebtFirst === true,
-    debtOrder: DEBT_ORDER_MODES.includes(p?.debtOrder) ? p.debtOrder : "interestRate",
-    allocations,
-    remainderTo: REMAINDER_TARGETS.includes(p?.remainderTo) ? p.remainderTo : "cash",
-  };
+  if (kind === "repaid") return { kind };
+  return { kind, amount: clampNumber(c?.amount, 0) };
 }
 
-// At least one period always exists, covering the whole projection by
-// default — an empty list would leave a plan year with no resolvable
-// surplus rule at all.
+function clampCascadeBranch(b, plan, assets, ctx) {
+  const destination = clampCascadeDestination(b?.destination, assets, ctx);
+  if (!destination) return null;
+  const pct = clampNumber(b?.pct, 0, 100);
+  if (pct <= 0) return null;
+  // "repaid" only makes sense against a debt destination — a stray
+  // repaid condition on a non-debt branch is dropped rather than left
+  // to silently never resolve.
+  const rawConditions = Array.isArray(b?.conditions) ? b.conditions : [];
+  const conditions = rawConditions
+    .filter((c) => !(c?.kind === "repaid" && destination.type !== "debt"))
+    .map((c) => clampCascadeCondition(c, plan))
+    .filter(Boolean);
+  return { id: typeof b?.id === "string" && b.id ? b.id : uid("cb"), destination, pct, conditions };
+}
+
+// Clamps one step's own shape. `used` branches are processed in order
+// and capped so their pct SUM never exceeds 100% — a branch that would
+// push the total over 100% is truncated to whatever headroom remains,
+// and a zero-headroom branch is dropped outright, so there is no state
+// in which one step's branches sum to more than 100% (the same
+// data-layer guarantee the old allocations list made).
+//
+// Auto-upgrades an old-shaped input FIRST: an object with `branches` is
+// used as-is; an object shaped like the pre-Commit-1 period (`from`/
+// `allocations`/`remainderTo` present, no `branches`) is expanded via
+// migratePeriodToStep and its own [debt?, main] steps are clamped and
+// returned — so this function's own return type is an ARRAY (0-2
+// elements for one legacy period; exactly 1 for anything already
+// step-shaped), unlike the old clampSurplusPeriod's single object.
+export function clampCascadeStep(raw, plan, assets, ctx = {}) {
+  if (raw && Array.isArray(raw.branches)) {
+    const branches = [];
+    let used = 0;
+    for (const b of raw.branches) {
+      if (used >= 100) break;
+      const branch = clampCascadeBranch(b, plan, assets, ctx);
+      if (!branch) continue;
+      const pct = Math.min(branch.pct, 100 - used);
+      if (pct <= 0) continue;
+      used += pct;
+      branches.push({ ...branch, pct });
+    }
+    return [{ id: typeof raw?.id === "string" && raw.id ? raw.id : uid("cs"), branches }];
+  }
+  return migratePeriodToStep(raw ?? {}).map((s) => clampCascadeStep(s, plan, assets, ctx)[0]);
+}
+
+// One old-shaped period → an array of 1-2 unclamped cascade steps:
+// [debtFirstStep?, mainStep] (allocations + remainder folded into one
+// step's own branches — mathematically identical to two separate
+// steps, since the remainder branch always claims 100% of whatever
+// reaches it regardless of which "pool" snapshot it reads against; see
+// the spec's own "Migration" section for the proof).
+//
+// `windowConditions` — attached to BOTH resulting steps, used only by
+// the multi-period case below (a genuinely single-period array passes
+// none: today's resolveSurplusPeriod falls back to the LAST period for
+// any uncovered year, so a lone period already behaves as unconditional
+// for the whole projection regardless of its own stored bounds — no
+// window condition is needed, or correct, for that case).
+function migratePeriodToStep(p, windowConditions = []) {
+  // Ids are DERIVED from the input period's own id, never freshly
+  // minted (uid()) — this function runs unclamped, from schedule.js,
+  // on EVERY buildSchedules() call, not once at authoring time; a
+  // fresh uid() per call would make the SAME input state project to a
+  // different (id-bearing) schedule.surplusCascade shape each time it
+  // ran, breaking the "identical input projects identically" guarantee
+  // untouched fields elsewhere in this engine already rely on (found
+  // via deterministic.test.js's own touched-state regression gate).
+  const baseId = typeof p?.id === "string" && p.id ? p.id : "sp";
+  const steps = [];
+  if (p?.payNonDeductibleDebtFirst) {
+    steps.push({
+      id: `${baseId}-debt`,
+      branches: [{
+        id: `${baseId}-debt-b`,
+        destination: { type: "debt", deductibility: "nonDeductible", loanIds: null, order: DEBT_ORDER_MODES.includes(p?.debtOrder) ? p.debtOrder : "interestRate" },
+        pct: 100,
+        conditions: [{ kind: "repaid" }, ...windowConditions],
+      }],
+    });
+  }
+  const rawAllocations = Array.isArray(p?.allocations) ? p.allocations : [];
+  const branches = rawAllocations.map((a, i) => ({
+    id: typeof a?.id === "string" && a.id ? a.id : `${baseId}-a${i}`,
+    destination: a?.targetType === "liability"
+      ? { type: "debt", deductibility: "any", loanIds: [a.targetId], order: "interestRate" }
+      : a?.targetType === "superContribution"
+        ? { type: "superConcessional", targetId: a.targetId }
+        : { type: a?.targetType, targetId: a?.targetId },
+    pct: a?.pct ?? 0,
+    conditions: [...windowConditions],
+  }));
+  const usedPct = branches.reduce((s, b) => s + (Number(b.pct) || 0), 0);
+  const remainderType = REMAINDER_TARGETS.includes(p?.remainderTo) ? p.remainderTo : "cash";
+  branches.push({
+    id: `${baseId}-remainder`,
+    destination: { type: remainderType },
+    pct: Math.max(0, 100 - usedPct),
+    conditions: [...windowConditions],
+  });
+  steps.push({ id: `${baseId}-main`, branches });
+  return steps;
+}
+
+// Normalises the whole cascade. Each raw element is either already
+// step-shaped, or an old period/shorthand upgraded via clampCascadeStep
+// (which may expand ONE element into up to two) — flattened into the
+// final ordered list. At least one step always exists, covering the
+// whole projection by default — an empty list would leave a plan year
+// with no resolvable surplus rule at all.
+// Shape-normalises the whole raw cascade WITHOUT clamping/validating
+// any destination — exported so schedule.js can resolve date
+// conditions ahead of time using the SAME upgrade logic
+// normaliseSurplusPeriods (below) uses for the authoritative,
+// validated pass, rather than a second, drifting copy of it (the same
+// "resolves WHEN, not WHAT" split schedule.js's own header already
+// documents for the old from/to fields — destination validity stays
+// deterministic.js's own job, re-checked live against engine state,
+// same as before this commit).
+export function rawCascadeSteps(periods) {
+  const arr = Array.isArray(periods) && periods.length > 0 ? periods : [createCascadeStep()];
+  const n = arr.length;
+  const out = [];
+  arr.forEach((raw, i) => {
+    // Multi-period window conditions (see migratePeriodToStep's own
+    // header) — only meaningful for an OLD-shaped, multi-element array;
+    // a single element, or one already step-shaped, needs none. Reads
+    // from/to AS GIVEN (no clamping — clampCascadeCondition bounds the
+    // ref properly later, in the validated pass).
+    const isOldShaped = !(raw && Array.isArray(raw.branches));
+    const windowConditions = [];
+    if (isOldShaped && n > 1) {
+      if (i > 0) windowConditions.push({ kind: "date", ref: raw?.from, direction: "atOrAfter" });
+      if (i < n - 1) windowConditions.push({ kind: "date", ref: raw?.to, direction: "before" });
+    }
+    const steps = isOldShaped
+      ? migratePeriodToStep(raw ?? {}, windowConditions)
+      : [raw];
+    out.push(...steps);
+  });
+  return out;
+}
+
 export function normaliseSurplusPeriods(periods, plan, assets, ctx = {}) {
-  const arr = Array.isArray(periods) && periods.length > 0 ? periods : [createSurplusPeriod()];
-  return arr.map((p) => clampSurplusPeriod(p, plan, assets, ctx));
+  const out = [];
+  for (const raw of rawCascadeSteps(periods)) {
+    out.push(...clampCascadeStep(raw, plan, assets, ctx));
+  }
+  return out.length > 0 ? out : [createCascadeStep()];
 }
 
 // Surplus treatment (Working Cash Account FY-end sweep) — a period-based

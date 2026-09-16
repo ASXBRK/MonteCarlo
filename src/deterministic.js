@@ -1521,8 +1521,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const deficitMinimums = deficitSettings.minimumBalances ?? {};
   const deficitSellRule = deficitSettings.sellRule === "minimumCapitalGain" ? "minimumCapitalGain" : "order";
 
-  // Concessional contribution rows a surplus allocation may top up
-  // (v1 scope — see planState.js's clampAllocationEntry for why only
+  // Concessional contribution rows a surplus branch may top up (v1
+  // scope — see planState.js's clampCascadeDestination for why only
   // these two types are eligible): keyed by contribution row id →
   // { accountId, owner, type }, so the FY-end sweep can credit the
   // right account under the right person's cap without re-deriving it.
@@ -1532,30 +1532,230 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       .map((sc) => [sc.id, { accountId: sc.accountId, owner: sc.owner, type: sc.type }])
   );
 
-  // Surplus side: an ordered list of periods, each covering part of the
-  // projection (schedule.js resolved from/to into plan years already).
-  // Re-validated against live engine state the same defensive way
-  // fundingOrder is above — clampAllToPlan should already guarantee
-  // valid references, but this module has never fully trusted that for
-  // anything that moves real money.
-  const surplusPeriods = (schedule.surplusPeriods ?? []).map((p) => ({
-    ...p,
-    allocations: (p.allocations ?? []).filter((a) => {
-      if (a.targetType === "asset") return a.targetId in bal && !meta[a.targetId].lifestyle;
-      if (a.targetType === "liability") return liabs.some((l) => l.id === a.targetId);
-      if (a.targetType === "superContribution") return a.targetId in surplusSuperTargets;
-      if (a.targetType === "goal") return a.targetId in goalMeta;
+  // Surplus cascade (docs/specs/37-surplus-cascade.md, Commit 1): an
+  // ordered list of steps, each with one or more branches. Re-validated
+  // against live engine state the same defensive way fundingOrder is
+  // above — clampAllToPlan should already guarantee valid references,
+  // but this module has never fully trusted that for anything that
+  // moves real money. A branch whose destination doesn't resolve is
+  // dropped (never falls back to a default target).
+  const surplusCascade = (schedule.surplusCascade ?? []).map((s) => ({
+    ...s,
+    branches: (s.branches ?? []).filter((b) => {
+      const d = b.destination;
+      if (!d) return false;
+      if (d.type === "debt") return true; // scope resolved live per-year below; an empty/stale scope just contributes nothing
+      if (d.type === "asset") return d.targetId in bal && !meta[d.targetId].lifestyle;
+      if (d.type === "superConcessional") return d.targetId in surplusSuperTargets;
+      if (d.type === "goal") return d.targetId in goalMeta;
+      if (d.type === "cash" || d.type === "expenditure") return true;
       return false;
     }),
   }));
-  // The period covering plan year y — periods are supposed to be
-  // contiguous and cover the whole projection (Commit 2's UI makes
-  // gaps/overlaps impossible to enter), but this engine never assumes
-  // its inputs are perfect: an uncovered year falls back to the LAST
-  // period rather than leaving the FY-end sweep with nothing to do.
-  function resolveSurplusPeriod(y) {
-    if (surplusPeriods.length === 0) return null;
-    return surplusPeriods.find((p) => y >= p.fromYear && y <= p.toYear) ?? surplusPeriods[surplusPeriods.length - 1];
+
+  // Debt scope resolution — shared by the "repaid" condition (is there
+  // anything left to pay?) and by applying the branch itself, so the
+  // two can never disagree about which loans are in scope or what each
+  // one's own eligible balance is. Ordering/rate-at logic UNCHANGED
+  // from the pre-cascade debt-first step. `deductibility: "any"`
+  // (migrated single-liability allocations) reads each loan's FULL
+  // balance, matching that old allocation type's own behaviour exactly
+  // (no deductibility split at all).
+  function resolveDebtScope(destination, y) {
+    const rateAt = (l) => {
+      const md = liabMeta[l.id];
+      return md.rolloverMonth != null && julyOf(y) >= md.rolloverMonth ? md.revertRate : md.i;
+    };
+    const eligibleBalance = (l) => {
+      if (destination.deductibility === "any") return loanBal[l.id];
+      const fraction = currentDeductibleFraction(l.id);
+      return destination.deductibility === "deductible" ? loanBal[l.id] * fraction : loanBal[l.id] * (1 - fraction);
+    };
+    const idFilter = Array.isArray(destination.loanIds) ? new Set(destination.loanIds) : null;
+    const candidates = liabs.filter((l) => (!idFilter || idFilter.has(l.id)) && loanBal[l.id] > 0 && eligibleBalance(l) > 0);
+    const ordered = destination.order === "interestRate" ? [...candidates].sort((a, b) => rateAt(b) - rateAt(a)) : candidates;
+    const loans = ordered.map((l) => ({ l, eligible: eligibleBalance(l) }));
+    return { loans, total: loans.reduce((s, x) => s + x.eligible, 0) };
+  }
+
+  // isOpen — pure function of CURRENT state, called fresh every sweep:
+  // nothing about a condition is ever cached or permanently retired (a
+  // value that meets its target and later falls back below it resumes
+  // taking surplus the very next sweep that re-evaluates it). AND
+  // across a branch's own condition list (almost always 0 or 1 entries
+  // for a hand-authored branch; up to 2 for a migrated multi-period
+  // window — see planState.js's own migration header).
+  function branchDestinationBalance(destination) {
+    if (destination.type === "asset") return bal[destination.targetId] ?? 0;
+    if (destination.type === "superConcessional") return superBal[surplusSuperTargets[destination.targetId]?.accountId] ?? 0;
+    return 0;
+  }
+  function conditionIsOpen(c, destination, y) {
+    if (c.kind === "repaid") return destination.type === "debt" && resolveDebtScope(destination, y).total > 1e-6;
+    if (c.kind === "balanceBelow") {
+      // Debt's own scope total, not branchDestinationBalance (which
+      // only knows asset/superConcessional balances, and would
+      // otherwise read a debt branch as permanently "already below
+      // anything" — closed from the very first sweep, never taking a
+      // cent).
+      const current = destination.type === "debt" ? resolveDebtScope(destination, y).total : branchDestinationBalance(destination);
+      return current >= c.amount;
+    }
+    if (c.kind === "valueReaches") return branchDestinationBalance(destination) < c.amount;
+    if (c.kind === "date") return c.direction === "atOrAfter" ? y >= c.refYear : y < c.refYear;
+    return true;
+  }
+  function branchIsOpen(b, y) {
+    return (b.conditions ?? []).every((c) => conditionIsOpen(c, b.destination, y));
+  }
+
+  // Applies a "debt" branch's own share across its scoped loans, in
+  // order, stopping once the share (or the scope's own total eligible
+  // balance) is exhausted — the exact per-loan loop the pre-cascade
+  // debt-first step already had, now parameterised by the branch's own
+  // allotted share rather than the whole remaining pool (bit-identical
+  // when a branch's pct is 100, since share then equals the pool
+  // exactly — see the spec's own "sweep algorithm" section). A
+  // `balanceBelow` condition additionally caps the TOTAL paid this
+  // sweep at (current scoped balance − the stated floor) — isOpen only
+  // gates whether the branch takes anything at all; without this
+  // second cap, a single well-funded sweep could pay straight through
+  // a stated "leave $X owing" floor before the condition ever got a
+  // chance to close it, silently doing more than the adviser asked
+  // for. Balance moves are UNGATED (loanBal/wcaBal are snapshotted and
+  // restored around the measurement pass, same as every other
+  // mutation to them); the deductibility-bucket adjustment and
+  // reporting are real-pass only, same convention as before this
+  // commit.
+  function applyDebtBranch(branch, share, y, row) {
+    const destination = branch.destination;
+    const { loans, total } = resolveDebtScope(destination, y);
+    const balanceBelow = (branch.conditions ?? []).find((c) => c.kind === "balanceBelow");
+    const cap = balanceBelow ? Math.max(0, total - balanceBelow.amount) : Infinity;
+    let left = Math.min(share, cap);
+    let consumed = 0;
+    for (const { l, eligible } of loans) {
+      if (left <= 0) break;
+      const pay = Math.min(left, eligible);
+      if (pay <= 0) continue;
+      loanBal[l.id] -= pay;
+      if (row) {
+        // Dynamic deductibility (spec 24, Commit 1) — a "nonDeductible"/
+        // "deductible" branch targets that bucket specifically by
+        // definition, so it reduces that bucket directly, leaving the
+        // other (and the interest it still generates) untouched; an
+        // "any" branch (migrated single-liability allocations, no
+        // deductibility split) uses the generic proportional/
+        // private-first split every other liability allocation does.
+        if (destination.deductibility === "nonDeductible" && liabMeta[l.id].usesDynamicDeductibility) {
+          privateBal[l.id] = Math.max(0, privateBal[l.id] - pay);
+        } else if (destination.deductibility === "deductible" && liabMeta[l.id].usesDynamicDeductibility) {
+          investBal[l.id] = Math.max(0, investBal[l.id] - pay);
+        } else if (destination.deductibility === "any") {
+          reduceBucketsForRepayment(l.id, pay);
+        }
+      }
+      wcaBal -= pay;
+      left -= pay;
+      consumed += pay;
+      if (row) row.liabilities[l.id].surplusRepayment += pay;
+    }
+    return consumed;
+  }
+
+  // Applies one branch's own allotted share and returns how much it
+  // actually consumed (capped by the destination's own capacity — a
+  // loan's balance, a person's remaining concessional cap headroom;
+  // whatever a branch couldn't absorb is simply not subtracted from
+  // the caller's own `remaining`, so it reaches the next branch/step —
+  // never lost, and never redistributed to a sibling branch's own
+  // stated share — see the spec's own "splits" section). `superOutcome`
+  // is passed explicitly rather than closed over: it's resolved fresh
+  // each FY, inside the year loop, well after this function is first
+  // defined.
+  function applyBranch(b, share, y, row, superOutcome) {
+    const d = b.destination;
+    if (d.type === "debt") return applyDebtBranch(b, share, y, row);
+    if (d.type === "asset") {
+      const consumed = share;
+      wcaBal -= consumed;
+      bal[d.targetId] += consumed;
+      if (meta[d.targetId].cgt) pools[d.targetId] = poolAdd(pools[d.targetId], consumed);
+      if (row) {
+        row.surplusInvested += consumed;
+        row.perAssetDetail[d.targetId].surplusInvested += consumed;
+        row.wcaDetail.sweptInvested += consumed;
+      }
+      return consumed;
+    }
+    if (d.type === "superConcessional" && row) {
+      // Real pass only — superBal has no measurement-pass snapshot/
+      // restore, same as every other super credit. Disclosed
+      // simplification (unchanged from before this commit): capped at
+      // the person's remaining concessional cap headroom and taxed at
+      // the concessional rate, but does NOT reduce this FY's assessable
+      // income — the allocated amount isn't known until the WCA's own
+      // FY-end balance is, well after this FY's tax has already been
+      // measured.
+      const target = surplusSuperTargets[d.targetId];
+      const headroom = Math.max(0, superOutcome[target.owner]?.concessionalHeadroomAfterFills ?? 0);
+      const consumed = Math.min(share, headroom);
+      if (consumed > 0) {
+        const taxRate = superMeta[target.accountId]?.taxedStatus === "untaxed" ? 0 : superOutcome[target.owner].contributionsTaxRate;
+        const tax = consumed * taxRate;
+        superBal[target.accountId] += consumed - tax;
+        wcaBal -= consumed;
+        row.superDetail[target.accountId].contributions += consumed;
+        row.superDetail[target.accountId].contributionsTax += tax;
+        if (target.type === "personalDeductible") {
+          row.superDetail[target.accountId].personalDeductible += consumed;
+          row.superDetail[target.accountId].surplusPersonalDeductible += consumed;
+        } else {
+          row.superDetail[target.accountId].salarySacrifice += consumed;
+          // See the field's own comment: this slice passed through
+          // wcaBal above, unlike a genuine payroll salary sacrifice —
+          // conservationCheck.js needs it named separately so it isn't
+          // also added back.
+          row.superDetail[target.accountId].surplusSalarySacrifice += consumed;
+        }
+        // So a LATER branch targeting a different contribution row for
+        // the SAME person can't also believe the full headroom is
+        // still available — the exact class of bug reserveFromSuper
+        // closed for adviser fees/Division 293/296/FHSSS sharing one
+        // account (conservationCheck.js's own header).
+        superOutcome[target.owner].concessionalHeadroomAfterFills -= consumed;
+      }
+      return consumed;
+    }
+    if (d.type === "goal" && row) {
+      // Real pass only, same as every other goal accrual —
+      // goalAccruedTotal has no measurement-pass equivalent.
+      const consumed = share;
+      wcaBal -= consumed;
+      row.goals[d.targetId].contribution += consumed;
+      row.goals[d.targetId].surplusContribution += consumed;
+      goalAccruedTotal[d.targetId] += consumed;
+      return consumed;
+    }
+    if (d.type === "expenditure") {
+      const consumed = share;
+      wcaBal -= consumed;
+      if (row) {
+        row.surplusSpent += consumed;
+        row.wcaDetail.sweptSpent += consumed;
+      }
+      return consumed;
+    }
+    if (d.type === "cash") {
+      // Stays in the WCA — nothing moves, just recorded for the
+      // Funding section's own row.
+      if (row) {
+        row.surplusAccumulated += share;
+        row.wcaDetail.sweptToCash += share;
+      }
+      return share;
+    }
+    return 0;
   }
 
   // --- Working Cash Account (household cashflow buffer) ----------------------
@@ -4211,13 +4411,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         }
       }
 
-      // FY-end sweep (Surplus and Deficit Allocation spec, Commit 1):
-      // the WCA's balance above minimumBalance, only on the FY's final
-      // month, routed through the period covering this plan year —
-      // replaces the old single-destination settings.surplus.mode
-      // sweep with a waterfall: non-deductible debt first (optional),
-      // then percentage allocations across up to four destination
-      // types, then an explicit remainder. Asset/liability balance
+      // FY-end sweep (docs/specs/37-surplus-cascade.md, Commit 1): the
+      // WCA's balance above minimumBalance, only on the FY's final
+      // month, walked through the cascade's own ordered steps — each
+      // step's still-OPEN branches (isOpen re-evaluated fresh THIS
+      // sweep, never cached — see branchIsOpen's own header) take their
+      // stated share of whatever reached that step; whatever a step's
+      // branches couldn't absorb (closed, or capacity-capped) carries
+      // on to the next step untouched. Asset/liability/debt balance
       // moves are UNGATED (bal/loanBal are snapshotted and restored
       // around the measurement pass, same as every other mutation to
       // them — see loanSnap/balSnap above); super crediting and goal
@@ -4229,159 +4430,27 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // month, so nothing it does can still be growing/earning income
       // measured in this same year either way).
       if (m === last - 1 && wcaBal > wca.minimumBalance) {
-        const surplusPeriod = resolveSurplusPeriod(y);
-        if (surplusPeriod) {
-          let remaining = wcaBal - wca.minimumBalance;
-
-          // Step 1 — pay non-deductible debt first. Ranked by
-          // interest rate (descending) or manual (state.liabilities'
-          // own order); a part-deductible loan's eligible amount is
-          // its CURRENT balance times its non-deductible proportion,
-          // recomputed fresh each year (a disclosed simplification —
-          // not a separately tracked non-deductible sub-balance, see
-          // docs/specs/16-surplus-allocation.md's own Commit 1 for why
-          // this proportional reading is what "treat a part-deductible
-          // loan proportionally" means here).
-          if (surplusPeriod.payNonDeductibleDebtFirst && remaining > 0) {
-            const rateAt = (l) => {
-              const md = liabMeta[l.id];
-              return md.rolloverMonth != null && julyOf(y) >= md.rolloverMonth ? md.revertRate : md.i;
-            };
-            const candidates = liabs.filter((l) => loanBal[l.id] > 0 && currentDeductibleFraction(l.id) < 1);
-            const ordered = surplusPeriod.debtOrder === "interestRate"
-              ? [...candidates].sort((a, b) => rateAt(b) - rateAt(a))
-              : candidates; // "manual" — the order liabilities are entered in the Liabilities section
-            for (const l of ordered) {
-              if (remaining <= 0) break;
-              const nonDeductibleBalance = loanBal[l.id] * (1 - currentDeductibleFraction(l.id));
-              const pay = Math.min(remaining, nonDeductibleBalance);
-              if (pay <= 0) continue;
-              loanBal[l.id] -= pay;
-              // Dynamic deductibility (spec 24, Commit 1) — this payment
-              // targets the NON-deductible balance by definition, so it
-              // reduces the private bucket specifically, keeping the
-              // investment bucket (and hence the deductible interest it
-              // still generates) untouched. Real-pass only — this whole
-              // "d." surplus-sweep block runs in BOTH passes (unlike
-              // the drawdown/repayment bucket code, which is entirely
-              // inside a real-pass-only region), and investBal/privateBal
-              // have no measurement-pass snapshot/restore; gating here
-              // is what stops the measured pass's own touch from
-              // persisting (uncorrected) into the real pass.
-              if (row && liabMeta[l.id].usesDynamicDeductibility) {
-                privateBal[l.id] = Math.max(0, privateBal[l.id] - pay);
-              }
-              wcaBal -= pay;
-              remaining -= pay;
-              if (row) row.liabilities[l.id].surplusRepayment += pay;
-            }
-          }
-
-          // Step 2 — percentage allocations, applied to whatever's
-          // left after Step 1 (not the original excess) — a period
-          // that pays non-deductible debt first and ALSO allocates
-          // 60%/40% splits the REMAINING pool that way, not the whole
-          // surplus. Repayments/contributions stop at their own
-          // ceiling (a liability's balance, a person's remaining
-          // concessional cap headroom); whatever an entry couldn't
-          // absorb falls through to the NEXT entry — never lost —
-          // exactly like a liability's own extra repayment already
-          // stops at its balance.
-          const poolForPct = remaining;
-          for (const a of surplusPeriod.allocations) {
+        let remaining = wcaBal - wca.minimumBalance;
+        for (const step of surplusCascade) {
+          if (remaining <= 0) break;
+          const pool = remaining; // fixed for this step's own branches, same as the old poolForPct
+          for (const b of step.branches) {
             if (remaining <= 0) break;
-            const share = Math.min(remaining, poolForPct * (a.pct / 100));
+            if (!branchIsOpen(b, y)) continue; // closed — its share is simply never subtracted, so it cascades to the next step
+            const share = Math.min(remaining, pool * (b.pct / 100));
             if (share <= 0) continue;
-            let consumed = 0;
-            if (a.targetType === "asset") {
-              consumed = share;
-              wcaBal -= consumed;
-              bal[a.targetId] += consumed;
-              if (meta[a.targetId].cgt) pools[a.targetId] = poolAdd(pools[a.targetId], consumed);
-              if (row) {
-                row.surplusInvested += consumed;
-                row.perAssetDetail[a.targetId].surplusInvested += consumed;
-                row.wcaDetail.sweptInvested += consumed;
-              }
-            } else if (a.targetType === "liability") {
-              consumed = Math.min(share, loanBal[a.targetId]);
-              if (consumed > 0) {
-                loanBal[a.targetId] -= consumed;
-                // Dynamic deductibility (spec 24, Commit 1) — real-pass
-                // only, same convention as every other bucket mutation.
-                if (row) reduceBucketsForRepayment(a.targetId, consumed);
-                wcaBal -= consumed;
-                if (row) row.liabilities[a.targetId].surplusRepayment += consumed;
-              }
-            } else if (a.targetType === "superContribution" && row) {
-              // Real pass only — superBal has no measurement-pass
-              // snapshot/restore, same as every other super credit.
-              // Disclosed simplification: capped at the person's
-              // remaining concessional cap headroom and taxed at the
-              // concessional rate like any other concessional
-              // contribution, but — because the allocated amount isn't
-              // known until the WCA's own FY-end balance is, well
-              // after this FY's tax has already been measured — it
-              // does NOT reduce this FY's assessable income the way an
-              // ordinary personal-deductible contribution would. The
-              // cash/super-balance movement is correct; the tax timing
-              // is a documented gap, not a silent one.
-              const target = surplusSuperTargets[a.targetId];
-              const headroom = Math.max(0, superOutcome[target.owner]?.concessionalHeadroomAfterFills ?? 0);
-              consumed = Math.min(share, headroom);
-              if (consumed > 0) {
-                const taxRate = superMeta[target.accountId]?.taxedStatus === "untaxed" ? 0 : superOutcome[target.owner].contributionsTaxRate;
-                const tax = consumed * taxRate;
-                superBal[target.accountId] += consumed - tax;
-                wcaBal -= consumed;
-                row.superDetail[target.accountId].contributions += consumed;
-                row.superDetail[target.accountId].contributionsTax += tax;
-                if (target.type === "personalDeductible") {
-                  row.superDetail[target.accountId].personalDeductible += consumed;
-                  row.superDetail[target.accountId].surplusPersonalDeductible += consumed;
-                } else {
-                  row.superDetail[target.accountId].salarySacrifice += consumed;
-                  // See the field's own comment: this slice passed
-                  // through wcaBal above, unlike a genuine payroll
-                  // salary sacrifice — conservationCheck.js needs it
-                  // named separately so it isn't also added back.
-                  row.superDetail[target.accountId].surplusSalarySacrifice += consumed;
-                }
-                // So a LATER allocation entry targeting a different
-                // contribution row for the SAME person can't also
-                // believe the full headroom is still available — the
-                // exact class of bug reserveFromSuper closed for
-                // adviser fees/Division 293/296/FHSSS sharing one
-                // account (conservationCheck.js's own header).
-                superOutcome[target.owner].concessionalHeadroomAfterFills -= consumed;
-              }
-            } else if (a.targetType === "goal" && row) {
-              // Real pass only, same as every other goal accrual —
-              // goalAccruedTotal has no measurement-pass equivalent.
-              consumed = share;
-              wcaBal -= consumed;
-              row.goals[a.targetId].contribution += consumed;
-              row.goals[a.targetId].surplusContribution += consumed;
-              goalAccruedTotal[a.targetId] += consumed;
-            }
-            remaining -= consumed;
+            remaining -= applyBranch(b, share, y, row, superOutcome);
           }
-
-          // Step 3 — remainder.
-          if (remaining > 0) {
-            if (surplusPeriod.remainderTo === "expenditure") {
-              wcaBal -= remaining;
-              if (row) {
-                row.surplusSpent += remaining;
-                row.wcaDetail.sweptSpent += remaining;
-              }
-            } else if (row) {
-              // "cash" (default): stays in the WCA — nothing moves,
-              // just recorded for the Funding section's own row.
-              row.surplusAccumulated += remaining;
-              row.wcaDetail.sweptToCash += remaining;
-            }
-          }
+        }
+        // Implicit final catch-all: surplus never has nowhere to go.
+        // normaliseSurplusPeriods guarantees at least one step exists,
+        // but doesn't force the adviser's own cascade to END in an
+        // unconditional cash/expenditure branch — if it doesn't, this
+        // is where the leftover actually lands (as cash, the same
+        // default the old model's own remainderTo always fell back to).
+        if (remaining > 0 && row) {
+          row.surplusAccumulated += remaining;
+          row.wcaDetail.sweptToCash += remaining;
         }
       }
 

@@ -4151,6 +4151,83 @@ unavailable ("Chart unavailable" shows in every chart mount here),
 which has been true throughout this whole spec's own verification.
 Zero console errors.
 
+### Surplus: condition-based cascade engine (spec 37, Commit 1)
+
+**Replaces the time-period surplus model with an ordered, condition-based
+cascade.** Previously an adviser had to work out which YEAR a debt would
+be repaid and hand that year back as a period boundary; the engine now
+derives it. A cascade is an ordered list of steps, each with one or more
+branches (a split, by percentage); each branch names a destination
+(`debt` — with `deductibility`/`loanIds`/`order`; `asset`; `superConcessional`;
+`goal`; `cash`; `expenditure` — the last two replacing the old bolted-on
+`remainderTo` field, now ordinary destinations) and zero or more
+until-conditions (`repaid` — debt only; `balanceBelow`; `valueReaches`;
+`date`, with an internal-only `atOrAfter` direction used solely by
+migration, never hand-authored). Conditions are re-evaluated FRESH at
+every FY-end sweep — nothing is ever permanently retired; a `valueReaches`
+target met one year and lost to a later withdrawal reopens the branch the
+very next sweep (tested explicitly). A closed branch's own share cascades
+to the NEXT STEP, never redistributed to a sibling branch in the same step.
+
+**Migration, not a rewrite of stored state.** The wire field name
+`settings.surplus.periods` is unchanged; a three-level tolerance chain
+(already step-shaped → used as-is; old period-shaped
+`from`/`to`/`payNonDeductibleDebtFirst`/`allocations`/`remainderTo` →
+`migratePeriodToStep`; the pre-Commit-1 `{mode, assetId}` shorthand →
+`legacySurplusPeriod`) upgrades everything else automatically, mirroring
+the pre-v17 shorthand tolerance this codebase already had. A lone period
+needs no date/window condition when migrated (the old
+`resolveSurplusPeriod` already fell back to the last period for any
+uncovered year, so a single period already behaved unconditionally); a
+genuine multi-period array gets compound `atOrAfter`/`before` window
+conditions per element. `migratePeriodToStep`/`legacySurplusPeriod` derive
+their ids from the input's own id rather than minting fresh ones — both
+run unclamped on every `buildSchedules()`/`projectPlan()` call, and a
+fresh `uid()` there would make identical input project to a different
+(id-bearing) schedule shape each time (found via the existing
+`state.meta.touched` regression test, which failed on exactly this before
+the fix).
+
+**Breaking engine-contract change**, per CLAUDE.md: `schedule.surplusPeriods`
+is renamed and restructured to `schedule.surplusCascade` —
+`ENGINE_VERSION` bumped `1.5.0` → `2.0.0` (major), `engineContractShape.js`'s
+committed shape and `docs/reference/engine-api.md`'s version table updated
+in this commit. The old UI (`main.js`) keeps working unmodified through
+the tolerance chain — `createSurplusPeriod`/`createAllocationEntry` are
+retained for it, unused by anything new.
+
+Two real bugs found and fixed while adding the `balanceBelow` condition
+(closing the whole class, not just the case under test, per CLAUDE.md):
+(1) `conditionIsOpen`'s `balanceBelow` case read a debt destination's
+balance via the asset/superConcessional-only helper, which returns 0 for
+debt — permanently closing any debt-scoped `balanceBelow` condition from
+the first sweep; (2) even once readable, nothing capped a single lump-sum
+sweep at the stated floor — a well-funded sweep could pay a debt straight
+through "leave $X owing," even to zero, before the condition got a
+chance to close it on a later sweep. Fixed by reading `resolveDebtScope`
+for debt destinations, and by capping `applyDebtBranch`'s payable amount
+at `total − balanceBelow.amount` when that condition is present.
+
+**Conservation, confirmed before shipping, not after** (CLAUDE.md):
+`randomScenario()` now authors genuinely multi-step, split, conditioned
+cascades directly in the new vocabulary half the time (not just via the
+old-shape migration path) — exercising splits, a target met-then-lost,
+and a `superConcessional` branch capped at cap headroom with its
+remainder cascading on. No new named money flow was introduced (Commit 1
+re-routes existing flows — invest/repay/super-top-up/goal/spend/
+accumulate — through a new conditional structure), so `conservationCheck.js`
+needed no new term; confirmed empirically, not just by inspection — full
+suite green with the new generator live. No new `THRESHOLD_REGISTRY`
+entries: a cascade's `balanceBelow`/`valueReaches` amounts are
+adviser-chosen, not fixed statutory constants the engine branches on
+(unlike the registry's existing tax/super/pension entries).
+
+Tests: `planState.test.js` and `deterministic.test.js` updated for the
+new step/branch shape (old assertions on `.allocations`/`.remainderTo`
+replaced with `.branches` checks); 6 new cascade-vocabulary tests
+(re-opening, multi-step, splits, debt-scope `deductibility`/`loanIds`,
+`balanceBelow`). Full suite 2133/2133, build green.
+
 ---
 
 ## WHERE WE'RE GOING
@@ -4160,10 +4237,18 @@ Zero console errors.
    allocation view, and the non-deductible-first interest-saved figure.
    The model/engine (Commit 1) and settings UI (Commit 2) are done — see
    DONE above.
-2. **Bonus and allowance income as distinct types** — lumpy, variable
+2. **Surplus cascade — remaining commits** (spec 37, Commits 2–4) — a
+   `superConcessional`-then-`superNonConcessional` sub-cascade (CC to
+   cap, then NCC, with bring-forward opt-in and rejection handling);
+   confirming the debt-scope generalisation Commit 1 already delivers
+   needs nothing further; the cascade step editor UI (add/remove/
+   reorder steps, splits, resolved-effect-per-step, and the year each
+   condition is projected to be met). Commit 1 (engine/migration/
+   conservation) is done — see DONE above.
+3. **Bonus and allowance income as distinct types** — lumpy, variable
    income, matching the firm's own "Site/Locality Allowance" and "After
    tax bonus" rows (previously deferred in specs 11 and 13; promoted here).
-3. **Drawdown solver** — sustainable spend to life expectancy.
+4. **Drawdown solver** — sustainable spend to life expectancy.
 
 ---
 
