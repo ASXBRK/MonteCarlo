@@ -8912,6 +8912,186 @@ describe("Partial-first-year one-off events (docs/specs/37-review-remediation.md
   });
 });
 
+// Total superannuation balance includes pension phase (docs/specs/
+// 37-review-remediation.md, Commit 2; adversarial review finding 1.2) —
+// ITAA97 s307-230: TSB is accumulation PLUS retirement-phase value. Every
+// gate below is a SEPARATE call site that used to sum accumulation only;
+// each gets its own scenario, per CLAUDE.md's "close the class, not the
+// instance" — a single gate passing would not have caught the other five.
+describe("Total superannuation balance includes pension phase (docs/specs/37-review-remediation.md, Commit 2)", () => {
+  it("carry-forward eligibility: pension phase counts toward the $500,000 TSB gate (adversarial review probe B2)", () => {
+    // The review's own probe B2, reproduced directly: $300k accumulation
+    // + $900k ABP (TSB $1.2m, well past the gate) with 5 years of unused
+    // concessional cap seeded, then a $90,000 personal deductible
+    // contribution. Law: no carry-forward (TSB ≥ $500k) → excess CC ≈
+    // $90,000 − $31,707 ≈ $58,293.
+    const out = projectPlan(mkState({
+      endAge: 65,
+      plan: {
+        client: { currentAge: 61, retirementAge: 61, super: { carryForward: [20000, 20000, 20000, 20000, 20000], workTestMet: true } },
+        superAccounts: [superAcct({ balance: 1200000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({ commenceAt: { kind: "age", age: 61 }, commenceAmount: 900000, drawdownOption: "minimum" })],
+      },
+      cashflows: {
+        superContributions: [{
+          id: "sc1", owner: "client", accountId: "su1", type: "personalDeductible", basis: "amount",
+          amount: 90000, frequency: "annual", from: { kind: "age", age: 62 }, to: { kind: "age", age: 62 },
+          fhsssEligible: false, indexBasis: "cpi", indexExtraPct: 0,
+        }],
+      },
+    }));
+    expect(out.yearly[1].superCapUsage.client.carryForwardAvailable).toBe(0);
+    expect(out.yearly[1].taxDetail.client.excessConcessionalContributions).toBeCloseTo(58293, -2);
+  });
+
+  it("carry-forward eligibility: a client with NO pension is unaffected — carry-forward is available exactly as before", () => {
+    const out = projectPlan(mkState({
+      endAge: 65,
+      plan: {
+        client: { currentAge: 61, retirementAge: 61, super: { carryForward: [20000, 20000, 20000, 20000, 20000], workTestMet: true } },
+        superAccounts: [superAcct({ balance: 200000, allocation: zeroRealSuperAlloc() })], // well under the $500k gate
+      },
+      cashflows: {
+        superContributions: [{
+          id: "sc1", owner: "client", accountId: "su1", type: "personalDeductible", basis: "amount",
+          amount: 90000, frequency: "annual", from: { kind: "age", age: 62 }, to: { kind: "age", age: 62 },
+          fhsssEligible: false, indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+    }));
+    expect(out.yearly[1].superCapUsage.client.carryForwardAvailable).toBeGreaterThan(0);
+    expect(out.yearly[1].taxDetail.client.excessConcessionalContributions).toBe(0);
+  });
+
+  it("bring-forward tier selection: pension phase pushes TSB from the 2-year tier into the nil tier", () => {
+    // $1.9m accumulation alone sits between the full (1.84m) and two-year
+    // (1.97m) thresholds — a real (non-nil) 2-year bring-forward cap. Add
+    // a $250k pension and the SAME household's combined TSB ($2.15m) is
+    // at/above the general transfer balance cap ($2.1m) — nil under law.
+    const mk = (withPension) => mkState({
+      endAge: 42,
+      plan: {
+        client: { currentAge: 40 },
+        superAccounts: [superAcct({ balance: withPension ? 2150000 : 1900000, allocation: zeroRealSuperAlloc() })],
+        pensions: withPension ? [pensionRow({ commenceAt: { kind: "age", age: 40 }, commenceAmount: 250000, drawdownOption: "minimum" })] : [],
+      },
+      cashflows: {
+        superContributions: [{
+          id: "sc1", owner: "client", accountId: "su1", type: "personalNonDeductible", basis: "amount",
+          amount: 50000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          fhsssEligible: false, indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+    });
+    const withPension = projectPlan(mk(true));
+    const withoutPension = projectPlan(mk(false));
+    expect(withPension.yearly[0].superDetail.su1.nonConcessional).toBeCloseTo(0, 0); // nil tier — rejected
+    expect(withoutPension.yearly[0].superDetail.su1.nonConcessional).toBeCloseTo(50000, 0); // 2-year tier — fits within $260,000
+  });
+
+  it("Division 296 assesses pension-phase earnings, not accumulation alone (adversarial review probe B1)", () => {
+    // The review's own probe B1: $3.6m ABP + $100k accumulation (TSB
+    // $3.7m, past the $3m tier). Under the old accumulation-only sum
+    // Division 296 was assessed once (on the pre-commencement opening
+    // balance) then never again; correctly, it recurs every year the
+    // combined TSB stays above $3m.
+    const out = projectPlan(mkState({
+      endAge: 70,
+      plan: {
+        client: { currentAge: 66, retirementAge: 65 },
+        superAccounts: [superAcct({ balance: 3700000, allocation: { mode: "custom", incomePct: 4, growthPct: 0, frankingPct: 0, volBasis: "Balanced" } })],
+        pensions: [pensionRow({
+          commenceAt: { kind: "age", age: 66 }, commenceAmount: 3600000, drawdownOption: "minimum",
+          allocation: { mode: "custom", incomePct: 4, growthPct: 0, frankingPct: 0, volBasis: "Balanced" },
+        })],
+      },
+    }));
+    // Later years — well past the single opening-balance assessment the
+    // pre-fix engine produced — still show real Division 296 tax.
+    expect(out.yearly[2].taxDetail.div296).toBeGreaterThan(0);
+    expect(out.yearly[3].taxDetail.div296).toBeGreaterThan(0);
+  });
+
+  it("the co-contribution's TSB gate (nil at/above the general transfer balance cap) counts pension phase — previously absent entirely, not just wrongly sourced", () => {
+    const mk = (withPension) => mkState({
+      endAge: 42,
+      plan: {
+        client: { currentAge: 40 },
+        superAccounts: [superAcct({ id: "su1", balance: 2150000, allocation: zeroRealSuperAlloc() })],
+        pensions: withPension ? [pensionRow({ commenceAt: { kind: "age", age: 40 }, commenceAmount: 2050000, drawdownOption: "minimum" })] : [],
+      },
+      cashflows: {
+        income: [employmentRow({ amount: 40000, to: { kind: "age", age: 41 } })],
+        superContributions: [{
+          id: "sc1", owner: "client", accountId: "su1", type: "personalNonDeductible", basis: "amount",
+          amount: 1000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          fhsssEligible: false, indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+    });
+    const withPension = projectPlan(mk(true)); // TSB $2.15m via pension — at/above the $2.1m gate
+    const withoutPension = projectPlan(mk(false)); // same TSB, entirely accumulation — same gate, same result; proves the gate itself works
+    expect(withPension.yearly[0].superDetail.su1.govSuperInflow).toBe(0);
+    expect(withoutPension.yearly[0].superDetail.su1.govSuperInflow).toBe(0);
+    // And below the gate, entirely via accumulation (no pension in
+    // either arm here) the co-contribution IS paid — the gate only
+    // blocks when TSB is actually at/above the cap.
+    const belowGate = projectPlan(mkState({
+      endAge: 42,
+      plan: { client: { currentAge: 40 }, superAccounts: [superAcct({ id: "su1", balance: 50000, allocation: zeroRealSuperAlloc() })] },
+      cashflows: {
+        income: [employmentRow({ amount: 40000, to: { kind: "age", age: 41 } })],
+        superContributions: [{
+          id: "sc1", owner: "client", accountId: "su1", type: "personalNonDeductible", basis: "amount",
+          amount: 1000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          fhsssEligible: false, indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+    }));
+    expect(belowGate.yearly[0].superDetail.su1.govSuperInflow).toBeGreaterThan(0);
+  });
+
+  it("the spouse contribution tax offset's TSB gate counts the receiving spouse's pension phase — previously always inert (compared against an undefined threshold)", () => {
+    const mk = (withPension) => mkState({
+      endAge: 42,
+      plan: {
+        household: "married",
+        client: { currentAge: 40 }, partner: { currentAge: 40 },
+        superAccounts: [superAcct({ id: "su-p", owner: "partner", balance: 2150000, allocation: zeroRealSuperAlloc() })],
+        pensions: withPension ? [pensionRow({ owner: "partner", sourceAccountId: "su-p", commenceAt: { kind: "age", age: 40 }, commenceAmount: 2050000, drawdownOption: "minimum" })] : [],
+      },
+      cashflows: {
+        income: [employmentRow({ owner: "client", amount: 120000, to: { kind: "age", age: 41 } })],
+        superContributions: [{
+          id: "sc1", owner: "client", accountId: "su-p", type: "spouse", basis: "amount",
+          amount: 3000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          fhsssEligible: false, indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+    });
+    const withPension = projectPlan(mk(true)); // receiving spouse's TSB $2.15m via pension — at/above the GTBC
+    const withoutGate = projectPlan(mk(false)); // same TSB, all accumulation — same gate
+    const below = projectPlan(mkState({
+      endAge: 42,
+      plan: {
+        household: "married",
+        client: { currentAge: 40 }, partner: { currentAge: 40 },
+        superAccounts: [superAcct({ id: "su-p", owner: "partner", balance: 10000, allocation: zeroRealSuperAlloc() })],
+      },
+      cashflows: {
+        income: [employmentRow({ owner: "client", amount: 120000, to: { kind: "age", age: 41 } })],
+        superContributions: [{
+          id: "sc1", owner: "client", accountId: "su-p", type: "spouse", basis: "amount",
+          amount: 3000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          fhsssEligible: false, indexBasis: "none", indexExtraPct: 0,
+        }],
+      },
+    }));
+    expect(withPension.yearly[0].taxDetail.client.incomeTax).toBeCloseTo(withoutGate.yearly[0].taxDetail.client.incomeTax, 0);
+    expect(below.yearly[0].taxDetail.client.incomeTax).toBeLessThan(withPension.yearly[0].taxDetail.client.incomeTax);
+  });
+});
+
 // Age pension (spec 21a, Commit 3) — engine integration. An isolated
 // fixture (no assets, no income, no expenses) so the entitlement is
 // the ONLY thing moving household cash — the age pension's own known-

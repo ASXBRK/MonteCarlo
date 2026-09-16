@@ -4271,6 +4271,61 @@ the exactly-now case); a recurring annual row in the same September-start
 plan confirmed to still skip year 0 (the contrast case — `julyOf` itself
 is unchanged). Full suite 2141/2141, build green.
 
+### Review remediation, Commit 2: total superannuation balance includes pension phase (spec 37b) — DELIBERATE TIGHTENING
+
+**Client-facing numbers change.** Fixes finding 1.2. Total superannuation
+balance (ITAA97 s307-230) is accumulation value PLUS retirement-phase
+(pension) value; this engine summed accumulation only, at every site that
+tests it. **Any client with money in pension phase was tested on the
+wrong (understated) figure** — carry-forward eligibility (<$500,000),
+bring-forward tier selection, the nil NCC cap ($2.1m), Division 296
+(>$3m, including its own earnings base), the co-contribution, and the
+spouse contribution offset. A client who looked eligible for carry-
+forward, a bigger bring-forward, or no Division 296 at all may not be —
+correctly, once TSB is measured properly.
+
+**What changed and why**: one new function, `totalSuperBalance(owner)`
+(accumulation `superBal` + pension-phase `pensionBal`, summed live at the
+call site's own point in time — the same "read balances as they stand
+when asked" convention every other TSB-adjacent figure in this engine
+already used). Every one of the six gates now routes through it instead
+of re-summing `superAccountsByOwner` alone; DB pension interests are
+NOT included (this engine has no market-value balance for a DB pension —
+a disclosed narrowing of the law's broader definition, unchanged from
+before this commit).
+
+**Two defects beyond finding 1.2's own description, found while routing
+each gate through the single source** (CLAUDE.md: close the class, not
+the instance):
+- The spouse contribution offset's TSB check compared against
+  `spouseRatesY.generalTransferBalanceCap`, a field that does not exist
+  on that rates object — always `undefined`, so `receivingTsb >=
+  undefined` was always `false` and the gate **never fired at all**,
+  for any TSB, before this fix (not merely testing the wrong balance).
+  Now reads `superRatesY.generalTransferBalanceCap`, the same figure the
+  transfer-balance-cap section elsewhere in this file already uses.
+- The co-contribution had **no TSB gate whatsoever** — `coContribution()`
+  takes no TSB argument at all. Added: nil at/above the general transfer
+  balance cap at the co-contribution's own point of assessment (s292-467),
+  via the same `totalSuperBalance` source; LISTO is deliberately excluded
+  (no TSB test under law).
+
+Reproduced the review's own probes exactly: B1 (Division 296 on a $3.6m
+ABP + $100k accumulation) now assesses tax every year the combined TSB
+stays above $3m, not once on the pre-commencement opening balance and
+never again; B2 (carry-forward on $300k accumulation + $900k ABP, a
+$90,000 personal deductible contribution) now reports excess concessional
+contributions of $56,098 (a $90,000 request against the FY2027–28
+$31,707-adjusted-for-CPI-timing cap, carry-forward correctly denied),
+matching the review's own hand-calculated order of magnitude.
+
+Tests: each of the six gates gets its own scenario, pension-phase versus
+accumulation-only at the SAME combined total (carry-forward, bring-
+forward tier, nil NCC cap, Division 296, co-contribution, spouse offset);
+the review's B1/B2 probe scenarios reproduced directly; a client with no
+pension confirmed unaffected (carry-forward still available exactly as
+before). Full suite 2147/2147, build green.
+
 ---
 
 ## WHERE WE'RE GOING

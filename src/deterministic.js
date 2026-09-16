@@ -778,6 +778,32 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     pensionFixedProportion[pn.id] = 0;
     pensionCommenced[pn.id] = false;
   }
+  const pensionsByOwner = { client: [], partner: [] };
+  for (const pn of pensionRows) pensionsByOwner[pn.owner]?.push(pn.id);
+
+  // Total superannuation balance (docs/specs/37-review-remediation.md,
+  // Commit 2; adversarial review finding 1.2) — ITAA97 s307-230: TSB is
+  // accumulation phase value PLUS retirement-phase (pension) value, for
+  // the SAME owner, at the SAME point in time. Every gate that tests TSB
+  // (carry-forward eligibility, bring-forward tier selection, the nil
+  // NCC cap, Division 296, the co-contribution, the spouse offset) must
+  // read THIS function, never re-sum superAccountsByOwner alone — a
+  // client with money in pension phase was previously tested on their
+  // accumulation balance only, understating TSB by exactly what they'd
+  // moved into pension. Defined benefit interests are NOT included: this
+  // engine has no market-value balance for a DB pension to sum (it is a
+  // pure per-FY formula, not an account — see the "Defined benefit
+  // pensions" section just below), a disclosed narrowing of the law's
+  // own broader definition. Callable at any point in the monthly loop —
+  // superBal/pensionBal are live balances, not FY-boundary snapshots, so
+  // (same as every other "TSB" read in this engine before this fix) a
+  // caller wanting "at prior 30 June" must call this at that specific
+  // point, which every site below already does.
+  function totalSuperBalance(owner) {
+    const accum = (superAccountsByOwner[owner] ?? []).reduce((s, id) => s + superBal[id], 0);
+    const pension = (pensionsByOwner[owner] ?? []).reduce((s, id) => s + pensionBal[id], 0);
+    return accum + pension;
+  }
 
   // --- Defined benefit pensions (spec 26, Commit 2) --------------------------
   //
@@ -5117,7 +5143,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // closing TSB" rule below, once the real pass has produced closing.
     const tsbOpening = { client: 0, partner: 0 };
     for (const p of persons) {
-      const tsbPriorJune = superAccountsByOwner[p].reduce((s, id) => s + superBal[id], 0);
+      const tsbPriorJune = totalSuperBalance(p);
       tsbOpening[p] = tsbPriorJune;
       let grossSG = 0, grossSS = 0, grossPD = 0, grossNCC = 0;
       for (const id of superAccountsByOwner[p]) {
@@ -5637,7 +5663,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       let inflow = 0;
       if (eligibleIncomeTestMet) {
         const ncc = schedule.personalNccByOwner?.[p]?.[y] ?? 0;
-        inflow += coContribution(spouseRatesY, ncc, measured[p].ordinary);
+        // The co-contribution's own TSB gate (s292-467: nil if TSB ≥ the
+        // general transfer balance cap at the end of the prior FY) — via
+        // the single totalSuperBalance source (Commit 2). Previously
+        // absent entirely (coContribution() itself takes no TSB
+        // argument), not merely testing the wrong balance — found while
+        // routing this gate through the fix for finding 1.2, which
+        // named the co-contribution as one of the six affected gates.
+        // LISTO has no TSB test under law and is deliberately excluded
+        // from this gate.
+        if (totalSuperBalance(p) < superRatesY.generalTransferBalanceCap) {
+          inflow += coContribution(spouseRatesY, ncc, measured[p].ordinary);
+        }
         inflow += listo(spouseRatesY, superOutcome[p]?.lowTaxContributions ?? 0, measured[p].ordinary);
       }
       if (inflow > 0) {
@@ -5858,16 +5895,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         const contributingOwner = receivingOwner === "partner" ? "client" : "partner";
         const contribution = schedule.spouseContributionsByOwner?.[receivingOwner]?.[y] ?? 0;
         if (contribution <= 0) continue;
-        // TSB check (disclosed simplification: the receiving spouse's
-        // CURRENT total super balance, a reasonable proxy for "at the
-        // prior 30 June" — this engine doesn't separately snapshot TSB
-        // at FY boundaries anywhere else either). The "no excess NCCs"
-        // condition is not modelled — disclosed, not silently assumed
-        // met; a rare edge case relative to the income-based phase-out.
-        const receivingTsb = (state.plan.superAccounts ?? [])
-          .filter((s) => s.owner === receivingOwner && s.include)
-          .reduce((s, acc) => s + (superBal[acc.id] ?? 0), 0);
-        if (receivingTsb >= spouseRatesY.generalTransferBalanceCap) continue;
+        // TSB check, via the single totalSuperBalance source (Commit 2)
+        // — accumulation plus pension-phase, same "disclosed
+        // simplification" as before for using the CURRENT balance as a
+        // proxy for "at the prior 30 June" (this engine doesn't
+        // separately snapshot TSB at FY boundaries anywhere else
+        // either). The "no excess NCCs" condition is not modelled —
+        // disclosed, not silently assumed met; a rare edge case
+        // relative to the income-based phase-out.
+        // superRatesY.generalTransferBalanceCap, not spouseRatesY's own
+        // (which has no such field — comparing against it was always
+        // `>= undefined`, silently false, so this gate never actually
+        // fired before this fix; a second defect this same gate carried,
+        // found while routing it through the single TSB source).
+        const receivingTsb = totalSuperBalance(receivingOwner);
+        if (receivingTsb >= superRatesY.generalTransferBalanceCap) continue;
         const offset = spouseContributionOffset(spouseRatesY, contribution, repaymentIncome[receivingOwner]);
         if (offset > 0) spreadTax(-offset, measured[contributingOwner].incomeMonths, yearEnd(y) - 1);
       }
@@ -6051,8 +6093,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // convention as CGT/Div293 (folded into cgtDue next year).
     const newPendingDiv296 = { client: 0, partner: 0 };
     for (const p of persons) {
-      const closingTsb = superAccountsByOwner[p].reduce((s, id) => s + row.superDetail[id].closing, 0);
-      const earnings = superAccountsByOwner[p].reduce((s, id) => s + row.superDetail[id].earnings, 0);
+      // Closing TSB and this FY's earnings — accumulation PLUS
+      // pension-phase, via the same pensionsByOwner/pensionDetail
+      // fields totalSuperBalance itself reads live balances from
+      // (Commit 2): Division 296 earnings are net exempt current
+      // pension income too, i.e. the pension account's own earnings,
+      // not accumulation's alone.
+      const closingTsb = superAccountsByOwner[p].reduce((s, id) => s + row.superDetail[id].closing, 0)
+        + pensionsByOwner[p].reduce((s, id) => s + row.pensionDetail[id].closing, 0);
+      const earnings = superAccountsByOwner[p].reduce((s, id) => s + row.superDetail[id].earnings, 0)
+        + pensionsByOwner[p].reduce((s, id) => s + row.pensionDetail[id].earnings, 0);
       const { tax } = div296Tax({
         openingTsb: tsbOpening[p], closingTsb, earnings,
         lowerThreshold: superRatesY.div296LowerThreshold,
