@@ -65,6 +65,10 @@ export const SNAPSHOT_ROWS = [
   { section: "Cash Received", label: "Anticipated Tax Return", path: (s) => s.cashReceived.anticipatedTaxReturn },
   { section: "Cash Received", label: "After Tax Bonus", path: (s) => s.cashReceived.afterTaxBonus },
   { section: "Cash Received", label: "Other Tax Free Income", path: (s) => s.cashReceived.otherTaxFreeIncome },
+  { section: "Cash Received", label: "Age Pension", path: (s) => s.cashReceived.governmentPayments },
+  { section: "Cash Received", label: "Pension Payments", path: (s) => s.cashReceived.pensionPayments },
+  { section: "Cash Received", label: "Released Super Withdrawals", path: (s) => s.cashReceived.releasedSuperWithdrawals },
+  { section: "Cash Received", label: "Cash Received", path: (s) => s.cashReceived.total, total: true },
 
   { section: "Expenses", label: "Mortgage Repayments", path: (s) => -s.expenses.mortgageRepayments },
   { section: "Expenses", label: "Other Loan Repayments (P&I)", path: (s) => -s.expenses.otherLoanRepayments },

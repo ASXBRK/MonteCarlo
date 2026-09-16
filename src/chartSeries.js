@@ -8,27 +8,44 @@
 // Expense funding — "the affordability picture in one image": every
 // year's total funding need (income the household would have needed
 // to cover everything, derived as income − surplusOrDeficit) split
-// into what actually came from income, what was funded by selling
+// into what actually came from income, what was funded by pension
+// payments/released-super withdrawals, what was funded by selling
 // assets, and what went unfunded.
+//
+// fundedFromPension (docs/specs/37-review-remediation.md, Commit 4;
+// adversarial review finding 2.5) — pension payments and released-
+// super deficit draws are credited straight to the working cash
+// account (deterministic.js), never touching income or
+// surplusOrDeficit, so they used to break the identity below silently:
+// whatever they funded still showed up folded into "met from income"
+// (a retiree probe: income $24,429, pension payments $30,000, but the
+// chart read "Met from income" $44,958 of a $44,958 need). Capped at
+// whatever remains of the need after assets/unfunded are accounted for
+// — a pension's own statutory-minimum payment can exceed what the
+// household actually needed that year (a surplus year), and the
+// excess isn't "funding the need", it's accumulating in the working
+// cash account instead, the same way surplus income already does off
+// this chart.
 //
 // Reconciling identity (exact, not approximate): by construction of
 // the engine's own deficit-funding cascade (drain WCA/assets in
 // fundingOrder, remainder unfunded), deficitFundedFromAssets +
 // unfundedCashflow together equal exactly −surplusOrDeficit whenever
-// surplusOrDeficit is negative, and are both zero otherwise. So:
-//   metFromIncome = income − surplusOrDeficit − (fundedFromAssets + unfunded)
-// always reduces to a clean value: the full need when there was a
-// surplus (nothing to fund from elsewhere), or exactly `income` when
-// there was a deficit (every dollar of income went to the need, with
-// the shortfall made up by assets/unfunded) — verified directly in
+// surplusOrDeficit is negative, and are both zero otherwise, so
+// metFromIncome + fundedFromPension always exactly accounts for
+// whatever `fundedFromAssets + unfunded` didn't — verified directly in
 // chartSeries.test.js rather than just asserted here.
 export function expenseFundingSeries(yearly) {
   return yearly.map((row) => {
     const fundedFromAssets = row.deficitFundedFromAssets ?? 0;
     const unfunded = row.unfundedCashflow ?? 0;
     const need = (row.income ?? 0) - (row.surplusOrDeficit ?? 0);
-    const metFromIncome = need - fundedFromAssets - unfunded;
-    return { metFromIncome, fundedFromAssets, unfunded };
+    const pensionAndSuper = Object.values(row.pensionDetail ?? {}).reduce((s, d) => s + (d.payments ?? 0), 0)
+      + Object.values(row.superDetail ?? {}).reduce((s, d) => s + (d.withdrawals ?? 0), 0);
+    const remaining = need - fundedFromAssets - unfunded;
+    const fundedFromPension = Math.max(0, Math.min(remaining, pensionAndSuper));
+    const metFromIncome = remaining - fundedFromPension;
+    return { metFromIncome, fundedFromPension, fundedFromAssets, unfunded };
   });
 }
 
@@ -57,12 +74,15 @@ export function taxByTypeSeries(yearly) {
   });
 }
 
-// Debt vs assets — the crossover-year picture. Total assets includes
-// working cash (the same "Total assets" figure Key Figures' Consolidated
-// mode shows); total debt is row.liabilitiesClosing, unchanged.
+// Debt vs assets — the crossover-year picture. row.totalAssets is the
+// engine's own published aggregate (docs/specs/37-review-remediation.md,
+// Commit 4) — every balance type (financial/lifestyle assets, property,
+// super, pension, bonds, working cash), the same figure Key Figures'
+// Consolidated "Total assets" reads; total debt is row.liabilitiesClosing,
+// unchanged.
 export function debtVsAssetsSeries(yearly) {
   return yearly.map((row) => ({
-    assets: row.closingBalance + row.propertyClosing + row.superClosing + row.wcaClosing,
+    assets: row.totalAssets,
     debt: row.liabilitiesClosing,
   }));
 }
@@ -84,13 +104,20 @@ export function debtAssetsCrossoverYear(yearly) {
 }
 
 // Super vs non-super — the salary-sacrifice question made visual.
+// "Super" includes pension-phase balances (docs/specs/37-review-
+// remediation.md, Commit 4; adversarial review finding 1.11) — a
+// pension is superannuation money in retirement phase, not a
+// different asset class, and was previously omitted entirely (a
+// retiree probe: "Super" read $1,720 while $592,722 sat in an ABP).
 // Non-super is everything else the household holds outside a fund:
-// financial/lifestyle assets, property, and working cash. Reconciles
-// with debtVsAssetsSeries's own "assets" figure by construction
-// (super + nonSuper === that same total assets figure).
+// financial/lifestyle assets, property, bonds, and working cash.
+// nonSuper is derived from row.totalAssets minus super so the two
+// always reconcile with debtVsAssetsSeries's own "assets" figure by
+// construction (super + nonSuper === that same total assets figure),
+// rather than re-listing non-super's own components a second time.
 export function superVsNonSuperSeries(yearly) {
-  return yearly.map((row) => ({
-    superBalance: row.superClosing,
-    nonSuper: row.closingBalance + row.propertyClosing + row.wcaClosing,
-  }));
+  return yearly.map((row) => {
+    const superBalance = row.superClosing + row.pensionClosing;
+    return { superBalance, nonSuper: row.totalAssets - superBalance };
+  });
 }

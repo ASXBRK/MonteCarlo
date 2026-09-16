@@ -2539,7 +2539,18 @@ export function defaultState(profiles = {}, now = new Date()) {
     goals: [],
     bonds: [],
     settings: {
-      surplus: { periods: [createCascadeStep()] },
+      // createSurplusPeriod() (old shape), NOT createCascadeStep() —
+      // main.js's own surplus-treatment UI (surplusPeriodCardHTML)
+      // still renders the old period vocabulary directly off this raw,
+      // unmigrated array and crashes on a step-shaped entry (found via
+      // an actual browser smoke test: a brand-new client's Settings
+      // view threw on mount). The engine-side tolerance chain
+      // (rawCascadeSteps/migratePeriodToStep) already converts this old
+      // shape into an equivalent cascade step transparently, so nothing
+      // about the cascade engine's own behaviour changes — only which
+      // shape a NEW client starts from, until the cascade step editor
+      // (docs/specs/37-surplus-cascade.md, Commit 4) replaces this UI.
+      surplus: { periods: [createSurplusPeriod()] },
       fundingOrder: [asset.id],
       deficit: { minimumBalances: {}, sellRule: "order" },
     },
@@ -3483,6 +3494,71 @@ export function createAllocationEntry() {
   return { id: uid("sa"), targetType: "asset", targetId: null, pct: 0 };
 }
 
+// A single allocation entry: dropped entirely (never coerced to a
+// fallback target) when its target doesn't resolve — an allocation
+// pointing at nothing would silently misdirect real money, unlike a
+// cosmetic field falling back to a default. `ctx` supplies the
+// candidate id sets to validate against (financial assets are the
+// only valid asset target — lifestyle assets are never a cash
+// destination, same rule fundingOrder/surplus-invest already enforce).
+// Restored (docs/specs/37-review-remediation.md, Commit 4) — deleted in
+// the cascade commit on the assumption normaliseSurplusPeriods could
+// safely force-upgrade every stored period to the new step/branch
+// shape; found via an actual browser check that main.js's own
+// pre-cascade-UI (surplusPeriodCardHTML) reads this old shape directly
+// off the RAW, stored settings.surplus.periods and crashes on a
+// step-shaped entry, which every hydrate() call was silently producing.
+function clampAllocationEntry(a, assets, ctx) {
+  const targetType = ALLOCATION_TARGET_TYPES.includes(a?.targetType) ? a.targetType : null;
+  if (!targetType) return null;
+  const pct = clampNumber(a?.pct, 0, 100);
+  if (pct <= 0) return null;
+  let targetId = null;
+  if (targetType === "asset") {
+    targetId = assets.some((x) => x.include && isFinancial(x) && x.id === a.targetId) ? a.targetId : null;
+  } else if (targetType === "liability") {
+    targetId = (ctx.liabilities ?? []).some((l) => l.id === a.targetId) ? a.targetId : null;
+  } else if (targetType === "superContribution") {
+    const row = (ctx.superContributions ?? []).find((sc) => sc.id === a.targetId);
+    targetId = row && (row.type === "salarySacrifice" || row.type === "personalDeductible") ? a.targetId : null;
+  } else if (targetType === "goal") {
+    targetId = (ctx.goals ?? []).some((g) => g.id === a.targetId) ? a.targetId : null;
+  }
+  if (!targetId) return null;
+  return { id: typeof a.id === "string" && a.id ? a.id : uid("sa"), targetType, targetId, pct };
+}
+
+// Clamps one OLD-shaped period, preserving the old shape (id/from/to/
+// payNonDeductibleDebtFirst/debtOrder/allocations/remainderTo) rather
+// than upgrading it to a cascade step — restored alongside
+// clampAllocationEntry above, same reason. `used` allocations are
+// processed in order and capped so their SUM never exceeds 100%, same
+// "incapable of displaying an invalid state" guarantee the cascade
+// step's own clampCascadeStep gives its branches.
+function clampSurplusPeriod(p, plan, assets, ctx = {}) {
+  const { from, to } = clampFromTo(p ?? {}, plan.client.currentAge, plan.endAge, plan);
+  const raw = Array.isArray(p?.allocations) ? p.allocations : [];
+  let used = 0;
+  const allocations = [];
+  for (const a of raw) {
+    if (used >= 100) break;
+    const entry = clampAllocationEntry(a, assets, ctx);
+    if (!entry) continue;
+    const pct = Math.min(entry.pct, 100 - used);
+    if (pct <= 0) continue;
+    used += pct;
+    allocations.push({ ...entry, pct });
+  }
+  return {
+    id: typeof p?.id === "string" && p.id ? p.id : uid("sp"),
+    from, to,
+    payNonDeductibleDebtFirst: p?.payNonDeductibleDebtFirst === true,
+    debtOrder: DEBT_ORDER_MODES.includes(p?.debtOrder) ? p.debtOrder : "interestRate",
+    allocations,
+    remainderTo: REMAINDER_TARGETS.includes(p?.remainderTo) ? p.remainderTo : "cash",
+  };
+}
+
 // Converts the pre-Commit-1 {mode, assetId} shape into an equivalent
 // SINGLE unconditional cascade step — the migration's own conversion,
 // factored out so hydrate() and any raw-state test fixture built around
@@ -3719,12 +3795,28 @@ export function rawCascadeSteps(periods) {
   return out;
 }
 
+// Validates and STORES each period in its OWN native shape — an
+// already step-shaped entry (`.branches`) clamps (and possibly
+// expands) via clampCascadeStep, exactly as before; an old-shaped
+// entry clamps via clampSurplusPeriod and is preserved AS an old-shaped
+// period, never force-upgraded (docs/specs/37-review-remediation.md,
+// Commit 4 — the whole-cascade migration this function used to run
+// unconditionally is a purely INTERNAL, transient concern for the
+// engine's own resolution — see rawCascadeSteps above, still used
+// as-is by schedule.js — not something that belongs in what gets
+// persisted back into state.settings.surplus.periods, which main.js's
+// own pre-cascade-UI still reads directly). The stored array may
+// legitimately mix old-shaped and step-shaped entries; each element
+// is self-describing, and schedule.js's own rawCascadeSteps already
+// treats every element independently by its own shape.
 export function normaliseSurplusPeriods(periods, plan, assets, ctx = {}) {
+  const arr = Array.isArray(periods) && periods.length > 0 ? periods : [createSurplusPeriod()];
   const out = [];
-  for (const raw of rawCascadeSteps(periods)) {
-    out.push(...clampCascadeStep(raw, plan, assets, ctx));
+  for (const raw of arr) {
+    if (raw && Array.isArray(raw.branches)) out.push(...clampCascadeStep(raw, plan, assets, ctx));
+    else out.push(clampSurplusPeriod(raw, plan, assets, ctx));
   }
-  return out.length > 0 ? out : [createCascadeStep()];
+  return out.length > 0 ? out : [createSurplusPeriod()];
 }
 
 // Surplus treatment (Working Cash Account FY-end sweep) — a period-based
@@ -4105,12 +4197,29 @@ function migrateV15toV16(raw) {
 // deductiblePct itself is absent, and only ever copies the fields it
 // explicitly lists — the stale boolean simply doesn't survive the next
 // clamp, migrated or not.
+// OLD-shaped, not step-shaped — this migration stores directly into
+// settings.surplus.periods, which main.js's own pre-cascade-UI still
+// reads in the old vocabulary (docs/specs/37-review-remediation.md,
+// Commit 4 — see normaliseSurplusPeriods' own header for why the
+// cascade shape never belongs in storage). Deliberately NOT the same
+// function as the exported legacySurplusPeriod (which schedule.js
+// calls for the bare-shorthand engine-resolution case and must return
+// a step, with a FIXED id for determinism) — a one-time migration can
+// mint a fresh uid() safely, unlike that per-projection-call site.
+function migrateV16toV17SurplusPeriod(old) {
+  const base = { id: uid("sp"), from: anchorRef("start"), to: anchorRef("end"), payNonDeductibleDebtFirst: false, debtOrder: "interestRate" };
+  if (old?.mode === "invest" && old.assetId) {
+    return { ...base, allocations: [{ id: uid("sa"), targetType: "asset", targetId: old.assetId, pct: 100 }], remainderTo: "cash" };
+  }
+  if (old?.mode === "spend") return { ...base, allocations: [], remainderTo: "expenditure" };
+  return { ...base, allocations: [], remainderTo: "cash" }; // "accumulate" or unrecognised
+}
 function migrateV16toV17(raw) {
   const old = raw?.settings?.surplus ?? { mode: "accumulate", assetId: null };
   return {
     ...raw,
     schemaVersion: 17,
-    settings: { ...raw.settings, surplus: { periods: [legacySurplusPeriod(old)] } },
+    settings: { ...raw.settings, surplus: { periods: [migrateV16toV17SurplusPeriod(old)] } },
   };
 }
 

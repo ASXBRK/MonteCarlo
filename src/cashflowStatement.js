@@ -313,8 +313,22 @@ export function taxSums(row, forOwner = null) {
 // every other assessable-income row above (Other/Interest/Dividend/
 // etc.) is already received in full, so it needs no separate cash-
 // received line here.
+//
+// governmentPayments/pensionPayments/releasedSuperWithdrawals
+// (docs/specs/37-review-remediation.md, Commit 4; adversarial review
+// finding 1.10) — three real household cash receipts this section
+// previously omitted entirely: the age pension (non-assessable but
+// genuinely cash — it belongs here even though assessableIncome's own
+// governmentPayments is deliberately excluded from ITS total, see that
+// function's header), pension/TTR payments (credited straight to the
+// working cash account by deterministic.js, never folded into
+// row.income), and deficit-funded released-super withdrawals (same
+// "never touches row.income" shape). Without these, "Cash Received"
+// could show far less than the household's actual cash while its
+// working cash account visibly grows — the exact defect a retiree
+// probe caught (SURPLUS INCOME −$45,000 while cash rose).
 export function cashReceivedSums(row, ctx, forOwner = null) {
-  const { incomeRows = [], rowTotalsIncome = {}, y = 0 } = ctx;
+  const { incomeRows = [], rowTotalsIncome = {}, y = 0, pensionRows = [], superAccounts = [] } = ctx;
   const byCat = (cat) => sumByCategory(incomeRows, rowTotalsIncome, cat, y, forOwner);
   const client = row.taxDetail?.client ?? {};
   const partner = row.taxDetail?.partner ?? {};
@@ -342,10 +356,21 @@ export function cashReceivedSums(row, ctx, forOwner = null) {
   const otherTaxFreeIncomeComputed = byCat("otherTaxFreeIncome");
   const adjNonTaxable = adjustmentSum(row, "income.nonTaxable", forOwner);
   const otherTaxFreeIncome = otherTaxFreeIncomeComputed + adjNonTaxable;
-  const total = regularTakeHomePay + anticipatedTaxReturn + afterTaxBonus + otherTaxFreeIncome;
+  const governmentPayments = forOwner == null
+    ? (row.agePensionDetail?.entitlement ?? 0)
+    : (row.agePensionDetail?.[forOwner]?.paid ?? 0);
+  const pensionPayments = pensionRows
+    .filter((pn) => forOwner == null || pn.owner === forOwner)
+    .reduce((s, pn) => s + (row.pensionDetail?.[pn.id]?.payments ?? 0), 0);
+  const releasedSuperWithdrawals = superAccounts
+    .filter((sa) => forOwner == null || sa.owner === forOwner)
+    .reduce((s, sa) => s + (row.superDetail?.[sa.id]?.withdrawals ?? 0), 0);
+  const total = regularTakeHomePay + anticipatedTaxReturn + afterTaxBonus + otherTaxFreeIncome
+    + governmentPayments + pensionPayments + releasedSuperWithdrawals;
   return {
     regularTakeHomePay, anticipatedTaxReturn, afterTaxBonus,
-    otherTaxFreeIncomeComputed, adjNonTaxable, otherTaxFreeIncome, total,
+    otherTaxFreeIncomeComputed, adjNonTaxable, otherTaxFreeIncome,
+    governmentPayments, pensionPayments, releasedSuperWithdrawals, total,
   };
 }
 

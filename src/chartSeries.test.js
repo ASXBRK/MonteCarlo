@@ -3,14 +3,22 @@ import {
   expenseFundingSeries, taxByTypeSeries, debtVsAssetsSeries, debtAssetsCrossoverYear, superVsNonSuperSeries,
 } from "./chartSeries.js";
 
+// totalAssets mirrors deterministic.js's own formula (docs/specs/
+// 37-review-remediation.md, Commit 4) so a test overriding any one
+// component still gets a correct totalAssets without having to also
+// pass it explicitly — same convention as row.netAssets before it.
 function mkRow(over = {}) {
-  return {
+  const base = {
     income: 0, surplusOrDeficit: 0, deficitFundedFromAssets: 0, unfundedCashflow: 0,
-    closingBalance: 0, propertyClosing: 0, superClosing: 0, wcaClosing: 0, liabilitiesClosing: 0,
+    closingBalance: 0, propertyClosing: 0, superClosing: 0, pensionClosing: 0, bondsClosing: 0, wcaClosing: 0, liabilitiesClosing: 0,
     taxDetail: { client: {}, partner: null },
     superDetail: {},
     ...over,
   };
+  base.totalAssets = over.totalAssets ?? (
+    base.closingBalance + base.propertyClosing + base.superClosing + base.pensionClosing + base.bondsClosing + base.wcaClosing
+  );
+  return base;
 }
 
 describe("expenseFundingSeries", () => {
@@ -115,6 +123,26 @@ describe("superVsNonSuperSeries", () => {
     const [d] = debtVsAssetsSeries([row]);
     expect(s.superBalance).toBeCloseTo(200000, 6);
     expect(s.nonSuper).toBeCloseTo(610000, 6);
+    expect(s.superBalance + s.nonSuper).toBeCloseTo(d.assets, 6);
+  });
+
+  // docs/specs/37-review-remediation.md, Commit 4 — adversarial review
+  // finding 1.11: pension-phase and bond balances were entirely absent
+  // from both series (a retiree probe: "Super" read $1,720 while
+  // $592,722 sat in an ABP; "Total assets" read $51,582 against a
+  // netAssets of $746,846 on the adjacent row). A pension counts as
+  // super (retirement-phase superannuation, not a different asset
+  // class); a bond counts as non-super.
+  it("counts pension-phase balances as super and bond balances as non-super", () => {
+    const row = mkRow({
+      closingBalance: 100000, propertyClosing: 500000, superClosing: 200000,
+      pensionClosing: 592722, bondsClosing: 102543, wcaClosing: 10000, liabilitiesClosing: 0,
+    });
+    const [s] = superVsNonSuperSeries([row]);
+    const [d] = debtVsAssetsSeries([row]);
+    expect(s.superBalance).toBeCloseTo(200000 + 592722, 6);
+    expect(s.nonSuper).toBeCloseTo(100000 + 500000 + 102543 + 10000, 6);
+    expect(d.assets).toBeCloseTo(100000 + 500000 + 200000 + 592722 + 102543 + 10000, 6);
     expect(s.superBalance + s.nonSuper).toBeCloseTo(d.assets, 6);
   });
 });

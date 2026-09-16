@@ -2099,6 +2099,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // costs, across every property sold this FY (usually one).
     propertySaleProceeds: 0,
     propertyClosing: 0,
+    totalAssets: 0,
     netAssets: 0,
     // Per-asset flow detail for the Assets view: opening + contributions
     // − withdrawals + oneOffs − deficitFunding + surplusInvested +
@@ -6128,7 +6129,17 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       row.properties[pid].value = propVal[pid];
       row.propertyClosing += propVal[pid];
     }
-    row.netAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.pensionClosing + row.bondsClosing + row.wcaClosing - row.liabilitiesClosing - row.heasDetail.closing;
+    // Total assets (docs/specs/37-review-remediation.md, Commit 4;
+    // adversarial review finding 1.11) — every balance type netAssets
+    // itself sums, published on its own so a display never has to
+    // re-derive "every asset the household holds" by re-listing the
+    // components (and risk omitting one — pension and bond balances
+    // were missing from four separate re-derivations in main.js/
+    // chartSeries.js before this field existed). netAssets now DERIVES
+    // from this, guaranteeing the two can never drift apart from each
+    // other by construction.
+    row.totalAssets = row.closingBalance + row.propertyClosing + row.superClosing + row.pensionClosing + row.bondsClosing + row.wcaClosing;
+    row.netAssets = row.totalAssets - row.liabilitiesClosing - row.heasDetail.closing;
 
     // CGT assessment on the year's realised net gains (decision 13),
     // stacked on the same measured income base.

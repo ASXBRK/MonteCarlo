@@ -735,6 +735,7 @@ export const COMMITTED_SHAPE ={
         "array",
         "empty"
       ],
+      "totalAssets": "number",
       "transferBalance": {
         "client": {
           "balance": "number",

@@ -16,9 +16,18 @@ export function compositeExpenditure(row) {
   return row.expenses + row.tax + loanService;
 }
 
-// Capital drawdown: funded withdrawals + deficit-funding draws.
+// Capital drawdown: funded withdrawals + deficit-funding draws + pension
+// payments + released-super withdrawals (docs/specs/37-review-
+// remediation.md, Commit 4; adversarial review finding 2.5). Pension
+// payments and released-super deficit draws are credited straight to
+// the working cash account (deterministic.js) — never folded into
+// row.income, and previously absent from this chart's own drawdown
+// band entirely, so the tool's headline picture showed a retiree's
+// $30,000/yr pension drawdown as nothing at all.
 export function compositeDrawdown(row) {
-  return row.withdrawals + row.deficitFundedFromAssets;
+  const pensionPayments = Object.values(row.pensionDetail ?? {}).reduce((s, d) => s + (d.payments ?? 0), 0);
+  const releasedSuperWithdrawals = Object.values(row.superDetail ?? {}).reduce((s, d) => s + (d.withdrawals ?? 0), 0);
+  return row.withdrawals + row.deficitFundedFromAssets + pensionPayments + releasedSuperWithdrawals;
 }
 
 // Age pension (spec 21a, Commit 4) — row.income already INCLUDES the

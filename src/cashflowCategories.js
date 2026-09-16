@@ -41,10 +41,37 @@ export function personalSuperContributionsCash(row, superAccounts) {
 
 // Income category sums for one plan year — built from exactly the
 // fields the Cashflow table's income rows read, so summing every
-// category reproduces the table's Total income (once the table's own
-// "Less: salary sacrifice" row is included) and the engine's row.income
-// exactly. One-off inflows fold into "other" (income has no other
+// category (INCLUDING agePension below) reproduces the table's Total
+// income (once the table's own "Less: salary sacrifice" row is
+// included). One-off inflows fold into "other" (income has no other
 // natural home for them).
+//
+// Reconciliation, precisely stated (docs/specs/37-review-remediation.md,
+// Commit 4 — "the reconciliation claim made true"): the categories here
+// sum to row.income PLUS wcaInterest, not row.income alone.
+// deterministic.js credits WCA interest straight to row.surplusOrDeficit
+// (and wcaBal) as its own term — deliberately, per that file's own
+// comment ("real household income... needs this added ON TOP of it"),
+// and conservationCheck.js's own ΔN formula treats it the same way, as
+// a term separate from row.income — so row.income itself never includes
+// it. This function still surfaces wcaInterest as its own category
+// (real, taxed, genuinely cash — the Cashflow view has always shown
+// it), so a caller summing every field below must add row.income's own
+// figure to whatever this function reports for wcaInterest, not compare
+// this sum against row.income directly (found via
+// displayReconciliation.test.js's own multi-year reconciliation, once a
+// scenario ran long enough for the working cash account to carry a
+// nonzero balance).
+//
+// agePension (docs/specs/37-review-remediation.md, Commit 4; adversarial
+// review finding 1.10) — the age pension IS in row.income (deterministic
+// .js folds it into `inc` the same way salary/rent/distributions are)
+// but was in no category here, so every consumer of this function's sum
+// (Key figures "Total income", the Cashflow bars chart) silently
+// dropped it while claiming to reconcile against row.income. It is its
+// own category, not folded into "other" — it is non-assessable (no
+// SAPTO modelled) but genuinely cash, the reverse of every OTHER
+// category here, which are all assessable.
 //
 // incomeRows: state.cashflows.income (each needs .id, .incomeType)
 // rowTotalsIncome: projection.schedule.rowTotals.income (per-row Float64Arrays, GROSS of sacrifice)
@@ -64,7 +91,8 @@ export function incomeCategorySums(row, incomeRows, rowTotalsIncome, properties,
   const wcaInterest = row.wcaDetail.interest;
   const oneOffIn = financialAssetIds.reduce((s, id) => s + Math.max(0, oneOffsByAssetYear[id]?.[y] ?? 0), 0);
   const other = byType("otherTaxable") + byType("nonTaxable") + oneOffIn;
-  return { employment, rental, investment, wcaInterest, other };
+  const agePension = row.agePensionDetail?.entitlement ?? 0;
+  return { employment, rental, investment, wcaInterest, other, agePension };
 }
 
 // Expense category sums for one plan year — mirrors incomeCategorySums.

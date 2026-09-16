@@ -10178,6 +10178,19 @@ function renderCashflowBarsChart() {
       hovertemplate: `Age %{x}<br>%{y:$,.0f}<extra>${escapeHTML(seg.name)}</extra>`,
     });
   }
+  // Age pension (docs/specs/37-review-remediation.md, Commit 4;
+  // adversarial review finding 1.10) — its own band, read straight off
+  // incomeCategorySums' now-published agePension field, same "its own
+  // band, not folded into a category" pattern the Income sources chart
+  // already uses successfully (that chart reads row.agePensionDetail
+  // directly instead, for the same reason: no double-count risk).
+  const agePensionSums = yearIdxs.map((yr, i) => incomeSums[i].agePension * factor(yr));
+  if (!seriesIsAllZero(agePensionSums)) {
+    traces.push({
+      x: ages, y: agePensionSums, name: "Age pension", type: "bar", marker: { color: AGE_PENSION_CHART_COLOR },
+      hovertemplate: "Age %{x}<br>%{y:$,.0f}<extra>Age pension</extra>",
+    });
+  }
   for (const seg of CASHFLOW_EXPENSE_SEGMENTS) {
     const y = yearIdxs.map((yr, i) => -expenseSums[i][seg.key] * factor(yr));
     if (seriesIsAllZero(y)) continue;
@@ -11099,15 +11112,29 @@ function buildKeyFiguresGroups(ctx = { state, projection }, entity = "all") {
   // Consolidated ("all") includes working cash, exactly as before this
   // commit; a per-person split excludes it (no owner attribution exists
   // for the WCA) rather than guessing, per the header comment above.
+  // Pension and bond balances (docs/specs/37-review-remediation.md,
+  // Commit 4; adversarial review finding 1.11) — omitted entirely
+  // before this fix, so Total assets/NET ASSETS could sit tens or
+  // hundreds of thousands below the very next row's NET ASSETS figure
+  // (which DID include them via row.netAssets) with no liabilities to
+  // explain the gap. Consolidated reads row.totalAssets directly (the
+  // engine's own published aggregate — Commit 4's whole point: read the
+  // ledger rather than re-deriving it); the per-owner split still sums
+  // components (no owner-attributed aggregate exists per-person), now
+  // including pension and bond shares alongside financial/property/super.
   const totalAssets = (y) => {
     const row = yl[y];
-    if (forOwner == null) return row.closingBalance + row.propertyClosing + row.superClosing + row.wcaClosing;
+    if (forOwner == null) return row.totalAssets;
     const financial = s.assets.filter((a) => a.include)
       .reduce((sum, a) => sum + (row.perAssetDetail[a.id]?.closing ?? 0) * ownerShareOf(a.owner, forOwner), 0);
     const property = properties.reduce((sum, pr) => sum + (row.properties?.[pr.id]?.value ?? 0) * ownerShareOf(pr.owner, forOwner), 0);
     const superBal = (s.plan.superAccounts ?? []).filter((sa) => sa.owner === forOwner)
       .reduce((sum, sa) => sum + (row.superDetail[sa.id]?.closing ?? 0), 0);
-    return financial + property + superBal;
+    const pensionBal = (s.plan.pensions ?? []).filter((pn) => pn.owner === forOwner)
+      .reduce((sum, pn) => sum + (row.pensionDetail[pn.id]?.closing ?? 0), 0);
+    const bondBal = (s.bonds ?? []).filter((b) => b.include)
+      .reduce((sum, b) => sum + (row.bondDetail[b.id]?.closing ?? 0) * ownerShareOf(b.owner, forOwner), 0);
+    return financial + property + superBal + pensionBal + bondBal;
   };
   const totalLiabilities = (y) => {
     const row = yl[y];
@@ -11132,15 +11159,23 @@ function buildKeyFiguresGroups(ctx = { state, projection }, entity = "all") {
   const netAssets = (y) => forOwner == null ? yl[y].netAssets : totalAssets(y) - totalLiabilities(y);
   const totalIncome = (y) => {
     const s = incomeCategorySums(y, ctx);
-    return s.employment + s.rental + s.investment + s.wcaInterest + s.other;
+    // agePension (Commit 4, finding 1.10) — in row.income but was in no
+    // category here, so a retiree's own "Total income" could read a
+    // few dollars of WCA interest while the age pension itself, often
+    // the household's largest cash receipt, silently vanished.
+    return s.employment + s.rental + s.investment + s.wcaInterest + s.other + s.agePension;
   };
   const totalExpenses = (y) => {
     const s = expenseCategorySums(y, ctx);
     return s.living + s.investmentExpenses + s.loanInterest + s.loanPrincipal + s.tax + s.superContributions;
   };
+  // Pension-phase balances count as "Super" here too (Commit 4, finding
+  // 1.11) — a pension is superannuation money in retirement phase, not
+  // a different asset class.
   const superBalance = (y) => forOwner == null
-    ? yl[y].superClosing
-    : (s.plan.superAccounts ?? []).filter((sa) => sa.owner === forOwner).reduce((sum, sa) => sum + (yl[y].superDetail[sa.id]?.closing ?? 0), 0);
+    ? yl[y].superClosing + yl[y].pensionClosing
+    : (s.plan.superAccounts ?? []).filter((sa) => sa.owner === forOwner).reduce((sum, sa) => sum + (yl[y].superDetail[sa.id]?.closing ?? 0), 0)
+      + (s.plan.pensions ?? []).filter((pn) => pn.owner === forOwner).reduce((sum, pn) => sum + (yl[y].pensionDetail[pn.id]?.closing ?? 0), 0);
   // Defined benefit pensions (UI: spec 27 Commit 4) — an income line,
   // not a balance: there is no account to appear in Total assets/NET
   // ASSETS above (deterministic.js's own point — the spec exists
@@ -11273,6 +11308,7 @@ function buildCashflowGroups(forOwner = null) {
     properties, liabilities, superAccounts, y,
     educationBlocks: flatEducationBlocks(state.plan), rowTotalsEducation: rt.education,
     definedBenefits: state.plan.definedBenefits ?? [],
+    pensionRows: state.plan.pensions ?? [],
   }, forOwner);
 
   // The per-owner suffix is redundant (and confusing) once the whole
@@ -11399,7 +11435,20 @@ function buildCashflowGroups(forOwner = null) {
           "Other tax free income", (y) => stmt(y).cashReceived.otherTaxFreeIncomeComputed, (y) => stmt(y).cashReceived.adjNonTaxable,
           "income.nonTaxable", forOwner
         )),
+    // Age pension, pension payments and released-super withdrawals
+    // (docs/specs/37-review-remediation.md, Commit 4; adversarial
+    // review finding 1.10) — real household cash receipts previously
+    // absent from this section entirely: the age pension is
+    // non-assessable (Assessable Income's own "Government/Centrelink
+    // Payments" row deliberately excludes it from ITS total — see
+    // cashflowStatement.js's assessableIncome header) but genuinely
+    // cash; pension payments and released-super deficit draws never
+    // touch row.income at all, only the working cash account directly.
+    { label: "Age Pension", cell: (y) => stmt(y).cashReceived.governmentPayments },
+    { label: "Pension Payments", cell: (y) => stmt(y).cashReceived.pensionPayments },
+    { label: "Released Super Withdrawals", cell: (y) => stmt(y).cashReceived.releasedSuperWithdrawals },
   ];
+  cashReceivedRows.push({ label: "Cash Received", always: true, cls: "tl-total", cell: (y) => stmt(y).cashReceived.total });
 
   // --- EXPENSES ----------------------------------------------------------
   const expenseSectionRows = [
@@ -12930,6 +12979,8 @@ function snapshotCtxFor(y) {
     properties: state.properties ?? [], liabilities: state.liabilities ?? [],
     superAccounts: state.plan.superAccounts ?? [], y,
     educationBlocks: flatEducationBlocks(state.plan), rowTotalsEducation: rt.education,
+    definedBenefits: state.plan.definedBenefits ?? [],
+    pensionRows: state.plan.pensions ?? [],
   };
 }
 
@@ -16735,9 +16786,9 @@ let compareSeries = "net-assets"; // a COMPARE_SERIES key (chart) or a COMPARE_T
 const COMPARE_SERIES = {
   "net-assets": { label: "Net assets", fn: (row) => row.netAssets },
   "cashflow-surplus": { label: "Cashflow surplus / (deficit)", fn: (row) => row.surplusOrDeficit },
-  "total-assets": { label: "Total assets", fn: (row) => row.closingBalance + row.propertyClosing + row.superClosing + row.wcaClosing },
+  "total-assets": { label: "Total assets", fn: (row) => row.totalAssets },
   "total-liabilities": { label: "Total liabilities", fn: (row) => row.liabilitiesClosing },
-  "super-balance": { label: "Super balance", fn: (row) => row.superClosing },
+  "super-balance": { label: "Super balance", fn: (row) => row.superClosing + row.pensionClosing },
   "tax-paid": { label: "Tax paid", fn: (row) => row.tax },
 };
 const COMPARE_TABLES = { "key-figures": "Key figures", snapshot: "Snapshot rows" };
@@ -16768,6 +16819,7 @@ function snapshotCtxForScenario(s, p, y) {
     superAccounts: s.plan.superAccounts ?? [], y,
     educationBlocks: flatEducationBlocks(s.plan), rowTotalsEducation: rt.education,
     definedBenefits: s.plan.definedBenefits ?? [],
+    pensionRows: s.plan.pensions ?? [],
   };
 }
 

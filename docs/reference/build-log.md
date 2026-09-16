@@ -4195,6 +4195,11 @@ committed shape and `docs/reference/engine-api.md`'s version table updated
 in this commit. The old UI (`main.js`) keeps working unmodified through
 the tolerance chain — `createSurplusPeriod`/`createAllocationEntry` are
 retained for it, unused by anything new.
+**Correction, review remediation Commit 4**: this claim was wrong —
+`normaliseSurplusPeriods` was force-upgrading every stored period to
+the new step shape, which crashed the old UI on every hydrate(). Not
+caught here because this commit was never actually loaded in a
+browser. Fixed in review remediation Commit 4, see that entry.
 
 Two real bugs found and fixed while adding the `balanceBelow` condition
 (closing the whole class, not just the case under test, per CLAUDE.md):
@@ -4378,6 +4383,124 @@ against — assets, super, pensions, bonds — actually appears in the shock
 set, so a future balance type added to the engine without a matching
 entry here fails this test rather than silently shocking nothing. Full
 suite 2153/2153, build green.
+
+### Review remediation, Commit 4: the display layer reads the ledger (spec 37b)
+
+**Fixes findings 1.10, 1.11, 2.5.** `main.js`, `cashflowStatement.js`,
+`cashflowCategories.js`, `chartSeries.js` and `outputSeries.js` each
+re-derived their own totals instead of reading what the engine
+computed, and had drifted: Total assets omitted pension and bond
+balances ($51,582 shown against `row.netAssets` of $746,846 on the
+adjacent row, no liabilities to explain the gap); Cash Received omitted
+pension payments, expenditure-pension draws and released-super
+withdrawals; Total income omitted the age pension (in `row.income` but
+in no category — a retiree's own Total income read $42); the composite
+chart's drawdown band and the Expense funding chart's "met from income"
+both broke the same way.
+
+**New engine field: `row.totalAssets`** (accumulation, pension, bond,
+property, financial/lifestyle asset and working-cash balances summed —
+every term `netAssets` itself already sums, published on its own so a
+display never has to re-list the components and risk omitting one, the
+exact drift that produced finding 1.11 four separate times across
+`main.js`'s Key Figures/Scenario comparison and `chartSeries.js`'s Debt
+vs assets/Super vs non-super). `netAssets` now DERIVES from it
+(`totalAssets − liabilities − HEAS`), so the two can never drift from
+each other again by construction. **Breaking-additive** per CLAUDE.md:
+`ENGINE_VERSION` 2.0.0 → 2.1.0 (minor — additive only), contract
+snapshot and engine-api.md updated in this commit.
+
+**Cash Received** (`cashflowStatement.js`) gains `governmentPayments`
+(the age pension — non-assessable, so still excluded from
+`assessableIncome`'s own total, but genuinely cash), `pensionPayments`,
+and `releasedSuperWithdrawals`, threaded through every `ctx` builder
+(`main.js`'s Cashflow table and Snapshot, `snapshot.js`'s own
+`SNAPSHOT_ROWS`, the Scenario comparison ctx) via a new `pensionRows`
+field — found while wiring this up that `main.js`'s own
+`snapshotCtxFor` was ALSO missing `definedBenefits`, a pre-existing
+drift of the identical shape for any client with a defined benefit
+pension, fixed alongside.
+
+**Total income** (`cashflowCategories.js`'s `incomeCategorySums`) gains
+`agePension`, threaded into Key Figures' "Total income" and a new Age
+Pension band on the Cashflow bars chart (mirroring the pattern the
+Income sources chart already used correctly — that one was never
+broken). While building the comprehensive reconciliation test below, a
+SEPARATE, previously undetected crack surfaced: `incomeCategorySums`'s
+own header claimed its categories sum to `row.income` "exactly", which
+is false whenever the working cash account carries a nonzero balance —
+`deterministic.js` deliberately credits WCA interest to
+`row.surplusOrDeficit` (and `conservationCheck.js`'s own ΔN formula) as
+its own term, never into `row.income`. Not a behaviour change: the
+categories (including `wcaInterest`) already summed to the CORRECT
+total-income figure shown in Key Figures; only the claim about what
+that sum equals was wrong. Corrected to state precisely what the
+categories reconcile to (`row.income` **plus** `wcaInterest`), per the
+spec's own "reconciliation claim made true or removed" instruction.
+
+**Composite chart** (`outputSeries.js`'s `compositeDrawdown`) now
+includes pension payments and released-super withdrawals, not just
+`row.withdrawals`/`deficitFundedFromAssets` — a retiree's own $30,000/yr
+pension drawdown showed as nothing on the tool's headline chart before
+this. **Expense funding chart** (`chartSeries.js`'s
+`expenseFundingSeries`) gains a `fundedFromPension` band, capped at
+whatever remains of the year's need after assets/unfunded are
+accounted for (a pension's own statutory minimum can exceed what was
+actually needed that year — the excess isn't "funding the need", it
+accumulates in the working cash account, the same as surplus income
+already does off this chart) — previously "met from income" silently
+absorbed whatever pension payments covered.
+
+**A critical regression found and fixed while browser-testing this
+commit, unrelated to the three named findings**: `normaliseSurplusPeriods`
+(spec 37a, Commit 1) force-upgraded every stored surplus period to the
+new cascade step/branch shape on every `hydrate()`/`clampAllToPlan`
+call, but `main.js`'s own pre-cascade-UI (`surplusPeriodCardHTML`)
+reads `state.settings.surplus.periods` directly in the OLD vocabulary
+(`allocations`/`remainderTo`/`payNonDeductibleDebtFirst`) and crashed
+on a step-shaped entry — which every hydrate() call was silently
+producing, for every saved client, not just new ones. `defaultState()`
+also switched to the cascade shape in that same commit, so even an
+unsaved brand-new client crashed on mount. Fixed by making
+`normaliseSurplusPeriods` validate and STORE each period in its own
+native shape (old-shaped stays old-shaped via restored
+`clampSurplusPeriod`/`clampAllocationEntry`; step-shaped stays
+step-shaped via the existing `clampCascadeStep`) rather than force-
+upgrading everything — the cascade migration remains exactly where it
+belongs, transiently inside the engine's own resolution
+(`rawCascadeSteps`, used by `schedule.js`), never in what gets
+persisted. `defaultState()` and the v16→v17 schema migration both
+reverted to producing old-shaped periods, matching what the still-live
+UI expects, until the cascade step editor (spec 37a, Commit 4) replaces
+it. Found by actually loading the app in a browser and watching the
+console — CLAUDE.md's own instruction for UI-adjacent changes, followed
+here after the fact; the lesson generalises to always doing this BEFORE
+declaring the surplus cascade commit done, not after a later commit's
+own smoke test happens to catch it.
+
+**A separate, pre-existing conservation-invariant flake was observed
+once** during this work (`FHSSS release doesn't net to zero... gap
+337.57`, unseeded `Math.random()` stratified sweep, scenario 2123) —
+reproduced zero times across several immediate re-runs, unrelated to
+anything touched in Commits 1–4 (FHSSS release capping, not surplus
+periods, TSB, Monte Carlo, or display totals). Noted, not chased — out
+of scope for this spec; flagged for its own investigation.
+
+Tests: `displayReconciliation.test.js` — one integration test built
+from a scenario with accumulation, an account-based pension, a bond, an
+investment property and the age pension all present, asserting every
+display total this commit touched (`row.totalAssets`,
+`debtVsAssetsSeries`, `superVsNonSuperSeries`, `incomeCategorySums`,
+`cashReceivedSums`, `compositeDrawdown`, `expenseFundingSeries`)
+reconciles to its own ledger source, for every plan year — the single
+test that would have caught all three named findings, per the spec's
+own instruction. Plus dedicated unit tests for the new
+`cashReceivedSums` fields (household total, per-owner split reconciling
+Client + Partner to Total, and the pre-Commit-4-caller default-to-zero
+case) and the `debtVsAssetsSeries`/`superVsNonSuperSeries` pension/bond
+coverage. Full suite 2158/2158, build green, browser-verified (fresh
+load, adding a super account and a pension, and navigating ten output
+views — zero console errors).
 
 ---
 

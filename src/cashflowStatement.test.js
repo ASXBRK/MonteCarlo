@@ -305,6 +305,62 @@ describe("cashReceivedSums", () => {
     expect(c.otherTaxFreeIncome).toBe(1200);
     expect(c.total).toBeCloseTo(c.regularTakeHomePay + c.anticipatedTaxReturn + 5000 + 1200, 6);
   });
+
+  // docs/specs/37-review-remediation.md, Commit 4; adversarial review
+  // finding 1.10 — the age pension, pension payments and released-super
+  // withdrawals are real household cash receipts that never touch
+  // row.income (pension/super-release) or belong in assessable income
+  // (the age pension, non-assessable) but were absent from Cash
+  // Received entirely, so a retiree's own "Cash Received" total could
+  // read $0 while their working cash account visibly grew.
+  it("the age pension, pension payments, and released-super withdrawals all land in Cash Received and its total", () => {
+    const row = mkRow({
+      agePensionDetail: { entitlement: 24429 },
+      pensionDetail: { pn1: { payments: 30000 }, pn2: { payments: 5000 } },
+      superDetail: { su1: { withdrawals: 8000 }, su2: { withdrawals: 0 } },
+    });
+    const ctx = {
+      y: 0,
+      pensionRows: [{ id: "pn1", owner: "client" }, { id: "pn2", owner: "partner" }],
+      superAccounts: [{ id: "su1", owner: "client" }, { id: "su2", owner: "partner" }],
+    };
+    const c = cashReceivedSums(row, ctx);
+    expect(c.governmentPayments).toBe(24429);
+    expect(c.pensionPayments).toBe(35000);
+    expect(c.releasedSuperWithdrawals).toBe(8000);
+    expect(c.total).toBeCloseTo(24429 + 35000 + 8000, 6);
+  });
+
+  it("age pension, pension payments and released-super withdrawals filter correctly per owner, and Client + Partner reconciles to Total", () => {
+    const row = mkRow({
+      agePensionDetail: { entitlement: 24429, client: { paid: 14000 }, partner: { paid: 10429 } },
+      pensionDetail: { pn1: { payments: 30000 }, pn2: { payments: 5000 } },
+      superDetail: { su1: { withdrawals: 8000 }, su2: { withdrawals: 2000 } },
+    });
+    const ctx = {
+      y: 0,
+      pensionRows: [{ id: "pn1", owner: "client" }, { id: "pn2", owner: "partner" }],
+      superAccounts: [{ id: "su1", owner: "client" }, { id: "su2", owner: "partner" }],
+    };
+    const client = cashReceivedSums(row, ctx, "client");
+    const partner = cashReceivedSums(row, ctx, "partner");
+    const total = cashReceivedSums(row, ctx, null);
+    expect(client.pensionPayments).toBe(30000);
+    expect(partner.pensionPayments).toBe(5000);
+    expect(client.releasedSuperWithdrawals).toBe(8000);
+    expect(partner.releasedSuperWithdrawals).toBe(2000);
+    expect(client.governmentPayments).toBe(14000);
+    expect(partner.governmentPayments).toBe(10429);
+    expect(client.total + partner.total).toBeCloseTo(total.total, 6);
+  });
+
+  it("defaults to zero when the ctx supplies no pensionRows/superAccounts (a pre-Commit-4 caller)", () => {
+    const row = mkRow({ agePensionDetail: { entitlement: 24429 } });
+    const c = cashReceivedSums(row, { y: 0 });
+    expect(c.pensionPayments).toBe(0);
+    expect(c.releasedSuperWithdrawals).toBe(0);
+    expect(c.governmentPayments).toBe(24429);
+  });
 });
 
 describe("expenseSums", () => {

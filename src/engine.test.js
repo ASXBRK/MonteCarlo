@@ -207,7 +207,11 @@ describe("engine.js — serialisation and worked integration (spec 31 Commit 3)"
     const ctxFor = (yy) => ({ ...ctx, y: yy });
     const columns = buildSnapshotColumns(result.yearly, ctxFor, [0, 1, 2], false);
     const table = buildSnapshotTable(columns, { hideEmptyRows: true });
-    expect(table.rows.length).toBe(23);
+    // 24, not 23 — Commit 4 (docs/specs/37-review-remediation.md) adds
+    // a "Cash Received" total row (always shown, like every other
+    // section's own total) alongside Age Pension/Pension Payments/
+    // Released Super Withdrawals, which this fixture hides (all zero).
+    expect(table.rows.length).toBe(24);
     const surplusRow = table.rows.find((r) => r.label === "SURPLUS INCOME");
     expect(surplusRow.cells.map((c) => Math.round(c.total))).toEqual([30976, 39441, 39770]);
   });

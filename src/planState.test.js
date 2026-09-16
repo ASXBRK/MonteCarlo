@@ -79,9 +79,10 @@ describe("defaults (v3)", () => {
     expect(s.cashflows.contributions).toHaveLength(1);
     expect(s.cashflows.contributions[0].assetId).toBe(s.assets[0].id);
     expect(s.settings.surplus.periods).toHaveLength(1);
-    expect(s.settings.surplus.periods[0].branches).toMatchObject([
-      { destination: { type: "debt", deductibility: "nonDeductible", loanIds: null, order: "interestRate" }, pct: 100, conditions: [{ kind: "repaid" }] },
-    ]);
+    expect(s.settings.surplus.periods[0]).toMatchObject({
+      payNonDeductibleDebtFirst: true, debtOrder: "interestRate", allocations: [], remainderTo: "cash",
+      from: { kind: "anchor", anchorId: "start" }, to: { kind: "anchor", anchorId: "end" },
+    });
     expect(s.settings.fundingOrder).toEqual([s.assets[0].id]);
   });
 
@@ -277,24 +278,19 @@ describe("fundingOrder invariants", () => {
       surplus: { periods: [{ ...createSurplusPeriod(), allocations: [{ id: "sa1", targetType: "asset", targetId, pct: 40 }] }] },
       fundingOrder: [],
     });
-    // payNonDeductibleDebtFirst defaults true, so the allocations/
-    // remainder branches land in the SECOND migrated step (periods[1])
-    // — periods[0] is the debt-first step.
-    expect(normaliseSettings(withTarget("a"), assets, plan).surplus.periods[1].branches[0])
-      .toMatchObject({ destination: { type: "asset", targetId: "a" }, pct: 40 });
+    expect(normaliseSettings(withTarget("a"), assets, plan).surplus.periods[0].allocations)
+      .toEqual([{ id: "sa1", targetType: "asset", targetId: "a", pct: 40 }]);
     // "b" is excluded, "gone" doesn't exist — both drop the allocation
     // entirely (never coerced to some other target), leaving none.
-    expect(normaliseSettings(withTarget("b"), assets, plan).surplus.periods[1].branches
-      .some((b) => b.destination.type === "asset")).toBe(false);
-    expect(normaliseSettings(withTarget("gone"), assets, plan).surplus.periods[1].branches
-      .some((b) => b.destination.type === "asset")).toBe(false);
+    expect(normaliseSettings(withTarget("b"), assets, plan).surplus.periods[0].allocations).toEqual([]);
+    expect(normaliseSettings(withTarget("gone"), assets, plan).surplus.periods[0].allocations).toEqual([]);
   });
 
   it("remainderTo is preserved as-is (a valid, explicit choice — never silently upgraded)", () => {
     const plan = { client: { currentAge: 40 }, partner: null, endAge: 90 };
     const assets = [{ id: "a", include: true }];
     const settings = { surplus: { periods: [{ ...createSurplusPeriod(), remainderTo: "expenditure" }] }, fundingOrder: [] };
-    expect(normaliseSettings(settings, assets, plan).surplus.periods[1].branches[0].destination.type).toBe("expenditure");
+    expect(normaliseSettings(settings, assets, plan).surplus.periods[0].remainderTo).toBe("expenditure");
   });
 
   it("removeAsset cascades cashflows, funding order, and a surplus allocation targeting it", () => {
@@ -311,7 +307,7 @@ describe("fundingOrder invariants", () => {
     expect(out.assets).toHaveLength(1);
     expect(out.cashflows.withdrawals).toHaveLength(0);
     expect(out.settings.fundingOrder).toEqual([s.assets[0].id]);
-    expect(out.settings.surplus.periods[1].branches).toEqual([]);
+    expect(out.settings.surplus.periods[0].allocations).toEqual([]);
   });
 
   it("never removes the last asset", () => {
@@ -476,9 +472,7 @@ describe("migration", () => {
     // forward to v17's period model, that's 100% remainder to
     // expenditure, non-deductible-first off (bit-identical projection).
     expect(s.settings.surplus.periods).toHaveLength(1);
-    expect(s.settings.surplus.periods[0].branches).toMatchObject([
-      { destination: { type: "expenditure" }, pct: 100, conditions: [] },
-    ]);
+    expect(s.settings.surplus.periods[0]).toMatchObject({ payNonDeductibleDebtFirst: false, allocations: [], remainderTo: "expenditure" });
   });
 
   it("rejects garbage and unknown versions", () => {
@@ -514,9 +508,7 @@ describe("persistence round-trip (v3)", () => {
     expect(back.plan.household).toBe("married"); // v5 splits marital status
     expect(back.plan.partner.currentAge).toBe(36);
     expect(back.assets[1]).toMatchObject({ owner: "joint", distributions: "cash" });
-    expect(back.settings.surplus.periods[1].branches).toMatchObject([
-      { id: "sa1", destination: { type: "asset", targetId: a2.id }, pct: 100 },
-    ]);
+    expect(back.settings.surplus.periods[0].allocations).toEqual([{ id: "sa1", targetType: "asset", targetId: a2.id, pct: 100 }]);
     expect(back.settings.fundingOrder).toEqual([a2.id, s.assets[0].id]);
     expect(back.cashflows.income[0]).toMatchObject({
       owner: "partner", amount: 90000,
@@ -975,7 +967,7 @@ describe("D2 — asset class model", () => {
       surplus: { periods: [{ ...createSurplusPeriod(), allocations: [{ id: "sa1", targetType: "asset", targetId: "l", pct: 100 }] }] },
       fundingOrder: [],
     };
-    expect(normaliseSettings(settings, [fin, lf], plan).surplus.periods[1].branches).toEqual([]);
+    expect(normaliseSettings(settings, [fin, lf], plan).surplus.periods[0].allocations).toEqual([]);
   });
 
   it("cashflow rows targeting lifestyle assets drop on hydrate", () => {
@@ -1497,7 +1489,7 @@ describe("Tier 1.2 — Super (Commit 1): accounts, per-person state, contributio
     };
     const settings = normaliseSettings(raw, [], plan);
     expect(settings.fundingOrder).toEqual([]);
-    expect(settings.surplus.periods[1].branches).toEqual([]);
+    expect(settings.surplus.periods[0].allocations).toEqual([]);
   });
 
   it("hydrate drops contribution/withdrawal/lump-sum rows that target a super account id (not a financial asset)", () => {
@@ -1717,12 +1709,7 @@ describe("Working Cash Account (engine correctness fix)", () => {
 
   it("defaultState's default surplus treatment is accumulate, not spend", () => {
     const s = defaultState(PROFILES, NOW);
-    // A fresh scenario has no debt, so the default debt-repaid-first
-    // step is immediately closed and everything cascades to the
-    // implicit cash catch-all — accumulate, not spend.
-    expect(s.settings.surplus.periods[0].branches).toMatchObject([
-      { destination: { type: "debt", deductibility: "nonDeductible" }, pct: 100, conditions: [{ kind: "repaid" }] },
-    ]);
+    expect(s.settings.surplus.periods[0]).toMatchObject({ allocations: [], remainderTo: "cash" });
   });
 
   it("hydrate migrates a pre-WCA (v8) blob forward, stamping the default workingCash", () => {
@@ -1753,9 +1740,7 @@ describe("Working Cash Account (engine correctness fix)", () => {
     // new payNonDeductibleDebtFirst-true default only applies to
     // brand-new scenarios.
     expect(s.settings.surplus.periods).toHaveLength(1);
-    expect(s.settings.surplus.periods[0].branches).toMatchObject([
-      { destination: { type: "expenditure" }, pct: 100, conditions: [] },
-    ]);
+    expect(s.settings.surplus.periods[0]).toMatchObject({ payNonDeductibleDebtFirst: false, allocations: [], remainderTo: "expenditure" });
   });
 });
 

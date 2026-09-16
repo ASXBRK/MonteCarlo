@@ -7121,15 +7121,12 @@ describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, C
     };
     const hydrated = hydrate(JSON.stringify(legacyState), PROFILES);
     expect(hydrated).not.toBeNull();
-    // docs/specs/37-surplus-cascade.md, Commit 1: settings.surplus.periods
-    // now holds cascade STEPS, not time periods — a migrated {mode:
-    // "invest"} shorthand becomes a single unconditional step, one
-    // branch, targeting the nominated asset (no condition at all: the
-    // OLD mode had no stopping rule either).
     expect(hydrated.settings.surplus.periods).toHaveLength(1);
-    expect(hydrated.settings.surplus.periods[0].branches).toMatchObject([
-      { destination: { type: "asset", targetId: "a1" }, pct: 100, conditions: [] },
-    ]);
+    expect(hydrated.settings.surplus.periods[0]).toMatchObject({
+      payNonDeductibleDebtFirst: false,
+      allocations: [{ targetType: "asset", targetId: "a1", pct: 100 }],
+      remainderTo: "cash",
+    });
     const hydratedOut = projectPlan(hydrated);
     // The pre-existing "surplus invest routes to the nominated asset"
     // fixture (this same describe file, deficit funding block) asserts
