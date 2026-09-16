@@ -13,19 +13,30 @@
 // aged care entry and 30+ years of pension-phase drawdown both have
 // somewhere to land.
 //
-// Pension-phase design (deliberately kept simple to avoid stacking
-// fragile assumptions): "Current" and "Sell the investment property at
-// 65" both run income to the household's own "end" anchor rather than
-// a retirement age — a disclosed simplification (still working
-// indefinitely) that keeps both scenarios trivially affordable without
-// needing a pension object at all. "Maximise concessional" adds a
-// genuine TTR pension for the client from 60 while they keep working —
-// the classic transition-to-retirement strategy, and the ONLY scenario
-// that exercises TTR specifically (no earnings-tax exemption, unlike
-// an ABP). "Retire at 60" is the one scenario where the client actually
-// stops working, at their own retirement-client anchor overridden to
+// Pension-phase design. Every scenario's own salary rows anchor to
+// their OWNER's own retirement date (the factory default this file used
+// to override away to the household's "end" anchor instead — a "still
+// working indefinitely" simplification that left a "pre-retiree" demo
+// with no retirement anywhere in it, docs/reference/adversarial-
+// review-2026-09/README.md finding 2.8, and made the "Retire later"
+// lever a dead arm against this client, finding 1.13). "Current" and
+// "Sell the investment property at 65" both retire the couple at their
+// own DEFAULT retirementAge (65) with no dedicated pension object —
+// post-retirement spending draws straight from released accumulation
+// super via the engine's own deficit-funding fallback (Tier 1.2,
+// Commit 3), a faithful "hasn't set up a pension strategy yet"
+// representation for a baseline/do-nothing scenario, not a bug.
+// "Maximise concessional" adds a genuine TTR pension for the client
+// from 60 while they keep working to 65 — the classic transition-to-
+// retirement strategy, and the ONLY scenario that exercises TTR
+// specifically (no earnings-tax exemption, unlike an ABP), then a real
+// retirement at 65 like every other scenario once TTR's own bridge
+// years end. "Retire at 60" is the one scenario where the client
+// retires EARLY, at their own retirement-client anchor overridden to
 // 60 — a genuine full retirement condition of release, converting to
 // an ordinary ABP and crediting the transfer balance account for real.
+// The partner's own retirement (65, unmodified) is identical in every
+// scenario, "Retire at 60" included — only the client's date moves.
 import { PROFILES } from "../profiles.js";
 import {
   defaultState, clampPlan, clampAllToPlan,
@@ -63,18 +74,19 @@ function baseInputs(now) {
   };
   const assets = [savings];
 
-  // Combined ~$450k. Working indefinitely (to "end", not a retirement
-  // anchor) in this base — see the module header on why; "Retire at
-  // 60" overrides the client's own cutoff explicitly.
+  // Combined ~$450k, each anchored to its OWNER's own retirement date
+  // (CLAUDE.md's own locked convention — income-row ages anchor to the
+  // owner) — "Retire at 60" further overrides the client's own cutoff
+  // to age 60 on top of this.
   const clientSalary = {
     ...createIncomeRow(plan, []), label: "Salary — client", category: "salary", incomeType: "employment",
     owner: "client", amount: 280_000 / 12, frequency: "monthly", sgApplies: true,
-    to: { kind: "anchor", anchorId: "end" },
+    to: { kind: "anchor", anchorId: "retirement-client" },
   };
   const partnerSalary = {
     ...createIncomeRow(plan, []), label: "Salary — partner", category: "salary", incomeType: "employment",
     owner: "partner", amount: 170_000 / 12, frequency: "monthly", sgApplies: true,
-    to: { kind: "anchor", anchorId: "end" },
+    to: { kind: "anchor", anchorId: "retirement-partner" },
   };
   const income = [clientSalary, partnerSalary];
 
@@ -201,11 +213,12 @@ function buildCurrent(now) {
   return finalize(base, plan, assets, income, expenses, liabilities, properties, superAccounts, bonds);
 }
 
-// TTR from 60 while still working (the client never stops — see the
-// module header) plus both maximising concessional contributions —
-// for the partner (under the $500k total-super-balance test) this
-// includes catching up on unused prior-year cap; for the client it's
-// this year's cap only.
+// TTR from 60 while still working to their own default retirement at
+// 65 (a genuine transition-to-retirement bridge, not indefinite work —
+// see the module header) plus both maximising concessional
+// contributions — for the partner (under the $500k total-super-balance
+// test) this includes catching up on unused prior-year cap; for the
+// client it's this year's cap only.
 function buildMaximiseConcessional(now) {
   const { base, plan, assets, income, expenses, liabilities, properties, superAccounts, bonds } = baseInputs(now);
   const clientCap = {
@@ -228,21 +241,16 @@ function buildMaximiseConcessional(now) {
   });
 }
 
-// The client actually retires at 60 (retirementAge overridden — see
-// the module header on why this alone is enough to move BOTH the
-// income cutoff and the pension's own commencement, since both anchor
-// to "retirement-client"), converting to a genuine ABP: a real
-// retirement condition of release met at/after preservation age, not
-// merely the unconditional age-65 rule. The partner keeps working
-// unchanged (still anchored to "end").
+// The client actually retires at 60 (retirementAge overridden — since
+// both the client's own salary row and the new pension's own
+// commencement already anchor to "retirement-client", overriding
+// retirementAge alone is enough to move both), converting to a genuine
+// ABP: a real retirement condition of release met at/after preservation
+// age, not merely the unconditional age-65 rule. The partner keeps
+// working unchanged, retiring at their own default 65.
 function buildRetireAt60(now) {
   const { base, plan, assets, income, expenses, liabilities, properties, superAccounts, bonds } = baseInputs(now);
   const planEarlyRetirement = { ...plan, client: { ...plan.client, retirementAge: 60 } };
-  const [clientSalary, partnerSalary] = income;
-  const retiringIncome = [
-    { ...clientSalary, to: { kind: "anchor", anchorId: "retirement-client" } }, // now resolves to 60
-    partnerSalary,
-  ];
   const superClient = superAccounts.find((s) => s.owner === "client");
   const abp = {
     ...createPension(plan, [], superAccounts, "client"), name: "Account-based pension — client",
@@ -250,7 +258,7 @@ function buildRetireAt60(now) {
     type: "abp", drawdownOption: "minimum",
   };
   const planWithPension = { ...planEarlyRetirement, pensions: [abp] };
-  return finalize(base, planWithPension, assets, retiringIncome, expenses, liabilities, properties, superAccounts, bonds);
+  return finalize(base, planWithPension, assets, income, expenses, liabilities, properties, superAccounts, bonds);
 }
 
 function buildSellInvestmentPropertyAt65(now) {

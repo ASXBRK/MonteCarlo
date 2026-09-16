@@ -31,6 +31,14 @@ export function registerShockKind(kind, applyFn) {
   SHOCK_APPLIERS.set(kind, applyFn);
 }
 
+// docs/specs/37-review-remediation.md, Commit 6 — comparisonArmRegistry.
+// test.js diffs this against its own registered-arm list so a new shock
+// kind registered here without a matching "does it actually bite" entry
+// there fails loudly, rather than silently shipping untested.
+export function registeredShockKinds() {
+  return [...SHOCK_APPLIERS.keys()];
+}
+
 // runShock(state, shock) → { base, shocked, deltas }. `state` is never
 // mutated: applyFn only ever sees a structuredClone (state is plain
 // JSON, the same convention solve.js/every Focus solver already uses —

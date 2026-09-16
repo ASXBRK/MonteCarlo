@@ -16309,10 +16309,26 @@ const LEVER_NONCONVERGED_REASON_TEXT = {
   "time-cap": "did not settle within the search's own time limit",
 };
 
+// docs/specs/37-review-remediation.md, Commit 6, finding 1.13 — a lever
+// that structurally cannot move this plan's own ruin probability (no
+// super account to contribute into; no client income anchored to
+// retirement for "retire later" to defer; no expenditure-drawdown
+// pension for "spend less" to throttle) is a DIFFERENT situation from
+// one that searched and found no answer, and must say so specifically
+// rather than sharing the single hardcoded "no super account" sentence
+// every r.available === false case used to get regardless of WHICH
+// lever, or why.
+const LEVER_UNAVAILABLE_REASON_TEXT = {
+  "no-super-account": "the client has no super account to contribute into",
+  "no-retirement-anchored-income": "no income on this plan is anchored to the client's own retirement date — retiring later doesn't change this plan's cashflow at all",
+  "no-expenditure-pension": "no pension on this plan draws down to a target spending figure — reducing Income Required doesn't change this plan's drawdown at all",
+};
+
 function retirementLeverStatementHTML(r) {
   const pct = simPctHTML; // docs/specs/36-retirement-outputs.md, Commit 3 — capped + rounded, everywhere a simulation-derived probability appears
   if (r.available === false) {
-    return `<p class="helper-text">Not available — the client has no super account to contribute into.</p>`;
+    const reasonText = LEVER_UNAVAILABLE_REASON_TEXT[r.reason] ?? "this lever has nothing to act on for this plan";
+    return `<p class="helper-text">Not available — ${reasonText}.</p>`;
   }
   if (!r.converged) {
     const reasonText = LEVER_NONCONVERGED_REASON_TEXT[r.reason] ?? "did not converge";

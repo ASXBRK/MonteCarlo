@@ -99,6 +99,37 @@ export function applyRetireLater(state, age) {
   return clone;
 }
 
+// docs/specs/37-review-remediation.md, Commit 6, finding 1.13 (two
+// remaining dead arms) — applyRetireLater moves ONLY the CLIENT's own
+// retirementAge; that number reaches the engine solely through anchors
+// that resolve against it (income rows anchor to their OWNER's own
+// retirement, per CLAUDE.md's own locked convention — planState.js's
+// createIncomeRow default and its owner-based anchorRef). A plan whose
+// client-owned income rows are all anchored to fixed ages (or don't
+// exist) has NOTHING that moves when retirementAge moves: the scan
+// below would try every candidate age and see an identically flat ruin
+// probability, indistinguishable from "genuinely can't be fixed by
+// retiring later" — the review's own finding. Checked up front, same
+// as solveContributeMore's own "no-super-account" bail, rather than
+// discovered the expensive way via a full scan that never converges.
+function hasRetirementAnchoredClientIncome(state) {
+  const isClientRetirementAnchor = (ref) => ref?.kind === "anchor" && ref.anchorId === "retirement-client";
+  return (state.cashflows?.income ?? []).some(
+    (r) => r.owner === "client" && (isClientRetirementAnchor(r.from) || isClientRetirementAnchor(r.to))
+  );
+}
+
+// A pension whose drawdownOption is "expenditure" is the ONLY thing
+// deterministic.js's income-driven drawdown reads plan.retirement.
+// incomeRequired against (line ~4477, gated at ~4491 by exactly this
+// check) — applySpendLess sets incomeRequired and forces
+// incomeDrivenDrawdown on, but without such a pension nothing in the
+// engine ever looks at either field, so every candidate income level
+// produces the identical, unmodified baseline ruin probability.
+function hasExpenditureDrawdownPension(state) {
+  return (state.plan.pensions ?? []).some((pn) => pn.drawdownOption === "expenditure");
+}
+
 // Income Required is a reference line, not a driver, EXCEPT when
 // incomeDrivenDrawdown is on (spec 32, Commit 4) — forced on here for
 // the trial, since a "spend less" lever with no engine effect on ruin
@@ -172,6 +203,9 @@ export function solveRetireLater(state, profiles, {
   threshold, baselineRuin, numPaths = DEFAULT_NUM_PATHS, seed = LEVER_SEED,
   searchPaths = LEVER_SEARCH_PATHS, searchSeed = LEVER_SEED,
 } = {}) {
+  if (!hasRetirementAnchoredClientIncome(state)) {
+    return { lever: "retireLater", available: false, reason: "no-retirement-anchored-income" };
+  }
   const currentAge = state.plan.client.retirementAge;
   const endAge = state.plan.endAge;
   for (let age = currentAge + 1; age <= endAge; age++) {
@@ -201,6 +235,9 @@ export function solveSpendLess(state, profiles, {
   threshold, baselineRuin, numPaths = DEFAULT_NUM_PATHS, seed = LEVER_SEED,
   searchPaths = LEVER_SEARCH_PATHS, searchSeed = LEVER_SEED,
 } = {}) {
+  if (!hasExpenditureDrawdownPension(state)) {
+    return { lever: "spendLess", available: false, reason: "no-expenditure-pension" };
+  }
   const f = (income) => ruinAtSearch(clampAllToPlan(applySpendLess(state, income), profiles), profiles, searchPaths, searchSeed);
   const search = bisectScalar({ f, lo: 0, hi: 500000, targetValue: threshold, tolerance: 0.02, maxMs: LEVER_MAX_MS });
   if (!search.converged || search.value == null) {

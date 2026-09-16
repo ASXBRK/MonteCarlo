@@ -280,6 +280,45 @@ describe("Comprehensive pre-retiree — the features this client exists to exerc
     expect(shocked.yearly[y].income).toBeLessThan(base.yearly[y].income);
   });
 
+  // docs/reference/adversarial-review-2026-09/README.md finding 2.8 —
+  // the ORIGINAL "Current" scenario ran both salary rows to the
+  // household's own "end" anchor rather than to a retirement age, so a
+  // "pre-retiree" demo's own DEFAULT scenario never actually retired
+  // anyone — $493,000/yr of household income at ages 65, 75 and 85
+  // alike — and the "Retire later" lever showed zero effect on it
+  // (finding 1.13), since applyRetireLater only ever moves an anchor
+  // nothing in this fixture was anchored to. Fixed by anchoring each
+  // salary row to its own OWNER's retirement date, the schema's own
+  // default (planState.js's createIncomeRow) this fixture used to
+  // override away.
+  it("the retirement key date is genuinely reached within the projection — Current, not just Retire at 60", () => {
+    const out = projectPlan(current.state);
+    const client = current.state.plan.client, partner = current.state.plan.partner;
+    expect(client.retirementAge).toBe(65);
+    expect(partner.retirementAge).toBe(65);
+    const retirementYear = out.yearly.findIndex((row) => row.clientAge >= client.retirementAge);
+    expect(retirementYear).toBeGreaterThan(0);
+    expect(retirementYear).toBeLessThan(out.yearly.length - 1); // reached well before the projection's own end at 95
+    // Household income falls materially once both salaries stop — not
+    // just "different", genuinely lower, the way a real retirement reads.
+    const workingYearIncome = out.yearly[retirementYear - 1].income;
+    const retiredYearIncome = out.yearly[retirementYear + 1].income;
+    expect(retiredYearIncome).toBeLessThan(workingYearIncome * 0.5);
+  });
+
+  // The same finding, from the lever's own side: "Retire later" used to
+  // report zero effect against this exact fixture (docs/specs/37-
+  // review-remediation.md, Commit 6) because nothing in it was anchored
+  // to the client's own retirement — now it is, so pushing retirement
+  // out genuinely changes the projection.
+  it("retiring later than 65 (Current) changes the projection — the lever this fixture used to defeat now genuinely bites", () => {
+    const base = projectPlan(current.state);
+    const later = { ...current.state, plan: { ...current.state.plan, client: { ...current.state.plan.client, retirementAge: 70 } } };
+    const shocked = projectPlan(later);
+    const lastYear = base.yearly.length - 1;
+    expect(shocked.yearly[lastYear].netAssets).not.toBeCloseTo(base.yearly[lastYear].netAssets, 0);
+  });
+
   it("selling the investment property realises a capital gain and pays down/discharges its own loan", () => {
     const out = projectPlan(sellProperty.state);
     const property = sellProperty.state.properties[0];

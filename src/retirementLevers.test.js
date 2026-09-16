@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { runMonteCarlo } from "./monteCarlo.js";
+import { projectPlan } from "./deterministic.js";
 import { PROFILES } from "./profiles.js";
 import {
   solveContributeMore, solveRetireLater, solveSpendLess, solveTakeMoreRisk, solveAllLevers,
@@ -35,10 +36,32 @@ function pensionRow(over = {}) {
     ...over,
   };
 }
+// A real cash NEED, anchored start-to-end so it runs the whole
+// projection — `ruinProbability` (monteCarlo.js) is the fraction of
+// paths with ANY unfunded cashflow before the projection ends; none of
+// this file's OTHER fixtures include an expense row at all, so their
+// own "ruin" is structurally always 0 regardless of any other stress
+// (income required, balances) applied to them — a genuine deficit
+// needs a genuine expense to be unfunded against.
+function expenseRow(over = {}) {
+  return {
+    id: "e1", label: "Living", owner: "client", category: "nonDiscretionary",
+    amount: 90000 / 12, frequency: "monthly",
+    from: { kind: "anchor", anchorId: "retirement-client" }, to: { kind: "anchor", anchorId: "end" },
+    indexBasis: "cpi", indexExtraPct: 0,
+    ...over,
+  };
+}
 function employmentRow(over = {}) {
   return {
     id: "i1", label: "Salary", owner: "client", amount: 90000, frequency: "annual",
-    from: { kind: "age", age: 55 }, to: { kind: "age", age: 65 },
+    // `to` anchors to the client's own retirement (planState.js's own
+    // default for a real income row — createIncomeRow's anchorRef),
+    // NOT a fixed age — a fixed age coinciding with leverState()'s own
+    // retirementAge would make "retire later" silently inert, the
+    // exact class of bug docs/specs/37-review-remediation.md Commit 6
+    // fixes (finding 1.13's two remaining dead arms).
+    from: { kind: "age", age: 55 }, to: { kind: "anchor", anchorId: "retirement-client" },
     indexBasis: "cpi", indexExtraPct: 0, incomeType: "employment", sgApplies: true,
     ...over,
   };
@@ -201,6 +224,48 @@ describe("solveRetireLater", () => {
       expect(result.afterRuin).toBeCloseTo(reRun.ruinProbability, 6);
     }
   });
+
+  // docs/specs/37-review-remediation.md, Commit 6, finding 1.13 — the
+  // review's own reproduction: a plan whose client income rows are all
+  // anchored to a FIXED age rather than the client's own retirement.
+  // applyRetireLater only ever moves plan.client.retirementAge, so
+  // nothing in this plan's schedule changes at any candidate age —
+  // before this fix, the scan ran to endAge and reported the generic
+  // "out-of-bounds", indistinguishable from a plan that genuinely can't
+  // be helped by retiring later.
+  it("is unavailable, with a specific reason, when no client income is anchored to the client's own retirement date", () => {
+    const state = leverState();
+    state.cashflows.income = [employmentRow({ to: { kind: "age", age: 65 } })]; // fixed age, not the retirement anchor
+    const result = solveRetireLater(state, PROFILES, { threshold: 0.6, baselineRuin: 0.9, numPaths: 60, seed: 2, ...FAST });
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe("no-retirement-anchored-income");
+    expect(result.converged).toBeUndefined();
+  });
+
+  it("is unavailable for a plan with no income rows at all — the same structural condition, the degenerate case", () => {
+    const state = leverState();
+    state.cashflows.income = [];
+    const result = solveRetireLater(state, PROFILES, { threshold: 0.6, baselineRuin: 0.9, numPaths: 60, seed: 2, ...FAST });
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe("no-retirement-anchored-income");
+  });
+
+  // "constructs a scenario where that arm must bite and asserts the
+  // projection differs from its baseline" — the spec's own words for
+  // Commit 6's guard. A deterministic projectPlan comparison, not a
+  // Monte Carlo ruin comparison: with a retirement-anchored salary row,
+  // pushing retirementAge out both extends the salary and defers the
+  // (also retirement-anchored) expense row, so the projected end-of-plan
+  // net assets is materially different — genuinely bites, where the
+  // pre-fix engine produced an IDENTICAL projection at every age.
+  it("genuinely bites — pushing a retirement-anchored salary out changes the projection", () => {
+    const state = leverState();
+    state.cashflows.expenses = [expenseRow()];
+    const baseline = projectPlan(state, PROFILES);
+    const later = projectPlan(applyRetireLater(state, 75), PROFILES);
+    const lastYear = baseline.yearly.length - 1;
+    expect(later.yearly[lastYear].netAssets).not.toBeCloseTo(baseline.yearly[lastYear].netAssets, 0);
+  });
 });
 
 describe("solveSpendLess", () => {
@@ -237,6 +302,48 @@ describe("solveSpendLess", () => {
         expect(["out-of-bounds", "non-monotonic", "iteration-cap", "time-cap"]).toContain(result.reason);
       }
     });
+  });
+
+  // docs/specs/37-review-remediation.md, Commit 6, finding 1.13 — the
+  // review's own reproduction: a plan with no pension whose
+  // drawdownOption is "expenditure". applySpendLess only ever sets
+  // Income Required and forces incomeDrivenDrawdown on, both of which
+  // deterministic.js reads ONLY inside that gate — with no such pension
+  // present, every candidate spend figure produces the identical,
+  // unmodified baseline ruin probability, and the bisection used to
+  // report the generic "out-of-bounds" for a plan that was never
+  // actually searched.
+  it("is unavailable, with a specific reason, when no pension on the plan draws down to a target ('expenditure')", () => {
+    const state = leverState();
+    state.plan.pensions = [pensionRow({ drawdownOption: "minimum" })]; // present, but not expenditure-driven
+    const result = solveSpendLess(state, PROFILES, { threshold: 0.5, baselineRuin: 0.9, numPaths: 60, seed: 7, ...FAST });
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe("no-expenditure-pension");
+    expect(result.converged).toBeUndefined();
+  });
+
+  it("is unavailable for a plan with no pensions at all — the same structural condition, the degenerate case", () => {
+    const state = leverState();
+    state.plan.pensions = [];
+    const result = solveSpendLess(state, PROFILES, { threshold: 0.5, baselineRuin: 0.9, numPaths: 60, seed: 7, ...FAST });
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe("no-expenditure-pension");
+  });
+
+  // "constructs a scenario where that arm must bite and asserts the
+  // projection differs from its baseline" — same guard as the
+  // retireLater test above, checked at the deterministic projectPlan
+  // level rather than via noisy Monte Carlo ruin: given an expenditure
+  // pension, a materially lower Income Required target changes how much
+  // the pension actually pays out each year, changing its withdrawals
+  // — where the pre-fix engine left every pension's withdrawals
+  // identical at every Income Required value.
+  it("genuinely bites — a lower Income Required target changes the expenditure pension's own withdrawals", () => {
+    const state = leverState(); // pensionRow() defaults to drawdownOption: "expenditure"
+    const baseline = projectPlan(state, PROFILES);
+    const less = projectPlan(applySpendLess(state, 5000), PROFILES); // far below the default 55,000 target
+    const totalPayments = (out) => out.yearly.reduce((sum, row) => sum + (row.pensionDetail.pn1?.payments ?? 0), 0);
+    expect(totalPayments(less)).toBeLessThan(totalPayments(baseline));
   });
 });
 

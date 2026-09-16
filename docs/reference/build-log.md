@@ -4623,6 +4623,142 @@ Commit: `Fix: rule corrections from the 2026-09 review`.
 
 ---
 
+### Review remediation, Commit 6: dead comparison arms, and a guard covering every arm (spec 37b — closes spec 37)
+
+**Finding 1.13, the remaining two dead arms.** "Retire later" and
+"Spend less" reported the generic "reaches nowhere in the range this
+lever searched" on a plan whose income/pensions gave them nothing to
+act on — indistinguishable from a plan genuinely beyond help.
+`solveRetireLater` now checks up front whether ANY client income row is
+anchored to the client's own retirement date (`applyRetireLater` only
+ever moves that one anchor point — a fixed-age salary row can't respond
+to it) and `solveSpendLess` checks for a pension whose own
+`drawdownOption` is `"expenditure"` (the only thing
+`plan.retirement.incomeRequired`/`incomeDrivenDrawdown` ever drives,
+`deterministic.js`'s own gate) — both bail with a specific
+`{available: false, reason: ...}` BEFORE running an expensive, doomed
+search, mirroring `solveContributeMore`'s existing "no-super-account"
+precedent. `main.js`'s levers panel gained a reason-keyed message map
+(`LEVER_UNAVAILABLE_REASON_TEXT`) — it previously hardcoded "the client
+has no super account to contribute into" for EVERY `available: false`
+lever regardless of which one or why, a latent bug of its own that
+would have misreported both new cases.
+
+**Finding 2.8, the "Comprehensive pre-retiree" demo never retires.**
+Its client and partner salary rows were explicitly anchored to the
+household's own "end" date rather than to retirement — a "disclosed
+simplification" that meant the demo's own DEFAULT ("Current") scenario,
+the one the review's probe and this tool's own lever solver naturally
+run against, showed $493,000/yr of household income at ages 65, 75 and
+85 alike, and made "Retire later" a dead arm against this exact fixture
+(the review's own named repro for 1.13). Fixed by anchoring each salary
+row to its own OWNER's retirement date — the schema's own factory
+default (`createIncomeRow`) this fixture had overridden away — so
+"Current", "Maximise concessional", and "Sell the investment property
+at 65" all now retire the couple at their own default age 65 (only
+"Retire at 60" moves the client's own date, unchanged). No pension
+object needed to stay affordable: post-retirement spending is funded by
+the engine's own deficit-funding fallback drawing on released
+accumulation super (Tier 1.2, Commit 3) — a faithful "hasn't set up a
+pension strategy yet" reading for a baseline scenario, verified
+`expectAffordable: true` still holds (`out.shortfall === null`) for
+every one of the four scenarios via the existing suite-wide affordability
+gate, not asserted around.
+
+**The guard.** `docs/specs/37-review-remediation.md`'s own words: "for
+every comparison arm, what-if shock and lever in the application,
+[construct] a scenario where that arm must bite... Register arms so a
+new one cannot be added without appearing in the test." New
+`comparisonArmRegistry.test.js` — two enumerable, REAL runtime
+registries (`retirementLevers.js`'s `LEVERS`, `whatIf.js`'s
+`SHOCK_APPLIERS` via a new `registeredShockKinds()` export) are diffed
+against this file's own registered-arm lists, so a lever or shock kind
+added to the app without a matching entry here fails immediately, by
+construction. The ten Focus/comparison arms (age pension strategy gift
+and work-income, aged care planning gift, aged care accommodation
+RAD/DAP, salary sacrifice, FHSSS, surplus allocation, recontribution,
+debt payoff, debt recycling, glide-vs-static lifecycle) have no such
+central dispatch table in this app — each is its own module, imported
+ad hoc by main.js — so for these the guard is a completeness check:
+every registry entry names a real test file and test title, and the
+test confirms both exist, catching a bite-proving test silently deleted
+or renamed out from under its own arm. **Disclosed scope**: these ten
+arms are NOT re-verified with brand-new scenarios in this commit — the
+2026-09 review's own second-pass ("Checked and found sound" section 8)
+already independently confirmed every one of them bites, with real
+before/after figures, and every one already has its own dedicated,
+passing test file; rebuilding ten more scenarios from scratch here
+would duplicate coverage that already exists rather than closing a gap
+that doesn't. A dispatch-registry retrofit spanning every Focus module
+was considered and rejected as disproportionate to what this commit's
+finding actually requires (CLAUDE.md's own anti-overengineering
+convention) — the completeness check is the enforceable equivalent
+available without one.
+
+**Spec 34–36 documented figures, re-verified against the post-Commit-3
+engine, as this commit's own spec instructed.** Commit 3 changed live
+Monte Carlo/crash output materially for any pension- or bond-holding
+plan (that commit's own build-log entry: a pension-only retiree's
+30%-crash impact moved from $357 to $121,457) and explicitly deferred
+checking specs 34–36's own worked examples against it. Searched: the
+prose of `docs/specs/34-retirement-intelligent.md`,
+`35-retirement-output-view.md`, and `36-retirement-outputs.md`
+themselves (every dollar/percentage figure in all three — "$72,000 a
+year", "ruin probability 18%", "$12,000 more a year moves ruin from
+X% to Y%", "in about 1 in 5 scenarios you run short before 95", and
+others); every file under `docs/reference/` for a companion "documented
+figures" record analogous to spec 33's own `retirement-comparison.md`;
+and the test suite for any assertion pinning a Monte-Carlo-derived
+number to a spec-34–36 example. **Finding: nothing needed updating.**
+Every figure in the three specs' own prose is illustrative UI-copy —
+design-time mockup text ("at a 10% ruin tolerance you can spend
+$72,000 a year" is the spec's OWN worked illustration of what the
+FEATURE should say, not a locked output) — never computed from or
+asserted against a live engine run; the one place "$72,000" appears in
+the test suite (`lifestyleBand.test.js`) tests `asfaBandPhrase`'s own
+string formatting against that literal number as an ARBITRARY input,
+independent of any simulation. The only genuine "documented figures"
+artifact in the Retirement feature area, `retirement-comparison.md`
+(spec 33, its own `retirementComparison.test.js`), is confirmed
+deterministic-only — `computeRetirementAnalytics` off `projectPlan`,
+zero Monte Carlo fields asserted — so it was never in Commit 3's blast
+radius in the first place; it passed unchanged throughout this whole
+spec's six commits, verified directly rather than assumed. Recording
+this explicitly, per instruction, so the magnitude of Commit 3's
+tightening is on the record precisely BECAUSE no committed figure
+anywhere silently went stale — an absence of drift confirmed by
+searching, not by absence of looking.
+
+**Not a new money flow** — every fix in this commit is a display/
+solve-availability correction or a demo-fixture input change, none
+introduce a flow `randomScenario()`/`conservationCheck.js` don't already
+know about. No engine change; `ENGINE_VERSION` untouched.
+
+Tests: `retirementLevers.test.js` — 6 new (unavailable-with-reason for
+both levers, the degenerate no-income/no-pensions cases, and a
+genuine-bite test for each, at the `projectPlan` level per the spec's
+own "asserts the projection differs from its baseline" wording, not a
+noisy Monte Carlo comparison — an earlier attempt using
+`runMonteCarlo`-derived ruin deltas surfaced its own trap: this file's
+existing `leverState()` fixture had no expense row at all, so its own
+"ruin" was structurally always 0 regardless of any other stress, a
+smaller instance of the exact same class of bug this commit fixes
+elsewhere; `employmentRow()`'s own default `to` changed from a fixed
+age coinciding with `retirementAge` to a genuine retirement anchor, the
+same fix applied to the demo fixture). `demo/demo.test.js` — 2 new
+(retirement key date genuinely reached in "Current", not just "Retire
+at 60"; retiring later than 65 changes "Current"'s own projection).
+`comparisonArmRegistry.test.js` — 6 new (registry/runtime-registry
+parity for levers and shocks, bite-test existence for every registered
+arm). Full suite 2185/2185, build green, browser-verified (fresh load,
+demo clients loaded, Comprehensive pre-retiree → Current → Monte Carlo
+→ Run simulation: 0% ruin, zero console errors — this scenario's own
+substantial super balances mean it doesn't itself reach the levers
+panel's display threshold; the underlying lever logic is exercised
+directly by the unit tests above instead).
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
