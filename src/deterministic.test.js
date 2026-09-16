@@ -8774,6 +8774,144 @@ describe("Pension phase (spec 20, Commit 5): commutations", () => {
   });
 });
 
+// Partial-first-year one-off events (docs/specs/37-review-remediation.md,
+// Commit 1; adversarial review finding 1.1) — julyOf(0) returns null for
+// ANY plan year 0 whose start month isn't July, and six event resolvers
+// treated that null as "never fires within the projection" rather than
+// "fire at the plan's own actual start month". This is the CLASS, not a
+// single instance: pension commencement, defined-benefit commencement,
+// gifts, super rollovers, pension commutations, and aged care entry all
+// resolved through the exact same julyOf(y) call. Every one of the six
+// gets its own scenario here — a single event type passing would not
+// have caught the other five.
+describe("Partial-first-year one-off events (docs/specs/37-review-remediation.md, Commit 1)", () => {
+  const SEPTEMBER_START = { year: 2026, month: 9 };
+
+  it("pension commencement fires at the plan's own start month in a partial first year, not never", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        start: SEPTEMBER_START,
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow()], // commenceAt age 60 === currentAge — "now"
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.commencementAmount).toBeGreaterThan(0);
+    expect(out.yearly[0].pensionDetail.pn1.payments).toBeGreaterThan(0);
+  });
+
+  it("defined benefit commencement fires at the plan's own start month in a partial first year, not never", () => {
+    const out = projectPlan(mkState({
+      endAge: 63,
+      plan: {
+        start: SEPTEMBER_START,
+        client: { currentAge: 60 },
+        definedBenefits: [dbRow({ annualPension: 50000, commenceAt: { kind: "age", age: 60 } })],
+      },
+    }));
+    // 16× credit to the TBA is the same "did it actually commence"
+    // signal the ordinary-start DB tests above use.
+    expect(out.yearly[0].transferBalance.client.balance).toBeCloseTo(50000 * 16, 2);
+    expect(out.yearly[0].definedBenefitDetail.db1.grossPension).toBeGreaterThan(0);
+  });
+
+  it("a gift fires at the plan's own start month in a partial first year, not never", () => {
+    const out = projectPlan(mkState({
+      endAge: 70, assets: [],
+      plan: {
+        start: SEPTEMBER_START,
+        client: { currentAge: 65 },
+        gifts: [{ id: "g1", owner: "client", amount: 15000, at: { kind: "age", age: 65 }, label: "Gift" }],
+      },
+    }));
+    expect(out.yearly[0].giftsPaid).toBeCloseTo(15000, 2);
+  });
+
+  it("a gift dated BEFORE plan start (an age already past) still fires — falls back to the plan's own start month, not to never", () => {
+    const out = projectPlan(mkState({
+      endAge: 70, assets: [],
+      plan: {
+        start: SEPTEMBER_START,
+        client: { currentAge: 65 },
+        // Age 60 is five years before the client's current age — an
+        // anchor resolving to a month before the plan begins clamps to
+        // plan year 0 (resolveOwnerAge's own out-of-window rule) and
+        // must still fire there, not be silently dropped.
+        gifts: [{ id: "g1", owner: "client", amount: 15000, at: { kind: "age", age: 60 }, label: "Gift" }],
+      },
+    }));
+    expect(out.yearly[0].giftsPaid).toBeCloseTo(15000, 2);
+  });
+
+  it("a super rollover fires at the plan's own start month in a partial first year, not never", () => {
+    const out = projectPlan(mkState({
+      endAge: 42,
+      plan: {
+        start: SEPTEMBER_START,
+        client: { currentAge: 40 },
+        superAccounts: [
+          superAcct({ id: "su1", taxedStatus: "taxed", balance: 100000, allocation: zeroRealSuperAlloc() }),
+          superAcct({ id: "su2", taxedStatus: "taxed", balance: 0, allocation: zeroRealSuperAlloc() }),
+        ],
+      },
+      cashflows: {
+        superRollovers: [{ id: "sr1", owner: "client", fromAccountId: "su1", toAccountId: "su2", amount: null, at: { kind: "age", age: 40 } }],
+      },
+    }));
+    expect(out.yearly[0].superDetail.su1.rolloverOut).toBeCloseTo(100000, 1);
+    expect(out.yearly[0].superDetail.su2.rolloverIn).toBeCloseTo(100000, 1);
+  });
+
+  it("a pension commutation fires at the plan's own start month in a partial first year, not never", () => {
+    const out = projectPlan(mkState({
+      endAge: 64,
+      plan: {
+        start: SEPTEMBER_START,
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 100000, taxFreeComponent: 40000, allocation: zeroRealSuperAlloc() })],
+        pensions: [pensionRow({
+          drawdownOption: "minimum",
+          // Both commencement (age 60 === currentAge) and the
+          // commutation itself (also age 60) resolve to plan year 0 —
+          // exercising the fix on both resolvers in the same scenario.
+          commutations: [commutationRow({ amount: 20000, at: { kind: "age", age: 60 } })],
+        })],
+      },
+    }));
+    expect(out.yearly[0].pensionDetail.pn1.commutations).toBeCloseTo(20000, 0);
+  });
+
+  it("an aged care entry fires at the plan's own start month in a partial first year, not never", () => {
+    const out = projectPlan(mkState({
+      endAge: 78,
+      plan: {
+        start: SEPTEMBER_START,
+        client: { currentAge: 76 },
+        agedCare: [{
+          id: "ac1", name: "Aged care", owner: "client",
+          entryAt: { kind: "age", age: 76 }, facility: "Facility",
+          accommodationPrice: 400000, paymentMethod: "dap", radAmount: 0,
+          extraServiceFeesAnnual: 0, formerHomeOccupiedByProtectedPerson: false,
+          optedIntoNewRegime: false,
+        }],
+      },
+    }));
+    expect(out.yearly[0].agedCareDetail.ac1).toBeTruthy();
+    expect(out.yearly[0].agedCareDetail.ac1.total).toBeGreaterThan(0);
+  });
+
+  it("the July-anchored RECURRING behaviour is unchanged — an annual row still skips a partial first year with no July to fire in", () => {
+    const out = projectPlan(mkState({
+      endAge: 42,
+      plan: { start: SEPTEMBER_START, client: { currentAge: 40 } },
+      cashflows: { expenses: [cf({ id: "e1", assetId: null, amount: 10000, frequency: "annual", fromAge: 40, toAge: 45 })] },
+    }));
+    expect(out.yearly[0].expenses).toBe(0); // skipped — no July in the partial first year
+    expect(out.yearly[1].expenses).toBeCloseTo(10000, 2); // resumes next July
+  });
+});
+
 // Age pension (spec 21a, Commit 3) — engine integration. An isolated
 // fixture (no assets, no income, no expenses) so the entitlement is
 // the ONLY thing moving household cash — the age pension's own known-

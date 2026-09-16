@@ -4228,6 +4228,49 @@ replaced with `.branches` checks); 6 new cascade-vocabulary tests
 (re-opening, multi-step, splits, debt-scope `deductibility`/`loanIds`,
 `balanceBelow`). Full suite 2133/2133, build green.
 
+### Review remediation, Commit 1: partial-first-year one-off events (spec 37b)
+
+**Fixes finding 1.1** from the 2026-09 adversarial review
+(`docs/reference/adversarial-review-2026-09/README.md`, merged onto this
+branch from `claude/lucid-ptolemy-rxca4k` ahead of this work). `julyOf(y)`
+returns `null` for plan year 0 whenever the plan's start month isn't July
+— correct for a RECURRING annual row (there is no July in a partial first
+year to fire in, so it waits for the next one) but wrong for a ONE-OFF:
+six event resolvers treated that `null` as "never fires within the
+projection" rather than "fire at the plan's own actual start month" —
+pension commencement, defined-benefit commencement, gifts, super
+rollovers, pension commutations, and aged care entry. A retiree entered
+in September who "commences an account-based pension at 70 (now)" got no
+pension at all: super stayed in accumulation for the whole projection,
+taxed at 15% on earnings, no minimum drawdown.
+
+**The fix is a new resolver, `oneOffFireMonth(y)`**, used only by those
+six sites (`julyOf` itself is untouched, so every recurring-row and
+property-purchase call site keeps its existing behaviour): for `y > 0` it
+is identical to `julyOf(y)` (every age-based DateRef in this engine ticks
+on 1 July, so a future plan year always starts on an actual July — see
+CLAUDE.md's Time convention); for `y === 0` it returns `0` (the plan's
+own actual start month) instead of `null`, since an age resolving to year
+0 means the client has already reached it — "now", with no "next July" to
+wait for.
+
+**Also fixes three of the four dead comparison arms named in finding
+1.13** (the aged care planning gift arm and the RAD/DAP accommodation
+arms), which were dead for this exact reason and needed no separate
+code change — verified via `probes/probeM.mjs` and `probes/probeO.mjs`:
+the aged care planning gift arm now shows a real Δ in net assets and cost
+of care, and the RAD arm now actually pays its $500,000 RAD at entry
+instead of silently paying nothing while still being compared as if it
+had. The two dead comparison LEVERS ("Retire later", "Spend less") are a
+different root cause and remain for Commit 6.
+
+Tests: one scenario per event type (all six) with a September-start plan,
+asserting the event fires in year 0; a gift dated to an age already
+BEFORE plan start, confirming the fallback-to-plan-start path (not just
+the exactly-now case); a recurring annual row in the same September-start
+plan confirmed to still skip year 0 (the contrast case — `julyOf` itself
+is unchanged). Full suite 2141/2141, build green.
+
 ---
 
 ## WHERE WE'RE GOING

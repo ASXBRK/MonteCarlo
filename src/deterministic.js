@@ -907,6 +907,22 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const heasProperty = heasConfig.enabled ? props.find((p) => p.id === heasConfig.propertyId) ?? null : null;
   const yearStartIdx = (y) => (y === 0 ? 0 : schedule.monthsInFirstYear + 12 * (y - 1));
   const julyOf = (y) => (y === 0 ? (state.plan.start.month === 7 ? 0 : null) : yearStartIdx(y));
+  // A ONE-OFF event's own firing month (docs/specs/37-review-remediation.md,
+  // Commit 1) — pension/DB commencement, aged care entry, a gift, a
+  // super rollover, a pension commutation. Every DateRef in this engine
+  // is age-anchored (ages tick 1 July — see CLAUDE.md's Time
+  // convention), so a resolved plan year y>0 always lands on an actual
+  // July (yearStartIdx(y) === julyOf(y) for y>0 — the client cannot
+  // "turn" an age on any other date). The one case that differs is
+  // y===0: julyOf(0) is null whenever the plan's own start month isn't
+  // July, because THAT null means "no July exists in this partial first
+  // year" — correct for a RECURRING annual row, which must wait for the
+  // next one. A one-off has no "next" occurrence to wait for; an age
+  // resolving to year 0 means the client has already reached it (it
+  // clamps there even for an age reached before the plan starts, same
+  // as any other out-of-window DateRef) — "now", not "next July" — so
+  // it fires at the plan's own actual start month, whatever that is.
+  const oneOffFireMonth = (y) => (y === 0 ? 0 : yearStartIdx(y));
 
   // Pension commencement month (spec 20, Commit 1) — resolved once
   // here, not per month, same as a property's own purchaseMonth just
@@ -932,7 +948,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const gateAge = pensionMinCommenceAge(meta.type, ownerPerson?.retirementAge);
     let y = resolveRef(pn.commenceAt, state.plan, schedule, "client").planYear;
     while (y < schedule.planYears && ownerAgeAt(meta.owner, y) < gateAge) y++;
-    pensionCommenceMonth[pn.id] = y < schedule.planYears ? julyOf(y) : null; // null = never fires within the projection (convention 5's partial-first-year skip, or the gate never met)
+    pensionCommenceMonth[pn.id] = y < schedule.planYears ? oneOffFireMonth(y) : null; // null = never fires within the projection (the condition-of-release gate never met before the plan ends)
   }
 
   // Defined benefit pensions (spec 26, Commit 2) — same "fires in July
@@ -944,7 +960,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const dbCommenceMonth = {};
   for (const db of dbRows) {
     const y = resolveRef(db.commenceAt, state.plan, schedule, "client").planYear;
-    dbCommenceMonth[db.id] = y < schedule.planYears ? julyOf(y) : null;
+    dbCommenceMonth[db.id] = y < schedule.planYears ? oneOffFireMonth(y) : null;
   }
   // Transfer balance account credit guard (spec 26, Commit 2) — same
   // one-off shape as pensionTbaCredited above.
@@ -986,7 +1002,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const agedCareRegime = {}; // resolved once, at entry — "old" | "new" | "pre2014" | null (never fires)
   for (const ac of agedCareRows) {
     const y = resolveRef(ac.entryAt, state.plan, schedule, "client").planYear;
-    agedCareEntryMonth[ac.id] = y < schedule.planYears ? julyOf(y) : null;
+    agedCareEntryMonth[ac.id] = y < schedule.planYears ? oneOffFireMonth(y) : null;
     agedCareLifetimeCumulative[ac.id] = 0;
     agedCareNcccCumulative[ac.id] = 0;
     agedCareNcccYearsSoFar[ac.id] = 0;
@@ -1026,7 +1042,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   for (const pn of pensionRows) {
     pensionCommutationEvents[pn.id] = (pn.commutations ?? []).map((c) => {
       const y = resolveRef(c.at, state.plan, schedule, "client").planYear;
-      return { id: c.id, month: julyOf(y), amount: c.amount, destination: c.destination };
+      return { id: c.id, month: oneOffFireMonth(y), amount: c.amount, destination: c.destination };
     }).filter((e) => e.month != null);
   }
 
@@ -1038,7 +1054,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // mutation in this engine is real-pass-gated).
   const superRolloverEvents = (state.cashflows.superRollovers ?? []).map((sr) => {
     const y = resolveRef(sr.at, state.plan, schedule, "client").planYear;
-    return { id: sr.id, month: julyOf(y), fromAccountId: sr.fromAccountId, toAccountId: sr.toAccountId, amount: sr.amount };
+    return { id: sr.id, month: oneOffFireMonth(y), fromAccountId: sr.fromAccountId, toAccountId: sr.toAccountId, amount: sr.amount };
   }).filter((e) => e.month != null && e.fromAccountId && e.toAccountId && superIds.includes(e.fromAccountId) && superIds.includes(e.toAccountId));
 
   // Deeming grandfathering (spec 21b, Commit 3) — grandfathering is
@@ -1065,7 +1081,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   // regardless of input order (src/gifting.js's own header).
   const giftEvents = (state.plan.gifts ?? []).map((g) => {
     const y = resolveRef(g.at, state.plan, schedule, "client").planYear;
-    const month = julyOf(y);
+    const month = oneOffFireMonth(y);
     return month == null ? null : { id: g.id, month, amount: g.amount, planYear: y };
   }).filter(Boolean);
   const resolvedGifts = resolveGiftDeprivation(giftEvents);
