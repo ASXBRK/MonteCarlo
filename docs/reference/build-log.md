@@ -4759,6 +4759,114 @@ directly by the unit tests above instead).
 
 ---
 
+### Finding and editing inputs, Commit 1: the review panel, available everywhere (spec 38)
+
+**Generalises `retirementReviewPanel.js` rather than forking it.** The
+input review panel spec 35 built for Retirement > Projection (every
+input the projection reads, grouped, editable in place, link-out for
+anything complex) is now available below every other output/focus/
+what-if view too — one collapsible mount, physically placed once
+(`index.html`, right after `.view-canvas`, still inside `#outputCanvas`)
+rather than duplicated per view, since every `viewXxx` div is `hidden`
+except the active one and this mount sits outside all of them.
+
+**One builder, not two.** `buildReviewGroups(state, order)`
+(`retirementReviewPanel.js`) is the real implementation;
+`buildRetirementReviewGroups(state)` is now a one-line wrapper
+(`buildReviewGroups(state, RETIREMENT_REVIEW_GROUP_ORDER)`) kept for the
+existing Retirement mount and its own tests — same nine groups, same
+order, byte-for-byte unchanged behaviour (verified: `buildReviewGroups(
+state, RETIREMENT_REVIEW_GROUP_ORDER)` is asserted identical to
+`buildRetirementReviewGroups(state)` directly, not just by inspection).
+The general mounts pass the new `REVIEW_GROUP_ORDER` instead — the same
+nine groups plus **Liabilities** and **Bonds**, the two money-holding
+collections a narrowly retirement-scoped panel never needed but
+"everything the projection uses", read from every other output view,
+does (the spec's own named example: "looking at debt charts should
+surface liabilities first" — impossible without a Liabilities group at
+all). Liabilities required a small refactor first: the real Liabilities
+section committed every field edit through inline logic in its own
+`change` listener, with no reusable function the way assets/super/
+pension/bonds already had — extracted into `applyLiabilityFieldEdit`/
+`commitLiabilityEdit`, called by BOTH the real section (behaviour
+unchanged, verified) and the new panel, per the spec's own "not
+negotiable" constraint that every reused component reads the same
+commit functions the output views/input sections already use. Bonds
+needed no such refactor — `applyBondEdit` already existed.
+
+**Relevance ordering** (`REVIEW_PANEL_RELEVANT_GROUPS`,
+`reviewPanelGroupOrderFor`) — deliberately kept in `retirementReviewPanel
+.js`, not `main.js`, specifically so it's unit-testable: main.js has no
+DOM test harness in this codebase, and this is exactly the kind of logic
+("does the full set survive reordering, for every mapped view")
+worth a direct test rather than trusting by construction. One entry per
+`activeView` id naming the group(s) that view's own chart/table most
+directly reads (e.g. `liabilities` → `["liabilities"]`,
+`super` → `["super", "contributions", "glidePath"]`), promoted to the
+front; every other group still follows in its own default order — the
+function's own test suite checks `[...ordered].sort()` equals
+`[...REVIEW_GROUP_ORDER].sort()` for every mapped view directly, the
+"reorder, never filter" guarantee made mechanical rather than assumed.
+An unmapped view falls back to the plain default order (itself a
+reasonable "income/super/assets first" starting point) — not every one
+of the ~50 `activeView` ids has a bespoke entry (`key-figures`,
+`snapshot`, `assumptions`, `focus-lookups`, `focus-approach-comparison`
+don't), a proportionate stop short of hand-tuning every last one for a
+first commit.
+
+**The existing Retirement mount is unchanged, literally** — it keeps its
+own dedicated, always-open container (`#retirementReviewPanel`, no
+toggle, same as before this spec) and the same `RETIREMENT_REVIEW_GROUP
+_ORDER`; the new general mount (`#inputReviewSection`/`#inputReviewPanel`)
+hides itself specifically when `activeView === "retirement-projection"`,
+so the same panel never renders twice on one page. Both mounts share
+every other piece: `retirementReviewGroupRowsHTML` (gained two new
+`case` branches, `liabilities`/`bonds`; every existing case untouched),
+`applyRetirementReviewFieldEdit` (gained two new dispatch branches for
+`data-lid`/`data-bdid`; every existing branch's calls updated from
+`renderRetirementReviewPanel()` to a new `renderAllReviewPanels()` that
+refreshes whichever mount(s) actually exist, so an edit from either
+container keeps both in sync), and `onRetirementReviewPanelClick`
+(unchanged; link-out and add-inline both already worked generically).
+
+**Collapsed by default, remembered per session — for free.** A native
+`<details>` element, not a hand-rolled toggle + JS state variable: since
+the ONE mount node persists across every view switch (it's never
+recreated), the browser's own open/closed state simply survives
+navigation on its own. No new field on `state`/localStorage — collapse
+state resets on a page reload, matching "per session" literally rather
+than "forever."
+
+**Scope decision, disclosed**: Properties and lifestyle assets are NOT
+new review-panel groups in this commit, despite also being money-
+holding collections the engine reads. Properties have no simple single
+"amount" field the way assets/liabilities/bonds do (sale/purchase/duty
+logic, not an inline-editable balance) and lifestyle assets have no
+natural "most relevant view" to promote them for — both would need
+either a much more complex row than this panel's "edit in place for
+anything simple, link out for anything more complex" rule allows, or a
+row so thin it wouldn't earn its place. Not filtered from being
+mentioned — simply not built yet; a natural Commit 1 follow-up if it
+turns out to be missed.
+
+Tests: `retirementReviewPanel.test.js` — 10 new (`buildReviewGroups`'s
+own superset/liabilities/bonds/custom-order behaviour, identical-to-the-
+wrapper equivalence; `reviewPanelGroupOrderFor`'s full-set-preserved,
+falls-back-to-default, genuinely-differs-by-view, relevant-groups-lead,
+and no-dead-keys checks). Full suite 2195/2195, build green. Browser-
+verified (fresh load, demo clients loaded, Family with a mortgage):
+Liabilities output view shows the general panel collapsed, opens to
+Liabilities-group-first ordering with the full set below; editing a
+liability balance from the panel commits and is reflected switching to
+the Table form; switching to the Super view keeps the panel OPEN
+(remembered) and reorders to Super-group-first, the earlier liability
+edit still visible further down; Focus > Debt payoff also promotes
+Liabilities first; Retirement > Projection shows ONLY its own original,
+always-open panel — the general mount hides itself there, no visible
+duplication; zero console errors throughout.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

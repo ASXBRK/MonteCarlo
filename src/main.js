@@ -58,7 +58,7 @@ import {
   isCoupleHousehold, defaultReportPeriod,
 } from "./planState.js";
 import { singleStepGlidePathPreset, gradualGlidePathPreset } from "./glidePaths.js";
-import { buildRetirementReviewGroups } from "./retirementReviewPanel.js";
+import { buildRetirementReviewGroups, buildReviewGroups, REVIEW_GROUP_ORDER, reviewPanelGroupOrderFor } from "./retirementReviewPanel.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { resolveGiftDeprivation, GIFT_ANNUAL_LIMIT, GIFT_FIVE_YEAR_LIMIT } from "./gifting.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -8558,6 +8558,44 @@ function findLiability(lid) {
   return (state.liabilities ?? []).find((l) => l.id === lid) || null;
 }
 
+// Extracted (docs/specs/38-finding-and-editing-inputs.md, Commit 1) so
+// the general input review panel can commit a liability edit through
+// the EXACT function the real Liabilities section uses, rather than a
+// second copy of this field-by-field switch — this spec's own "not
+// negotiable" constraint. Sub-row fields (extra/one-off repayments) are
+// deliberately NOT handled here — "edit in place for anything simple,
+// link out for anything more complex" (the retirement panel's own
+// existing rule) already treats a loan's own core fields as simple and
+// its repayment sub-rows as link-out-only; nothing in this function's
+// own real caller below has changed.
+function applyLiabilityFieldEdit(l, field, el) {
+  const value = el.value;
+  if (field === "name") l.name = value.trim() || l.name;
+  else if (field === "type") l.type = value;
+  else if (field === "owner") l.owner = value;
+  else if (field === "balance") l.balance = clampNumber(value, 0);
+  else if (field === "interestRatePct") l.interestRatePct = clampNumber(value, 0, 30);
+  else if (field === "termYears") l.termYears = clampInt(value, 1, 50);
+  else if (field === "ioYears") l.ioYears = clampInt(value, 1, l.termYears); // never longer than the loan's own term
+  else if (field === "deductiblePct") { l.deductiblePct = clampNumber(value, 0, 100); l.deductiblePctIsDefault = false; }
+  else if (field === "linkedAssetId") l.linkedAssetId = value || null;
+  else if (field === "offsetAssetId") l.offsetAssetId = value || null;
+  // Fixed-rate rollover (Commit 1).
+  else if (field === "fixedRatePct") l.fixedRatePct = clampNumber(value, 0, 30);
+  else if (field === "fixedUntilAge") l.fixedUntil = { kind: "age", age: clampInt(value, state.plan.client.currentAge, state.plan.endAge) };
+  // Blank clears back to "use the mortgage-rate assumption" — the
+  // same override-or-default shape as dutyOverride/lmiOverride.
+  else if (field === "revertRatePct") l.revertRatePct = value === "" ? null : clampNumber(value, 0, 30);
+  else if (field === "commencedOn") { l.commencedOn = value || null; l.commencementIsDefault = false; }
+}
+
+// Post-edit normalisation every liability field commit needs, shared by
+// the real section's own listener and the general review panel.
+function commitLiabilityEdit() {
+  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
+  applyLiabilityLinkDerivations(state.liabilities, state.properties, state.plan, projection.schedule);
+}
+
 els.liabilitiesSection.addEventListener("change", (e) => {
   const helpOwner = e.target.dataset.helpOwner;
   if (helpOwner === "client" || helpOwner === "partner") {
@@ -8579,23 +8617,7 @@ els.liabilitiesSection.addEventListener("change", (e) => {
   const erField = e.target.dataset.erfield;
   const orField = e.target.dataset.orfield;
   if (field) {
-    if (field === "name") l.name = e.target.value.trim() || l.name;
-    else if (field === "type") l.type = e.target.value;
-    else if (field === "owner") l.owner = e.target.value;
-    else if (field === "balance") l.balance = clampNumber(e.target.value, 0);
-    else if (field === "interestRatePct") l.interestRatePct = clampNumber(e.target.value, 0, 30);
-    else if (field === "termYears") l.termYears = clampInt(e.target.value, 1, 50);
-    else if (field === "ioYears") l.ioYears = clampInt(e.target.value, 1, l.termYears); // never longer than the loan's own term
-    else if (field === "deductiblePct") { l.deductiblePct = clampNumber(e.target.value, 0, 100); l.deductiblePctIsDefault = false; }
-    else if (field === "linkedAssetId") l.linkedAssetId = e.target.value || null;
-    else if (field === "offsetAssetId") l.offsetAssetId = e.target.value || null;
-    // Fixed-rate rollover (Commit 1).
-    else if (field === "fixedRatePct") l.fixedRatePct = clampNumber(e.target.value, 0, 30);
-    else if (field === "fixedUntilAge") l.fixedUntil = { kind: "age", age: clampInt(e.target.value, state.plan.client.currentAge, state.plan.endAge) };
-    // Blank clears back to "use the mortgage-rate assumption" — the
-    // same override-or-default shape as dutyOverride/lmiOverride.
-    else if (field === "revertRatePct") l.revertRatePct = e.target.value === "" ? null : clampNumber(e.target.value, 0, 30);
-    else if (field === "commencedOn") { l.commencedOn = e.target.value || null; l.commencementIsDefault = false; }
+    applyLiabilityFieldEdit(l, field, e.target);
   } else if (erField) {
     // Document Set Commit 5 — extra repayment sub-row.
     const er = (l.extraRepayments ?? []).find((x) => x.id === e.target.dataset.erid);
@@ -8615,8 +8637,7 @@ els.liabilitiesSection.addEventListener("change", (e) => {
   } else {
     return;
   }
-  state.liabilities = normaliseLiabilities(state.liabilities, state.plan, state.assets, state.properties);
-  applyLiabilityLinkDerivations(state.liabilities, state.properties, state.plan, projection.schedule);
+  commitLiabilityEdit();
   saveState();
   refreshOutputs();
   renderLiabilities();
@@ -9085,6 +9106,10 @@ function renderActiveView() {
   else if (activeView === "retirement-table") renderRetirementTableView();
   else if (activeView === "retirement-monte-carlo") renderRetirementMonteCarloView();
   else if (activeView === "retirement-lifecycle") renderRetirementLifecycleView();
+  // docs/specs/38-finding-and-editing-inputs.md, Commit 1 — one call
+  // here covers every view's own general input review panel, rather
+  // than adding a call to each of the ~50 render*View functions above.
+  renderInputReviewPanel();
 }
 
 const isNominal = () => state.display.units === "nominal";
@@ -15562,6 +15587,33 @@ function retirementReviewGroupRowsHTML(group) {
         return retirementReviewRowHTML(sa.name, controls);
       }).join("");
 
+    // docs/specs/38-finding-and-editing-inputs.md, Commit 1 — the two
+    // groups the general mounts need that the retirement-scoped panel
+    // never did (this function's own header). Committed through
+    // applyLiabilityFieldEdit/applyBondEdit — the EXACT functions the
+    // real Liabilities/Investment cashflows sections already use.
+    case "liabilities":
+      return group.ids.map((id) => {
+        const l = findLiability(id);
+        if (!l) return "";
+        const controls = `
+          ${retirementReviewAmountInputHTML(l.balance, `data-lid="${id}" data-lfield="balance"`)}
+          ${isCouple() ? `<select data-lid="${id}" data-lfield="owner" aria-label="Owner">${ownerOptions(l.owner)}</select>` : ""}
+        `;
+        return retirementReviewRowHTML(l.name, controls);
+      }).join("");
+
+    case "bonds":
+      return group.ids.map((id) => {
+        const b = findBond(id);
+        if (!b) return "";
+        const controls = `
+          ${retirementReviewAmountInputHTML(b.balance, `data-bdid="${id}" data-bdfield="balance"`)}
+          ${isCouple() ? `<select data-bdid="${id}" data-bdfield="owner" aria-label="Owner">${ownerOptions(b.owner)}</select>` : ""}
+        `;
+        return retirementReviewRowHTML(b.name, controls);
+      }).join("");
+
     default:
       return "";
   }
@@ -15593,30 +15645,57 @@ function retirementReviewGroupHTML(group) {
   `;
 }
 
-function retirementReviewPanelHTML() {
-  const groups = buildRetirementReviewGroups(state);
+function retirementReviewPanelHTML(groups) {
   if (!groups.length) {
     return `<p class="helper-text">Nothing feeds this projection yet — add income, super or an asset to see it reviewed here.</p>`;
   }
   return groups.map(retirementReviewGroupHTML).join("");
 }
 
-function renderRetirementReviewPanel() {
-  const el = $("retirementReviewPanel");
+// Shared by both mounts (docs/specs/38-finding-and-editing-inputs.md,
+// Commit 1 — "do not fork the module"): the Retirement > Projection
+// mount (unchanged behaviour, RETIREMENT_REVIEW_GROUP_ORDER) and the
+// general mount now available under every other output view
+// (REVIEW_GROUP_ORDER, reordered by relevance — reviewPanelGroupOrderFor
+// below). Same focus-guard as before this refactor: skip the rebuild
+// only while an amount/number field inside THIS panel currently has the
+// caret.
+function renderReviewPanelInto(elId, groups) {
+  const el = $(elId);
   if (!el) return;
-  // See this section's own header: skip the rebuild only while an
-  // amount/number field inside this panel currently has the caret —
-  // that's the one case a wholesale rebuild would yank the cursor out
-  // from under a live keystroke. A button (add-row/add-super/add-asset/
-  // link-out) or a <select> mid-"change" are safe to rebuild under —
-  // nothing is "mid-edit" there, and a <select> stays focused through
-  // its own "change" (unlike a text input, which blurs first), so
-  // guarding on ANY focus-inside-panel would silently swallow every
-  // structural reveal a select-driven change is supposed to produce
-  // (e.g. a pension's "Fixed amount" field appearing).
   const active = document.activeElement;
   if (active && el.contains(active) && active.tagName === "INPUT" && (active.type === "text" || active.type === "number")) return;
-  el.innerHTML = retirementReviewPanelHTML();
+  el.innerHTML = retirementReviewPanelHTML(groups);
+}
+
+function renderRetirementReviewPanel() {
+  renderReviewPanelInto("retirementReviewPanel", buildRetirementReviewGroups(state));
+}
+
+// Relevance ordering itself (REVIEW_PANEL_RELEVANT_GROUPS,
+// reviewPanelGroupOrderFor) lives in retirementReviewPanel.js, not here
+// — pure data/logic belongs in a module that's actually unit-testable
+// (main.js has no DOM test harness in this codebase), imported above.
+
+// The general mount (every output view EXCEPT retirement-projection,
+// which keeps its own dedicated, always-open mount above — two visible
+// copies of the same panel on one page would be noise, not "available
+// everywhere").
+function renderInputReviewPanel() {
+  const section = $("inputReviewSection");
+  if (section) section.hidden = activeView === "retirement-projection";
+  if (activeView === "retirement-projection") return;
+  renderReviewPanelInto("inputReviewPanel", buildReviewGroups(state, reviewPanelGroupOrderFor(activeView)));
+}
+
+// Refreshes every mounted review panel — an edit committed through
+// EITHER one (the dedicated Retirement mount or the general one) keeps
+// both in sync, and each call is a no-op where its own element isn't
+// in the DOM or is currently mid-edit (renderReviewPanelInto's own
+// guard).
+function renderAllReviewPanels() {
+  renderRetirementReviewPanel();
+  renderInputReviewPanel();
 }
 
 // Field commits — one dispatch per attribute scheme, each routed to the
@@ -15647,7 +15726,7 @@ function applyRetirementReviewFieldEdit(e, commit) {
 
   const field = el.dataset.field;
   if (!el.dataset.kind && !el.dataset.aid && field && field.startsWith("ir")) {
-    if (commit) { onIncomeRequiredChange(el, field); renderRetirementReviewPanel(); }
+    if (commit) { onIncomeRequiredChange(el, field); renderAllReviewPanels(); }
     return;
   }
 
@@ -15657,7 +15736,7 @@ function applyRetirementReviewFieldEdit(e, commit) {
     applyRowEdit(el.dataset.kind, row, field, el, commit);
     saveState();
     refreshOutputs();
-    if (commit) renderRetirementReviewPanel();
+    if (commit) renderAllReviewPanels();
     return;
   }
   if (el.dataset.aid) {
@@ -15667,7 +15746,7 @@ function applyRetirementReviewFieldEdit(e, commit) {
     saveState();
     if (structural) { renderAssets(); renderSettings(); renderCashflows(); }
     refreshOutputs();
-    if (commit) renderRetirementReviewPanel();
+    if (commit) renderAllReviewPanels();
     return;
   }
   if (el.dataset.said) {
@@ -15677,7 +15756,7 @@ function applyRetirementReviewFieldEdit(e, commit) {
     saveState();
     if (structural) renderSuper();
     refreshOutputs();
-    if (commit) renderRetirementReviewPanel();
+    if (commit) renderAllReviewPanels();
     return;
   }
   if (el.dataset.pid) {
@@ -15687,7 +15766,36 @@ function applyRetirementReviewFieldEdit(e, commit) {
     saveState();
     if (structural) renderPensions();
     refreshOutputs();
-    if (commit) renderRetirementReviewPanel();
+    if (commit) renderAllReviewPanels();
+    return;
+  }
+  // docs/specs/38-finding-and-editing-inputs.md, Commit 1 — liabilities
+  // and bonds, the two groups only the general mount shows (see this
+  // file's own REVIEW_GROUP_ORDER). Committed through the SAME functions
+  // the real Liabilities/Investment cashflows sections use.
+  if (el.dataset.lid) {
+    // The real Liabilities section itself only ever commits on "change"
+    // (no live-typing update) — matched here rather than making the
+    // panel more responsive than the section it mirrors.
+    if (!commit) return;
+    const l = findLiability(el.dataset.lid);
+    if (!l) return;
+    applyLiabilityFieldEdit(l, el.dataset.lfield, el);
+    commitLiabilityEdit();
+    saveState();
+    refreshOutputs();
+    renderLiabilities();
+    renderAllReviewPanels();
+    return;
+  }
+  if (el.dataset.bdid) {
+    const b = findBond(el.dataset.bdid);
+    if (!b) return;
+    const structural = applyBondEdit(b, el.dataset.bdfield, el, commit);
+    saveState();
+    if (structural && commit) renderCashflows();
+    refreshOutputs();
+    if (commit) renderAllReviewPanels();
     return;
   }
 }
@@ -15707,7 +15815,7 @@ function onRetirementReviewPanelClick(e) {
       saveState();
       refreshOutputs();
       renderSuper();
-      renderRetirementReviewPanel();
+      renderAllReviewPanels();
     } else if (addBtn.dataset.rrpAction === "add-asset") {
       const a = createAsset(state.plan, state.assets, PROFILES);
       state.assets.push(a);
@@ -15731,23 +15839,28 @@ function onRetirementReviewPanelClick(e) {
   // guard exists to prevent (found live, browser-verified).
   if (!e.target.closest("[data-action]")) return;
   onCashflowSectionClick(e);
-  renderRetirementReviewPanel();
+  renderAllReviewPanels();
 }
 
-const retirementReviewPanelMount = $("retirementReviewPanel");
-if (retirementReviewPanelMount) {
+// Both mounts — the dedicated Retirement one and the general one
+// (docs/specs/38-finding-and-editing-inputs.md, Commit 1) — wire the
+// SAME three listeners to the SAME three functions. One panel, two
+// containers, not a fork.
+for (const mountId of ["retirementReviewPanel", "inputReviewPanel"]) {
+  const mount = $(mountId);
+  if (!mount) continue;
   // Same comma-strip-on-focus affordance CF_MOUNTS gives every amount
   // field elsewhere (see that loop's own comment) — this panel isn't
   // one of those containers, so it needs its own copy.
-  retirementReviewPanelMount.addEventListener("focusin", (e) => {
+  mount.addEventListener("focusin", (e) => {
     if (e.target.matches(".cf-amount-input")) {
       e.target.value = e.target.value.replaceAll(",", "");
       e.target.select();
     }
   });
-  retirementReviewPanelMount.addEventListener("input", (e) => applyRetirementReviewFieldEdit(e, false));
-  retirementReviewPanelMount.addEventListener("change", (e) => applyRetirementReviewFieldEdit(e, true));
-  retirementReviewPanelMount.addEventListener("click", onRetirementReviewPanelClick);
+  mount.addEventListener("input", (e) => applyRetirementReviewFieldEdit(e, false));
+  mount.addEventListener("change", (e) => applyRetirementReviewFieldEdit(e, true));
+  mount.addEventListener("click", onRetirementReviewPanelClick);
 }
 
 // Super (accumulation) and pension (drawdown) balances, stacked — the

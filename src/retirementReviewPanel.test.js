@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { buildRetirementReviewGroups, RETIREMENT_REVIEW_GROUP_ORDER } from "./retirementReviewPanel.js";
+import {
+  buildRetirementReviewGroups, buildReviewGroups, RETIREMENT_REVIEW_GROUP_ORDER, REVIEW_GROUP_ORDER,
+  reviewPanelGroupOrderFor, REVIEW_PANEL_RELEVANT_GROUPS,
+} from "./retirementReviewPanel.js";
 import { INPUT_SECTIONS } from "./router.js";
 import { PROFILES } from "./profiles.js";
 import {
   defaultState, clampAllToPlan, createIncomeRow, createExpenseRow, createSuperAccount,
-  createSuperContribution, createPension, createAsset,
+  createSuperContribution, createPension, createAsset, createLiability, createBond,
 } from "./planState.js";
 
 function withPersonPatch(state, owner, patch) {
@@ -132,5 +135,106 @@ describe("buildRetirementReviewGroups", () => {
     expect(incomeGroup.ids).toEqual(state.cashflows.income.map((r) => r.id));
     const superGroup = groups.find((g) => g.key === "super");
     expect(superGroup.ids).toEqual(state.plan.superAccounts.filter((s) => s.include !== false).map((s) => s.id));
+  });
+});
+
+// docs/specs/38-finding-and-editing-inputs.md, Commit 1 — the general
+// builder every mount OTHER than Retirement > Projection uses. Same
+// underlying function as buildRetirementReviewGroups (this file's own
+// header on why there is only one), called with the wider REVIEW_GROUP_
+// ORDER — which adds liabilities and bonds, the two collections a
+// retirement-scoped panel never needed.
+describe("buildReviewGroups (the general builder)", () => {
+  it("defaults to REVIEW_GROUP_ORDER, a strict superset of RETIREMENT_REVIEW_GROUP_ORDER (adds liabilities and bonds only)", () => {
+    const extra = REVIEW_GROUP_ORDER.filter((k) => !RETIREMENT_REVIEW_GROUP_ORDER.includes(k));
+    expect(extra.sort()).toEqual(["bonds", "liabilities"]);
+    for (const k of RETIREMENT_REVIEW_GROUP_ORDER) expect(REVIEW_GROUP_ORDER).toContain(k);
+  });
+
+  it("buildReviewGroups(state, RETIREMENT_REVIEW_GROUP_ORDER) is IDENTICAL to buildRetirementReviewGroups(state) — the same function underneath, not a fork", () => {
+    let state = clampAllToPlan(defaultState(PROFILES), PROFILES);
+    const sa = createSuperAccount(state.plan, [], PROFILES, "client");
+    state = { ...state, plan: { ...state.plan, superAccounts: [sa] } };
+    state = clampAllToPlan(state, PROFILES);
+    expect(buildReviewGroups(state, RETIREMENT_REVIEW_GROUP_ORDER)).toEqual(buildRetirementReviewGroups(state));
+  });
+
+  it("a liability populates a new Liabilities group, ordered and sectioned correctly, absent when there are none", () => {
+    let state = clampAllToPlan(defaultState(PROFILES), PROFILES);
+    expect(buildReviewGroups(state).map((g) => g.key)).not.toContain("liabilities");
+    const liability = createLiability(state.plan, []);
+    state = { ...state, liabilities: [liability] };
+    state = clampAllToPlan(state, PROFILES);
+    const group = buildReviewGroups(state).find((g) => g.key === "liabilities");
+    expect(group).toBeTruthy();
+    expect(group.ids).toEqual([liability.id]);
+    expect(group.sectionId).toBe("liabilities");
+    expect(INPUT_SECTIONS).toContain(group.sectionId);
+  });
+
+  it("a bond populates a new Bonds group; an excluded (include:false) bond is absent", () => {
+    let state = clampAllToPlan(defaultState(PROFILES), PROFILES);
+    const bond = createBond(state.plan, [], PROFILES);
+    state = { ...state, bonds: [bond] };
+    state = clampAllToPlan(state, PROFILES);
+    const group = buildReviewGroups(state).find((g) => g.key === "bonds");
+    expect(group.ids).toEqual([bond.id]);
+    expect(INPUT_SECTIONS).toContain(group.sectionId);
+
+    const excludedState = { ...state, bonds: [{ ...bond, include: false }] };
+    expect(buildReviewGroups(clampAllToPlan(excludedState, PROFILES)).map((g) => g.key)).not.toContain("bonds");
+  });
+
+  it("accepts a custom order — relevance reordering (main.js's own job) is just a different array, not a different builder", () => {
+    let state = clampAllToPlan(defaultState(PROFILES), PROFILES);
+    const liability = createLiability(state.plan, []);
+    state = clampAllToPlan({ ...state, liabilities: [liability] }, PROFILES);
+    const reordered = ["liabilities", "assets", "incomeRequired", "retirementAges"];
+    const groups = buildReviewGroups(state, reordered);
+    expect(groups.map((g) => g.key)).toEqual(reordered); // liabilities first, exactly as passed
+  });
+});
+
+// docs/specs/38-finding-and-editing-inputs.md, Commit 1 — "relevance
+// ordering differs by view while the full set remains" is the spec's
+// own required test. Checked directly here, not trusted by
+// construction, because a typo'd group key in REVIEW_PANEL_RELEVANT_
+// GROUPS (this file's own data) would otherwise silently either drop a
+// group from a specific view's own panel or duplicate one — exactly the
+// "do not filter" defect this spec exists to prevent, in a NEW place.
+describe("reviewPanelGroupOrderFor", () => {
+  it("every view's own ordering is a permutation of REVIEW_GROUP_ORDER — same set, never filtered, for every mapped view", () => {
+    for (const view of Object.keys(REVIEW_PANEL_RELEVANT_GROUPS)) {
+      const ordered = reviewPanelGroupOrderFor(view);
+      expect([...ordered].sort()).toEqual([...REVIEW_GROUP_ORDER].sort());
+    }
+  });
+
+  it("an unmapped/unknown view falls back to the plain default order", () => {
+    expect(reviewPanelGroupOrderFor("some-view-nobody-registered")).toEqual(REVIEW_GROUP_ORDER);
+  });
+
+  it("relevance genuinely differs by view — liabilities lead for a debt view, super leads for a super view", () => {
+    const debt = reviewPanelGroupOrderFor("liabilities");
+    expect(debt[0]).toBe("liabilities");
+    const superView = reviewPanelGroupOrderFor("super");
+    expect(superView[0]).toBe("super");
+    expect(debt).not.toEqual(superView);
+  });
+
+  it("relevant groups lead in the order given; every other group keeps its own default relative order behind them", () => {
+    const ordered = reviewPanelGroupOrderFor("projection"); // ["assets", "super", "pensions", "liabilities"]
+    expect(ordered.slice(0, 4)).toEqual(["assets", "super", "pensions", "liabilities"]);
+    const rest = ordered.slice(4);
+    const defaultRest = REVIEW_GROUP_ORDER.filter((k) => !["assets", "super", "pensions", "liabilities"].includes(k));
+    expect(rest).toEqual(defaultRest);
+  });
+
+  it("every group named anywhere in REVIEW_PANEL_RELEVANT_GROUPS is a real REVIEW_GROUP_ORDER key — no dead/typo'd entries", () => {
+    for (const [view, groups] of Object.entries(REVIEW_PANEL_RELEVANT_GROUPS)) {
+      for (const g of groups) {
+        expect(REVIEW_GROUP_ORDER, `"${view}" names unknown group "${g}"`).toContain(g);
+      }
+    }
   });
 });

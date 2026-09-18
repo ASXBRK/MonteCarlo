@@ -415,6 +415,24 @@
               </div>
             </div>
             <div class="chart-note" data-role="chartNote"></div>
+            <!-- Input review panel, generalised (docs/specs/38-finding-
+                 and-editing-inputs.md, Commit 1) — the SAME panel
+                 Retirement > Projection has carried since spec 35,
+                 mounted here once so it's available below every other
+                 output/focus/what-if view too, rather than forked per
+                 view. Sits OUTSIDE .view-canvas's own per-view hidden
+                 divs, so one physical mount serves all of them; native
+                 <details> gives "collapsed by default, remembered per
+                 session" for free — this node is never recreated across
+                 a view switch, so the browser's own open/closed state
+                 just persists, no JS tracking needed. Groups reorder by
+                 relevance to whichever view is active (main.js's own
+                 reviewPanelGroupOrderFor) but the full set always
+                 remains — never filtered. -->
+            <details id="inputReviewSection" class="rrp-section">
+              <summary class="rrp-toggle">Inputs used in this view</summary>
+              <div id="inputReviewPanel" class="rrp-panel"></div>
+            </details>
           </section>
         </div>
       </div>

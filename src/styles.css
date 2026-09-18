@@ -3076,12 +3076,31 @@ dialog.modal::backdrop {
 .mre-legend-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
 
 /* Retirement: input review panel (docs/specs/35-retirement-output-
-   view.md, Commit 2). One .rrp-group per group (income rows, super
-   funds, ...), a plain flex row per item — deliberately lighter than
-   the .cf-section/.pcard input-section chrome it echoes, since this
-   panel is a review surface, not the input surface (edit-in-place +
-   add-inline + link-out only; the spec's own "not replacing the input
-   surface"). */
+   view.md, Commit 2; generalised to every output view by docs/specs/38-
+   finding-and-editing-inputs.md, Commit 1). One .rrp-group per group
+   (income rows, super funds, ...), a plain flex row per item —
+   deliberately lighter than the .cf-section/.pcard input-section chrome
+   it echoes, since this panel is a review surface, not the input
+   surface (edit-in-place + add-inline + link-out only; the spec's own
+   "not replacing the input surface"). */
+.rrp-section {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.rrp-toggle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  cursor: pointer;
+  padding: 4px 0;
+  list-style: none; /* the default ▸/▾ marker still renders via ::marker below — this just drops the browser's own list-item bullet/triangle so ::marker is the single indicator */
+}
+.rrp-toggle::-webkit-details-marker { display: none; }
+.rrp-toggle::marker { content: "▸ "; }
+.rrp-section[open] > .rrp-toggle { color: var(--ink); }
+.rrp-section[open] > .rrp-toggle::marker { content: "▾ "; }
+.rrp-panel { margin-top: 10px; }
 .rrp-group { border-top: 1px dashed var(--line); padding-top: 10px; margin-top: 10px; }
 .rrp-group:first-child { border-top: none; padding-top: 0; margin-top: 0; }
 .rrp-group-head {
