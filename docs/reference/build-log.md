@@ -4867,6 +4867,106 @@ duplication; zero console errors throughout.
 
 ---
 
+### Finding and editing inputs, Commit 2: search across all inputs (spec 38)
+
+**A single box at the top of the input rail** (`#inputSearchBar`, a static
+element in `index.html` sitting above `#sideNav`, both wrapped in a new
+`.side-nav-wrap` — kept OUT of `#sideNav`'s own dynamically-replaced
+innerHTML specifically so a sidenav rebuild elsewhere can never yank
+focus out of it mid-keystroke, the same reasoning Commit 1's review
+panel mount already established). New pure module `inputSearch.js`:
+`buildSearchIndex(state, sectionLabels)` builds one entry per row across
+income, expenses, super accounts, contributions, pensions, financial
+assets, lifestyle assets, liabilities, bonds, properties, plus the two
+review-panel singletons (Income Required, retirement age(s)), plus a
+section-name-only fallback entry for all 17 `INPUT_SECTIONS` (so a
+section with no row-level detail yet — Children, Tax details, Aged
+care, Goals, Settings — is still findable by name alone).
+`searchInputs(index, term)` matches label, section name, humanised
+type/category, owner, and the row's own raw value.
+
+**No per-type label map needed for most terms.** A stored enum value's
+own camelCase split into plain words (`"salarySacrifice"` →
+`"salary sacrifice"`) already satisfies "sacrifice", "Super", and
+"15000" all finding the salary-sacrifice row — the spec's own worked
+example — with no alias at all. `SEARCH_ALIASES` (one object, in
+`inputSearch.js`, "extended without hunting through the search code" per
+the spec's own instruction) covers exactly the six named abbreviations
+that genuinely need one, because nothing in the row's own text contains
+them: sac, NCC ↔ non-concessional (→ `personalNonDeductible`, whose own
+humanised text has neither "ncc" nor "concessional" in it), TTR ↔
+transition to retirement, ABP ↔ account-based pension, offset, PPR ↔
+main residence.
+
+**Inline edit reuses `applyRetirementReviewFieldEdit` verbatim** — every
+index entry's `dataAttrs` is written in the exact scheme that Commit 1
+dispatcher already handles (`data-kind`/`data-cfid`, `data-aid`,
+`data-said`, `data-pid`, `data-lid`, `data-bdid`), so a result's amount
+field commits through the identical code path a real input section (or
+the review panel) already uses — never a third copy. A property result
+has `dataAttrs: null` (no simple single "amount" field — sale/purchase/
+duty logic) — click-through only, matching the review panel's own
+existing "edit inline where simple, link out for anything complex" rule.
+
+**Click-through and highlight**: navigates to the entry's own section,
+then locates the real row by id (every known id-attribute name tried at
+once — ids are globally unique across collections even where two
+different row types reuse the same attribute name, e.g. `data-pid` on
+both pensions and properties), scrolls it into view, briefly flashes it
+(`.isr-highlight`, a CSS animation), and focuses its first real control.
+
+**Keyboard**: `/` focuses the box from anywhere except while already
+typing in a real form control (the same guard a browser's own find
+shortcut uses); ArrowUp/ArrowDown move the active result; Enter jumps to
+it; Escape clears and closes.
+
+**A real, pre-existing bug found and fixed while browser-verifying
+this commit, not new here.** Editing an asset/super/pension/bond
+balance — or an income/expense/contribution row — through the general
+review panel (Commit 1) silently failed to update the REAL input
+section's own DOM: that section is rendered once and then only shown/
+hidden by `showSection`, so an edit that reaches state without also
+calling the section's own render function leaves its cached markup
+stale — navigating there afterward showed the OLD value even though
+every computed output was already correct. `applyRetirementReviewFieldEdit`
+gated the real section's re-render on `applyAssetEdit`/
+`applySuperAccountEdit`/`applyPensionEdit`/`applyBondEdit`'s own
+`structural` return value — true for a field like an asset's `owner`
+(which cascades into other sections) but FALSE for a plain balance
+edit, which is exactly the case this commit's own testing exercises
+(search a super balance, edit it, look at the real Super section).
+Fixed by making every branch re-render its own real section
+unconditionally on commit (matching what editing directly in that
+section already does, and matching the pattern Commit 1's own
+liabilities branch had already got right by mirroring the real
+section's unconditional behaviour) — `structural`'s return value now
+only gates the WIDER cross-section effects (`renderSettings`/
+`renderCashflows` after an asset rename/removal), not the row's own
+display. Affects the general review panel too, not just search — a
+liability was never affected (already unconditional); this closes the
+same class for assets, super, pensions, bonds, and income/expenses/
+contributions.
+
+Tests: `inputSearch.test.js` — 24 new (`buildSearchIndex` per collection
+including the property click-through-only case and exclusion filtering;
+`searchInputs`'s label/section/value/partial-value matches — the spec's
+own "sacrifice"/"Super"/"15000" example directly; all six named aliases,
+each proven against a term that is NOT a literal substring of the row's
+own text; section-name-only results; empty-term and no-match reporting;
+ranking). Full suite 2219/2219, build green. Browser-verified: the
+worked example end to end in a real demo scenario ("sac" finding both
+"Salary sacrifice — client/partner" contribution rows); an income
+amount edited from a search result reflecting in the real Income
+section; a super balance edited from BOTH the general review panel and
+a search result now correctly reflecting in the real Super section
+(the bug above, confirmed fixed in both places); click-through
+navigating to the correct section and applying the highlight class;
+ArrowDown moving the active result; "/" focusing the box from
+elsewhere on the page; the empty-result message; zero console errors
+throughout.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

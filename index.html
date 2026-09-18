@@ -23,7 +23,21 @@
       </header>
 
       <div class="workspace-layout">
-        <nav id="sideNav" class="side-nav" aria-label="Workspace sections"></nav>
+        <div class="side-nav-wrap">
+          <!-- Search across inputs (docs/specs/38-finding-and-editing-
+               inputs.md, Commit 2) — "a single box at the top of the
+               input rail." A static element, not part of #sideNav's own
+               dynamically-replaced innerHTML (see styles.css's own
+               comment on .side-nav-wrap for why) so a full sidenav
+               rebuild elsewhere in the app can never yank focus out of
+               it mid-keystroke. -->
+          <div id="inputSearchBar" class="input-search-bar">
+            <input type="search" id="inputSearchBox" class="input-search-box"
+                   placeholder="Search inputs (press /)" aria-label="Search inputs" autocomplete="off" />
+            <div id="inputSearchResults" class="input-search-results" role="listbox" aria-label="Search results" hidden></div>
+          </div>
+          <nav id="sideNav" class="side-nav" aria-label="Workspace sections"></nav>
+        </div>
 
         <div class="workspace-canvas">
           <section id="planBar" class="plan-bar" data-section="setup" aria-label="Setup"></section>

@@ -59,6 +59,7 @@ import {
 } from "./planState.js";
 import { singleStepGlidePathPreset, gradualGlidePathPreset } from "./glidePaths.js";
 import { buildRetirementReviewGroups, buildReviewGroups, REVIEW_GROUP_ORDER, reviewPanelGroupOrderFor } from "./retirementReviewPanel.js";
+import { buildSearchIndex, searchInputs } from "./inputSearch.js";
 import { resolveRef, listAnchors } from "./keyDates.js";
 import { resolveGiftDeprivation, GIFT_ANNUAL_LIMIT, GIFT_FIVE_YEAR_LIMIT } from "./gifting.js";
 import { levelPayment, monthlyRate, termMonths, ioMonths } from "./liabilities.js";
@@ -15735,6 +15736,17 @@ function applyRetirementReviewFieldEdit(e, commit) {
     if (!row) return;
     applyRowEdit(el.dataset.kind, row, field, el, commit);
     saveState();
+    // Bug found while browser-verifying docs/specs/38 Commit 2 (pre-
+    // existing since spec 35's own original panel, not new here): the
+    // real section's own DOM is only rendered ONCE and then shown/
+    // hidden by showSection — an edit reaching state without also
+    // calling that section's own render function leaves its cached DOM
+    // stale, so navigating there afterward silently shows the OLD
+    // value even though state (and every OTHER view) is correct.
+    // Fixed by always re-rendering the row's own real section on
+    // commit, not only when the field happened to be "structural" —
+    // matching what editing directly in that section already does.
+    if (commit) { if (el.dataset.kind === "superContributions") renderSuper(); else renderCashflows(); }
     refreshOutputs();
     if (commit) renderAllReviewPanels();
     return;
@@ -15744,7 +15756,8 @@ function applyRetirementReviewFieldEdit(e, commit) {
     if (!a) return;
     const structural = applyAssetEdit(a, field, el, commit);
     saveState();
-    if (structural) { renderAssets(); renderSettings(); renderCashflows(); }
+    if (commit) renderAssets(); // see this branch's own sibling above for why this is unconditional on commit now
+    if (structural) { renderSettings(); renderCashflows(); }
     refreshOutputs();
     if (commit) renderAllReviewPanels();
     return;
@@ -15752,9 +15765,9 @@ function applyRetirementReviewFieldEdit(e, commit) {
   if (el.dataset.said) {
     const sa = findSuperAccount(el.dataset.said);
     if (!sa) return;
-    const structural = applySuperAccountEdit(sa, el.dataset.sfield, el, commit);
+    applySuperAccountEdit(sa, el.dataset.sfield, el, commit);
     saveState();
-    if (structural) renderSuper();
+    if (commit) renderSuper();
     refreshOutputs();
     if (commit) renderAllReviewPanels();
     return;
@@ -15762,9 +15775,9 @@ function applyRetirementReviewFieldEdit(e, commit) {
   if (el.dataset.pid) {
     const pn = findPension(el.dataset.pid);
     if (!pn) return;
-    const structural = applyPensionEdit(pn, el.dataset.pfield, el, commit);
+    applyPensionEdit(pn, el.dataset.pfield, el, commit);
     saveState();
-    if (structural) renderPensions();
+    if (commit) renderPensions();
     refreshOutputs();
     if (commit) renderAllReviewPanels();
     return;
@@ -15791,9 +15804,9 @@ function applyRetirementReviewFieldEdit(e, commit) {
   if (el.dataset.bdid) {
     const b = findBond(el.dataset.bdid);
     if (!b) return;
-    const structural = applyBondEdit(b, el.dataset.bdfield, el, commit);
+    applyBondEdit(b, el.dataset.bdfield, el, commit);
     saveState();
-    if (structural && commit) renderCashflows();
+    if (commit) renderCashflows(); // see the data-kind branch above for why this is unconditional now
     refreshOutputs();
     if (commit) renderAllReviewPanels();
     return;
@@ -15861,6 +15874,196 @@ for (const mountId of ["retirementReviewPanel", "inputReviewPanel"]) {
   mount.addEventListener("input", (e) => applyRetirementReviewFieldEdit(e, false));
   mount.addEventListener("change", (e) => applyRetirementReviewFieldEdit(e, true));
   mount.addEventListener("click", onRetirementReviewPanelClick);
+}
+
+// --- Search across inputs (docs/specs/38-finding-and-editing-inputs.md,
+// Commit 2) --------------------------------------------------------------
+//
+// "A single box at the top of the input rail... the fix that keeps
+// working as sections are added." inputSearch.js (pure) builds the
+// index and matches a term against it; everything here is rendering,
+// keyboard handling, and the click-through/highlight affordance — DOM
+// concerns that module deliberately has no part of.
+//
+// Inline edit reuses applyRetirementReviewFieldEdit VERBATIM (docs/
+// specs/38 Commit 1's own dispatcher) — every SearchIndexEntry's own
+// dataAttrs is written in the EXACT scheme that function already
+// dispatches on, so a result's amount field commits through the SAME
+// code path a real input section (or the review panel) already uses,
+// never a third copy.
+let inputSearchResults = [];
+let inputSearchActiveIndex = -1;
+
+// Rebuilt fresh on every keystroke/edit rather than cached — building
+// it is a plain map over collections already in memory (no engine run,
+// no derived series), cheap enough that a staleness-tracking cache
+// would trade a real correctness risk (an edit committed elsewhere and
+// this index forgetting to invalidate) for no measurable benefit.
+function getInputSearchIndex() {
+  return buildSearchIndex(state, SECTION_LABELS);
+}
+
+// data-attribute key → the exact HTML attribute name every existing
+// section/review-panel row already uses for it (see applyAssetEdit/
+// applySuperAccountEdit/applyPensionEdit/applyLiabilityFieldEdit/
+// applyBondEdit/applyRowEdit's own callers) — inputSearch.js's own
+// dataAttrs objects use these same short keys so this is the ONLY place
+// that needs to know the mapping.
+const SEARCH_RESULT_ATTR_NAMES = {
+  kind: "data-kind", cfid: "data-cfid", field: "data-field",
+  aid: "data-aid", said: "data-said", sfield: "data-sfield",
+  pid: "data-pid", pfield: "data-pfield",
+  lid: "data-lid", lfield: "data-lfield",
+  bdid: "data-bdid", bdfield: "data-bdfield",
+  planField: "data-plan-field",
+};
+
+function searchResultAttrsHTML(dataAttrs) {
+  if (!dataAttrs) return "";
+  return Object.entries(dataAttrs)
+    .map(([k, v]) => `${SEARCH_RESULT_ATTR_NAMES[k] ?? `data-${k}`}="${escapeHTML(String(v))}"`)
+    .join(" ");
+}
+
+function inputSearchValueControlHTML(entry) {
+  if (!entry.dataAttrs) {
+    return entry.value != null ? `<span class="rrp-readonly">${fmtMoney(entry.value)}</span>` : "";
+  }
+  if (entry.dataAttrs.planField) {
+    return `<input type="number" min="0" max="100" step="1" value="${entry.value ?? ""}"
+                   ${searchResultAttrsHTML(entry.dataAttrs)} aria-label="${escapeHTML(entry.label)}" style="width:60px" />`;
+  }
+  return retirementReviewAmountInputHTML(entry.value ?? 0, searchResultAttrsHTML(entry.dataAttrs));
+}
+
+function inputSearchResultRowHTML(entry, idx) {
+  return `
+    <div class="isr-row${idx === inputSearchActiveIndex ? " isr-active" : ""}" role="option"
+         aria-selected="${idx === inputSearchActiveIndex}" data-isr-idx="${idx}" data-isr-entry-id="${escapeHTML(entry.id)}">
+      <span class="isr-row-main">
+        <span class="isr-row-label">${escapeHTML(entry.label)}</span>
+        <span class="isr-row-section">${escapeHTML(entry.sectionLabel)}${entry.typeText ? ` · ${escapeHTML(entry.typeText)}` : ""}</span>
+      </span>
+      <span class="isr-row-value">${inputSearchValueControlHTML(entry)}</span>
+    </div>
+  `;
+}
+
+function renderInputSearchResults() {
+  const el = $("inputSearchResults");
+  if (!el) return;
+  if (inputSearchResults.length === 0) {
+    const term = $("inputSearchBox")?.value.trim();
+    el.innerHTML = term ? `<p class="isr-empty">No matches for "${escapeHTML(term)}".</p>` : "";
+    el.hidden = !term;
+    return;
+  }
+  el.innerHTML = inputSearchResults.map(inputSearchResultRowHTML).join("");
+  el.hidden = false;
+}
+
+function runInputSearch(term) {
+  inputSearchResults = term.trim() ? searchInputs(getInputSearchIndex(), term) : [];
+  inputSearchActiveIndex = inputSearchResults.length > 0 ? 0 : -1;
+  renderInputSearchResults();
+}
+
+function closeInputSearchResults() {
+  inputSearchResults = [];
+  inputSearchActiveIndex = -1;
+  const el = $("inputSearchResults");
+  if (el) { el.innerHTML = ""; el.hidden = true; }
+}
+
+// Click-through: navigate to the entry's own section, then scroll the
+// real row into view, focus it, and flash it briefly — "focused and
+// highlighted" (the spec's own words). Best-effort generic lookup
+// (every known id-attribute name, since ids are globally unique — see
+// this section's own header) rather than a bespoke selector per
+// section; `[class*="card"]`/`tr` covers the two container shapes every
+// input section actually uses (see docs/reference/build-log.md's own
+// Commit 2 entry for the sections this was verified against).
+const SEARCH_RESULT_ID_SELECTORS = ["data-cfid", "data-aid", "data-said", "data-pid", "data-lid", "data-bdid"];
+function focusAndHighlightRow(rowId) {
+  if (!rowId) return;
+  requestAnimationFrame(() => {
+    const target = document.querySelector(SEARCH_RESULT_ID_SELECTORS.map((a) => `[${a}="${CSS.escape(rowId)}"]`).join(", "));
+    if (!target) return;
+    const container = target.closest('[class*="card"], tr') ?? target;
+    container.scrollIntoView({ behavior: "smooth", block: "center" });
+    container.classList.add("isr-highlight");
+    setTimeout(() => container.classList.remove("isr-highlight"), 1700);
+    const focusable = target.matches("input, select, textarea, button") ? target : target.querySelector("input, select, textarea, button");
+    if (focusable) focusable.focus({ preventScroll: true });
+    else { container.setAttribute("tabindex", "-1"); container.focus({ preventScroll: true }); }
+  });
+}
+
+function jumpToInputSearchResult(entry) {
+  if (!entry) return;
+  if (entry.kind === "section" || entry.rowId == null) {
+    const { client, scenario } = findActive(workspace);
+    navigate({ page: "workspace", clientId: client.id, scenarioId: scenario.id, area: "input", section: entry.sectionId });
+    closeInputSearchResults();
+    return;
+  }
+  const { client, scenario } = findActive(workspace);
+  navigate({ page: "workspace", clientId: client.id, scenarioId: scenario.id, area: "input", section: entry.sectionId });
+  closeInputSearchResults();
+  focusAndHighlightRow(entry.rowId);
+}
+
+const inputSearchBox = $("inputSearchBox");
+const inputSearchResultsEl = $("inputSearchResults");
+if (inputSearchBox && inputSearchResultsEl) {
+  inputSearchBox.addEventListener("input", (e) => runInputSearch(e.target.value));
+  inputSearchBox.addEventListener("focus", () => { if (inputSearchBox.value.trim()) runInputSearch(inputSearchBox.value); });
+  inputSearchBox.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (inputSearchResults.length === 0) return;
+      inputSearchActiveIndex = (inputSearchActiveIndex + 1) % inputSearchResults.length;
+      renderInputSearchResults();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (inputSearchResults.length === 0) return;
+      inputSearchActiveIndex = (inputSearchActiveIndex - 1 + inputSearchResults.length) % inputSearchResults.length;
+      renderInputSearchResults();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      jumpToInputSearchResult(inputSearchResults[inputSearchActiveIndex]);
+    } else if (e.key === "Escape") {
+      inputSearchBox.value = "";
+      closeInputSearchResults();
+      inputSearchBox.blur();
+    }
+  });
+  // Reuse the SAME field-commit dispatcher the review panel mounts use
+  // (this section's own header) — a result's inline amount input is
+  // wired identically, not a fourth copy of the commit logic.
+  inputSearchResultsEl.addEventListener("input", (e) => applyRetirementReviewFieldEdit(e, false));
+  inputSearchResultsEl.addEventListener("change", (e) => applyRetirementReviewFieldEdit(e, true));
+  inputSearchResultsEl.addEventListener("click", (e) => {
+    if (e.target.closest("input, select, textarea")) return; // inline-edit control — its own listener handles it
+    const row = e.target.closest("[data-isr-entry-id]");
+    if (!row) return;
+    jumpToInputSearchResult(inputSearchResults.find((r) => r.id === row.dataset.isrEntryId));
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#inputSearchBar")) closeInputSearchResults();
+  });
+  // Keyboard shortcut: "/" focuses the box from anywhere EXCEPT while
+  // already typing in a real form control — the same guard a browser's
+  // own "/" find-shortcut uses, so this never steals a literal "/"
+  // character out of an amount/name/date field.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+    const active = document.activeElement;
+    const typing = active && (active.tagName === "INPUT" || active.tagName === "SELECT" || active.tagName === "TEXTAREA" || active.isContentEditable);
+    if (typing) return;
+    e.preventDefault();
+    inputSearchBox.focus();
+  });
 }
 
 // Super (accumulation) and pension (drawdown) balances, stacked — the

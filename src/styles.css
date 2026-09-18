@@ -1461,10 +1461,27 @@ html, body {
   gap: 20px;
 }
 
-.side-nav {
+/* docs/specs/38-finding-and-editing-inputs.md, Commit 2 — the search
+   box sits ABOVE #sideNav, both inside .side-nav-wrap, which now carries
+   the flex-item/sticky role .side-nav used to carry directly. #sideNav
+   itself is untouched (still owns its own children's layout) — its
+   `flex`/`position: sticky` rules just go inert once it's nested rather
+   than a direct .workspace-layout child, which is harmless. Kept as a
+   separate wrapper, not merged into #sideNav's own dynamically-replaced
+   innerHTML, specifically so renderSideNav()'s frequent full rebuilds
+   can never yank focus out of the search box mid-keystroke — the exact
+   class of bug the review panel's own focus guard (docs/specs/35
+   Commit 2) exists to prevent, avoided here by construction instead. */
+.side-nav-wrap {
   flex: 0 0 190px;
   position: sticky;
   top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.side-nav {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1475,6 +1492,51 @@ html, body {
   margin: 0 0 10px 10px;
   font-size: 12.5px;
 }
+
+/* Search across inputs (docs/specs/38-finding-and-editing-inputs.md,
+   Commit 2). */
+.input-search-bar { position: relative; }
+.input-search-box {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--card);
+  color: var(--ink);
+}
+.input-search-box:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.input-search-results {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+}
+.isr-empty { padding: 8px 10px; font-size: 12.5px; color: var(--ink-soft); }
+.isr-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer;
+}
+.isr-row:hover, .isr-row.isr-active { background: var(--bg-soft, #f2f4f7); }
+.isr-row-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.isr-row-label { font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.isr-row-section { font-size: 11px; color: var(--ink-soft); }
+.isr-row-value { flex: 0 0 auto; }
+.isr-row-value input.rrp-amount { width: 90px; font-size: 12.5px; }
+/* A result the caret lands on after click-through/Enter — a brief flash
+   on the real row/card in the input section itself, not the results
+   list (which is closed by then). */
+@keyframes isr-flash { from { background: var(--accent-soft, #fff3cd); } to { background: transparent; } }
+.isr-highlight { animation: isr-flash 1.6s ease-out; }
 
 .nav-group-label {
   font-size: 10.5px;
@@ -1617,10 +1679,8 @@ tr[data-adj-marker] { cursor: pointer; }
 
 @media (max-width: 900px) {
   .workspace-layout { flex-direction: column; }
+  .side-nav-wrap { flex: none; position: static; width: 100%; }
   .side-nav {
-    flex: none;
-    position: static;
-    width: 100%;
     flex-direction: row;
     flex-wrap: wrap;
     border-bottom: 1px solid var(--line);
