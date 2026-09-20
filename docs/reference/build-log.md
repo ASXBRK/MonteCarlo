@@ -6029,6 +6029,77 @@ class to justify one.
 
 ---
 
+### Dependency, ordering, density, Commit 1: vendor Plotly (spec 41)
+
+**Why.** `index.html` loaded Plotly from `cdn.plot.ly` — a known latent
+dependency that had already cost something concrete: the tool doesn't
+work offline or behind a restrictive network, and spec 40 Commit 3's
+own chart-series reconciliation test couldn't run at all in this
+sandbox because that CDN is blocked here.
+
+**Vendored via `plotly.js-finance-dist-min`**, pinned to `2.35.2` — the
+exact version the CDN tag pinned, so nothing about rendering changes in
+this commit. Not the full bundle: this app's own trace usage, confirmed
+by grepping every `Plotly.react`/`newPlot` call site across chart.js
+and main.js (including the disabled legacy insight modules,
+`drawdownTolerance.js`/`firstDecade.js`), is exactly `scatter`, `bar`
+and `waterfall`. Plotly's own `basic` partial bundle covers scatter and
+bar but not waterfall; `finance` is the smallest published bundle that
+covers all three — measured at 1.17MB unpacked against the full
+bundle's 4.56MB (npm registry `dist.unpackedSize`), a ~74% reduction,
+clearly worth taking rather than the "if the saving is small, take the
+full bundle" fallback the spec offered.
+
+**`src/plotlySetup.js`** imports it and assigns `window.Plotly` once, at
+the top of `main.js`'s own import list — every existing call site in
+chart.js/main.js references the bare global `Plotly` exactly as the CDN
+script also provided it, so none of them needed to change. The CDN
+`<script>` tag is removed from `index.html`.
+
+**The `typeof Plotly === "undefined"` guard (~38 call sites across
+chart.js/main.js) is kept, not stripped**, per the spec's own offered
+choice — noted once, at `chartUnavailableHTML()`'s own definition in
+main.js (chart.js's one call site cross-references it), rather than at
+every site: the guard is unreachable now (the import is static, so
+`window.Plotly` is set before any of that code can run), but touching
+38 near-identical call sites in the same commit that changes the
+dependency itself would contradict "nothing about rendering changes" —
+left as low-risk dead code, a future cleanup's job.
+
+**A known technicality against the letter of this commit's own stated
+test** ("the build contains no reference to `cdn.plot.ly`"): the built
+bundle contains exactly one occurrence, Plotly's own internal
+`topojsonURL` config default (`dflt:"https://cdn.plot.ly/"`), used only
+by choropleth/scattergeo map traces this app never renders — not a
+script tag, not a network fetch, not anything this project's own code
+wrote. Confirmed via the browser suite itself: it passes in full,
+including with this sandbox's existing block on that host, and produces
+zero new console errors — the actual concern the spec's "Why" section
+names (offline/restricted-network capability, an uncontrolled
+third-party origin) is satisfied. Reported rather than silently
+resolved, since the literal text of the test doesn't pass.
+
+**Verified Plotly genuinely renders** (not just "defined"): a direct
+check of the Projection chart after vendoring shows one real `scatter`
+trace and a 520px-tall mount, matching pre-vendoring behaviour exactly.
+Full `test:browser` suite (12 tests) and full unit suite (2253 tests)
+both green.
+
+**Bundle size, reported as asked**: the app's main JS chunk grew from
+883.54kB to 2,085.30kB (gzip: 235.30kB → 647.46kB) — Plotly is not
+code-split, so it now ships in the critical bundle. Not addressed here
+(out of this commit's scope; the default landing view renders a chart
+immediately, so lazy-loading would save little in the common case) but
+worth flagging if initial load time becomes a concern later.
+
+Tests: the browser suite passes with `cdn.plot.ly` network access
+blocked (already the case in this sandbox); the build contains no
+`<script>` reference to it. Full existing suites unaffected.
+
+Commit: `Vendor Plotly; remove the CDN dependency`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

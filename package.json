@@ -15,5 +15,8 @@
     "playwright": "^1.62.1",
     "vite": "^5.4.0",
     "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "plotly.js-finance-dist-min": "2.35.2"
   }
 }

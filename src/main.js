@@ -5,6 +5,7 @@
 // derived summaries. The ledger that consumes these inputs arrives in
 // Phase B; tax in B.1 — income is captured gross and the UI says so.
 
+import "./plotlySetup.js"; // vendors Plotly onto window.Plotly — see that module's own header
 import { PROFILES, realMu, impliedFrankingPct, ASSET_CLASS_KEYS, ASSET_CLASS_LABELS } from "./profiles.js";
 import { allocationSeries } from "./allocation.js";
 import { runMonteCarlo, DEFAULT_NUM_PATHS } from "./monteCarlo.js";
@@ -9603,6 +9604,16 @@ function renderProjectionChart() {
 // bars. Series come from src/outputSeries.js — pure and unit-tested;
 // this function only scales and draws them.
 
+// Plotly is vendored (docs/specs/41-dependency-ordering-density.md,
+// Commit 1 — see plotlySetup.js), not loaded from a CDN, so every
+// `typeof Plotly === "undefined"` guard using this (~38 call sites
+// across this file and chart.js) is now unreachable in practice: the
+// import is static, so window.Plotly is set before any of this code
+// can run. Left in place deliberately rather than stripped at every
+// site in the same commit that changes the dependency — Commit 1's own
+// point is that nothing about rendering changes — but it is dead code
+// from here on; a future cleanup could remove it as a separate,
+// low-risk commit.
 function chartUnavailableHTML() {
   return `<p class="helper-text" style="text-align:center;padding:40px 0;">Chart unavailable (Plotly failed to load). Table views and autosave still work.</p>`;
 }
