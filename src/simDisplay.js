@@ -36,3 +36,21 @@ export function isSimPctCapped(p) {
 
 export const SIM_PCT_CAP_EXPLANATION =
   "Capped at 99% — a simulation can't support a claim of certainty, however high the raw figure. The underlying value is unaffected; solvers and scenario comparison still use the exact figure.";
+
+// docs/specs/39-cleanup-rules-cascade.md, Commit 4, review finding
+// 2.6 — the same principle as formatSimPct above, applied to a
+// simulation-derived DOLLAR figure instead of a probability: a
+// deterministic table can defensibly show whole dollars (that figure
+// is exact, not sampled), but a Monte Carlo percentile drawn from a
+// few thousand paths cannot support that precision — "$514,764" reads
+// as more certain than 2,000-ish paths can actually deliver. Rounds to
+// the nearest $1,000, the same order of magnitude the underlying
+// sampling noise already operates at for a typical net-assets figure,
+// rather than inventing a second convention alongside formatSimPct's
+// own 1%/99% rule. Display-only, same discipline as formatSimPct: the
+// exact figure stays in mcResult itself for every solver/comparison
+// call site — this never mutates the value it's given.
+export function roundSimMoney(v) {
+  if (v == null || Number.isNaN(v)) return v;
+  return Math.round(v / 1000) * 1000;
+}

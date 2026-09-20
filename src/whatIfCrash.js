@@ -19,12 +19,33 @@ export { crashHoldings as eligibleCrashHoldings };
 // halfway ("mid-career"), and 10% short of retirement ("near
 // retirement"). A short plan may collapse two of these to the same
 // age — an honest reflection of a genuinely short horizon, not a bug.
+//
+// For a client already AT or PAST retirement (docs/specs/39-cleanup-
+// rules-cascade.md, Commit 4, review finding 2.7), that accumulation-
+// phase framing cannot apply at all — retirementAge - currentAge is
+// zero or negative, so `span` floors to its 2-year minimum regardless
+// of how long retirement itself actually runs, and `clamp`'s own
+// currentAge+1 floor then swallows every one of the three points
+// (15%/50%/90% of a 2-year span, all within a year of "now") into the
+// SAME age: three coincident "Early"/"Mid-career"/"Near retirement"
+// lines on someone who has no working life left to spread them
+// across. Spread across the REMAINING RETIREMENT horizon instead,
+// under retirement-phase labels that don't imply a working life that
+// doesn't exist.
 export function representativeCrashAges(state, schedule) {
   const currentAge = state.plan.client.currentAge;
   const endAge = state.plan.endAge;
   const retirementAge = resolveRef({ kind: "anchor", anchorId: "retirement-client" }, state.plan, schedule, "client").age;
-  const span = Math.max(2, retirementAge - currentAge);
   const clamp = (a) => Math.min(endAge - 1, Math.max(currentAge + 1, Math.round(a)));
+  if (currentAge >= retirementAge) {
+    const retSpan = Math.max(2, endAge - currentAge);
+    return [
+      { label: "Early retirement", age: clamp(currentAge + retSpan * 0.15) },
+      { label: "Mid-retirement", age: clamp(currentAge + retSpan * 0.5) },
+      { label: "Late retirement", age: clamp(currentAge + retSpan * 0.85) },
+    ];
+  }
+  const span = Math.max(2, retirementAge - currentAge);
   return [
     { label: "Early", age: clamp(currentAge + span * 0.15) },
     { label: "Mid-career", age: clamp(currentAge + span * 0.5) },

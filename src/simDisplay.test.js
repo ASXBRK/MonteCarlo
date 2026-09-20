@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatSimPct, isSimPctCapped } from "./simDisplay.js";
+import { formatSimPct, isSimPctCapped, roundSimMoney } from "./simDisplay.js";
 
 describe("formatSimPct (docs/specs/36-retirement-outputs.md, Commit 3 — display honesty)", () => {
   it("rounds to the nearest 1% for an ordinary value", () => {
@@ -38,5 +38,24 @@ describe("isSimPctCapped", () => {
     expect(isSimPctCapped(1)).toBe(true);
     expect(isSimPctCapped(0.994)).toBe(false);
     expect(isSimPctCapped(0.5)).toBe(false);
+  });
+});
+
+describe("roundSimMoney (docs/specs/39-cleanup-rules-cascade.md, Commit 4, review finding 2.6)", () => {
+  it("rounds to the nearest $1,000", () => {
+    expect(roundSimMoney(514764)).toBe(515000);
+    expect(roundSimMoney(514499)).toBe(514000);
+    expect(roundSimMoney(514500)).toBe(515000);
+  });
+  it("rounds a negative figure symmetrically", () => {
+    expect(roundSimMoney(-514764)).toBe(-515000);
+  });
+  it("leaves an exact multiple of $1,000 unchanged", () => {
+    expect(roundSimMoney(500000)).toBe(500000);
+    expect(roundSimMoney(0)).toBe(0);
+  });
+  it("null/NaN passes through unchanged, never a malformed figure", () => {
+    expect(roundSimMoney(null)).toBeNull();
+    expect(Number.isNaN(roundSimMoney(NaN))).toBe(true);
   });
 });

@@ -58,6 +58,27 @@ describe("representativeCrashAges", () => {
     expect(ages[0].age).toBeLessThanOrEqual(ages[1].age);
     expect(ages[1].age).toBeLessThanOrEqual(ages[2].age);
   });
+
+  it("regression: a client already retired spreads the three ages across RETIREMENT, not three coincident points (docs/specs/39-cleanup-rules-cascade.md, Commit 4, review finding 2.7)", () => {
+    // currentAge === retirementAge — the accumulation-phase span
+    // (retirementAge - currentAge) is zero, which used to collapse
+    // every one of the three points into the SAME age via clamp's own
+    // currentAge+1 floor (the review's own repro: the Modest retiree
+    // demo, 70 retired at 70, all three resolved to age 71).
+    const state = mkState({ plan: { client: { currentAge: 70, retirementAge: 70 } }, endAge: 88 });
+    const schedule = buildSchedules(state);
+    const ages = representativeCrashAges(state, schedule);
+    expect(ages).toHaveLength(3);
+    expect(ages.map((a) => a.label)).toEqual(["Early retirement", "Mid-retirement", "Late retirement"]);
+    // Genuinely distinct ages, not three coincident lines.
+    expect(new Set(ages.map((a) => a.age)).size).toBe(3);
+    expect(ages[0].age).toBeLessThan(ages[1].age);
+    expect(ages[1].age).toBeLessThan(ages[2].age);
+    for (const a of ages) {
+      expect(a.age).toBeGreaterThan(state.plan.client.currentAge);
+      expect(a.age).toBeLessThan(state.plan.endAge);
+    }
+  });
 });
 
 describe("buildCrashTimingView", () => {

@@ -77,7 +77,8 @@ import { computeRetirementAnalytics, retirementAnchor, leAnchor } from "./retire
 import { goalVsPositionSummary } from "./goalVsPosition.js";
 import { resolveLifestyleBand, currentLevelDescriptors, deltaDescriptors, asfaBandPhrase } from "./lifestyleBand.js";
 import { agePensionExcludedFor, resolveOutcomeThresholds, computeOutcomeBuckets } from "./retirementOutcomeBuckets.js";
-import { formatSimPct, isSimPctCapped, SIM_PCT_CAP_EXPLANATION } from "./simDisplay.js";
+import { formatSimPct, isSimPctCapped, SIM_PCT_CAP_EXPLANATION, roundSimMoney } from "./simDisplay.js";
+import { fmtLedgerCell, csvMoney } from "./moneyDisplay.js";
 import { thinnedYearIndices } from "./periodThinning.js";
 import { compositeSeries, sharedZeroRanges, seriesIsAllZero, axisTickVals } from "./outputSeries.js";
 import { cashflowStatement } from "./cashflowStatement.js";
@@ -9841,14 +9842,22 @@ function renderMonteCarloStats() {
 // view's percentile table (and its CSV export) — one row/column
 // definition, so the two can never drift apart.
 function monteCarloPercentileGroups() {
+  // docs/specs/39-cleanup-rules-cascade.md, Commit 4, review finding
+  // 2.6 — rounded to the nearest $1,000 (simDisplay.js's own
+  // roundSimMoney, the same "don't imply precision sampling can't
+  // support" principle formatSimPct already applies to probabilities)
+  // BEFORE the table/CSV's own real→nominal display scaling, not
+  // after — this is a real-dollar simulation output, only meaningful
+  // to the nearest $1,000 in today's terms regardless of which year's
+  // nominal factor it's later multiplied by for display.
   return [{
     title: "Net assets — simulated percentiles",
     rows: [
-      { label: "10th percentile", cell: (y) => mcResult.netAssets.p10[y], always: true },
-      { label: "25th percentile", cell: (y) => mcResult.netAssets.p25[y], always: true },
-      { label: "Median (50th)", cell: (y) => mcResult.netAssets.p50[y], always: true, cls: "tl-total" },
-      { label: "75th percentile", cell: (y) => mcResult.netAssets.p75[y], always: true },
-      { label: "90th percentile", cell: (y) => mcResult.netAssets.p90[y], always: true },
+      { label: "10th percentile", cell: (y) => roundSimMoney(mcResult.netAssets.p10[y]), always: true },
+      { label: "25th percentile", cell: (y) => roundSimMoney(mcResult.netAssets.p25[y]), always: true },
+      { label: "Median (50th)", cell: (y) => roundSimMoney(mcResult.netAssets.p50[y]), always: true, cls: "tl-total" },
+      { label: "75th percentile", cell: (y) => roundSimMoney(mcResult.netAssets.p75[y]), always: true },
+      { label: "90th percentile", cell: (y) => roundSimMoney(mcResult.netAssets.p90[y]), always: true },
     ],
   }];
 }
@@ -9887,7 +9896,7 @@ function renderMonteCarloDistributionTable() {
     <table class="param-table">
       <thead><tr><th>Statistic</th><th>Ending net assets</th></tr></thead>
       <tbody>
-        ${rows.map(([label, val]) => `<tr><td>${escapeHTML(label)}</td><td>${fmtMoney(val * factor)}</td></tr>`).join("")}
+        ${rows.map(([label, val]) => `<tr><td>${escapeHTML(label)}</td><td>${fmtMoney(roundSimMoney(val) * factor)}</td></tr>`).join("")}
       </tbody>
     </table>
   `;
@@ -9902,7 +9911,7 @@ function exportMonteCarloCSV() {
   lines.push(["Net assets — simulated percentiles", ...yearIdxs.map((y) => yearHeaderText(y))].map(esc).join(","));
   for (const g of monteCarloPercentileGroups()) {
     for (const r of g.rows) {
-      lines.push([esc(r.label), ...yearIdxs.map((y) => (r.cell(y) * factor(y)).toFixed(2))].join(","));
+      lines.push([esc(r.label), ...yearIdxs.map((y) => csvMoney(r.cell(y) * factor(y)))].join(","));
     }
   }
   lines.push("");
@@ -9913,7 +9922,7 @@ function exportMonteCarloCSV() {
     ["Minimum", d.min], ["10th percentile", d.p10], ["25th percentile", d.p25], ["Median", d.p50],
     ["75th percentile", d.p75], ["90th percentile", d.p90], ["Maximum", d.max], ["Mean", d.mean],
   ]) {
-    lines.push([esc(label), (val * endFactor).toFixed(2)].join(","));
+    lines.push([esc(label), csvMoney(roundSimMoney(val) * endFactor)].join(","));
   }
   lines.push("");
   // Deliberately the RAW figure, not formatSimPct's capped/rounded
@@ -10886,12 +10895,14 @@ els.viewMoneyDecomposition.addEventListener("change", (e) => {
 //
 // Row shape: { label, cell(y) → number, always?, cls?, text? (string
 // cells, exempt from hiding + scaling) }.
-
-function fmtLedgerCell(v) {
-  if (Math.abs(v) < 0.005) return "–";
-  const s = Math.round(Math.abs(v)).toLocaleString("en-AU");
-  return v < 0 ? `(${s})` : s;
-}
+//
+// fmtLedgerCell (table) and csvMoney (CSV) now live in the pure
+// src/moneyDisplay.js (docs/specs/39-cleanup-rules-cascade.md, Commit
+// 4, review finding 2.9) — extracted so the "table and its CSV agree
+// on rounding and sign" rule can actually be unit-tested, which
+// main.js itself (DOM-dependent throughout) cannot be. See that
+// module's own header for the fix and why the two intentionally don't
+// share identical punctuation.
 
 // Start/end are always the first/last column or chart edge already —
 // annotating them again would just be noise, so table and chart
@@ -10995,7 +11006,7 @@ function exportTransposedCSV(viewName, groups) {
       const cells = yearIdxs.map((y) => {
         if (r.text) return esc(String(r.cell(y)));
         if (r.pct) return esc(`${r.cell(y).toFixed(2)}%`);
-        return (r.cell(y) * factor(y)).toFixed(2);
+        return csvMoney(r.cell(y) * factor(y));
       });
       lines.push([esc(r.label), ...cells].join(","));
     }
@@ -12200,11 +12211,11 @@ function exportDeathBenefitsCSV() {
     for (const b of detail?.byBeneficiary ?? []) {
       for (const a of b.accounts) {
         const net = a.taxFree + a.taxableTaxed + a.taxableUntaxed - a.tax;
-        lines.push([label, a.accountName, b.label, DEATH_BENEFIT_RELATIONSHIP_LABELS[b.relationship] ?? b.relationship, b.sharePct, a.taxFree.toFixed(2), a.taxableTaxed.toFixed(2), a.taxableUntaxed.toFixed(2), a.tax.toFixed(2), net.toFixed(2)].map(csvEsc).join(","));
+        lines.push([label, a.accountName, b.label, DEATH_BENEFIT_RELATIONSHIP_LABELS[b.relationship] ?? b.relationship, b.sharePct, csvMoney(a.taxFree), csvMoney(a.taxableTaxed), csvMoney(a.taxableUntaxed), csvMoney(a.tax), csvMoney(net)].map(csvEsc).join(","));
       }
     }
     for (const rp of detail?.reversionaryPensions ?? []) {
-      lines.push([label, rp.pensionName, "Reversionary — continues to spouse", "", "", rp.valueAtDeath.toFixed(2), "0.00", "0.00", "0.00", rp.valueAtDeath.toFixed(2)].map(csvEsc).join(","));
+      lines.push([label, rp.pensionName, "Reversionary — continues to spouse", "", "", csvMoney(rp.valueAtDeath), "0", "0", "0", csvMoney(rp.valueAtDeath)].map(csvEsc).join(","));
     }
   };
   addPerson(clientName(), d.client);

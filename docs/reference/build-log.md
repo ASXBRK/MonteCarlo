@@ -5328,6 +5328,127 @@ Commit: `Fix: review findings 2.1 to 2.4`.
 
 ---
 
+### Cleanup, rule gaps, and the surplus cascade, Commit 4: review findings 2.6, 2.7, 2.9, and one rounding convention (spec 39)
+
+Read `docs/reference/adversarial-review-2026-09/README.md` §2 directly
+for 2.6/2.7/2.9; 2.5 and 2.8 confirmed already fixed first, per the
+spec's own instruction, before touching anything else.
+
+**2.5 and 2.8 — confirmed already fixed, no work needed.** 2.5 (the
+composite chart's flow bars omitting pension drawdown; the Expense
+funding chart mislabelling it "met from income") — re-ran
+`probes/probeK.mjs`: `compositeSeries`'s own `drawdown` figure now
+reads the pension's actual payment ($30,083, matching
+`pensionDetail.payments` exactly) where it used to read $0. 2.8 (the
+"Comprehensive pre-retiree" demo never retires) — re-ran
+`probes/probeO.mjs`: income at ages 75/85 now reads ~$43,000 (age
+pension plus drawdown), not the pre-fix $493,000 salary run to the
+plan's end. Both match spec 37 Commits 4 and 6 as the spec said they
+would.
+
+**2.6 — Monte Carlo percentiles shown to the dollar.** A deterministic
+table can defensibly show whole dollars (the figure is exact); a
+percentile drawn from a few thousand simulated paths cannot support
+that precision the same way probabilities can't support 92.6% (spec
+36 Commit 3's own reasoning, applied here to money instead).
+`simDisplay.js` — already "the single place this lives" for
+simulation-derived display rules, per its own header — gets a new
+`roundSimMoney(v)`, rounding to the nearest $1,000, applied inside
+`monteCarloPercentileGroups()`'s own cell functions (so the Graphs-view
+table, the Tables-view table, and the CSV export, which all share that
+one function, can't drift apart) and the end-of-projection distribution
+table/CSV. Display-only, same discipline as `formatSimPct`: the exact
+figure stays in `mcResult` itself for every solver/comparison call
+site.
+
+**2.9 — table and CSV of the same view disagree on rounding and sign.**
+Three conventions coexisted: `renderTransposed`'s own cells
+(`fmtLedgerCell`) round to the whole dollar with parenthesised
+negatives; `exportTransposedCSV` wrote the same cells to the CENT with
+a leading minus; Snapshot's HTML/CSV pair already agreed with each
+other (whole dollars) but not with the transposed pair. Picked the
+whole-dollar convention (already the majority one) and extracted both
+formatters into a new pure module, `src/moneyDisplay.js`
+(`fmtLedgerCell`/`csvMoney`), so `exportTransposedCSV` now rounds to
+the SAME whole dollar its own table shows — genuinely testable, unlike
+the rest of `main.js`, which is why this fix lives in its own module
+rather than staying inline. Table and CSV deliberately don't share
+identical PUNCTUATION (CLAUDE.md's own locked Outputs convention
+requires parentheses for negatives on screen; a CSV cell stays a
+plain, spreadsheet-parseable number) — "agree on rounding and sign"
+means the same rounded magnitude and the same negative-ness, which a
+new test (`moneyDisplay.test.js`) asserts directly across a stratified
+sweep of values by stripping the table's own punctuation and comparing
+numerically.
+
+That test caught a real bug before it shipped: the first draft of
+`csvMoney` used `Math.round(v)` directly, which rounds a negative
+EXACT-.5 value TOWARD zero (`Math.round(-0.5) === -0`) — asymmetric
+with `fmtLedgerCell`'s own `Math.round(Math.abs(v))` then re-signed
+(round `0.5` to `1`, then negate). At exactly $0.50 negative, the table
+would have shown "(1)" while the CSV wrote "0" — silently disagreeing
+at precisely the boundary the fix was meant to close. Fixed by making
+`csvMoney` round the same way: `Math.abs`, round, re-sign.
+
+Also fixed, explicitly named in the finding: the death-benefits CSV
+(`exportDeathBenefitsCSV`), which wrote cents against a table
+(`buildDeathBenefitsTableHTML`) that already used `fmtLedgerCell` —
+switched to `csvMoney` to match.
+
+**Scope decision, on the record.** The finding also notes "the ...
+focus CSVs also write cents" — true of roughly forty further call
+sites across the one-off focus modules (first-home target, FHSSS
+comparison, debt recycling, debt payoff, education funding, main
+residence exemption, stamp duty/LMI, retirement levers, the surplus
+cascade builder, liability rollover/shock comparisons, the lifecycle
+comparison). Deliberately NOT touched in this commit: unlike the
+transposed-table family, the Snapshot pair, and the MC percentile
+pair, most of these have no PAIRED on-screen table built from the same
+row model to "agree" with — each is a standalone downloadable export,
+so the spec's own core testable claim ("every table and its CSV
+agree") doesn't structurally apply to most of them, and the volume
+(~40 call sites across a dozen unrelated modules, each needing its own
+read before a mechanical edit) is disproportionate to what's left of
+this eight-commit spec, with the architecturally central work — the
+surplus cascade, Commits 5–8 — still ahead. `csvMoney` exists now and
+the fix pattern is proven; closing this specific tail is a clean,
+low-risk follow-up whenever it's prioritised, not a rediscovered gap.
+
+**2.7 — crash timing labels for a retiree.** `representativeCrashAges`
+(`whatIfCrash.js`) derives its three points from `retirementAge -
+currentAge`; for a client already AT or PAST retirement that span is
+zero or negative, floored to a 2-year minimum regardless of how long
+retirement itself runs — and `clamp`'s own `currentAge + 1` floor then
+swallowed all three of 15%/50%/90% of that 2-year span (all within a
+year of "now") into the SAME age. Reproduced exactly via a direct
+`buildDemoClients` probe: the Modest retiree demo (70, retired at 70)
+returned "Early"/"Mid-career"/"Near retirement" all at age 71 — three
+coincident lines under working-life labels for someone with no working
+life left. Fixed by branching on `currentAge >= retirementAge`: spread
+the three points across the REMAINING RETIREMENT horizon instead
+(15%/50%/85% of `endAge - currentAge`), under retirement-phase labels
+("Early retirement"/"Mid-retirement"/"Late retirement") that don't
+imply an accumulation phase that doesn't exist. Same probe post-fix:
+73/79/85 — three genuinely distinct ages.
+
+**Not a new money flow; no new threshold.** All four fixes are display/
+labelling changes (2.6, 2.9) or a display-derivation branch (2.7) —
+none touch a value the engine, a solver, or `conservationCheck.js`
+reads. `ENGINE_VERSION`, `randomScenario()`, and `THRESHOLD_REGISTRY`
+untouched.
+
+Tests: `moneyDisplay.test.js` (new, 8 tests — the table/CSV agreement
+sweep above, plus each formatter's own known-value and edge-case
+behaviour); `simDisplay.test.js` gains 4 (`roundSimMoney` — known-value
+rounding, negative symmetry, exact-multiple no-op, null/NaN passthrough);
+`whatIfCrash.test.js` gains 1 (the already-retired regression, asserting
+three distinct retirement-phase ages, all within the plan window).
+Full suite 2246/2246, build green.
+
+Commit: `Fix: review findings 2.6, 2.7, 2.9 and one rounding convention`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
