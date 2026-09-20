@@ -160,37 +160,11 @@ test("browser: displayed totals reconcile to the ledger", { timeout: 30_000 }, a
       });
     }
 
-    // Chart series sum — guarded exactly like Commit 1's console-error
-    // filter and Commit 2's Export-button test: this sandbox's proxy
-    // blocks the Plotly CDN (index.html loads it from cdn.plot.ly), so
-    // no chart trace data exists to sum here. Written for when Plotly
-    // IS available (a real deployment); logged, not silently skipped,
-    // when it isn't.
-    await goToOutput(page, ids, "net-worth", "chart");
-    const chartCheck = await page.evaluate((expectedByAge) => {
-      if (typeof Plotly === "undefined") return { skipped: true };
-      const el = document.getElementById("chartNetAssets");
-      if (!el?.data?.length) return { skipped: true, reason: "no chart data mounted" };
-      // Net worth chart's own series are per-asset-class stacks that
-      // sum to net assets at each x (age) — summed here rather than
-      // assuming a single "total" trace, since the exact trace layout
-      // is a chart.js/chartSeries.js concern this test shouldn't
-      // hard-code.
-      const xs = el.data[0].x;
-      const mismatches = [];
-      xs.forEach((age, i) => {
-        const want = expectedByAge[age];
-        if (want == null) return;
-        const sum = el.data.reduce((s, trace) => s + (Number(trace.y[i]) || 0), 0);
-        if (Math.abs(sum - want) > 1) mismatches.push({ age, rendered: sum, expected: want });
-      });
-      return { skipped: false, mismatches };
-    }, Object.fromEntries(clientAges.map((age, y) => [age, out.yearly[y].netAssets])));
-    if (chartCheck.skipped) {
-      console.log(`[reconciliation] chart series check skipped: Plotly unavailable in this environment (${chartCheck.reason ?? "CDN blocked"})`);
-    } else {
-      for (const m of chartCheck.mismatches) mismatches.push({ rowLabel: "Chart / Net worth", ...m });
-    }
+    // Chart series reconciliation now lives in its own dedicated file
+    // (tests/browser/chartReconciliation.test.mjs, docs/specs/41-
+    // dependency-ordering-density.md Commit 2) — covering every Output-
+    // group chart, not just Net worth's, now that Plotly is vendored
+    // and actually available to check against.
 
     // Round trip — edit through the review panel (the surface spec 38's
     // "stale cached DOM" bug lived on), assert the engine changed AND

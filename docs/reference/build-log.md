@@ -6100,6 +6100,79 @@ Commit: `Vendor Plotly; remove the CDN dependency`.
 
 ---
 
+### Dependency, ordering, density, Commit 2: complete the chart reconciliation (spec 41)
+
+**With Plotly vendored (Commit 1), un-guarded spec 40 Commit 3's chart-
+series test and made it real** — the assertion that would have caught
+adversarial-review findings 1.10, 1.11 and 2.5, which had never been
+able to run in this sandbox. `tests/browser/chartReconciliation.test.mjs`
+reconciles 13 of the Output group's charts (every deterministic,
+directly-ledger-backed one) against the exact pure function or
+`projectPlan()` row field main.js itself uses to build each chart's
+traces: `chartSeries.js`'s `expenseFundingSeries`/`taxByTypeSeries`/
+`debtVsAssetsSeries`/`superVsNonSuperSeries`, `cashflowCategories.js`'s
+`incomeCategorySums`/`expenseCategorySums` (the same pure functions
+spec 37's own unit reconciliation test uses), `allocation.js`'s
+`allocationSeries`, or a bare row field — never a second, hand-
+maintained computation. Two reconciliation modes: `byName` (each
+Plotly trace, matched by name, against its own expected series — most
+charts) and `sum` (every trace summed, against a single ledger total —
+Assets/Super, whose trace names are dynamic asset/account names with
+nothing fixed to key on).
+
+**Three of the four `CHART_OPTIONS.cashflow`/`.net-worth`/`.super`
+chart-type variants required an extra step**: selecting the non-default
+option via `#chartTypeSelect` before its container receives data, the
+same real interaction a user makes. Reached this way: Debt vs assets
+(under Net worth), Super vs non-super (under Super), and all three of
+Cashflow's own variants (Income sources, Expense funding, Tax by type).
+
+**Verified against real data, not an empty pass**: a direct check
+before committing confirmed every chart carried genuine, varied trace
+values matching already-known fixture figures (e.g. Net worth's year-0
+value, $785,584.83, matches the exact figure recorded when this fixture
+was first built for Commit 2 of spec 40).
+
+**Scope, each exclusion stated rather than silent**:
+- Monte Carlo charts (`chartMonteCarlo`, the Retirement group's MC/
+  sustainable-spend/levers/lifecycle-comparison charts) — genuinely
+  stochastic; a simulated distribution has no single ledger figure to
+  reconcile to the way a deterministic total does.
+- Composite and "Where the money went" (`money-decomposition`) — the
+  other two Net worth/Projection chart-type variants, layered on the
+  same `compositeSeries()`/row fields the in-scope charts already
+  exercise; deferred rather than growing this commit further.
+- Focus/What-if/Retirement-group charts — single-question views over
+  the same comprehensive inputs, outside the adversarial review's own
+  scope (findings 1.10/1.11/2.5 were all Output-group totals).
+- **Net worth's per-person entity view** — `ownerNetWorthExWca()`
+  (main.js), the one chart-feeding computation this investigation found
+  with no pure, importable equivalent (everything else in-scope either
+  reads a row field directly or already delegates to `chartSeries.js`/
+  `cashflowCategories.js`/`allocation.js`). This is exactly the pattern
+  the spec names ("where a chart legitimately plots something the
+  ledger does not publish directly, add that to the engine's output
+  rather than deriving it in the chart") — not done here: it visibly
+  resembles `buildKeyFiguresGroups`' own per-owner `totalAssets`/
+  `totalLiabilities` logic (spec 40 Commit 3's build-log entry), and
+  extracting it properly — ideally deduplicating against that near-twin
+  rather than creating a second pure copy — is a genuinely separate
+  task from "reconcile the charts that already have one source."
+  Flagged for the user rather than either done ad hoc or silently
+  skipped. The consolidated ("all") entity view, the default every
+  chart lands on, is fully reconciled.
+
+Tests: series reconciliation across the 13 in-scope charts (one test,
+all charts); a deliberately introduced chart drift (a live-mutated
+Plotly trace, not a code change) failing. Full `test:browser` suite (5
+files, 14 tests) green; full existing unit suite 2253/2253 unaffected.
+
+Commit: `Browser: chart series reconcile to the ledger`.
+
+Spec 41 Commits 1–2 (vendor Plotly) complete.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
