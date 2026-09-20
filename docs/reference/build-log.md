@@ -5913,6 +5913,77 @@ Commit: `Browser: every interactive control is alive`.
 
 ---
 
+### Browser test harness, Commit 3: displayed totals reconcile to the ledger (spec 40)
+
+**The defect class.** The adversarial review (spec 37) found "Total
+assets" showing $51,582 against net assets of $746,846 on adjacent
+rows — three separate re-derivations of figures the engine already
+published, drifting apart. Spec 37 Commit 4 added a unit-level
+reconciliation test (`src/displayReconciliation.test.js`); that test
+calls the display-computation functions directly and never touches the
+DOM, so it could not have caught the three original drifts, which all
+lived in what actually rendered. `tests/browser/reconciliation.test.mjs`
+is that same assertion against the render.
+
+**The ledger is `projectPlan()` itself** — the exact function
+`main.js` assigns to its own `projection` variable
+(`projection = projectPlan(state)`) — called directly on the same
+seeded state, never a second, hand-maintained computation. Rendered
+cell text is compared against `fmtLedgerCell()`/`csvMoney()`
+(`src/moneyDisplay.js`), the same pure formatters the table and CSV
+export themselves call, so "expected" is produced by the app's own
+code, not a re-implementation of its rounding/sign rules. A rendered
+table's year columns are matched back to a year index by AGE
+(`.tl-age`, the same value `out.schedule.clientAges[y]` carries), not
+by assuming which years the period selector currently shows.
+
+**Checked, using the `fullyPopulatedState` fixture already built for
+Commit 2** (accumulation, pension, bond, property, liability and age
+pension together, with a sanity check that all five are actually
+nonzero before reconciling — a zeroed field would trivially "reconcile"):
+
+- **Key figures** (`output/net-worth`, table form) — "Total assets",
+  "NET ASSETS", "Super balance", "Working cash balance", across every
+  rendered year.
+- **Assets table's own totals row** (`output/assets`, table form) —
+  "Closing balance", a second independent display surface for the same
+  ledger field.
+- **CSV export** — the same two Key figures rows via `csvMoney()`, a
+  genuinely separate code path from the table's `fmtLedgerCell()`
+  (`moneyDisplay.js`'s own header: the review finding it exists to fix
+  was exactly these two formatters disagreeing).
+- **Chart series sum** (`output/net-worth`, chart form) — written to
+  sum `#chartNetAssets`'s own plotted traces per year and compare to
+  `netAssets`, but this sandbox's proxy blocks the Plotly CDN (the same
+  documented "CDN may be blocked" case Commit 1/2 already account for),
+  so no trace data exists to sum here. Guarded exactly like the
+  console-error filter and the Export-button test: skips with a logged
+  reason rather than failing OR silently vanishing, and runs for real
+  wherever Plotly does load.
+- **The round trip** — edits the fixture's bond balance through the
+  review panel (`#inputReviewPanel`, the surface spec 38's "stale
+  cached DOM" bug lived on), without navigating away from the
+  already-open Key figures table. Asserts three things: the edited
+  `localStorage` state, re-hydrated and re-run through `projectPlan()`
+  independently, produces a genuinely different NET ASSETS; the
+  already-open table's own NET ASSETS cell changed at all; and it
+  changed to exactly that freshly-computed figure — "every open display
+  followed," not just "something changed somewhere."
+
+**A deliberately introduced drift** — mutates one already-rendered
+NET ASSETS cell to a wrong figure via `page.evaluate` (no code changed,
+mirroring Commit 2's synthetic disconnected-control test) and re-runs
+the same row-comparison function against it, proving the mechanism
+itself catches a genuine drift rather than passing by construction.
+
+Tests: the two described above. Full `test:browser` suite (all three
+files, 8 tests) runs in ~28.4s; full existing unit suite 2253/2253
+unaffected, build green.
+
+Commit: `Browser: displayed totals reconcile to the ledger`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
