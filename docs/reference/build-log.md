@@ -5449,6 +5449,84 @@ Commit: `Fix: review findings 2.6, 2.7, 2.9 and one rounding convention`.
 
 ---
 
+### Surplus cascade, Commit 5: conditions replace periods (spec 39)
+
+**The cascade engine itself was already built.** `docs/specs/37-surplus-
+cascade.md` Commit 1 ("Surplus: condition-based cascade engine",
+`387b923`) already landed the whole model this commit's own text
+describes: an ordered list of steps, each with one or more branches, a
+destination, and until-conditions (`repaid`/`balanceBelow`/
+`valueReaches`/`date` — all four already in `CASCADE_CONDITION_KINDS`,
+`planState.js`), re-evaluated fresh every FY-end sweep
+(`branchIsOpen`/`conditionIsOpen`, `deterministic.js`) with no
+caching — a condition that closes and later un-satisfies already
+resumes taking surplus the very next sweep, by construction, not by
+special-casing. Confirmed by reading the engine directly, not assumed
+from the spec's own summary: `resolveDebtScope`'s live per-year
+re-evaluation, `branchIsOpen`'s own header ("nothing about a condition
+is ever cached or permanently retired"), and an existing test
+(deterministic.test.js, "a valueReaches condition closes once met,
+then RE-OPENS...") already prove this for the native cascade
+vocabulary.
+
+**"Do not keep two systems" — already true at the execution level.**
+There is exactly ONE resolution path: `schedule.js`'s
+`rawCascadeSteps` upgrades an old-shaped period into 1-2 equivalent
+cascade steps (via `migratePeriodToStep`) at schedule-build time,
+before `deterministic.js` ever sees anything but a uniform
+step/branch/condition array. The OLD shape survives only as an INPUT-
+AUTHORING convenience — `state.settings.surplus.periods` may still
+store an old-shaped period object, deliberately (spec 37's own review
+remediation, Commit 4: `main.js`'s pre-cascade UI reads that shape
+directly and would break on a force-upgraded one) — but the engine
+itself never branches on which shape it's looking at; every element is
+resolved through the same migration before anything moves money. UI
+authoring of the NEW vocabulary directly is Commit 8's own explicit
+scope, not this one's.
+
+**The actual gap: migration coverage.** Every existing period-vocabulary
+test in `deterministic.test.js`'s "Surplus and deficit allocation"
+describe block — all ~30 of them, plus the one existing "migration
+bit-identity" test proving a real `hydrate()`d v16 blob reaches the
+same figures as its v17 equivalent — used exactly ONE period. Nothing
+exercised `migratePeriodToStep`'s own `windowConditions` branch
+(`rawCascadeSteps`, `planState.js`): the `atOrAfter`/`before` date
+conditions attached to a genuinely MULTI-period array, the one input
+shape where migration can silently misattribute a year to the wrong
+period's own destination. Closed with two new tests:
+- A multi-period bit-identity test: two periods, each investing in a
+  different asset, boundary at age 42 — asserts years 0-1 credit ONLY
+  the first period's asset and years 2-4 credit ONLY the second's,
+  proving each period's own window (not the old engine's literal
+  resolution, which no longer exists in this codebase to diff
+  against, but the documented pre-cascade semantics: each period owns
+  `[from, to)`, the last covers whatever's left) survives the
+  migration exactly.
+- A met-then-lost regression proven through the OLD vocabulary
+  specifically, not just the native one: a non-deductible-debt-first
+  period whose loan is fully repaid in year 0, then re-drawn (a
+  genuine `drawdowns` event, `purpose: "private"` — deliberately NOT
+  `"investment"`, which dynamic deductibility tracking would
+  reclassify as deductible debt and correctly exclude from a
+  `nonDeductible`-scoped branch, a real mechanic this test isn't the
+  one to exercise) in year 1 — asserts "repaid" reopens and surplus
+  returns to debt in year 1, proving the migration path's own
+  `{kind:"repaid"}` condition is re-evaluated fresh, not just the
+  native cascade vocabulary's `valueReaches`/`balanceBelow`.
+
+**Not a new money flow; no new threshold.** All four condition kinds
+and every destination type were already registered by spec 37 Commit
+1; this commit adds test coverage only, touching no engine code.
+`ENGINE_VERSION`, `randomScenario()`, `THRESHOLD_REGISTRY`, and
+`conservationCheck.js` untouched.
+
+Tests: 2 new (above), both include a `checkYearConservation` pass
+across every year. Full suite 2248/2248, build green.
+
+Commit: `Surplus cascade: conditions replace periods`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

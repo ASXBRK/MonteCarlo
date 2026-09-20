@@ -7533,6 +7533,103 @@ describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, C
     // test helper's own shim.
     expect(hydratedOut.monthly.combined[12]).toBeCloseTo(100000 + 12000, -3);
   });
+
+  it("migration bit-identity: a MULTI-period array (docs/specs/39-cleanup-rules-cascade.md, Commit 5) — each period governs only its own [from, to) window, exactly like the pre-cascade engine", () => {
+    // Every other test in this describe block (old-shape AND cascade)
+    // uses a single period — the multi-period array is the one shape
+    // migratePeriodToStep's own windowConditions branch exists for
+    // (rawCascadeSteps, planState.js) and nothing before this test
+    // actually exercised it: period i>0 gets an "atOrAfter" floor at
+    // its own `from`, period i<n-1 gets a "before" ceiling at its own
+    // `to` — reproducing "each period owns its own window, the last
+    // one covers whatever's left" without a second, parallel
+    // period-resolution code path in the engine.
+    const s = mkState({
+      endAge: 44,
+      assets: [
+        mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() }),
+        mkAsset({ id: "a2", balance: 0, allocation: zeroRealAlloc() }),
+      ],
+      cashflows: { income: [cf({ assetId: null, amount: 1000, toAge: 44 })] }, // ~$12,000/yr surplus
+      surplus: { periods: [
+        // Years 0-1 (ages 40-41): invests in a1.
+        { id: "sp1", from: { kind: "anchor", anchorId: "start" }, to: { kind: "age", age: 42 },
+          payNonDeductibleDebtFirst: false, debtOrder: "interestRate",
+          allocations: [{ id: "a1a", targetType: "asset", targetId: "a1", pct: 100 }], remainderTo: "cash" },
+        // Years 2-4 (ages 42-44): invests in a2 instead — the LAST
+        // period, so its own `to` is ignored (covers whatever's left).
+        { id: "sp2", from: { kind: "age", age: 42 }, to: { kind: "anchor", anchorId: "end" },
+          payNonDeductibleDebtFirst: false, debtOrder: "interestRate",
+          allocations: [{ id: "a2a", targetType: "asset", targetId: "a2", pct: 100 }], remainderTo: "cash" },
+      ] },
+    });
+    const out = projectPlan(s);
+    // Years 0-1: period 1's own window — a1 gets the surplus, a2 gets
+    // nothing.
+    for (const y of [0, 1]) {
+      expect(out.yearly[y].perAssetDetail.a1.surplusInvested).toBeGreaterThan(9000);
+      expect(out.yearly[y].perAssetDetail.a2.surplusInvested).toBeCloseTo(0, 6);
+    }
+    // Years 2-4: period 2's own window — a2 gets the surplus, a1 gets
+    // nothing more (its balance stops growing from surplus).
+    for (const y of [2, 3, 4]) {
+      expect(out.yearly[y].perAssetDetail.a2.surplusInvested).toBeGreaterThan(9000);
+      expect(out.yearly[y].perAssetDetail.a1.surplusInvested).toBeCloseTo(0, 6);
+    }
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `multi-period migration, year ${y}`);
+  });
+
+  it("migration bit-identity: a condition MET, then LOST, re-opens exactly as spec 39 Commit 5 requires — proven through the OLD period vocabulary's own migration path, not just the native cascade vocabulary", () => {
+    // The native-cascade version of this exact behaviour is already
+    // covered above ("a valueReaches condition closes once met, then
+    // RE-OPENS...") — this proves the SAME guarantee survives the
+    // old-shape migration path too, since a period's own allocations
+    // carry no condition of their own (migratePeriodToStep attaches
+    // only window/repaid conditions) EXCEPT the one place a period-
+    // authored rule genuinely can un-satisfy: payNonDeductibleDebtFirst
+    // ("repaid"), re-opening if new debt is drawn after being cleared.
+    // (There is no period-authored equivalent of valueReaches/
+    // balanceBelow — those only exist in the native cascade vocabulary,
+    // which is exactly why COMMIT 8's UI work, not this commit, is
+    // where an adviser gets to author one directly.)
+    const s = {
+      ...mkState({
+        endAge: 42,
+        assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() })],
+        cashflows: { income: [cf({ assetId: null, amount: 2000, toAge: 42 })] }, // ~$24,000/yr surplus
+        surplus: { periods: [{
+          id: "sp1", from: { kind: "anchor", anchorId: "start" }, to: { kind: "anchor", anchorId: "end" },
+          payNonDeductibleDebtFirst: true, debtOrder: "interestRate",
+          allocations: [{ id: "a1a", targetType: "asset", targetId: "a1", pct: 100 }], remainderTo: "cash",
+        }] },
+      }),
+      liabilities: [{
+        id: "lb1", name: "Loan", type: "personal", owner: "client", balance: 5000,
+        interestRatePct: 0, termYears: 25, repayment: "io", ioYears: 25, deductiblePct: 0,
+        linkedAssetId: null, offsetAssetId: null, extraRepayments: [], oneOffRepayments: [],
+        rateType: "variable", fixedRatePct: 6, fixedUntil: { kind: "age", age: 43 }, revertRatePct: null, commencedOn: null,
+        // A DRAWDOWN in year 1 re-opens "repaid" after it closed in
+        // year 0 — proving the condition is re-evaluated fresh every
+        // sweep, never permanently retired, even through the migration
+        // path (not just the native cascade vocabulary). purpose:
+        // "private" is deliberate — dynamic deductibility tracking
+        // (deterministic.js's own currentDeductibleFraction) reclass-
+        // ifies an "investment"-purpose drawdown as DEDUCTIBLE debt,
+        // which the debt-first step's own "nonDeductible" scope would
+        // then correctly exclude — a genuinely different, correct
+        // behaviour this test isn't the one to exercise.
+        drawdowns: [{ id: "dd1", label: "Redraw", amount: 8000, at: { kind: "age", age: 41 }, purpose: "private", destination: "cash" }],
+      }],
+    };
+    const out = projectPlan(s);
+    // Year 0: the $5,000 loan is repaid in full from the debt-first
+    // step; the ASSET only sees the remainder.
+    expect(out.yearly[0].liabilities.lb1.surplusRepayment).toBeCloseTo(5000, 0);
+    expect(out.yearly[0].liabilities.lb1.closing).toBeCloseTo(0, 0);
+    // Year 1: the $8,000 draw re-opens the loan — "repaid" is OPEN
+    // again, so this year's surplus goes to debt first, not the asset.
+    expect(out.yearly[1].liabilities.lb1.surplusRepayment).toBeGreaterThan(0);
+  });
 });
 
 // Adjustment Rows (docs/specs/18-adjustment-rows.md, Commit 1).
