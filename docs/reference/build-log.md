@@ -5097,6 +5097,125 @@ suite's own single run).
 
 ---
 
+### Cleanup, rule gaps, and the surplus cascade, Commit 2: HELP/MLS income base excludes the year's net capital gain (spec 39)
+
+**The spec's own label doesn't match the codebase.** The spec names
+this "Division 296 and HELP income bases exclude net capital gain."
+Direct read of `div296Tax` (`src/Tax/div296.js`) first: it takes
+`{openingTsb, closingTsb, earnings, lowerThreshold, upperThreshold}` —
+no taxable-income parameter at all, so Division 296 structurally cannot
+have this gap. Traced the real shared computation instead:
+`repaymentIncome[p]` in `deterministic.js` is a single `assessPerson({
+netCapitalGain: 0, ... })` call whose result feeds THREE downstream
+consumers — HELP repayment, the Medicare Levy Surcharge, and CSHC
+eligibility — all reading an income base that structurally excludes the
+year's own capital gain, regardless of size. Scoped this commit to the
+two CASH-bearing consumers, HELP and MLS. CSHC is deliberately left
+unfixed: it has no cash effect of its own to defer, and closing its gap
+would mean moving its eligibility check past the real-pass boundary — a
+structural relocation judged disproportionate for a same-commit fix.
+Disclosed here rather than silently dropped; a candidate for its own
+future commit if CSHC eligibility display is ever revisited.
+
+**Fix, mirroring the existing lagged-differencing pattern** (the same
+one `pendingBondTax`/`pendingUntaxedSuperTax`/`pendingDiv293`/
+`pendingDiv296` already use): same-year ordinary HELP/MLS liability is
+untouched (it's already correct, already withheld PAYG-style via
+`spreadTax` in the year the income is earned). What was missing is the
+INCREMENT the year's own realised gain would add on top. Each FY now
+also computes the full-income HELP/MLS figure (base + taxable gain,
+reading `assessPerson`'s own `taxableIncome`, which already combines
+both) and defers the delta — `helpTopUp`/`mlsTopUp` — to settle in July
+of FY t+1, folded into the existing `cgtDue` household-cash rollup
+alongside CGT/Div293/Div296/bond-tax/untaxed-super-tax rather than
+building parallel cash machinery. Two new fields exposed per person and
+at household level: `helpMlsTopUpAccrued` (this year's newly-computed
+increment) and `helpMlsTopUpSettled` (last year's increment, now
+actually paid). MLS has no balance to reduce (a straight surcharge), so
+the HELP-only share of the combined top-up is tracked in a second,
+parallel ledger (`pendingHelpTopUpOnly`) purely to drive the HELP
+liability balance reduction.
+
+**A timing bug caught before any test ran, not after.** The first draft
+reduced `helpBal[p]` by the top-up amount in the SAME year the
+increment was computed — the year the underlying gain was realised —
+while the matching cash outflow was correctly deferred to the following
+year via `cgtDue`. That desyncs balance from cash: the liability shrinks
+in year Y with no year-Y cash outflow to match it, which the
+conservation invariant would have caught (net worth rises by the
+top-up amount out of nowhere) — but was caught by reasoning about the
+established convention first: every other deferred item in this engine
+settles BOTH its cash and its balance effect in the same (later) year,
+never split. Fixed by moving the balance reduction out of the
+top-up-computation loop entirely and applying it instead at the same
+point the ORDINARY repayment already reduces the balance the following
+year (`helpBal[p] -= helpDue[p]` immediately followed by `helpBal[p] -=
+pendingHelpTopUpOnly[p]`) — same settlement moment, both effects
+together.
+
+Division 293 also reads `a2 = assessPerson(...)` for its own TSB/cap
+check; consolidating around `repaymentIncome`'s own inputs surfaced that
+`a2`'s own call was missing `fhsssTaxableRelease` and
+`ttrPensionTaxable` — both present in `repaymentIncome`'s own call, both
+silently absent from Division 293's. Added both to `a2`, closing a
+second, independently-discovered under-inclusion in the same commit
+(CLAUDE.md's own "close the whole class" expectation, applied here to a
+sibling case turned up while doing the named work rather than a second
+bug report).
+
+**Not a new money flow requiring a `conservationCheck.js` extension.**
+Both sides of this flow route through terms the invariant already
+names: the cash side folds into the existing `cgtDue`/tax rollup (the
+same mechanism CGT/Div293/Div296/bond-tax/untaxed-super-tax already
+share), and the balance side folds into the existing `helpBal[p]`/
+`row.liabilitiesClosing`/`row.netAssets` figures the pre-existing
+HELP-as-liability fix already covers. Verified directly (a new
+hand-crafted conservation test combining a HELP-triggering income with
+a realised gain) rather than only inferring it — and the existing
+3000-scenario stratified sweep, which already independently generates
+both ingredients, ran clean across the full suite after this change
+with no failures traceable to this code path. No new
+`THRESHOLD_REGISTRY` entry added either: the specific combination
+(HELP-triggering income co-occurring with a realised gain in the same
+year) is reachable today via two already-independently-stratified
+generator dimensions, not gated behind a single new branch point of its
+own.
+
+**Engine contract.** New fields are additive: `ENGINE_VERSION` 2.1.0 →
+2.2.0, `helpMlsTopUpAccrued`/`helpMlsTopUpSettled` added to
+`engineContractShape.js` (both the per-person and household-level
+`taxDetail` shapes, alphabetically placed), `docs/reference/engine-api.md`'s
+version table updated. That same pass found the 2.1.0 row (spec 37
+Commit 4's `totalAssets` field) was itself missing from the version
+table despite the version constant and contract shape having been
+correctly bumped at the time — added retroactively so the table is
+complete, not just correct going forward.
+
+**A pre-existing, unrelated flake, observed twice, not fixed here.**
+`deterministic.test.js`'s "coverage report: every registered threshold
+is exercised in every stratum across a real sweep" test failed twice
+during this commit's full-suite runs, each time reporting a different
+single unexercised `(threshold, stratum)` cell
+(`agePension.age.67.wellAbove`, then `pension.minDrawdown.75.at`) — both
+times gone on 3 immediate re-runs. This matches the test's own existing
+comment describing exactly this Poisson-variance weakness in stratified
+sampling, first documented before this commit. Out of scope for spec
+39's own named work; flagged here since it recurred twice in one
+session rather than being a single historical note.
+
+Tests: 6 new, covering a net-capital-gain year accruing and then
+settling the top-up the following year; the HELP balance genuinely
+dropping only in the settlement year, not the accrual year; a capital
+LOSS producing no top-up; conservation across a combined
+HELP-plus-gain-plus-top-up scenario; and two regression gates (a
+no-capital-gain scenario's HELP repayment figure unchanged at the
+existing known-value $4,570.80; Division 293's own existing behaviour,
+including its own settle-next-FY timing, unchanged). Full suite
+2230/2231 (the one failure the confirmed pre-existing flake above,
+itself passing on 3 immediate re-runs), build green.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

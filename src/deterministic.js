@@ -893,6 +893,21 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
   const heasConfig = state.plan.heas ?? { enabled: false, propertyId: null };
   let pendingDiv293 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT)
   let pendingDiv296 = { client: 0, partner: 0 }; // assessed FY t, paid July t+1 (same convention as CGT/Div293)
+  // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — HELP/MLS are
+  // withheld same-year via spreadTax (PAYG-style), computed from
+  // repaymentIncome, which (like Division 293's own taxableIncome used
+  // to) excludes this FY's own net capital gain: its exact size isn't
+  // known until the real pass runs, well after spreadTax already ran.
+  // Rather than defer HELP/MLS's ENTIRE payment the way Division 293
+  // does (a bigger behaviour change, and unnecessary — same-year
+  // withholding on ordinary income is still correct), only the
+  // INCREMENTAL amount attributable to the gain is deferred, same
+  // one-year lag as CGT/Division 293/296/bond tax/untaxed-super tax.
+  let pendingHelpMlsTopUp = { client: 0, partner: 0 }; // assessed FY t, paid July t+1
+  // The HELP-only share of the above — MLS is a straight surcharge with
+  // no balance to reduce, so the debt-reduction side effect (below)
+  // needs this split out separately from the combined cash figure.
+  let pendingHelpTopUpOnly = { client: 0, partner: 0 };
   // PAYG withholding / tax refund timing: assessed FY t (paygWithheld −
   // actualTaxPayable, per person with employment income that FY), paid
   // July t+1 (same convention). 0 for a person with no employment
@@ -4750,8 +4765,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     }
     const bondTaxDue = y > 0 ? pendingBondTax.client + pendingBondTax.partner : 0;
     const untaxedSuperTaxDue = y > 0 ? pendingUntaxedSuperTax.client + pendingUntaxedSuperTax.partner : 0;
+    // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — see
+    // pendingHelpMlsTopUp's own header (declared above).
+    const helpMlsTopUpDueDetail = y > 0 ? pendingHelpMlsTopUp : { client: 0, partner: 0 };
+    const helpMlsTopUpDue = helpMlsTopUpDueDetail.client + helpMlsTopUpDueDetail.partner;
     const cgtDue = (y > 0 ? pendingCgt.client + pendingCgt.partner : 0)
-      + divReleaseCash.client + divReleaseCash.partner - refundDue + bondTaxDue + untaxedSuperTaxDue;
+      + divReleaseCash.client + divReleaseCash.partner - refundDue + bondTaxDue + untaxedSuperTaxDue + helpMlsTopUpDue;
     const cgtDueDetail = y > 0 ? pendingCgt : { client: 0, partner: 0 };
 
     // Pension drawdown (spec 20, Commit 2): resolved ONCE per FY, before
@@ -5990,6 +6009,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         spreadTax(taxAdjustmentTotal[p], measured[p].incomeMonths, yearEnd(y) - 1);
       }
       helpBal[p] -= helpDue[p];
+      // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — LAST year's
+      // gain-driven HELP top-up (see pendingHelpTopUpOnly's own header)
+      // settles now, same point in the year's own timeline as the
+      // ordinary repayment just above (both after this year's own
+      // indexation, both before this year's OWN topup accrual is
+      // computed further down) — never MLS's own share, which has no
+      // balance to reduce.
+      helpBal[p] -= pendingHelpTopUpOnly[p];
     }
 
     // Spouse contribution tax offset (spec 19 Commit 6) — applied via
@@ -6277,6 +6304,10 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // differenced against a baseline that keeps every OTHER lagged flow
     // in place, the general pattern for combining independent deltas.
     const newPendingUntaxedSuperTax = { client: 0, partner: 0 };
+    // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — see the
+    // HELP/MLS top-up loop below, after this one, for why this is
+    // captured per person here rather than computed inline.
+    const fullTaxableIncome = { client: 0, partner: 0 };
     for (const p of persons) {
       // Remaining quarantined carry offsets this year's realised gains.
       if (quarantineCarry[p] > 0 && real[p].netCapitalGain > 0) {
@@ -6308,6 +6339,16 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         capitalLossCarryFwd: lossCarryFwd[p],
         taxProfile: state.plan[p]?.taxProfile ?? null,
         excessConcessionalContributions: superOutcome[p]?.excessCC ?? 0,
+        // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — added here
+        // so a2.taxableIncome is genuinely the FULL picture, not just
+        // "ordinary income + this FY's real flows": these two were
+        // already in repaymentIncome's OWN separate assessPerson call
+        // (below) but missing from THIS one, the exact "consolidating
+        // finds a second defect" pattern spec 37 Commit 2's own TSB fix
+        // warned about — Division 293 (which reads a2.taxableIncome
+        // directly) was silently under-including them until now.
+        fhsssTaxableRelease: measured[p].fhsssTaxableRelease ?? 0,
+        ttrPensionTaxable: measured[p].ttrPensionTaxable ?? 0,
         bondAssessableWithdrawal: bondDeficitAssessableWithdrawal,
         untaxedSuperTaxable: untaxedSuperWithinCap,
         untaxedSuperExcess,
@@ -6316,6 +6357,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       });
       lossCarryFwd[p] = a2.lossCarryFwd;
       newPending[p] = a2.cgtTax;
+      // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — captured for
+      // the HELP/MLS top-up loop below, which needs BOTH persons' own
+      // full figures (MLS compares against the FAMILY total for a
+      // couple) and so can't run until this whole loop has finished.
+      fullTaxableIncome[p] = a2.taxableIncome;
       // docs/specs/37-review-remediation.md, Commit 5, finding 1.8 —
       // Division 293 income is taxable income (here, a2.taxableIncome —
       // includes this FY's REAL net capital gain, unlike the
@@ -6372,6 +6418,55 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         });
         newPendingUntaxedSuperTax[p] = a2.netIncomeTax - withoutUntaxedSuper.netIncomeTax;
       }
+    }
+
+    // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — HELP/MLS were
+    // already withheld this FY (spreadTax, above) from repaymentIncome,
+    // which excludes this FY's own net capital gain — the identical gap
+    // spec 37 Commit 5 fixed for Division 293. fullTaxableIncome
+    // (captured in the loop above, now complete for both persons) is
+    // the true figure; the INCREMENT it implies over what was already
+    // withheld is what defers to July of FY t+1 — the same one-year lag
+    // CGT/Division 293/296/bond tax/untaxed-super tax all already use.
+    // The whole payment is deliberately NOT deferred the way Division
+    // 293 is — same-year withholding on ordinary income is already
+    // correct; only the gain-driven increment is late.
+    const newPendingHelpMlsTopUp = { client: 0, partner: 0 };
+    const newPendingHelpTopUpOnly = { client: 0, partner: 0 };
+    const fullFamilyIncome = fullTaxableIncome.client + (state.plan.partner ? fullTaxableIncome.partner : 0);
+    for (const p of persons) {
+      // Uncapped, then differenced against what was already withheld,
+      // THEN capped at the loan's own remaining balance (helpBal[p] is
+      // already post-helpDue[p] AND post-LAST-year's-topup-settlement
+      // here — see those two assignments' own lines, above) — capping
+      // the FULL recomputed figure against the ALREADY-REDUCED balance
+      // directly would silently compare two amounts capped at two
+      // different points, the same "two independently-capped figures
+      // never reconciling" bug class this project's own conservation
+      // invariant exists to catch.
+      const helpFullDueUncapped = helpRepaymentAmount(fullTaxableIncome[p], helpRatesY);
+      const helpTopUpRequested = Math.max(0, helpFullDueUncapped - helpDue[p]);
+      const helpTopUp = Math.min(helpTopUpRequested, Math.max(0, helpBal[p]));
+      // MLS is a straight surcharge, not a loan — no balance to cap
+      // against, just the incremental amount.
+      const mlsFullDue = mlsSurchargeAmount({
+        ownIncome: fullTaxableIncome[p],
+        comparisonIncome: isFamily ? fullFamilyIncome : fullTaxableIncome[p],
+        hasCover: (p === "partner" ? state.plan.partner : state.plan.client)?.privateHospitalCover !== false,
+        isFamily, dependentChildren, rates: mlsRatesY,
+      });
+      const mlsTopUp = Math.max(0, mlsFullDue - mlsDue[p]);
+      // NOT applied to helpBal[p] here — the debt reduction settles
+      // alongside the cash, next FY (see helpBal[p] -= pendingHelpTopUpOnly[p],
+      // above), the SAME "assessed FY t, paid AND balance-effected FY
+      // t+1" timing every other deferred item in this engine already
+      // uses. Reducing the balance HERE, a year before the cash moves,
+      // would silently shrink net worth (a real liability, gone) with
+      // no matching cash outflow that same year — conservation would
+      // have caught this the moment a scenario combining the two ever
+      // ran.
+      newPendingHelpMlsTopUp[p] = helpTopUp + mlsTopUp;
+      newPendingHelpTopUpOnly[p] = helpTopUp;
     }
 
     const detail = (p) => persons.includes(p) ? {
@@ -6443,6 +6538,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       helpBalanceClosing: helpBal[p],
       // Document Set Commit 2 — this FY's Medicare Levy Surcharge.
       medicareLevySurcharge: mlsDue[p],
+      // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — the gain-
+      // driven increment to HELP/MLS this FY's own income implies (see
+      // pendingHelpMlsTopUp's own header), same accrued-this-year/
+      // settled-this-year(from-last-year) shape as refundSettled above.
+      helpMlsTopUpAccrued: newPendingHelpMlsTopUp[p],
+      helpMlsTopUpSettled: pendingHelpMlsTopUp[p],
       // Document Set Commit 3 — this FY's FHSSS release, if any: the
       // gross amount (already netted into the property's settlement
       // figure above) and the resulting tax offset (30% of the taxable
@@ -6490,6 +6591,11 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       netCapitalGain: persons.reduce((s, p) => s + real[p].netCapitalGain, 0),
       helpRepayment: helpDue.client + helpDue.partner,
       medicareLevySurcharge: mlsDue.client + mlsDue.partner,
+      // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — household
+      // totals, same convention as refundSettled/helpRepayment above
+      // (see detail(p)'s own fields for the per-person breakdown).
+      helpMlsTopUpAccrued: newPendingHelpMlsTopUp.client + newPendingHelpMlsTopUp.partner,
+      helpMlsTopUpSettled: pendingHelpMlsTopUp.client + pendingHelpMlsTopUp.partner,
       fhsssRelease: (fhsssRelease.client?.grossRelease ?? 0) + (fhsssRelease.partner?.grossRelease ?? 0),
       // Salary packaging (spec 23, Commit 3) — the household's FBT
       // liability (already inside row.tax above, via taxOutArr) and the
@@ -6506,6 +6612,8 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     pendingDiv293 = newPendingDiv293;
     pendingDiv296 = newPendingDiv296;
     pendingRefund = newPendingRefund;
+    pendingHelpMlsTopUp = newPendingHelpMlsTopUp;
+    pendingHelpTopUpOnly = newPendingHelpTopUpOnly;
   }
 
   // Document Set Commit 5 — interest saved / time saved versus the

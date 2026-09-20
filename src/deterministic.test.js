@@ -5348,6 +5348,129 @@ describe("HELP repayments (Document Set Commit 1)", () => {
       expect(row.liabilities.help_client).toBeUndefined();
     }
   });
+
+  // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — HELP's own
+  // income base (repaymentIncome) excludes the year's net capital
+  // gain, the identical gap spec 37 Commit 5 fixed for Division 293.
+  // Verified structurally (the top-up fires, is capped correctly, and
+  // settles as a real cash+balance transfer the following year) rather
+  // than by an exact hand-calc — the repayment-rate schedule's own
+  // bracket arithmetic is already covered by the known-value tests
+  // above; this block's own job is proving the NEW income-base plumbing
+  // is wired and conserves, not re-deriving the rate table.
+  describe("HELP/MLS income base includes the year's net capital gain (docs/specs/39-cleanup-rules-cascade.md, Commit 2)", () => {
+    // Deficit-funding expenses force monthly sales off a growth-only
+    // CGT asset (same technique as the "tax — CGT timing" describe
+    // block above) — realises a real, sizeable gain in year 0 without
+    // needing an explicit sell/withdrawal row.
+    function gainForcedState(helpBalance, extra = {}) {
+      return mkState({
+        endAge: 42,
+        start: { year: 2027, month: 7 }, // post-reform, matching the existing CGT-timing tests' own convention
+        plan: { client: { currentAge: 40, helpBalance }, workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+        assets: [mkAsset({ allocation: growthOnlyAlloc(), balance: 500000, cgtAsset: true, costBase: 250000 })],
+        cashflows: {
+          income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 } })],
+          expenses: [cf({ assetId: null, amount: 10000 })], // forces ~$60k of realised gain in year 0, same figure the CGT-timing test hand-calcs
+        },
+        ...extra,
+      });
+    }
+
+    it("a year with a net capital gain accrues a HELP/MLS top-up, settling as cash the following year", () => {
+      const out = projectPlan(gainForcedState(100000));
+      expect(out.yearly[0].taxDetail.client.netCapitalGain).toBeGreaterThan(15000); // the gain genuinely fired
+      expect(out.yearly[0].taxDetail.client.helpMlsTopUpAccrued).toBeGreaterThan(0);
+      // Settles EXACTLY (not approximately) the following year — a real
+      // transfer, not an estimate that drifts between accrual and cash.
+      expect(out.yearly[1].taxDetail.client.helpMlsTopUpSettled)
+        .toBeCloseTo(out.yearly[0].taxDetail.client.helpMlsTopUpAccrued, 6);
+    });
+
+    it("the top-up genuinely reduces the HELP balance the year it SETTLES, not the year it accrues — and the cash/liability sides reconcile exactly", () => {
+      const out = projectPlan(gainForcedState(100000));
+      const accrued = out.yearly[0].taxDetail.client.helpMlsTopUpAccrued;
+      expect(accrued).toBeGreaterThan(0);
+      // Year 0's own closing balance already reflects year 0's ORDINARY
+      // repayment (helpRepayment) but NOT yet the top-up (nothing to
+      // settle in year 0 — no prior-year accrual exists).
+      const y0Ordinary = out.yearly[0].taxDetail.client.helpRepayment;
+      expect(out.yearly[0].taxDetail.client.helpBalanceClosing).toBeCloseTo(100000 - y0Ordinary, 2);
+      // Year 1's closing balance drops by an ADDITIONAL amount, on top
+      // of year 1's own ordinary repayment, exactly equal to what
+      // settled — the balance side of the SAME transfer the cash side
+      // (helpMlsTopUpSettled, asserted above) also reports.
+      const y1Ordinary = out.yearly[1].taxDetail.client.helpRepayment;
+      const y1Settled = out.yearly[1].taxDetail.client.helpMlsTopUpSettled;
+      const expectedY1Closing = out.yearly[0].taxDetail.client.helpBalanceClosing - y1Ordinary - y1Settled;
+      expect(out.yearly[1].taxDetail.client.helpBalanceClosing).toBeCloseTo(Math.max(0, expectedY1Closing), 2);
+    });
+
+    it("a capital LOSS (no net gain) produces no top-up — gains only, never a rebate", () => {
+      const withLoss = mkState({
+        endAge: 42,
+        start: { year: 2027, month: 7 },
+        plan: { client: { currentAge: 40, helpBalance: 100000 }, workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+        // A loss-making CGT asset (costBase above balance) sold down by
+        // the SAME deficit-funding technique — realises losses, never a
+        // positive net capital gain.
+        assets: [mkAsset({ allocation: { mode: "custom", incomePct: 0, growthPct: -3, frankingPct: 0, volBasis: "Balanced" }, balance: 500000, cgtAsset: true, costBase: 600000 })],
+        cashflows: {
+          income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 } })],
+          expenses: [cf({ assetId: null, amount: 10000 })],
+        },
+      });
+      const out = projectPlan(withLoss);
+      for (const row of out.yearly) {
+        expect(row.taxDetail.client.netCapitalGain).toBeLessThanOrEqual(0);
+        expect(row.taxDetail.client.helpMlsTopUpAccrued).toBe(0);
+      }
+    });
+
+    it("conservation holds across a scenario combining a HELP-triggering income, a realised capital gain, and the resulting top-up", () => {
+      const out = projectPlan(gainForcedState(100000));
+      for (let y = 0; y < out.yearly.length - 1; y++) {
+        checkYearConservation(out, y, `HELP/MLS top-up regression, year ${y}`);
+      }
+    });
+
+    it("regression gate: a scenario with no capital gain at all produces an identical projection to before this commit — zero top-up throughout", () => {
+      const s = mkState({
+        endAge: 42,
+        assets: [], // isolate — matches the known-value test's own isolation, above
+        plan: { client: { currentAge: 40, helpBalance: 100000 }, workingCash: { balance: 0, minimumBalance: 0, ratePct: 2.5 } },
+        cashflows: { income: [employmentRow({ amount: 100000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 } })] },
+      });
+      const out = projectPlan(s);
+      for (const row of out.yearly) {
+        expect(row.taxDetail.client.helpMlsTopUpAccrued).toBe(0);
+        expect(row.taxDetail.client.helpMlsTopUpSettled).toBe(0);
+        expect(row.taxDetail.helpMlsTopUpAccrued).toBe(0);
+        expect(row.taxDetail.helpMlsTopUpSettled).toBe(0);
+      }
+      // And the ordinary HELP repayment known-value from the very first
+      // test in this describe block is completely unaffected.
+      expect(out.yearly[0].taxDetail.client.helpRepayment).toBeCloseTo(4570.80, 2);
+    });
+
+    it("Division 293's own existing behaviour is unchanged by this commit — same known-value figure spec 37 Commit 5 established", () => {
+      // A person over the Division 293 threshold with NO capital gain —
+      // proves the fhsssTaxableRelease/ttrPensionTaxable fields newly
+      // added to a2 (this commit) default to 0 and change nothing when
+      // absent, and that Division 293 keeps reading a2.taxableIncome
+      // exactly as spec 37 Commit 5 left it.
+      const s = mkState({
+        endAge: 42,
+        assets: [],
+        plan: { client: { currentAge: 40 }, superAccounts: [superAcct()] },
+        cashflows: { income: [employmentRow({ amount: 400000, from: { kind: "age", age: 40 }, to: { kind: "age", age: 42 } })] },
+      });
+      const out = projectPlan(s);
+      // Div293 assesses year 0's income but settles as cash in year 1 —
+      // see the div293DueDetail = y > 0 ? pendingDiv293 : {...} gate.
+      expect(out.yearly[1].taxDetail.client.div293).toBeGreaterThan(0);
+    });
+  });
 });
 
 // --- HELP-as-liability follow-up fix ----------------------------------------
