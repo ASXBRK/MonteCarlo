@@ -6249,6 +6249,85 @@ Commit: `Consolidate the assessment income base`.
 
 ---
 
+### Dependency, ordering, density, Commit 4: fix the ordering (spec 41)
+
+**The gap.** Assessment ran before the FY-end surplus cascade sweep, so
+anything the sweep did (specifically: crediting a `superConcessional`
+cascade destination) was invisible to that year's Division 293/HELP/MLS
+assessment — the third occurrence of "the same income base needing the
+same kind of attention" this spec's own "Why" section names (spec 37
+Commit 5, spec 39 Commit 2, and now this). Division 296 was already
+immune: it reads post-sweep TSB/earnings directly, not a pre-sweep
+snapshot.
+
+**Chosen approach: lagged differencing** — "cheaper, and consistent
+with an existing mechanism," the spec's own second option — but which
+mechanism differs per base, because the two bases sit at different
+points in the yearly loop for unrelated historical reasons:
+
+- **Division 293's own assessment (the `a2` loop) already runs AFTER
+  the real pass/sweep** (spec 37 Commit 5's own CGT-timing fix put it
+  there). No lag was needed at all: `reportableSuperContributions` and
+  `lowTaxContributions` are corrected in place, in the SAME FY, by
+  reading the sweep's own credit off `row.superDetail[id].
+  surplusSalarySacrifice`/`.surplusPersonalDeductible` — the exact
+  fields, and the exact read, spec 39 Commit 6's carry-forward
+  correction already established for a sibling ordering bug found the
+  same way ("stress-testing the surplus cascade against a second same-
+  cap claimant"). That existing correction block now computes and
+  shares one `cascadeConcessional[p]` figure rather than deriving its
+  own copy.
+- **HELP/MLS's same-year figure (`repaymentIncome[p]`) genuinely
+  cannot see the sweep** — it's computed before the real pass runs, and
+  moving it would mean reordering the whole assessment loop, out of
+  this commit's scope. Extended the EXISTING `pendingHelpMlsTopUp`
+  deferred-settlement mechanism (spec 39 Commit 2) instead: its own
+  "full" recomputation (renamed `fullTaxableIncome` → `fullHelpMlsIncome`
+  for clarity) now routes through `assessmentIncomeBase("help", ...)`
+  with `cascadeConcessional[p]` folded into `reportableSuperContributions`,
+  the same correction Division 293 gets, just settled a year later
+  because that's when the true figure exists.
+
+**This also fixes Commit 3's own finding #2** — the top-up's "full"
+figure used to be bare `a2.taxableIncome`, with NO add-back terms at
+all (ordinary or cascade-sourced). Routing it through
+`assessmentIncomeBase` fixes both problems in the one change: the
+missing add-backs generally, and cascade-sourced contributions
+specifically.
+
+**`randomScenario()` extended**, not just the tests: a
+`biasCascadeConcessionalNearThreshold` flag (~40% of runs) stratifies
+client's own salary directly against the Division 293/HELP thresholds
+(a narrower draw than the general `randomIncome()` pool), and forces
+the FIRST cascade branch this generator creates to be a
+`superConcessional` destination targeting client's own eligible row
+when the flag is set and one exists — deliberately shaping ONE branch,
+not the whole cascade, so every later branch/step still draws normally.
+The existing 3,000-run stratified sweep, 300-run gate, and per-threshold
+coverage report all now exercise this combination without a separate
+new test needed for that — they passed unchanged in kind, run count,
+and per-threshold-per-stratum coverage.
+
+**Three dedicated regression tests** (`deterministic.test.js`) isolate
+the fix precisely — a cascade-routed scenario against an otherwise-
+identical cash-routed control: Division 293 fires in the SAME year the
+contribution is made (no lag) where the control shows nothing; HELP/MLS
+accrues a top-up with **zero capital gain at all** (isolating this fix
+from spec 39 Commit 2's own gain-driven case) where the control accrues
+nothing; Division 296 is shown unaffected (already correct) as the
+control proving that claim, not something this commit changed.
+
+Tests: the three scenarios above; conservation checked across each;
+the full 3,000-scenario stratified sweep (now generating this shape
+too) and its threshold-coverage report both green. Full unit suite
+2263/2263, full browser suite 14/14, build green.
+
+Commit: `Fix: assessment ordering misses cascade-sourced contributions`.
+
+Spec 41 Commits 1–4 complete — Commits 5–6 (input density) remain.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

@@ -3474,6 +3474,21 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const couple = rngFn() < 0.4;
     const persons = couple ? ["client", "partner"] : ["client"];
     const years = randInt(2, 4); // ≥2 so at least one non-final year exists
+    // docs/specs/41-dependency-ordering-density.md, Commit 4 — assessment
+    // ran before the surplus cascade sweep, so a cascade-sourced
+    // concessional contribution was invisible to Division 293/HELP/MLS in
+    // the year it was actually made (Division 296 was already immune —
+    // it reads post-sweep balances). Independently drawing "income near
+    // the Division 293/HELP thresholds" (randomIncome()'s own pool) and
+    // "a cascade branch routes to superConcessional" (randomCascadeDestination,
+    // below) would eventually co-occur by chance, but rarely enough that
+    // a regression here could hide for a long sweep — the same "a plain
+    // rand() rarely lands near a boundary" reasoning spec 28's own
+    // generator-boundary-coverage work is built on. Drawn here,
+    // deliberately early, so client's own salary row (below) can react
+    // to it before the cascade destinations (much later in this
+    // function) are decided.
+    const biasCascadeConcessionalNearThreshold = rngFn() < 0.4;
     // Pension phase (spec 20, Commit 1) can only ever fire within
     // superReleaseAge's 60-65 window — unreachable from the ORIGINAL
     // fixed age-40 start over a 2-4 year projection. Stratified, not
@@ -3794,11 +3809,31 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // (see THRESHOLD_REGISTRY's own comment). Retirees only — a young
     // cohort's income is never assessed against Work Bonus at all.
     const workBonusIncome = () => Math.max(0, stratify("agePension.workBonus.exemptAnnual.7800", 7800, { near: 500, span: 20000 }));
+    // docs/specs/41-dependency-ordering-density.md, Commit 4 — paired
+    // with biasCascadeConcessionalNearThreshold (above) and the forced
+    // superConcessional cascade destination (below): stratifies
+    // straight from the four Division 293/HELP thresholds themselves
+    // (a narrower pool than randomIncome()'s full INCOME_THRESHOLDS),
+    // so client's OWN ordinary income lands near one of them — the
+    // cascade-sourced contribution decided later is what actually
+    // tips assessment across it, the exact shape this fix targets.
+    const CASCADE_CONCESSIONAL_THRESHOLDS = [
+      ["tax.div293.250000", 250000], ["tax.help.69528", 69528],
+      ["tax.help.129717", 129717], ["tax.help.cliff.186052", 186052],
+    ];
+    const cascadeConcessionalIncome = () => {
+      const [name, threshold] = pickFair("CASCADE_CONCESSIONAL_THRESHOLDS", CASCADE_CONCESSIONAL_THRESHOLDS);
+      return Math.max(1000, stratify(name, threshold));
+    };
     const income = persons.map((p) => {
       const terminates = rngFn() < 0.3;
       const at = terminates ? randInt(startAge, endAge) : null;
+      const useCascadeConcessionalIncome = p === "client" && biasCascadeConcessionalNearThreshold && !retireeCohort;
       return employmentRow({
-        id: `sal_${p}`, owner: p, amount: retireeCohort && rngFn() < 0.4 ? workBonusIncome() : randomIncome(),
+        id: `sal_${p}`, owner: p,
+        amount: useCascadeConcessionalIncome
+          ? cascadeConcessionalIncome()
+          : retireeCohort && rngFn() < 0.4 ? workBonusIncome() : randomIncome(),
         frequency: pick(["monthly", "annual"]),
         from: { kind: "age", age: startAge }, to: { kind: "age", age: terminates ? at : 120 },
         sgApplies: rngFn() < 0.9,
@@ -4322,7 +4357,23 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // randomScenario()" rule for any commit touching this class of
     // engine change.
     const eligiblePersonalNonDeductibleRows = superContributions.filter((sc) => sc.type === "personalNonDeductible");
+    // docs/specs/41-dependency-ordering-density.md, Commit 4 — the other
+    // half of biasCascadeConcessionalNearThreshold/cascadeConcessionalIncome
+    // (above): forces exactly the FIRST cascade branch this generator
+    // creates to be superConcessional, targeting client's own eligible
+    // row, whenever the bias was drawn AND client actually has one (the
+    // ordinary ~50% chance per contribution-row type still governs
+    // whether client has an eligible row at all — this only forces the
+    // DESTINATION CHOICE, not the row's existence). Consumed once, so
+    // every later branch/step in the same scenario still draws normally
+    // — this deliberately shapes ONE branch, not the whole cascade.
+    let forceSuperConcessionalOnce = biasCascadeConcessionalNearThreshold
+      && eligibleSuperContributions.some((sc) => sc.owner === "client");
     function randomCascadeDestination() {
+      if (forceSuperConcessionalOnce) {
+        forceSuperConcessionalOnce = false;
+        return { type: "superConcessional", targetId: eligibleSuperContributions.find((sc) => sc.owner === "client").id };
+      }
       const options = [];
       if (liabilities.length) options.push("debt");
       if (assets.length) options.push("asset");
@@ -7776,6 +7827,93 @@ describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, C
     // starved to zero, proving the fallthrough actually reached it.
     expect(y0.superDetail.su1.nonConcessional).toBeGreaterThan(20000);
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `CC-to-NCC fallthrough, year ${y}`);
+  });
+
+  // --- Assessment ordering (docs/specs/41-dependency-ordering-density.md,
+  // Commit 4) — assessment used to run before the surplus cascade sweep,
+  // so a cascade-sourced concessional contribution was invisible to
+  // Division 293/HELP/MLS in the year it was actually made. Division
+  // 296 was already immune (it reads post-sweep balances) — included
+  // below as the control proving that, not as something this commit
+  // changed. Each pair of scenarios below is IDENTICAL except where the
+  // FY-end surplus goes (superConcessional vs cash) — isolating the
+  // cascade contribution's own effect on assessment from everything else.
+  function cascadeVsCashState({ income, helpBalance = 0, toSuperConcessional }) {
+    return mkState({
+      endAge: 41,
+      assets: [],
+      plan: { client: { currentAge: 40, helpBalance }, superAccounts: [superAcct()], workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+      cashflows: {
+        income: [employmentRow({ amount: income, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+        expenses: [cf({ assetId: null, amount: 20000 / 12, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+        superContributions: [scRow({ id: "sc1", type: "salarySacrifice", amount: 0, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+      },
+      surplus: { periods: [step([branch({ destination: toSuperConcessional ? { type: "superConcessional", targetId: "sc1" } : { type: "cash" } })])] },
+    });
+  }
+
+  it("Division 293: a cascade-sourced concessional contribution is seen in the SAME year it's made, no lag needed (assessment already runs after the sweep)", () => {
+    const withCascade = { ...cascadeVsCashState({ income: 240000, toSuperConcessional: true }), assumptions: { cpi: 0.025, bracketMode: "indexed" } };
+    const withoutCascade = { ...cascadeVsCashState({ income: 240000, toSuperConcessional: false }), assumptions: { cpi: 0.025, bracketMode: "indexed" } };
+    const outCascade = projectPlan(withCascade);
+    const outControl = projectPlan(withoutCascade);
+    // $240,000 alone (no ordinary concessional contributions in this
+    // fixture) sits under the $250,000 threshold — no cascade, no
+    // Division 293 liability at all (paid year 1, per the deferred-
+    // settlement convention every other Division 293 test here uses).
+    expect(outControl.yearly[1].taxDetail.client.div293).toBe(0);
+    // The surplus swept to superConcessional pushes assessment income
+    // over $250,000 — Division 293 now genuinely fires, in year 0,
+    // settling year 1.
+    expect(outCascade.yearly[1].taxDetail.client.div293).toBeGreaterThan(0);
+    for (let y = 0; y < outCascade.yearly.length - 1; y++) checkYearConservation(outCascade, y, `Division 293 cascade-visibility regression, year ${y}`);
+  });
+
+  it("HELP/MLS: a cascade-sourced concessional contribution accrues a top-up even with NO capital gain at all — the ordering gap, isolated from spec 39 Commit 2's own capital-gain case", () => {
+    const withCascade = { ...cascadeVsCashState({ income: 100000, helpBalance: 50000, toSuperConcessional: true }), assumptions: { cpi: 0.025, bracketMode: "indexed" } };
+    const withoutCascade = { ...cascadeVsCashState({ income: 100000, helpBalance: 50000, toSuperConcessional: false }), assumptions: { cpi: 0.025, bracketMode: "indexed" } };
+    const outCascade = projectPlan(withCascade);
+    const outControl = projectPlan(withoutCascade);
+    // No capital gain anywhere in this fixture (no CGT assets at all) —
+    // the control accrues nothing to top up, same as spec 39 Commit 2's
+    // own "no gain, no top-up" regression test.
+    expect(outControl.yearly[0].taxDetail.client.helpMlsTopUpAccrued).toBe(0);
+    // The cascade-sourced contribution alone — with zero capital gain —
+    // now correctly accrues a top-up: before this commit, the top-up's
+    // own "full" figure never included ANY add-back term (ordinary or
+    // cascade-sourced), so this would have stayed zero too.
+    expect(outCascade.yearly[0].taxDetail.client.helpMlsTopUpAccrued).toBeGreaterThan(0);
+    expect(outCascade.yearly[1].taxDetail.client.helpMlsTopUpSettled)
+      .toBeCloseTo(outCascade.yearly[0].taxDetail.client.helpMlsTopUpAccrued, 6);
+    for (let y = 0; y < outCascade.yearly.length - 1; y++) checkYearConservation(outCascade, y, `HELP/MLS cascade-visibility regression, year ${y}`);
+  });
+
+  it("Division 296 was already immune to this ordering gap — a cascade-sourced concessional contribution was already visible via post-sweep TSB, unchanged by this commit", () => {
+    // A TSB comfortably over the $3m lower threshold, so Division 296
+    // actually has something to tax; the account balance (not a
+    // taxable-income concept) is what Division 296 reads, and a cascade
+    // contribution credits that balance the same way any other credit
+    // does — no code change was needed here, this proves it.
+    const s = {
+      ...mkState({
+        endAge: 41,
+        assets: [],
+        plan: { client: { currentAge: 40 }, superAccounts: [superAcct({ id: "su1", balance: 3200000 })], workingCash: { balance: 0, minimumBalance: 0, ratePct: 0 } },
+        cashflows: {
+          income: [employmentRow({ amount: 100000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+          expenses: [cf({ assetId: null, amount: 20000 / 12, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+          superContributions: [scRow({ id: "sc1", accountId: "su1", type: "salarySacrifice", amount: 0, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+        },
+        surplus: { periods: [step([branch({ destination: { type: "superConcessional", targetId: "sc1" } })])] },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed" },
+    };
+    const out = projectPlan(s);
+    // The cascade credit is genuinely in the closing TSB Division 296
+    // reads — confirms the fixture actually moved money, not a vacuous
+    // pass where the account never changed.
+    expect(out.yearly[0].superDetail.su1.surplusSalarySacrifice).toBeGreaterThan(0);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `Division 296 cascade-visibility control, year ${y}`);
   });
 
   it("a non-concessional branch REJECTED OUTRIGHT (TSB at/above the nil gate) debits cash for NOTHING, and the full surplus reaches the step behind it (docs/specs/39-cleanup-rules-cascade.md, Commit 7 — money bug 7's own shape)", () => {

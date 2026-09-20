@@ -6267,6 +6267,33 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
       agePensionMonthly, heasMonthly, agedCareMonthly, bonusCredits,
     });
+    // Cascade-sourced concessional contributions (docs/specs/41-
+    // dependency-ordering-density.md, Commit 4) — the surplus sweep's
+    // own superConcessional destination credit, read straight off
+    // row.superDetail now that the real pass has run. superOutcome[p]'s
+    // own reportableSuperContributions/lowTaxContributions (set earlier
+    // this same FY, BEFORE the sweep — see ccInputsByPerson's own
+    // comment below) have no visibility into it, which is exactly the
+    // gap Division 293 and HELP/MLS assessment inherit: a cascade-
+    // sourced concessional contribution was invisible to all three in
+    // the year it was actually made. Computed once here, per person,
+    // and reused by the carry-forward correction below (already
+    // reading these same two fields for a sibling ordering bug, spec
+    // 39 Commit 6) and by the Division 293 assessment further down.
+    const cascadeConcessional = { client: 0, partner: 0 };
+    for (const p of persons) {
+      for (const id of superAccountsByOwner[p]) {
+        cascadeConcessional[p] += (row.superDetail[id]?.surplusSalarySacrifice ?? 0)
+          + (row.superDetail[id]?.surplusPersonalDeductible ?? 0);
+      }
+    }
+    // Division 293's own cap-aware low-tax-contributions figure,
+    // corrected the same way the carry-forward ledger below already
+    // is: cascadeConcessional[p] can itself push totalCC past the cap,
+    // so the corrected AMOUNT under cap (not just the raw addition)
+    // is what Division 293's income base needs — defaults to the
+    // pre-sweep value for anyone with no cascade-sourced contribution.
+    const correctedLowTaxContributions = { ...Object.fromEntries(persons.map((p) => [p, superOutcome[p]?.lowTaxContributions ?? 0])) };
     // Carry-forward correction (docs/specs/39-cleanup-rules-cascade.md,
     // Commit 6) — a genuine bug found while stress-testing the surplus
     // cascade's own superConcessional destination against a second
@@ -6286,17 +6313,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     for (const p of persons) {
       const inputs = ccInputsByPerson[p];
       if (!inputs) continue;
-      let surplusConcessional = 0;
-      for (const id of superAccountsByOwner[p]) {
-        surplusConcessional += (row.superDetail[id]?.surplusSalarySacrifice ?? 0)
-          + (row.superDetail[id]?.surplusPersonalDeductible ?? 0);
-      }
-      if (surplusConcessional <= 1e-6) continue;
+      if (cascadeConcessional[p] <= 1e-6) continue;
       const corrected = processConcessionalCap({
-        totalCC: inputs.totalCC + surplusConcessional, baseCap: superRatesY.concessionalCap,
+        totalCC: inputs.totalCC + cascadeConcessional[p], baseCap: superRatesY.concessionalCap,
         carryForward: inputs.carryForwardBefore, tsbPriorJune: inputs.tsbPriorJune, gate: superRatesY.carryForwardTsbGate,
       });
       superCarryForward[p] = corrected.newCarryForward;
+      correctedLowTaxContributions[p] = Math.min(inputs.totalCC + cascadeConcessional[p], corrected.capAvailable);
     }
     // Bring-forward write-back (docs/specs/39-cleanup-rules-cascade.md,
     // Commit 7) — the SAME timing fix as the carry-forward correction
@@ -6517,8 +6540,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     const newPendingUntaxedSuperTax = { client: 0, partner: 0 };
     // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — see the
     // HELP/MLS top-up loop below, after this one, for why this is
-    // captured per person here rather than computed inline.
-    const fullTaxableIncome = { client: 0, partner: 0 };
+    // captured per person here rather than computed inline. Renamed
+    // from fullTaxableIncome (docs/specs/41-dependency-ordering-
+    // density.md, Commit 4): it now holds the full HELP/MLS ASSESSMENT
+    // INCOME base (assessmentIncomeBase("help", ...), same shape as
+    // repaymentIncome[p] above), not bare taxable income — see this
+    // loop's own comment on fullHelpMlsIncome[p], below, for why.
+    const fullHelpMlsIncome = { client: 0, partner: 0 };
     for (const p of persons) {
       // Remaining quarantined carry offsets this year's realised gains.
       if (quarantineCarry[p] > 0 && real[p].netCapitalGain > 0) {
@@ -6572,7 +6600,27 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // the HELP/MLS top-up loop below, which needs BOTH persons' own
       // full figures (MLS compares against the FAMILY total for a
       // couple) and so can't run until this whole loop has finished.
-      fullTaxableIncome[p] = a2.taxableIncome;
+      //
+      // docs/specs/41-dependency-ordering-density.md, Commit 4 — this
+      // used to be bare a2.taxableIncome, silently dropping the exact
+      // add-back terms repaymentIncome[p] (above) already includes
+      // (reportable super contributions, net investment loss,
+      // reportable fringe benefits): the "full" figure this loop is
+      // meant to correct TOWARD was itself missing components the
+      // ORIGINAL same-year figure had, so a person with any of those
+      // in a capital-gain year could see a top-up UNDER-computed, or
+      // zeroed, relative to what they'd already been assessed. Routed
+      // through the same assessmentIncomeBase("help", ...) call
+      // repaymentIncome[p] uses, with cascadeConcessional[p] (above)
+      // folded into reportableSuperContributions the same way Division
+      // 293's own assessment now is — the SAME fix, applied to
+      // whichever of this FY's two assessment passes actually needs it.
+      fullHelpMlsIncome[p] = assessmentIncomeBase("help", {
+        taxableIncome: a2.taxableIncome,
+        reportableSuperContributions: (superOutcome[p]?.reportableSuperContributions ?? 0) + cascadeConcessional[p],
+        netInvestmentLoss: netInvestmentLoss[p],
+        reportableFringeBenefits: reportableFringeBenefits[p],
+      });
       // docs/specs/37-review-remediation.md, Commit 5, finding 1.8 —
       // Division 293 income is taxable income (here, a2.taxableIncome —
       // includes this FY's REAL net capital gain, unlike the
@@ -6585,11 +6633,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // its cash effect to July of FY t+1 via this SAME newPendingDiv293
       // ledger; only the INCOME BASE it's computed from moves later,
       // to where the true figure exists.
+      //
+      // docs/specs/41-dependency-ordering-density.md, Commit 4 —
+      // reportableSuperContributions/lowTaxContributions both add in
+      // cascadeConcessional[p]/correctedLowTaxContributions[p] (above):
+      // this assessment already runs after the real pass, so a
+      // cascade-sourced concessional contribution needs no lag at all
+      // to be seen correctly, only these two already-corrected inputs.
       if (superOutcome[p]) {
         const { tax } = div293Tax({
           taxableIncome: a2.taxableIncome,
-          reportableSuperContributions: superOutcome[p].reportableSuperContributions,
-          lowTaxContributions: superOutcome[p].lowTaxContributions,
+          reportableSuperContributions: superOutcome[p].reportableSuperContributions + cascadeConcessional[p],
+          lowTaxContributions: correctedLowTaxContributions[p],
           reportableFringeBenefits: reportableFringeBenefits[p],
           threshold: superRatesY.div293Threshold,
           rate: superRatesY.div293Rate,
@@ -6634,17 +6689,20 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // docs/specs/39-cleanup-rules-cascade.md, Commit 2 — HELP/MLS were
     // already withheld this FY (spreadTax, above) from repaymentIncome,
     // which excludes this FY's own net capital gain — the identical gap
-    // spec 37 Commit 5 fixed for Division 293. fullTaxableIncome
-    // (captured in the loop above, now complete for both persons) is
-    // the true figure; the INCREMENT it implies over what was already
-    // withheld is what defers to July of FY t+1 — the same one-year lag
-    // CGT/Division 293/296/bond tax/untaxed-super tax all already use.
-    // The whole payment is deliberately NOT deferred the way Division
-    // 293 is — same-year withholding on ordinary income is already
-    // correct; only the gain-driven increment is late.
+    // spec 37 Commit 5 fixed for Division 293. fullHelpMlsIncome
+    // (captured in the loop above, now complete for both persons, and
+    // now the FULL assessment-income-base figure, not bare taxable
+    // income — docs/specs/41-dependency-ordering-density.md, Commit 4)
+    // is the true figure; the INCREMENT it implies over what was
+    // already withheld is what defers to July of FY t+1 — the same
+    // one-year lag CGT/Division 293/296/bond tax/untaxed-super tax all
+    // already use. The whole payment is deliberately NOT deferred the
+    // way Division 293 is — same-year withholding on ordinary income is
+    // already correct; only the gain-driven (and now cascade-
+    // concessional-driven) increment is late.
     const newPendingHelpMlsTopUp = { client: 0, partner: 0 };
     const newPendingHelpTopUpOnly = { client: 0, partner: 0 };
-    const fullFamilyIncome = fullTaxableIncome.client + (state.plan.partner ? fullTaxableIncome.partner : 0);
+    const fullFamilyIncome = fullHelpMlsIncome.client + (state.plan.partner ? fullHelpMlsIncome.partner : 0);
     for (const p of persons) {
       // Uncapped, then differenced against what was already withheld,
       // THEN capped at the loan's own remaining balance (helpBal[p] is
@@ -6655,14 +6713,14 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // different points, the same "two independently-capped figures
       // never reconciling" bug class this project's own conservation
       // invariant exists to catch.
-      const helpFullDueUncapped = helpRepaymentAmount(fullTaxableIncome[p], helpRatesY);
+      const helpFullDueUncapped = helpRepaymentAmount(fullHelpMlsIncome[p], helpRatesY);
       const helpTopUpRequested = Math.max(0, helpFullDueUncapped - helpDue[p]);
       const helpTopUp = Math.min(helpTopUpRequested, Math.max(0, helpBal[p]));
       // MLS is a straight surcharge, not a loan — no balance to cap
       // against, just the incremental amount.
       const mlsFullDue = mlsSurchargeAmount({
-        ownIncome: fullTaxableIncome[p],
-        comparisonIncome: isFamily ? fullFamilyIncome : fullTaxableIncome[p],
+        ownIncome: fullHelpMlsIncome[p],
+        comparisonIncome: isFamily ? fullFamilyIncome : fullHelpMlsIncome[p],
         hasCover: (p === "partner" ? state.plan.partner : state.plan.client)?.privateHospitalCover !== false,
         isFamily, dependentChildren, rates: mlsRatesY,
       });
