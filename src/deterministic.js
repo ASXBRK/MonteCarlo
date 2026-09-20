@@ -5240,6 +5240,13 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
     // this year's crediting) for Division 296's "higher of opening or
     // closing TSB" rule below, once the real pass has produced closing.
     const tsbOpening = { client: 0, partner: 0 };
+    // Carry-forward correction inputs (docs/specs/39-cleanup-rules-
+    // cascade.md, Commit 6) — see the correction block below, right
+    // after the real pass returns, for why this is needed: captured
+    // here so that later block can redo processConcessionalCap with
+    // the FULL year total, not just what was known before the surplus
+    // sweep ran.
+    const ccInputsByPerson = { client: null, partner: null };
     for (const p of persons) {
       const tsbPriorJune = totalSuperBalance(p);
       tsbOpening[p] = tsbPriorJune;
@@ -5311,6 +5318,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       }
 
       const totalCC = otherConcessional + fillTotal;
+      // Captured BEFORE superCarryForward[p] is overwritten below — see
+      // the post-sweep correction block, right after the real pass
+      // returns, for why: this year's carry-forward ledger update is
+      // about to be computed from otherConcessional+fillTotal alone,
+      // which doesn't yet know about a surplus-cascade superConcessional
+      // branch that fills MORE of this same cap later in the SAME
+      // year's monthly loop (the FY-end sweep, which runs after this
+      // per-person loop). Redone once that's known.
+      ccInputsByPerson[p] = { totalCC, carryForwardBefore: superCarryForward[p], tsbPriorJune };
       const ccResult = processConcessionalCap({
         totalCC, baseCap: superRatesY.concessionalCap, carryForward: superCarryForward[p],
         tsbPriorJune, gate: superRatesY.carryForwardTsbGate,
@@ -6120,6 +6136,37 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       ongoingFromSuperRequested, ongoingFromSuperShortfall, upfrontFromSuperShortfall,
       agePensionMonthly, heasMonthly, agedCareMonthly, bonusCredits,
     });
+    // Carry-forward correction (docs/specs/39-cleanup-rules-cascade.md,
+    // Commit 6) — a genuine bug found while stress-testing the surplus
+    // cascade's own superConcessional destination against a second
+    // same-cap claimant: this year's carry-forward ledger (set above,
+    // BEFORE the FY-end sweep ran) was computed from otherConcessional+
+    // fillTotal alone, with no visibility into a surplus-cascade branch
+    // that fills MORE of the SAME concessional cap later in this same
+    // year's monthly loop. The sweep's own credit is already correctly
+    // CAPPED at the time (concessionalHeadroomAfterFills, live-
+    // decremented across sibling branches) — the bug was never a
+    // literal money leak, only the ledger NEXT year inherits: it
+    // believed this year's full headroom went unused and carried it
+    // forward, so a member could re-use the SAME dollar of cap twice —
+    // once via the surplus sweep this year, again via carry-forward
+    // next year. Redone here with the TRUE total (now that the sweep
+    // has run), overwriting the tentative value set before it.
+    for (const p of persons) {
+      const inputs = ccInputsByPerson[p];
+      if (!inputs) continue;
+      let surplusConcessional = 0;
+      for (const id of superAccountsByOwner[p]) {
+        surplusConcessional += (row.superDetail[id]?.surplusSalarySacrifice ?? 0)
+          + (row.superDetail[id]?.surplusPersonalDeductible ?? 0);
+      }
+      if (surplusConcessional <= 1e-6) continue;
+      const corrected = processConcessionalCap({
+        totalCC: inputs.totalCC + surplusConcessional, baseCap: superRatesY.concessionalCap,
+        carryForward: inputs.carryForwardBefore, tsbPriorJune: inputs.tsbPriorJune, gate: superRatesY.carryForwardTsbGate,
+      });
+      superCarryForward[p] = corrected.newCarryForward;
+    }
     // Defined benefit pensions (spec 26, Commit 2) — report the FY's
     // income-cap excess on every one of this owner's DB rows,
     // proportioned by each row's own share of the person's total gross

@@ -3170,12 +3170,33 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   }
   let rngFn = Math.random;
   // fairBags (pickFair's own coverage-guarantee state, below) is reset
-  // on every reseed — see reseed's own call site inside randomScenario
-  // for why a single call must be a pure function of its own seed alone,
-  // not of how many earlier calls happened to share the module-level bag.
-  function reseed(seed) {
+  // ONLY when reseed is given an EXPLICIT external seed — see reseed's
+  // own call site inside randomScenario for why. docs/specs/39-cleanup-
+  // rules-cascade.md, Commit 6 — this used to reset unconditionally,
+  // on EVERY randomScenario() call including the sweep's own internal,
+  // unseeded ones, which silently reintroduced the exact Poisson-
+  // variance flake spec 28 built fairBags to eliminate: a fresh,
+  // just-created bag for a nested/gated threshold (one only ever
+  // stratified when a low-probability outer gate ALSO rolls true, e.g.
+  // AGE_THRESHOLDS' 25%-gated cohort) gets drawn from AT MOST once per
+  // scenario, so "reshuffle on every call" made that draw a plain
+  // i.i.d. pick again in every way that mattered — confirmed directly:
+  // repeated runs of the coverage-report test below turned up a
+  // DIFFERENT zeroed (threshold, stratum) cell each time after this
+  // regression, exactly the symptom its own comment already described
+  // as spec 28's original failure mode. Fixed by resetting fairBags
+  // only for an EXPLICIT seed (a deliberate single-scenario
+  // reproduction, where purity — independent of prior call history —
+  // is the whole point); an UNSEEDED call (every ordinary sweep
+  // iteration) lets fairBags carry over between calls, restoring the
+  // cross-call round-robin guarantee spec 28 actually relies on. This
+  // does not weaken reproducibility: nobody replays "the sweep's own
+  // 743rd unseeded call" in isolation — they replay ITS OWN seed,
+  // randomScenario(1928374650), which is exactly the explicit-seed
+  // case that still gets a full, seed-pure reset.
+  function reseed(seed, { resetFairBags = true } = {}) {
     rngFn = mulberry32(seed >>> 0);
-    fairBags.clear();
+    if (resetFairBags) fairBags.clear();
   }
   const rand = (min, max) => min + rngFn() * (max - min);
   const randInt = (min, max) => Math.floor(rand(min, max + 1));
@@ -3446,8 +3467,9 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   // never of how many earlier randomScenario() calls happened to run
   // first in the same sweep.
   function randomScenario(seed) {
-    const actualSeed = seed != null ? (seed >>> 0) : ((Math.random() * 0xffffffff) >>> 0);
-    reseed(actualSeed);
+    const explicitSeed = seed != null;
+    const actualSeed = explicitSeed ? (seed >>> 0) : ((Math.random() * 0xffffffff) >>> 0);
+    reseed(actualSeed, { resetFairBags: explicitSeed });
     randomScenario.lastSeed = actualSeed;
     const couple = rngFn() < 0.4;
     const persons = couple ? ["client", "partner"] : ["client"];
@@ -7629,6 +7651,67 @@ describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, C
     // Year 1: the $8,000 draw re-opens the loan — "repaid" is OPEN
     // again, so this year's surplus goes to debt first, not the asset.
     expect(out.yearly[1].liabilities.lb1.surplusRepayment).toBeGreaterThan(0);
+  });
+
+  it("two SIBLING branches (a split) targeting the SAME concessional cap never together credit more than the cap allows, and the REJECTED share is never debited from cash (docs/specs/39-cleanup-rules-cascade.md, Commit 6 — 'Bug 5'/'Bug 7' shape)", () => {
+    // Bug 5 (this project's own history, cited by the spec): multiple
+    // claimants on one shared resource, each checking availability in
+    // isolation, found twice in different features. Bug 7: a rejected
+    // contribution debited cash for the FULL requested amount while
+    // crediting only the accepted portion. A split step is the one
+    // native-cascade shape that can put two claimants on the SAME
+    // concessional headroom in the SAME sweep — deliberately forced
+    // here (both branches share one targetId) rather than left to the
+    // random generator's own chance of a collision.
+    const s = {
+      ...mkState({
+        endAge: 41,
+        assets: [],
+        plan: { superAccounts: [superAcct()] },
+        cashflows: {
+          income: [employmentRow({ amount: 150000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
+          superContributions: [scRow({ type: "salarySacrifice", amount: 2000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
+        },
+        // Native cascade: ONE step, a 50/50 split, BOTH branches
+        // targeting the SAME salarySacrifice row (concessional cap
+        // 2026-27 ~$32,500; ~$30,500 of headroom left after the
+        // ordinary $2,000 contribution above) — together they request
+        // far more than that headroom.
+        surplus: { periods: [{
+          id: "cs1",
+          branches: [
+            { id: "b1", destination: { type: "superConcessional", targetId: "sc1" }, pct: 50, conditions: [] },
+            { id: "b2", destination: { type: "superConcessional", targetId: "sc1" }, pct: 50, conditions: [] },
+          ],
+        }] },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed" },
+    };
+    const out = projectPlan(s);
+    for (const row of out.yearly) {
+      // The two branches together — plus the ordinary $2,000
+      // contribution — never credit more than the cap actually allows
+      // that FY (no carry-forward in this scenario, so cap alone is
+      // the ceiling): the live-decrement pattern
+      // (concessionalHeadroomAfterFills) must hold even across TWO
+      // branches sharing the SAME row in the SAME sweep, not just
+      // across separate mechanisms (adviser fees/Division 293/296/
+      // FHSSS) the way reserveFromSuper already guarantees for a
+      // shared super ACCOUNT.
+      const cap = row.superCapUsage?.client?.cap ?? Infinity;
+      expect(row.superDetail.su1.salarySacrifice).toBeLessThanOrEqual(cap + 1e-6);
+      // Cash is debited ONLY for what was actually accepted — the
+      // rejected remainder falls through to the implicit cash
+      // catch-all (surplusAccumulated), never vanishing AND never
+      // double-debited.
+      expect(row.surplusAccumulated).toBeGreaterThan(0);
+    }
+    // Genuine money moved into super via the surplus branches (not a
+    // vacuous pass where the cap was already exhausted by the ordinary
+    // contribution alone).
+    const totalSurplusSacrifice = out.yearly.reduce((s2, r) => s2 + (r.superDetail?.su1?.surplusSalarySacrifice ?? 0), 0);
+    expect(totalSurplusSacrifice).toBeGreaterThan(20000);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `split-branch shared-cap regression, year ${y}`);
   });
 });
 
