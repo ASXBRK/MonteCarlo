@@ -5411,8 +5411,45 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // figure anyway is the same class of money-creation bug the
         // conservation invariant exists to catch (found via this exact
         // check — see conservationCheck.js).
+        //
+        // docs/specs/39-cleanup-rules-cascade.md, Commit 1 — reserveFromSuper
+        // alone isn't enough here: it caps against superBal as it
+        // stands RIGHT NOW (before this FY's own growth), but this
+        // release's own real debit (withdrawFromSuper, in the block
+        // below) doesn't fire until the property-purchase event later
+        // in this SAME month's processing — AFTER this month's super
+        // growth has already been applied (the monthly loop's own
+        // "grow, then move money" order). Adviser fees and Division
+        // 293/296 don't have this gap (their own real debits happen
+        // BEFORE growth, in the same month) — FHSSS is the one claimant
+        // whose settlement-side figure is decided once, for both passes,
+        // then actually paid AFTER an intervening growth step. A
+        // negative real monthly rate (this project's own random-
+        // scenario generator draws real growth as low as -2% p.a. for a
+        // super account) shrinks the account between "decided" and
+        // "paid", so the later withdrawFromSuper call pays LESS than
+        // what was already credited to settlement — the two sides never
+        // reconcile, the exact "FHSSS release doesn't net to zero"
+        // failure the conservation sweep has caught twice. Fixed by
+        // projecting this month's own growth onto the remaining
+        // headroom BEFORE reserving, so the reservation itself never
+        // promises more than growth will leave behind. Positive growth
+        // is deliberately NOT credited back the same way (the request is
+        // only ever capped tighter, never loosened) — a real account
+        // that grows this month has genuine extra headroom by
+        // withdrawal time, but claiming it here would require BOTH
+        // passes to agree on a figure that depends on a growth
+        // trajectory this reservation has no need to predict when it
+        // only ever makes the number smaller and safer.
         const accountId = superAccountsByOwner[per]?.[0];
-        const claimed = reserveFromSuper(accountId, amounts.grossRelease);
+        const releaseSm = superMeta[accountId];
+        const releaseMonthlyRate = releaseSm
+          ? (releaseSm.glideYearly ? releaseSm.glideYearly[y].rate : releaseSm.rate) + shockFor(accountId, pm.purchaseMonth)
+          : 0;
+        const alreadyReserved = superReservedThisYear[accountId] ?? 0;
+        const preGrowthRemaining = Math.max(0, (superBal[accountId] ?? 0) - alreadyReserved);
+        const postGrowthCeiling = Math.max(0, preGrowthRemaining * (1 + releaseMonthlyRate));
+        const claimed = reserveFromSuper(accountId, Math.min(amounts.grossRelease, postGrowthCeiling));
         const scale = amounts.grossRelease > 0 ? claimed / amounts.grossRelease : 1;
         const capped = scale >= 1 ? amounts : {
           taxableComponent: amounts.taxableComponent * scale,

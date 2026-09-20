@@ -5008,6 +5008,95 @@ declined for the reasons above.
 
 ---
 
+### Cleanup, rule gaps, and the surplus cascade, Commit 1: the FHSSS conservation invariant flake (spec 39)
+
+**The guard's own hole, closed first, per instruction.** Every call in
+`deterministic.test.js`'s "Conservation invariant" describe block —
+`rand`/`randInt`/`pick`/`shuffled`/`stratify`/`stratifyInt` and every
+inline `Math.random()` inside `randomScenario()` itself (~98 call
+sites) — read the real, unseeded `Math.random()`. A failing sweep run
+could be described after the fact but never replayed, which is
+precisely why "FHSSS release doesn't net to zero" sat unresolved: it
+fired twice during spec 37 work, non-reproducible on retry both times,
+and was deferred as out of scope.
+
+Fixed with a small seeded PRNG (`mulberry32`) substituted in everywhere
+`Math.random()` used to be read. `randomScenario(seed)` now accepts an
+optional seed — omitted, it draws one (via the one remaining real
+`Math.random()` call, choosing WHICH deterministic run to have, not
+part of the run itself) — and exposes whichever seed it just used via
+`randomScenario.lastSeed`. Every sweep loop's own failure message now
+reads `scenario N (seed 1928374650 — reproduce with
+randomScenario(1928374650))` instead of just `scenario N`. Reseeding
+also resets `pickFair`'s own shuffle state (`fairBags`), a genuine,
+disclosed behaviour change from spec 28's own cross-call coverage
+design: `randomScenario(seed)` is now a PURE function of its seed
+alone, independent of how many other calls happened first in the same
+sweep — necessary for reproducibility, and confirmed not to weaken
+per-threshold stratum coverage (the existing "produces every stratum"
+test and its own coverage-report companion still pass; each call still
+visits every `pickFair` key at least once via its own fresh shuffle).
+
+**The bug itself, once reproducible: the RELEASE leg, specifically its
+own timing against the account's own growth.** FHSSS release always
+fires at the property's own purchase month, which is always the FIRST
+month of its plan year. The account's own growth for THAT SAME month is
+applied EARLIER in the monthly loop than the release's own real-pass
+debit (CLAUDE.md's own locked "grow assets, then move money" order,
+confirmed directly in `deterministic.js`: the super-growth loop and the
+property-purchase/FHSSS block are ~400 lines apart, growth first). The
+release AMOUNT is decided once, "before either pass" (so the
+measure and real pass agree on the settlement-side figure — the same
+architecture the already-fixed "requesting more than the account holds"
+bug this exact code block's own header documents), against the balance
+as it stood BEFORE that month's growth. A NEGATIVE real monthly rate
+(this project's own generator draws real super growth as low as -2%
+p.a. — `randomAllocation`'s own `growthPct: rand(-2, 8)`) shrinks the
+account between "decided" and "paid": the settlement side still credits
+the full decided figure, but `withdrawFromSuper` — called later, after
+that growth — pays less. Confirmed by direct reduction (not by
+re-running the sweep and waiting): a super account seeded near-empty,
+FHSSS-eligible contributions capped at the $15,000 annual cap, a
+-60%-real-growth allocation, and a purchase one plan year later
+reproduces a $395.09 gap deterministically, every time, from a fixed
+seed. Verified the OTHER three same-year claimants sharing
+`reserveFromSuper`'s ledger (adviser fees, Division 293/296) do NOT
+share this bug — both debit BEFORE growth in the same month, matching
+their own reservation. Pension commencement (a fifth claimant) doesn't
+either, for a different reason: unlike FHSSS it has no "decided once,
+used in both passes" duplicate computation to desynchronise — it reads
+the live, already-post-growth balance once, in the real pass only, and
+uses that same number everywhere.
+
+**Fix**: project the release month's own growth onto the remaining
+per-account headroom BEFORE reserving, so the reservation itself never
+promises more than growth will leave behind — `reserveFromSuper` itself
+is unchanged; the FHSSS block now caps its own *request* against
+`preGrowthRemaining × (1 + monthlyRate)` first. Positive growth is
+deliberately not credited back the same way (the request is only ever
+capped tighter, never loosened) — safe, and avoids needing the measure
+pass to predict a growth-dependent figure it has no other need to know.
+
+Not a new money flow (the transfer's own two sides were already both
+named in `conservationCheck.js`; this fixes their agreement, not their
+existence) — no `randomScenario()`/`conservationCheck.js` extension
+required under CLAUDE.md's own gate for that.
+
+Tests: 5 new (`randomScenario(seed)` reproducibility — same seed twice
+consecutively, same seed with unrelated calls interleaved first,
+different seeds differ, `.lastSeed` reports correctly, and
+`projectPlan()` output itself — not just the raw state — reproduces
+exactly) + 1 new (the reduced FHSSS scenario itself, asserting the
+release's two sides match exactly AND that conservation holds across
+the whole projection; confirmed against the pre-fix code via `git
+stash` that it fails with the exact $395.09 gap the hand reduction
+found, not a vacuous pass). Full suite 2225/2225, build green. The
+stratified sweep (3000 scenarios) re-run fresh five additional times
+after the fix, zero failures (15,000 further scenarios beyond the
+suite's own single run).
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

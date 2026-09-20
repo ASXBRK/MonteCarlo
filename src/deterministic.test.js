@@ -3143,9 +3143,43 @@ describe("toConcessionalCap contribution cash flow (engine-correctness fix)", ()
 // check rather than a second, driftable copy of it — this describe
 // block only supplies the random-scenario generator.
 describe("Conservation invariant (engine-correctness fix, generalized)", () => {
-  const rand = (min, max) => min + Math.random() * (max - min);
+  // Seeded generation (docs/specs/39-cleanup-rules-cascade.md, Commit 1)
+  // — "an unreproducible failure in this guard is a hole in the guard."
+  // Before this, every rngFn() call below was genuinely
+  // unseeded: a failing sweep run could never be replayed, only
+  // described after the fact — which is exactly how "FHSSS release
+  // doesn't net to zero" sat unresolved for months (fired twice during
+  // spec 37 work, non-reproducible on retry both times). mulberry32 is
+  // a small, fast, deterministic PRNG; every call in this whole
+  // describe block that used to read rngFn() now reads rngFn()
+  // instead, which reseed(seed) below points at a fresh mulberry32
+  // generator. randomScenario() reseeds itself once per call (see its
+  // own header) and exposes the seed it just used via
+  // randomScenario.lastSeed — the ONE thing every sweep loop below
+  // needs to turn "scenario 743 failed" into "scenario 743 (seed
+  // 1928374650) failed", a seed that reproduces the EXACT same
+  // scenario on its own: `randomScenario(1928374650)`.
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  let rngFn = Math.random;
+  // fairBags (pickFair's own coverage-guarantee state, below) is reset
+  // on every reseed — see reseed's own call site inside randomScenario
+  // for why a single call must be a pure function of its own seed alone,
+  // not of how many earlier calls happened to share the module-level bag.
+  function reseed(seed) {
+    rngFn = mulberry32(seed >>> 0);
+    fairBags.clear();
+  }
+  const rand = (min, max) => min + rngFn() * (max - min);
   const randInt = (min, max) => Math.floor(rand(min, max + 1));
-  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const pick = (arr) => arr[Math.floor(rngFn() * arr.length)];
 
   // --- Guaranteed-coverage stratified sampling (spec 28 hardening) ----------
   //
@@ -3182,7 +3216,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
   function shuffled(arr) {
     const a = arr.slice();
     for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = Math.floor(rngFn() * (i + 1));
       [a[i], a[j]] = [a[j], a[i]];
     }
     return a;
@@ -3357,13 +3391,13 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     ["agePension.income.freeAreaSingle.5876", 5876 / 0.0125],
   ];
   const randomAsset = (id, i = 1) => {
-    const balance = i === 0 && Math.random() < 0.4
+    const balance = i === 0 && rngFn() < 0.4
       ? Math.max(0, stratify(...pickFair("ASSET_BALANCE_THRESHOLDS", ASSET_BALANCE_THRESHOLDS)))
       : rand(0, 200000);
-    const cgtAsset = Math.random() < 0.5;
+    const cgtAsset = rngFn() < 0.5;
     return mkAsset({
       id, balance, cgtAsset,
-      distributions: Math.random() < 0.5 ? "reinvest" : "cash",
+      distributions: rngFn() < 0.5 ? "reinvest" : "cash",
       allocation: randomAllocation(),
       icrPct: 0,
       costBase: cgtAsset ? balance * rand(0.3, 1) : null,
@@ -3373,8 +3407,8 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // like any other: 30% of assets excluded, so both the "eligible"
       // and "skipped, unfunded shortfall or fell to the next asset in
       // the order" paths get exercised.
-      excludeFromRetirement: Math.random() < 0.3,
-      excludeFromRetirementReason: Math.random() < 0.5 ? "Earmarked for the kids" : "",
+      excludeFromRetirement: rngFn() < 0.3,
+      excludeFromRetirementReason: rngFn() < 0.5 ? "Earmarked for the kids" : "",
     });
   };
 
@@ -3400,8 +3434,22 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     return Math.max(1000, stratify(name, threshold));
   };
 
-  function randomScenario() {
-    const couple = Math.random() < 0.4;
+  // docs/specs/39-cleanup-rules-cascade.md, Commit 1 — seed is optional;
+  // omitted (the normal sweep-loop case), a fresh one is drawn from the
+  // REAL Math.random() (this one call is fine to stay unseeded — it's
+  // choosing which deterministic run to have, not part of the run
+  // itself) and exposed via randomScenario.lastSeed so a sweep can log
+  // it against whatever scenario index just failed. Passed explicitly,
+  // the SAME seed always reproduces the SAME scenario byte-for-byte —
+  // reseed() resets both the PRNG and pickFair's own shuffle state
+  // (fairBags), so a single call is a pure function of its seed alone,
+  // never of how many earlier randomScenario() calls happened to run
+  // first in the same sweep.
+  function randomScenario(seed) {
+    const actualSeed = seed != null ? (seed >>> 0) : ((Math.random() * 0xffffffff) >>> 0);
+    reseed(actualSeed);
+    randomScenario.lastSeed = actualSeed;
+    const couple = rngFn() < 0.4;
     const persons = couple ? ["client", "partner"] : ["client"];
     const years = randInt(2, 4); // ≥2 so at least one non-final year exists
     // Pension phase (spec 20, Commit 1) can only ever fire within
@@ -3429,7 +3477,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       ["pension.minDrawdown.65", 65], ["pension.minDrawdown.75", 75], ["pension.minDrawdown.80", 80],
       ["pension.minDrawdown.85", 85], ["pension.minDrawdown.90", 90], ["pension.minDrawdown.95", 95],
     ];
-    const boundaryAgeCohort = Math.random() < 0.25;
+    const boundaryAgeCohort = rngFn() < 0.25;
     const [boundaryAgeName, boundaryAgeThreshold] = pickFair("AGE_THRESHOLDS", AGE_THRESHOLDS);
     // Pension phase (spec 20, Commit 1) can only ever fire within
     // superReleaseAge's 60-65 window — unreachable from the ORIGINAL
@@ -3442,7 +3490,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // for) — so the ORIGINAL "byte-for-byte age-40" comment below no
     // longer holds for quite as large a share of runs as before spec
     // 28, a disclosed trade-off for the extra boundary coverage.
-    const olderCohort = Math.random() < 0.35 || boundaryAgeCohort;
+    const olderCohort = rngFn() < 0.35 || boundaryAgeCohort;
     // Age pension (spec 21a) can only ever fire once a person reaches
     // age pension age (67) — unreachable from EITHER the original
     // age-40 start or the pension-phase olderCohort (max 63+4-1=66)
@@ -3453,7 +3501,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // combine with olderCohort) the pension-phase-super-always-assessed
     // interaction the spec calls out as the case that "must be exactly
     // right".
-    const retireeCohort = Math.random() < 0.2;
+    const retireeCohort = rngFn() < 0.2;
     const startAge = retireeCohort ? randInt(65, 70)
       : boundaryAgeCohort ? Math.max(18, stratifyInt(boundaryAgeName, boundaryAgeThreshold, { near: 2, span: 6 }))
       : olderCohort ? randInt(56, 63)
@@ -3481,7 +3529,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       ["tax.div296.3000000", 3000000], ["tax.div296.10000000", 10000000],
     ];
     const randomSuperBalance = () => {
-      const r = Math.random();
+      const r = rngFn();
       if (r < 0.3) return 0;
       if (r < 0.6) return rand(0, 200000);
       const [name, threshold] = pickFair("SUPER_BALANCE_THRESHOLDS", SUPER_BALANCE_THRESHOLDS);
@@ -3493,7 +3541,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // Insurance premiums inside super (spec 19 Commit 7) — sometimes
       // active, sometimes larger than a low starting balance can sustain
       // (exercising withdrawFromSuper's own floor-at-zero convention).
-      insurancePremium: Math.random() < 0.5
+      insurancePremium: rngFn() < 0.5
         ? { amount: rand(200, 3000), indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: rand(0, 5) }
         : { amount: 0, indexBasis: "cpi", indexExtraPct: 3 },
       // Contribution splitting (spec 19 Commit 6 completion) — only
@@ -3501,19 +3549,19 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // a single client, mirrored by hand since this raw state bypasses
       // clamping); 40% chance per account, at a random % up to the
       // legal 85% ceiling.
-      contributionSplitPct: couple && Math.random() < 0.4 ? rand(1, 85) : 0,
+      contributionSplitPct: couple && rngFn() < 0.4 ? rand(1, 85) : 0,
       // Untaxed superannuation elements (spec 26, Commit 1) — public-
       // sector schemes (West State Super and similar): no contributions/
       // earnings tax inside the fund, tax instead on benefit — a 30%
       // chance per account so both the ordinary "taxed" path (the
       // regression gate) and the new untaxed mechanics both get
       // reliably exercised across the sweep.
-      taxedStatus: Math.random() < 0.3 ? "untaxed" : "taxed",
+      taxedStatus: rngFn() < 0.3 ? "untaxed" : "taxed",
       // Retirement exclusions (docs/specs/35-retirement-output-view.md,
       // Commit 3) — a pension sourced from an excluded account is
       // dropped from the shared income-driven-drawdown target (below);
       // 30% of accounts excluded so that interaction gets real coverage.
-      excludeFromRetirement: Math.random() < 0.3,
+      excludeFromRetirement: rngFn() < 0.3,
       excludeFromRetirementReason: "",
     }));
     // Rollovers (spec 26, Commit 1) — a second account per person, 30%
@@ -3526,16 +3574,16 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // so the sweep occasionally exercises the 47%-excess branch too).
     const superRollovers = [];
     for (const p of persons) {
-      if (Math.random() >= 0.3) continue;
+      if (rngFn() >= 0.3) continue;
       const secondId = `su2_${p}`;
       superAccounts.push(superAcct({
         id: secondId, owner: p, balance: pick([0, rand(0, 200000), rand(1500000, 2200000)]),
         allocation: randomAllocation(),
-        taxedStatus: Math.random() < 0.5 ? "untaxed" : "taxed",
+        taxedStatus: rngFn() < 0.5 ? "untaxed" : "taxed",
       }));
-      if (Math.random() < 0.5) {
+      if (rngFn() < 0.5) {
         const first = superAccounts.find((sa) => sa.owner === p && sa.id !== secondId);
-        const [fromAccountId, toAccountId] = Math.random() < 0.5 ? [first.id, secondId] : [secondId, first.id];
+        const [fromAccountId, toAccountId] = rngFn() < 0.5 ? [first.id, secondId] : [secondId, first.id];
         superRollovers.push({
           id: `sr_${p}`, owner: p, fromAccountId, toAccountId,
           amount: pick([null, rand(1000, 100000)]),
@@ -3556,7 +3604,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const pensions = [];
     if (olderCohort) {
       for (const p of persons) {
-        if (Math.random() < 0.5) {
+        if (rngFn() < 0.5) {
           const acct = superAccounts.find((sa) => sa.owner === p);
           const type = pick(["abp", "ttr"]);
           // Drawdown (spec 20, Commit 2) — "maximum" only ever picked
@@ -3589,12 +3637,12 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
             // around the general TBC ($2.1m, incl. a member at exactly
             // 100% used) when the source balance can reach it, on top
             // of the pre-existing null/partial draw.
-            commenceAmount: Math.random() < 0.3
+            commenceAmount: rngFn() < 0.3
               ? null
-              : acct.balance > 100000 && Math.random() < 0.3
+              : acct.balance > 100000 && rngFn() < 0.3
               ? Math.min(acct.balance, Math.max(0, stratify("pension.tbc.2100000", 2100000, { near: 50000, span: 1500000 })))
               : rand(0, acct.balance),
-            reversionary: Math.random() < 0.3,
+            reversionary: rngFn() < 0.3,
             taxFreeProportion: null,
             allocation: randomAllocation(),
             icrPct: 0,
@@ -3613,7 +3661,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
             // left) alongside the ordinary partial-then-continues path.
             commutations: Array.from({ length: randInt(0, 2) }, (_, i) => ({
               id: `cm_${p}_${i}`, label: `Commutation ${i}`,
-              amount: Math.random() < 0.5 ? null : rand(1000, 40000),
+              amount: rngFn() < 0.5 ? null : rand(1000, 40000),
               at: { kind: "age", age: randInt(startAge, endAge) },
               destination: pick(["cash", "super"]),
             })),
@@ -3637,7 +3685,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const definedBenefits = [];
     if (olderCohort) {
       for (const p of persons) {
-        if (Math.random() < 0.4) {
+        if (rngFn() < 0.4) {
           const taxFreeProportion = rand(0, 40);
           definedBenefits.push({
             id: `db_${p}`, name: `DB ${p}`, owner: p,
@@ -3674,7 +3722,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       ["agedCare.ncccLifetimeCap.137917", 137917.01],
     ];
     const agedCare = [];
-    if (olderCohort && Math.random() < 0.35) {
+    if (olderCohort && rngFn() < 0.35) {
       const accommodationPrice = rand(200000, 800000);
       const [name, threshold] = pickFair("AGED_CARE_ASSET_THRESHOLDS", AGED_CARE_ASSET_THRESHOLDS);
       const radAmount = Math.min(accommodationPrice, Math.max(0, stratify(name, threshold, { near: threshold * 0.02, span: threshold })));
@@ -3686,8 +3734,8 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         paymentMethod: pick(["rad", "dap", "combination"]),
         radAmount,
         extraServiceFeesAnnual: pick([0, rand(1000, 10000)]),
-        formerHomeOccupiedByProtectedPerson: Math.random() < 0.3,
-        optedIntoNewRegime: Math.random() < 0.3,
+        formerHomeOccupiedByProtectedPerson: rngFn() < 0.3,
+        optedIntoNewRegime: rngFn() < 0.3,
       });
     }
 
@@ -3725,13 +3773,13 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // cohort's income is never assessed against Work Bonus at all.
     const workBonusIncome = () => Math.max(0, stratify("agePension.workBonus.exemptAnnual.7800", 7800, { near: 500, span: 20000 }));
     const income = persons.map((p) => {
-      const terminates = Math.random() < 0.3;
+      const terminates = rngFn() < 0.3;
       const at = terminates ? randInt(startAge, endAge) : null;
       return employmentRow({
-        id: `sal_${p}`, owner: p, amount: retireeCohort && Math.random() < 0.4 ? workBonusIncome() : randomIncome(),
+        id: `sal_${p}`, owner: p, amount: retireeCohort && rngFn() < 0.4 ? workBonusIncome() : randomIncome(),
         frequency: pick(["monthly", "annual"]),
         from: { kind: "age", age: startAge }, to: { kind: "age", age: terminates ? at : 120 },
-        sgApplies: Math.random() < 0.9,
+        sgApplies: rngFn() < 0.9,
         termination: terminates ? {
           enabled: true, at: { kind: "age", age: at },
           completedYearsOfService: randInt(0, 25),
@@ -3743,7 +3791,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         // Commit 3) — display-side only (retirementAnalytics.js's own
         // income aggregation), but generated here anyway so the flag
         // itself is never a value this generator can't reach.
-        excludeFromRetirement: Math.random() < 0.3,
+        excludeFromRetirement: rngFn() < 0.3,
         excludeFromRetirementReason: "",
       });
     });
@@ -3792,14 +3840,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // sweeps too.
     const novatedLeases = [];
     for (const p of persons) {
-      if (Math.random() < 0.4) {
+      if (rngFn() < 0.4) {
         const termYears = randInt(2, 6);
         novatedLeases.push({
           id: `nl_${p}`, name: `Lease ${p}`, owner: p,
           baseValue: rand(20000, 80000),
           startAt: { kind: "age", age: startAge }, termYears,
           preTaxAnnual: rand(0, 8000), postTaxAnnual: rand(0, 5000),
-          runningCostsAnnual: rand(0, 4000), runningCostsPackaged: Math.random() < 0.5,
+          runningCostsAnnual: rand(0, 4000), runningCostsPackaged: rngFn() < 0.5,
           residualValue: rand(0, 20000),
           residualDestination: pick(["payout", "refinance"]),
         });
@@ -3818,7 +3866,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // toggle with nothing to release" get exercised too.
     const superContributions = [];
     for (const p of persons) {
-      if (Math.random() < 0.5) {
+      if (rngFn() < 0.5) {
         superContributions.push(scRow({
           id: `sc_amt_${p}`, owner: p, accountId: `su_${p}`,
           type: pick(["salarySacrifice", "personalDeductible"]),
@@ -3827,15 +3875,15 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           // now-often-six-figure stratified income, a contribution
           // stratified around the $32,500 cap itself exercises the
           // headroom boundary directly, not just an arbitrary $1-15k.
-          amount: Math.random() < 0.5
+          amount: rngFn() < 0.5
             ? Math.max(0, stratify("super.concessionalCap.32500", 32500, { near: 1000, span: 30000 }))
             : rand(1000, 15000),
           frequency: "annual",
           from: { kind: "age", age: startAge }, to: { kind: "age", age: 120 },
-          fhsssEligible: Math.random() < 0.5,
+          fhsssEligible: rngFn() < 0.5,
         }));
       }
-      if (Math.random() < 0.5) {
+      if (rngFn() < 0.5) {
         superContributions.push(scRow({
           id: `sc_cap_${p}`, owner: p, accountId: `su_${p}`,
           type: pick(["salarySacrifice", "personalDeductible"]), basis: "toConcessionalCap",
@@ -3845,7 +3893,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // Government co-contribution (spec 19 Commit 6) — a personal NCC,
       // small enough to sometimes land inside the co-contribution's own
       // phase-out band relative to randomIncome()'s own range.
-      if (Math.random() < 0.4) {
+      if (rngFn() < 0.4) {
         superContributions.push(scRow({
           id: `sc_ncc_${p}`, owner: p, accountId: `su_${p}`,
           type: "personalNonDeductible", basis: "amount", amount: rand(200, 1500), frequency: "annual",
@@ -3857,7 +3905,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // meaningful for a couple; owner is the RECEIVING spouse (this
     // engine's own convention — see planState.js's clampSuperContribution
     // header), so the OTHER person is the contributor the offset credits.
-    if (couple && Math.random() < 0.4) {
+    if (couple && rngFn() < 0.4) {
       const receivingOwner = pick(persons);
       superContributions.push(scRow({
         id: "sc_spouse", owner: receivingOwner, accountId: `su_${receivingOwner}`,
@@ -3872,12 +3920,12 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // in the invariant) actually gets exercised, not just the
     // comfortably-affordable case.
     const liabilities = [];
-    if (Math.random() < 0.5) {
+    if (rngFn() < 0.5) {
       const liab = {
         id: "lb1", name: "Loan", type: "mortgage", owner: couple ? "joint" : "client",
         balance: rand(50000, 300000), interestRatePct: rand(4, 8),
         termYears: randInt(10, 25), repayment: pick(["io", "pi"]), ioYears: 3,
-        deductible: Math.random() < 0.5, linkedAssetId: null, offsetAssetId: null,
+        deductible: rngFn() < 0.5, linkedAssetId: null, offsetAssetId: null,
         extraRepayments: [], oneOffRepayments: [],
         // Fixed-rate rollover (Implementation/Rates spec, Commit 1) —
         // half the time fixed, with the rollover date spanning BEFORE
@@ -3893,7 +3941,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         revertRatePct: pick([null, rand(3, 9)]),
         commencedOn: pick([null, "2022-01-01"]),
       };
-      if (Math.random() < 0.6) {
+      if (rngFn() < 0.6) {
         liab.extraRepayments = [{
           id: "er1", label: "Extra", amount: rand(200, 40000), // sometimes far beyond affordable
           frequency: pick(["monthly", "annual"]),
@@ -3901,7 +3949,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           indexBasis: pick(["none", "cpi"]), indexExtraPct: 0,
         }];
       }
-      if (Math.random() < 0.5) {
+      if (rngFn() < 0.5) {
         liab.oneOffRepayments = [{
           id: "or1", label: "Lump sum", amount: rand(1000, 80000),
           at: { kind: "age", age: randInt(startAge, endAge) },
@@ -3922,7 +3970,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       liab.repaymentAllocation = pick(["proportional", "proportional", "privateFirst"]);
       liab.creditLimit = pick([null, rand(liab.balance * 0.5, liab.balance * 1.5)]);
       liab.drawdowns = [];
-      if (Math.random() < 0.5) {
+      if (rngFn() < 0.5) {
         liab.drawdowns.push({
           id: "dd1", label: "Drawdown", amount: rand(5000, 150000), // spans under/over a tight creditLimit
           at: { kind: "age", age: randInt(startAge, endAge) },
@@ -3940,10 +3988,10 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // destinationAssetId sometimes dangling (falls through, no
       // redraw at all).
       liab.recycling = {
-        enabled: Math.random() < 0.3,
+        enabled: rngFn() < 0.3,
         from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
         destinationAssetId: pick([...assets.map((a) => a.id), "nonexistent"]),
-        matchRepayments: Math.random() < 0.9,
+        matchRepayments: rngFn() < 0.9,
         annualCap: pick([null, rand(100, 30000)]),
       };
       liabilities.push(liab);
@@ -3962,7 +4010,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // exercising the belt-and-braces filter, not just the default.
     const bonusRows = [];
     for (const p of persons) {
-      if (Math.random() < 0.5) {
+      if (rngFn() < 0.5) {
         const ownAccount = superAccounts.find((sa) => sa.owner === p);
         const destinationPool = [
           null,
@@ -3974,14 +4022,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           ...employmentRow({
             id: `bonus_${p}`, owner: p, amount: rand(1000, 30000), frequency: "annual",
             from: { kind: "age", age: startAge }, to: { kind: "age", age: endAge },
-            sgApplies: Math.random() < 0.5,
+            sgApplies: rngFn() < 0.5,
           }),
           category: "bonus", taxable: true, bonusMonth: randInt(1, 12),
           bonusDestination: pick(destinationPool) ?? { type: null, targetId: null },
         });
       }
-      if (Math.random() < 0.4) {
-        const taxable = Math.random() < 0.5;
+      if (rngFn() < 0.4) {
+        const taxable = rngFn() < 0.5;
         bonusRows.push({
           ...employmentRow({
             id: `allow_${p}`, owner: p, amount: rand(500, 8000), frequency: pick(["monthly", "annual"]),
@@ -3992,7 +4040,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           incomeType: taxable ? "employment" : "nonTaxable", // this raw state bypasses clampIncomeRow's own derivation
         });
       }
-      if (Math.random() < 0.4) {
+      if (rngFn() < 0.4) {
         bonusRows.push({
           ...employmentRow({
             id: `ot_${p}`, owner: p, amount: rand(500, 15000), frequency: pick(["monthly", "annual"]),
@@ -4012,7 +4060,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // accrual path and the capped-short path.
     const goals = [];
     for (let i = 0; i < randInt(0, 2); i++) {
-      const fundFromAsset = Math.random() < 0.5;
+      const fundFromAsset = rngFn() < 0.5;
       goals.push({
         id: `gl${i}`, label: `Goal ${i}`,
         targetAmount: rand(2000, 90000),
@@ -4033,8 +4081,8 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // "planned" — an "owned" property from day one is NOT safe here
     // (see conservationCheck.js's header caveat on y=0).
     const properties = [];
-    if (Math.random() < 0.5) {
-      const firstHomeBuyer = Math.random() < 0.5;
+    if (rngFn() < 0.5) {
+      const firstHomeBuyer = rngFn() < 0.5;
       const purchaseAge = randInt(startAge, endAge);
       // Main residence exemption and the six-year absence rule (spec 19
       // Commit 5) — sometimes this PPR gets an absence (moved out after
@@ -4044,7 +4092,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // precisely) — this mainly exercises the "still within the
       // window"/isCgt-flip/pool-seeding code paths under real engine
       // conditions, which is what the conservation invariant needs.
-      const hasAbsence = purchaseAge < endAge && Math.random() < 0.3;
+      const hasAbsence = purchaseAge < endAge && rngFn() < 0.3;
       const movedOutAge = hasAbsence ? randInt(purchaseAge + 1, endAge) : null;
       const saleAge = hasAbsence ? randInt(movedOutAge, endAge) : null;
       properties.push({
@@ -4059,17 +4107,17 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         // never at it — src/data/lmiRates.js) rather than the previous
         // fixed list, which only ever hit 80 exactly, never 79 or 81.
         lvrPct: Math.min(100, Math.max(0, stratifyInt("property.lvr.80", 80, { near: 1, span: 20 }))),
-        firstHomeBuyer, newBuild: Math.random() < 0.3,
+        firstHomeBuyer, newBuild: rngFn() < 0.3,
         purchaseCostsPct: rand(0, 3), dutyOverride: null, growthPct: rand(0, 6),
         rent: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
         expenses: { amount: 0, indexBasis: "none", indexExtraPct: 0 },
         expensesDeductible: true, depreciation: 0,
-        releaseFhsssAtPurchase: Math.random() < 0.6,
-        firstHomeGuarantee: firstHomeBuyer && Math.random() < 0.5,
+        releaseFhsssAtPurchase: rngFn() < 0.6,
+        firstHomeGuarantee: firstHomeBuyer && rngFn() < 0.5,
         lmiOverride: null,
-        lmiPayAtSettlement: Math.random() < 0.5,
+        lmiPayAtSettlement: rngFn() < 0.5,
         mainResidence: hasAbsence
-          ? { movedOutAt: { kind: "age", age: movedOutAge }, producingIncome: Math.random() < 0.5, movedBackInAt: null }
+          ? { movedOutAt: { kind: "age", age: movedOutAge }, producingIncome: rngFn() < 0.5, movedBackInAt: null }
           : { movedOutAt: null, producingIncome: false, movedBackInAt: null },
         sale: hasAbsence
           ? { enabled: true, at: { kind: "age", age: saleAge }, agentFeesPct: rand(0, 5), settlementCosts: rand(0, 5000), proceedsDestination: pick(["repayLoanThenAsset", "asset"]), assetId: pick(assets).id }
@@ -4100,14 +4148,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         // rarely put land value anywhere near $1,075,000 at all.
         priceToday: Math.max(50000, stratify("property.landTax.nsw.1075000", 1075000 / 0.7, { near: 50000, span: 900000 })),
         purchaseAt: { kind: "age", age: startAge },
-        lvrPct: 0, firstHomeBuyer: false, newBuild: Math.random() < 0.5,
+        lvrPct: 0, firstHomeBuyer: false, newBuild: rngFn() < 0.5,
         purchaseCostsPct: 0, dutyOverride: null, growthPct: rand(-2, 6),
         rent: { amount: rand(0, 40000), indexBasis: "none", indexExtraPct: 0 },
         expenses: { amount: rand(0, 10000), indexBasis: "none", indexExtraPct: 0 },
         expensesDeductible: true, depreciation: 0,
         releaseFhsssAtPurchase: false, firstHomeGuarantee: false, lmiOverride: null, lmiPayAtSettlement: false,
         landValuePct: pick([40, 60, 80, 100]),
-        landTaxOverride: Math.random() < 0.3 ? rand(0, 5000) : null,
+        landTaxOverride: rngFn() < 0.3 ? rand(0, 5000) : null,
         // Property sale (spec 19 Commit 4) — sometimes sold partway
         // through the projection (always AFTER its own startAge
         // purchase); both destinations and a randomised cost pair, so
@@ -4115,7 +4163,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         // path (repayLoanThenAsset — inert here since this fixture
         // never draws a purchase loan, lvrPct:0, but still exercises
         // the "no loan to discharge" branch) get exercised.
-        sale: Math.random() < 0.3 ? {
+        sale: rngFn() < 0.3 ? {
           enabled: true, at: { kind: "age", age: randInt(startAge + 1, endAge) },
           agentFeesPct: rand(0, 5), settlementCosts: rand(0, 5000),
           proceedsDestination: pick(["repayLoanThenAsset", "asset"]),
@@ -4151,13 +4199,13 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // default), so the literal value here is authoritative either way.
     const client = {
       currentAge: startAge, retirementAge: retirementAgeFor(),
-      helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5,
-      taxProfile: { centrelinkEligible: Math.random() < 0.85, centrelinkEligibleIsDefault: false },
+      helpBalance: rand(0, 40000), privateHospitalCover: rngFn() < 0.5,
+      taxProfile: { centrelinkEligible: rngFn() < 0.85, centrelinkEligibleIsDefault: false },
     };
     const partner = couple ? {
       currentAge: startAge, retirementAge: retirementAgeFor(),
-      helpBalance: rand(0, 40000), privateHospitalCover: Math.random() < 0.5,
-      taxProfile: { centrelinkEligible: Math.random() < 0.85, centrelinkEligibleIsDefault: false },
+      helpBalance: rand(0, 40000), privateHospitalCover: rngFn() < 0.5,
+      taxProfile: { centrelinkEligible: rngFn() < 0.85, centrelinkEligibleIsDefault: false },
     } : null;
 
     // Children + education funding (Input Usability spec, Commit 3) —
@@ -4187,7 +4235,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const children = Array.from({ length: randInt(0, 3) }, (_, i) => ({
       id: `ch${i}`, name: `Child ${i}`,
       dateOfBirth: synthDob(randInt(-2, 24), planStart),
-      education: Math.random() < 0.6 ? [{
+      education: rngFn() < 0.6 ? [{
         id: `ed${i}`, label: "Primary", annualAmount: rand(3000, 20000),
         fromAge: 5, toAge: 12, indexBasis: pick(["none", "cpi", "awote"]), indexExtraPct: rand(0, 3),
       }] : [],
@@ -4204,14 +4252,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // this generator must cover every new money-routing path the
     // conservation invariant is meant to guard.
     const allocationTargets = [];
-    for (const a of assets) if (Math.random() < 0.4) allocationTargets.push({ targetType: "asset", targetId: a.id });
-    for (const l of liabilities) if (Math.random() < 0.4) allocationTargets.push({ targetType: "liability", targetId: l.id });
+    for (const a of assets) if (rngFn() < 0.4) allocationTargets.push({ targetType: "asset", targetId: a.id });
+    for (const l of liabilities) if (rngFn() < 0.4) allocationTargets.push({ targetType: "liability", targetId: l.id });
     for (const sc of superContributions) {
-      if ((sc.type === "salarySacrifice" || sc.type === "personalDeductible") && Math.random() < 0.4) {
+      if ((sc.type === "salarySacrifice" || sc.type === "personalDeductible") && rngFn() < 0.4) {
         allocationTargets.push({ targetType: "superContribution", targetId: sc.id });
       }
     }
-    for (const g of goals) if (Math.random() < 0.4) allocationTargets.push({ targetType: "goal", targetId: g.id });
+    for (const g of goals) if (rngFn() < 0.4) allocationTargets.push({ targetType: "goal", targetId: g.id });
 
     let remainingPct = 100;
     const allocations = [];
@@ -4253,7 +4301,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         return {
           type: "debt",
           deductibility: pick(["nonDeductible", "deductible", "any"]),
-          loanIds: Math.random() < 0.3 ? [pick(liabilities).id] : null,
+          loanIds: rngFn() < 0.3 ? [pick(liabilities).id] : null,
           order: pick(["interestRate", "manual"]),
         };
       }
@@ -4264,19 +4312,19 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     }
     function randomCascadeConditions(destinationType) {
       const conditions = [];
-      if (destinationType === "debt" && Math.random() < 0.5) conditions.push({ kind: "repaid" });
-      if (Math.random() < 0.3) conditions.push({ kind: "balanceBelow", amount: rand(0, 50000) });
-      if (Math.random() < 0.3) conditions.push({ kind: "valueReaches", amount: rand(0, 200000) });
+      if (destinationType === "debt" && rngFn() < 0.5) conditions.push({ kind: "repaid" });
+      if (rngFn() < 0.3) conditions.push({ kind: "balanceBelow", amount: rand(0, 50000) });
+      if (rngFn() < 0.3) conditions.push({ kind: "valueReaches", amount: rand(0, 200000) });
       // "atOrAfter" is migration-only, never hand-authored (see
       // clampCascadeCondition's own header) — this generator authors
       // cascades directly, so only "before" is ever drawn here.
-      if (Math.random() < 0.3) {
+      if (rngFn() < 0.3) {
         conditions.push({ kind: "date", ref: { kind: "age", age: randInt(startAge, endAge) }, direction: "before" });
       }
       return conditions;
     }
     function randomCascadeStep(i) {
-      const branchCount = Math.random() < 0.4 ? 2 : 1; // sometimes a split
+      const branchCount = rngFn() < 0.4 ? 2 : 1; // sometimes a split
       const branches = [];
       let remainingPct = 100;
       for (let b = 0; b < branchCount; b++) {
@@ -4288,14 +4336,14 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
       return { id: `cs${i}`, branches };
     }
-    const surplus = Math.random() < 0.5
+    const surplus = rngFn() < 0.5
       ? { periods: Array.from({ length: randInt(1, 3) }, (_, i) => randomCascadeStep(i)) }
       : {
           periods: [{
             id: "sp1",
             from: { kind: "anchor", anchorId: "start" },
             to: { kind: "anchor", anchorId: "end" },
-            payNonDeductibleDebtFirst: Math.random() < 0.5,
+            payNonDeductibleDebtFirst: rngFn() < 0.5,
             debtOrder: pick(["interestRate", "manual"]),
             allocations,
             remainderTo: pick(["cash", "expenditure"]),
@@ -4303,7 +4351,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         };
 
     const deficitMinimumBalances = {};
-    for (const a of assets) if (Math.random() < 0.3) deficitMinimumBalances[a.id] = rand(0, 5000);
+    for (const a of assets) if (rngFn() < 0.3) deficitMinimumBalances[a.id] = rand(0, 5000);
     const deficit = { minimumBalances: deficitMinimumBalances, sellRule: pick(["order", "minimumCapitalGain"]) };
 
     // Adviser fees (Implementation/Rates spec, Commit 2) — half the
@@ -4356,10 +4404,10 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       };
     });
 
-    const pickSuperTarget = () => (superAccountIds.length > 0 && Math.random() < 0.7 ? pick(superAccountIds) : null);
-    const upfrontTotal = Math.random() < 0.5 ? rand(0, 30000) : 0;
+    const pickSuperTarget = () => (superAccountIds.length > 0 && rngFn() < 0.7 ? pick(superAccountIds) : null);
+    const upfrontTotal = rngFn() < 0.5 ? rand(0, 30000) : 0;
     const upfrontSuperTarget = upfrontTotal > 0 ? pickSuperTarget() : null;
-    const ongoingAnnual = Math.random() < 0.5 ? rand(0, 15000) : 0;
+    const ongoingAnnual = rngFn() < 0.5 ? rand(0, 15000) : 0;
     const ongoingSuperTarget = ongoingAnnual > 0 ? pickSuperTarget() : null;
     const adviserFees = {
       upfront: {
@@ -4389,7 +4437,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     // projection.
     const pprProperty = properties.find((p) => p.propertyType === "ppr");
     const heas = {
-      enabled: !!pprProperty && Math.random() < 0.5,
+      enabled: !!pprProperty && rngFn() < 0.5,
       propertyId: pprProperty ? pprProperty.id : null,
     };
 
@@ -4436,13 +4484,13 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // unmatured path respectively — see the a-bonds block's own
       // type branch), and sometimes NEITHER has a beneficiary at all
       // (the "never auto-funds anything" path), across enough runs.
-      const type = children.length && Math.random() < 0.4 ? "education" : "investment";
-      const beneficiaryChildId = children.length && Math.random() < 0.5 ? pick(children).id : null;
+      const type = children.length && rngFn() < 0.4 ? "education" : "investment";
+      const beneficiaryChildId = children.length && rngFn() < 0.5 ? pick(children).id : null;
       bonds.push({
         id, name: `Bond ${i}`, type,
         owner: couple ? pick(["client", "partner", "joint"]) : "client",
         include: true, balance: rand(0, 150000),
-        startDate: Math.random() < 0.5
+        startDate: rngFn() < 0.5
           ? stratifiedBondStartDate()
           : pick(["2012-03-01", "2020-11-01", "2026-07-01", "2027-01-01"]),
         allocation: randomAllocation(), icrPct: 0,
@@ -4456,8 +4504,8 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       // the second (active only from a later age) is stratified
       // tightly around 125% of the first's own annual total, so the
       // sweep actually exercises at/just-under/just-over the breach.
-      if (Math.random() < 0.7) {
-        const firstAnnual = Math.random() < 0.3 ? 0 : rand(500, 24000);
+      if (rngFn() < 0.7) {
+        const firstAnnual = rngFn() < 0.3 ? 0 : rand(500, 24000);
         const midAge = endAge > startAge ? randInt(startAge, endAge - 1) : startAge;
         bondContributions.push({
           id: `bdc${i}`, label: "Contribution", bondId: id,
@@ -4490,7 +4538,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         // scenarios this feature exists for (a long horizon, thresholds
         // pinned at today's nominal value) alongside the default-indexed
         // majority every pre-existing scenario already covered.
-        indexSuperThresholds: Math.random() < 0.7,
+        indexSuperThresholds: rngFn() < 0.7,
         plan: {
           household: couple ? "couple" : "single",
           client, partner, children,
@@ -4503,7 +4551,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
           // "excluded pension skips the shared target" interaction
           // (Commit 3). resolveIncomeRequired's own defensive default
           // covers incomeRequired's absence here.
-          retirement: { incomeDrivenDrawdown: Math.random() < 0.3 },
+          retirement: { incomeDrivenDrawdown: rngFn() < 0.3 },
         },
         cashflows: { income: [...income, ...bonusRows], expenses, superContributions, deductions: packagingRows, bondContributions, superRollovers },
         surplus,
@@ -4513,7 +4561,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         // ordinary assets so a shortfall actually reaches (and sells
         // from) one, exercising sellBond's own pre/post-maturity
         // assessable-withdrawal split, not just growth/contributions.
-        fundingOrder: Math.random() < 0.5
+        fundingOrder: rngFn() < 0.5
           ? [...bonds.map((b) => b.id), ...assets.map((a) => a.id)]
           : [...assets.map((a) => a.id), ...bonds.map((b) => b.id)],
       }),
@@ -4565,6 +4613,53 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     ];
   }
 
+  // docs/specs/39-cleanup-rules-cascade.md, Commit 1 — the whole point
+  // of seeding: a failing sweep run must be replayable from its own
+  // seed alone, not just describable after the fact. Checked directly,
+  // not assumed — this is the guard for the guard.
+  describe("randomScenario(seed) reproducibility", () => {
+    it("the SAME seed produces byte-for-byte identical scenarios, called consecutively", () => {
+      const a = randomScenario(1928374650);
+      const b = randomScenario(1928374650);
+      expect(b).toEqual(a);
+    });
+
+    it("the SAME seed reproduces identically even with OTHER randomScenario() calls interleaved before it — a call is a pure function of its own seed, not of sweep position", () => {
+      const a = randomScenario(555000111);
+      for (let i = 0; i < 25; i++) randomScenario(); // unrelated calls, unseeded
+      const b = randomScenario(555000111);
+      expect(b).toEqual(a);
+    });
+
+    it("different seeds produce different scenarios — the seed genuinely drives generation, not a no-op", () => {
+      const a = randomScenario(1);
+      const b = randomScenario(2);
+      expect(b).not.toEqual(a);
+    });
+
+    it("randomScenario.lastSeed reports whichever seed the MOST RECENT call actually used, explicit or drawn", () => {
+      randomScenario(42);
+      expect(randomScenario.lastSeed).toBe(42);
+      randomScenario(); // no seed passed — draws its own
+      expect(randomScenario.lastSeed).not.toBe(42);
+      expect(Number.isInteger(randomScenario.lastSeed)).toBe(true);
+    });
+
+    it("a seed reproduces the exact conservation-relevant output too, not just the raw state object — projectPlan(randomScenario(seed)) is itself deterministic", () => {
+      // The state object matching (above) is necessary but not
+      // sufficient proof of reproducibility for THIS guard's own
+      // purpose — what a failing sweep actually needs to replay is the
+      // ENGINE'S OWN output for that seed, confirmed identical here.
+      const seed = 20260918;
+      const outA = projectPlan(randomScenario(seed));
+      const outB = projectPlan(randomScenario(seed));
+      expect(outB.yearly.length).toBe(outA.yearly.length);
+      for (let y = 0; y < outA.yearly.length; y++) {
+        expect(outB.yearly[y].netAssets).toBeCloseTo(outA.yearly[y].netAssets, 6);
+      }
+    });
+  });
+
   // Report any conservation defect plainly (spec 28's own instruction)
   // rather than letting the first failing expect() abort the sweep
   // silently mid-run — every failure across the whole sweep is
@@ -4573,17 +4668,18 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const failures = [];
     for (let i = 0; i < runs; i++) {
       const state = randomScenario();
+      const seed = randomScenario.lastSeed;
       let out;
       try {
         out = projectPlan(state);
       } catch (e) {
-        failures.push(`${label} scenario ${i}: projectPlan threw: ${e.message}`);
+        failures.push(`${label} scenario ${i} (seed ${seed}): projectPlan threw: ${e.message}`);
         continue;
       }
       const years = out.yearly.length;
       for (let y = 0; y < years - 1; y++) { // final year excluded — see header
         try {
-          checkYearConservation(out, y, `${label} scenario ${i}, year ${y}`);
+          checkYearConservation(out, y, `${label} scenario ${i} (seed ${seed} — reproduce with randomScenario(${seed})), year ${y}`);
         } catch (e) {
           failures.push(e.message);
         }
@@ -4611,10 +4707,11 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const RUNS = 300;
     for (let i = 0; i < RUNS; i++) {
       const state = randomScenario();
+      const seed = randomScenario.lastSeed;
       const out = projectPlan(state);
       const years = out.yearly.length;
       for (let y = 0; y < years - 1; y++) { // final year excluded — see header
-        checkYearConservation(out, y, `scenario ${i}, year ${y}`);
+        checkYearConservation(out, y, `scenario ${i} (seed ${seed} — reproduce with randomScenario(${seed})), year ${y}`);
       }
     }
   });
@@ -4727,6 +4824,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const RUNS = 300;
     for (let i = 0; i < RUNS; i++) {
       const state = randomScenario();
+      const seed = randomScenario.lastSeed;
       const out = projectPlan(state);
       const years = out.yearly.length;
       for (let y = 0; y < years - 1; y++) {
@@ -4739,7 +4837,7 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
         const reconciled = prevNet + d.income + d.growth - d.tax - d.expenses - d.interest - d.fees + d.oneOffs;
         const gap = Math.abs(reconciled - row.netAssets);
         const tol = Math.max(0.05, Math.abs(row.netAssets) * 1e-6);
-        expect(gap, `scenario ${i}, year ${y}: decomposition ${reconciled.toFixed(2)} vs actual ${row.netAssets.toFixed(2)}`)
+        expect(gap, `scenario ${i} (seed ${seed} — reproduce with randomScenario(${seed})), year ${y}: decomposition ${reconciled.toFixed(2)} vs actual ${row.netAssets.toFixed(2)}`)
           .toBeLessThanOrEqual(tol);
       }
     }
@@ -5749,6 +5847,65 @@ describe("FHSSS (Document Set Commit 3)", () => {
       expect(row.properties.p1.fhsssRelease).toBe(0);
       expect(row.taxDetail.client.fhsssOffset).toBe(0);
       expect(row.taxDetail.fhsssRelease).toBe(0);
+    }
+  });
+
+  // docs/specs/39-cleanup-rules-cascade.md, Commit 1 — the "FHSSS
+  // release doesn't net to zero" conservation flake, reduced to its
+  // minimal cause. The leg that fails to balance: the RELEASE itself,
+  // specifically the account's own growth for the release month.
+  //
+  // The release always fires at the property's own purchase month —
+  // the FIRST month of that plan year (deterministic.js's own gate,
+  // pm.purchaseMonth === yearStart(y)). The account's OWN growth for
+  // THAT SAME month is applied EARLIER in the monthly loop than the
+  // release's own real-pass debit (CLAUDE.md's own locked "grow assets,
+  // THEN move money" order) — so a NEGATIVE real monthly rate shrinks
+  // the account between the two. The release amount is decided ONCE,
+  // "before either pass" (so the measure and real pass agree on the
+  // settlement-side figure), against the balance as it stood BEFORE
+  // that growth. Before this commit's fix, that decided figure was used
+  // for the settlement credit regardless of what the account could
+  // actually still pay once growth had run — a real, if narrow, money-
+  // creation gap the same class as the ALREADY-fixed "requesting more
+  // than the account holds" bug this exact block's own header
+  // documents, just reached via a timing gap rather than multiple
+  // claimants. This project's own random-scenario generator draws real
+  // super growth as low as -2% p.a. (randomAllocation, growthPct: rand
+  // (-2, 8)), which is why the sweep found this by chance rather than
+  // any of this file's own hand-built FHSSS fixtures (which all pin
+  // growth to exactly zero specifically to keep the hand-calc clean —
+  // see baseState's own comment — and so never exercised this leg).
+  it("regression: a super account's own NEGATIVE real growth in the release month never lets the settlement credit exceed what the account can actually pay", () => {
+    const negativeAlloc = { mode: "custom", incomePct: 0, growthPct: -60, frankingPct: 0, volBasis: "Balanced" };
+    const s = {
+      ...mkState({
+        endAge: 44,
+        assets: [],
+        plan: { superAccounts: [superAcct({ balance: 0, allocation: negativeAlloc })] },
+        cashflows: {
+          income: [employmentRow({ amount: 150000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } })],
+          superContributions: [scRow({
+            type: "salarySacrifice", amount: 15000, frequency: "annual", fhsssEligible: true,
+            indexBasis: "cpi", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          })],
+        },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0.025 },
+      properties: [fhsssProp({ purchaseAt: { kind: "age", age: 41 } })],
+      liabilities: [],
+    };
+    const out = projectPlan(s);
+    const y1 = out.yearly[1];
+    // The two sides of the SAME transfer — settlement's own credit and
+    // super's own debit — must be the identical figure, not just close.
+    expect(y1.properties.p1.fhsssRelease).toBeCloseTo(y1.superDetail.su1.fhsssRelease, 6);
+    // A genuine release actually happened (not a degenerate zero from
+    // over-tuning the reduction) — this scenario's own point is that
+    // growth bites HARD enough to matter, not that nothing releases.
+    expect(y1.properties.p1.fhsssRelease).toBeGreaterThan(0);
+    for (let y = 0; y < out.yearly.length - 1; y++) {
+      checkYearConservation(out, y, `FHSSS negative-growth regression, year ${y}`);
     }
   });
 });
