@@ -73,16 +73,24 @@ describe("retirementComparison fixture", () => {
 
     expect(a.retirement.age).toBe(65);
     expect(a.retirement.planYear).toBe(20);
-    expect(a.capitalAtRetirement).toBeCloseTo(996421.62, 2);
+    // Figures updated by docs/specs/39-cleanup-rules-cascade.md, Commit
+    // 3 (review finding 2.3): a whole-balance pension commencement now
+    // correctly sweeps its own commencement month's growth instead of
+    // leaving it stranded in accumulation — this fixture's own pension
+    // (createPension's default commenceAmount: null) exercises exactly
+    // that path, so its capital-at-retirement and every figure
+    // downstream of it shift by a few dollars, a genuine engine-
+    // behaviour change, not drift.
+    expect(a.capitalAtRetirement).toBeCloseTo(996428.47, 2);
     expect(a.firstShortfallAge).toBeNull();
     expect(a.superPensionExhaustionAge).toBeNull(); // combined super+pension never both hit zero — see this module's own header
     expect(a.le.age).toBe(83);
-    expect(a.le.capitalAtLE).toBeCloseTo(674161.96, 2);
-    expect(a.le.averageRetirementIncome).toBeCloseTo(54345.93, 2);
-    expect(a.le.averageAgePension).toBeCloseTo(19858.81, 2);
-    expect(a.le.averageAgePensionPctOfIncome).toBeCloseTo(35.94, 2);
+    expect(a.le.capitalAtLE).toBeCloseTo(674051.23, 2);
+    expect(a.le.averageRetirementIncome).toBeCloseTo(54420.29, 2);
+    expect(a.le.averageAgePension).toBeCloseTo(19856.96, 2);
+    expect(a.le.averageAgePensionPctOfIncome).toBeCloseTo(35.89, 2);
     expect(a.le.sustainableIncomeConverged).toBe(true);
-    expect(a.le.sustainableIncomeToLE).toBeCloseTo(41306.03, 2);
+    expect(a.le.sustainableIncomeToLE).toBeCloseTo(41306.55, 2);
     expect(a.materialLEDifference).toBe(false);
   });
 });

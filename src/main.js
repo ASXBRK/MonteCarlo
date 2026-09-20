@@ -11037,6 +11037,26 @@ const accruedDiv293Footer = () => {
     : "";
 };
 
+// Age pension assessability (docs/specs/39-cleanup-rules-cascade.md,
+// Commit 3, review finding 2.1) — the age pension is genuinely taxable
+// income, but SAPTO isn't modelled (see cashflowStatement.js's own
+// header on governmentPayments/assessableIncome), so this tool treats
+// it as non-assessable throughout: shown in Assessable Income for
+// visibility, excluded from every taxable-income and tax total. For a
+// full pensioner with no other taxable income that's the right answer
+// (SAPTO would offset it to nil anyway); for a part-pensioner with
+// other taxable income it UNDERSTATES tax — a real, material gap the
+// review's own worked example puts at roughly $2,200/yr for a common
+// client shape. Previously disclosed only in a code comment, invisible
+// to anyone using the tool; shown only when the age pension actually
+// appears somewhere in the projection, on both views the review named.
+const agePensionAssessabilityFooter = () => {
+  const anyAgePension = projection.yearly.some((row) => (row.agePensionDetail?.entitlement ?? 0) > 0.005);
+  return anyAgePension
+    ? `<div class="ledger-foot">The age pension is shown here as income but treated as non-assessable throughout this projection (SAPTO isn't modelled). That's correct for a full pensioner with no other taxable income; for a part-pensioner with other taxable income, actual tax payable is understated.</div>`
+    : "";
+};
+
 // --- View: Cashflow -----------------------------------------------------------
 
 // Shared by the Cashflow view's loan interest/principal rows and the
@@ -11668,7 +11688,7 @@ function renderCashflowView() {
     ? `<p class="chart-note-inline">Working cash interest, pooled cash distributions, and education fees are split 50/50 between ${clientName()} and ${partnerName()} (no per-person attribution exists for these); Goals, One-off amounts, and Funding are household-level and shown in full.</p>`
     : "";
   renderTransposed(els.cashflowTable, buildCashflowGroups(forOwner),
-    note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer() + adjustmentsDisclosureFooter());
+    note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer() + agePensionAssessabilityFooter() + adjustmentsDisclosureFooter());
 }
 
 // --- View: Assets ---------------------------------------------------------------
@@ -13292,7 +13312,7 @@ function renderTaxView() {
   if (taxPersonEntity !== "all" && !isCouple()) taxPersonEntity = "all";
   renderPersonSelector(els.taxEntity, taxPersonEntity, (id) => { taxPersonEntity = id; renderTaxView(); });
   const note = `<p class="chart-note-inline">Income tax rows accrue in the year shown (spread through the year, PAYG-style). CGT, Division 293 and Division 296 payable show the year of <em>payment</em> — each is assessed in one year and paid the following July.</p>`;
-  renderTransposed(els.taxTable, buildTaxGroups(taxPersonEntity), note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer() + adjustmentsDisclosureFooter());
+  renderTransposed(els.taxTable, buildTaxGroups(taxPersonEntity), note + accruedCgtFooter() + accruedDiv293Footer() + accruedDiv296Footer() + agePensionAssessabilityFooter() + adjustmentsDisclosureFooter());
 }
 
 // --- View: Assumptions (C4) -----------------------------------------------------

@@ -3119,16 +3119,30 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
           pensionCommenced[pn.id] = true;
           const pm = pensionMeta[pn.id];
           const sourceBal = superBal[pm.sourceAccountId];
-          // Capped via reserveFromSuper (resolved once per FY, before
-          // the monthly loop even starts — see that block's own header)
-          // against whatever adviser fees/Division 293/296/FHSSS
-          // already claimed on the SAME account this SAME year, THEN
-          // defensively re-capped against whatever's actually still
-          // there right now (belt and braces — nothing else should have
-          // touched this account between reservation and here, but
-          // matching withdrawFromSuper's own Math.min discipline costs
-          // nothing).
-          const amount = Math.min(pensionCommenceReserved[pn.id] ?? 0, Math.max(0, sourceBal));
+          // "Whole balance" (commenceAmount == null) sweeps whatever the
+          // account actually holds RIGHT NOW, including this month's own
+          // growth (already applied above) — the reservation above ran
+          // in the outer loop, BEFORE growth, so capping the transfer at
+          // that pre-growth figure stranded a month of growth in
+          // accumulation forever (review finding 2.3). The one thing
+          // still owed to someone else at this exact point in the
+          // month is a same-account FHSSS release: it reserves BEFORE
+          // commencement (reserveFromSuper's own fixed order) but its
+          // actual withdrawFromSuper call runs LATER in the month (the
+          // FHSSS block, below) — so its already-decided grossRelease
+          // must be carved out here, or "whole balance" would swallow
+          // money the real pass already promised it, reproducing the
+          // exact two-pass mismatch the FHSSS conservation fix (this
+          // file's own header, Commit 1) closed. A specific dollar
+          // commenceAmount has no such gap — it was always well inside
+          // the account regardless of growth — so it keeps the
+          // original, pre-growth reservation as its cap.
+          const fhsssOwnerRelease = fhsssRelease?.[pm.owner];
+          const fhsssSameAccountClaim = fhsssOwnerRelease && superAccountsByOwner[pm.owner]?.[0] === pm.sourceAccountId
+            ? (fhsssOwnerRelease.grossRelease ?? 0) : 0;
+          const amount = pn.commenceAmount == null
+            ? Math.max(0, sourceBal - fhsssSameAccountClaim)
+            : Math.min(pensionCommenceReserved[pn.id] ?? 0, Math.max(0, sourceBal));
           if (amount <= 0) continue; // nothing to commence with — leaves the pension permanently at 0, same as a purchase event with no funds
           const taxFreeFraction = sourceBal > 0 ? superTaxFree[pm.sourceAccountId] / sourceBal : 0;
           const taxFreeAmount = amount * taxFreeFraction;

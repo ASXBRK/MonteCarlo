@@ -5216,6 +5216,118 @@ itself passing on 3 immediate re-runs), build green.
 
 ---
 
+### Cleanup, rule gaps, and the surplus cascade, Commit 3: review findings 2.1 to 2.4 (spec 39)
+
+Read `docs/reference/adversarial-review-2026-09/README.md` §2 directly
+(not the spec's own summary), per instruction, before touching any of
+the four.
+
+**2.1 — age pension treated as non-assessable, undisclosed.** Spec 37
+Commit 4 already fixed the cash totals (the pension's own dollars are
+correctly IN the household's cash); what remained was the disclosure
+that this tool's tax treatment of it (non-assessable — SAPTO isn't
+modelled) understates tax for anyone with other taxable income, by
+about $2,200/yr on the review's own worked example. Previously
+disclosed only in a code comment (`cashflowStatement.js`'s own
+`governmentPayments` header) and one permanently-zero `sapto` table
+row — invisible to an actual user. Added a shared footer
+(`agePensionAssessabilityFooter`, `main.js`), shown on both the Tax
+view and the Cashflow statement whenever the age pension actually
+appears anywhere in the projection (silent otherwise, matching the
+existing accrued-CGT/Division 293/296 footer convention it sits
+alongside), stating the treatment and which direction it's wrong in.
+
+**2.2 — bonus-to-super doesn't appear on the NCC line.** Already fully
+closed — spec 37b Commit 5's own build-log entry for finding 1.4
+explicitly records fixing this same display gap in the same commit
+("the same rejected/accepted split now reports on the NCC line via
+`superDetail[...].nonConcessional`, where it was invisible before").
+Confirmed directly, not just from the log: re-ran `probes/probeE.mjs`
+(TSB above the cap, bonus rejected) — the rejection is reported and
+`nonConcessional` correctly reads 0 for the rejected amount; a second,
+new probe with TSB well under the cap (bonus accepted) shows the
+after-tax credit on `superDetail[...].nonConcessional` alongside SG,
+summing to `contributions`. No code change needed; recorded here as
+the spec asks.
+
+**2.3 — "whole balance" pension commencement leaves the commencement
+month's own growth behind.** Reproduced exactly via `probes/probeA.mjs`
+before the fix: a $600,000 account commencing "whole balance"
+(`commenceAmount: null`) leaves $1,720 (one month's growth) stranded in
+accumulation, which then compounds untouched for the rest of the
+projection. Root cause: growth for the commencement month is applied
+BEFORE the commencement transfer within the monthly loop (CLAUDE.md's
+own locked order), but the reservation that used to CAP the transfer
+(`reserveFromSuper`, shared with adviser fees/Division 293/296/FHSSS)
+is computed in the OUTER loop, against the FY-OPENING balance, before
+any growth exists to see. The transfer then capped itself at that
+pre-growth figure even though, by the time it actually ran, the account
+already held more.
+
+Fix, at the actual transfer point (`deterministic.js`, the commencement
+block): for `commenceAmount == null` only, sweep whatever the account
+holds RIGHT NOW rather than the pre-growth reservation — a specific
+dollar `commenceAmount` is untouched, since it was always well inside
+the account regardless of growth and needs no change. The one thing
+still owed to someone else at that exact point in the month is a
+same-account FHSSS release: it reserves BEFORE commencement
+(`reserveFromSuper`'s own fixed order) but its actual withdrawal runs
+LATER in the monthly loop than commencement's transfer — so "sweep
+everything live" would otherwise swallow money the real pass had
+already promised FHSSS, reproducing the exact two-pass mismatch the
+FHSSS conservation fix (Commit 1, this spec) closed for a different
+mechanism. Carved out explicitly: commencement subtracts FHSSS's own
+already-decided `grossRelease` first, when (and only when) FHSSS's
+release account for that owner is the same account the pension is
+commencing from. Verified by direct construction, not just inference:
+a new regression test shares one super account between a whole-balance
+ABP commencing and an FHSSS release firing in the same July, under
+POSITIVE growth (so there's real growth on the table for a wrong fix to
+mis-allocate), asserting the account never goes negative and both
+sides of the FHSSS transfer still net to zero.
+
+**2.4 — transfer balance figures (Super view — currently on the Tax
+view, since a standalone Super view doesn't exist yet).** Already fully
+closed by the same spec 37b Commit 5 fix finding 1.9 describes (the
+`pensionTba.js` redesign tracking `personalCapNominal` and re-deriving
+the real `personalCap` every year via `inflNow`). `main.js`'s display
+(`Transfer balance personal cap`/`remaining cap` rows) reads
+`row.transferBalance[p].personalCap`/`remainingCap` directly off that
+already-fixed source with no separate bug of its own. Confirmed
+directly: a 40-year projection for a 0%-used member shows `personalCap`
+declining smoothly with CPI erosion (as the fix intends), never
+ratcheting upward the way the pre-fix code did (the review's own
+"nearly double it after 40 years" finding). No code change needed;
+recorded here as the spec asks.
+
+**A real fixture drift, not a regression.** `retirementComparison.js`'s
+demo fixture (docs/reference/retirement-comparison.md) uses
+`createPension`'s own default `commenceAmount: null` — a whole-balance
+commencement — so the 2.3 fix moved its documented figures by a few
+dollars (`capitalAtRetirement` $996,421.62 → $996,428.47, and every
+life-expectancy figure downstream of it by a similarly small amount).
+`retirementComparison.test.js`'s own header comment anticipates exactly
+this: "if this test ever fails after a genuine engine change, that
+document is the other half of what needs updating, not just this
+file." Both updated together, to the live post-fix figures.
+
+Tests: 2 new (whole-balance commencement now sweeps the commencement
+month's own growth, with a `git stash`-confirmed pre-fix failure
+matching the mechanism exactly — $1,357.80 stranded at a different
+balance/growth rate than probeA's own $1,720; the shared-account
+FHSSS-plus-whole-balance-commencement race, above) + the
+`retirementComparison` fixture's 8 figures updated to their corrected
+values. No new money flow (a commencement transfer is already named in
+`conservationCheck.js`, per its own reasoning for a same-total move
+between two already-counted pockets — this fixes the transfer's own
+completeness, not its existence) — no `randomScenario()`/
+`conservationCheck.js` extension required under CLAUDE.md's own gate.
+Full suite 2233/2233, build green.
+
+Commit: `Fix: review findings 2.1 to 2.4`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

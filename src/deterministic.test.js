@@ -6031,6 +6031,58 @@ describe("FHSSS (Document Set Commit 3)", () => {
       checkYearConservation(out, y, `FHSSS negative-growth regression, year ${y}`);
     }
   });
+
+  it("regression: a whole-balance pension commencement never oversteps a same-account FHSSS release firing in the same July (docs/specs/39-cleanup-rules-cascade.md, Commit 3, finding 2.3)", () => {
+    // Same account (su1) funds BOTH claimants in the SAME month:
+    // FHSSS release (fires at the property's purchase month) and an
+    // ABP commencing "whole balance" (commenceAmount: null). FHSSS
+    // reserves first (reserveFromSuper's own fixed order) but its
+    // actual withdrawFromSuper call runs LATER in the monthly loop
+    // than commencement's transfer — so a naive "sweep everything
+    // live" fix for finding 2.3 would swallow money the real pass
+    // already promised FHSSS. Positive growth (unlike the negative-
+    // growth regression above) so there is real growth on the table
+    // for the fix to correctly award to the pension without also
+    // handing it FHSSS's own already-decided share.
+    const growthAlloc = { mode: "custom", incomePct: 0, growthPct: 8, frankingPct: 0, volBasis: "Balanced" };
+    const s = {
+      ...mkState({
+        endAge: 44,
+        assets: [],
+        plan: {
+          superAccounts: [superAcct({ balance: 50000, allocation: growthAlloc })],
+          pensions: [pensionRow({
+            sourceAccountId: "su1", commenceAt: { kind: "age", age: 41 },
+            commenceAmount: null, allocation: growthAlloc,
+          })],
+        },
+        cashflows: {
+          income: [employmentRow({ amount: 150000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 43 } })],
+          superContributions: [scRow({
+            type: "salarySacrifice", amount: 15000, frequency: "annual", fhsssEligible: true,
+            indexBasis: "cpi", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 },
+          })],
+        },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed", fhsssEarningsRate: 0.025 },
+      properties: [fhsssProp({ purchaseAt: { kind: "age", age: 41 } })],
+      liabilities: [],
+    };
+    const out = projectPlan(s);
+    const y1 = out.yearly[1];
+    // FHSSS's own two sides still net to zero — untouched by this fix.
+    expect(y1.properties.p1.fhsssRelease).toBeCloseTo(y1.superDetail.su1.fhsssRelease, 6);
+    expect(y1.properties.p1.fhsssRelease).toBeGreaterThan(0);
+    // The pension actually commenced with something (not starved to
+    // zero by an overcautious carve-out).
+    expect(y1.pensionDetail.pn1.commencementAmount).toBeGreaterThan(0);
+    // The one invariant a shared-account, same-month claim race could
+    // silently break: the account must never be driven negative.
+    expect(y1.superClosing).toBeGreaterThanOrEqual(-1e-6);
+    for (let y = 0; y < out.yearly.length - 1; y++) {
+      checkYearConservation(out, y, `shared-account FHSSS + whole-balance pension regression, year ${y}`);
+    }
+  });
 });
 
 describe("LMI and First Home Guarantee (Document Set Commit 4)", () => {
@@ -8363,6 +8415,35 @@ describe("Pension phase (spec 20, Commit 1): accounts, commencement, and the pro
     // (asserted above) while their REPORTED proportions do not,
     // confirming the reported figure tracks commencement, not the
     // live balance.
+  });
+
+  it("regression: a WHOLE-BALANCE commencement sweeps the commencement month's own growth too, not just the FY-opening balance (docs/specs/39-cleanup-rules-cascade.md, Commit 3, finding 2.3)", () => {
+    // Growth for the commencement month is applied BEFORE the
+    // commencement transfer within the same monthly loop (CLAUDE.md's
+    // own locked "grow assets, then move money" order), but the
+    // reservation that used to CAP the transfer was computed in the
+    // outer loop, against the FY-OPENING balance, before any growth —
+    // stranding one month's growth in accumulation forever (review
+    // finding 2.3, probeA.mjs: $600,000 leaves $1,720 behind, which
+    // then compounds untouched for the rest of the projection).
+    const out = projectPlan(mkState({
+      endAge: 66,
+      plan: {
+        client: { currentAge: 60, retirementAge: 60 },
+        superAccounts: [superAcct({ balance: 600000, allocation: { mode: "custom", incomePct: 3, growthPct: 3, frankingPct: 0, volBasis: "Balanced" } })],
+        pensions: [pensionRow({ commenceAt: { kind: "age", age: 60 }, commenceAmount: null, allocation: { mode: "custom", incomePct: 3, growthPct: 3, frankingPct: 0, volBasis: "Balanced" } })],
+      },
+    }));
+    // Nothing left behind in accumulation — the whole grown balance
+    // moved across, not just the pre-growth $600,000.
+    expect(out.yearly[0].superClosing).toBeCloseTo(0, 6);
+    expect(out.yearly[0].pensionDetail.pn1.commencementAmount).toBeGreaterThan(600000);
+    // And it stays at zero — no leftover balance compounding silently
+    // in the background for the rest of the projection.
+    for (const row of out.yearly) expect(row.superClosing).toBeCloseTo(0, 6);
+    for (let y = 0; y < out.yearly.length - 1; y++) {
+      checkYearConservation(out, y, `whole-balance commencement growth regression, year ${y}`);
+    }
   });
 
   it("a PARTIAL commencement transfers components proportionally, leaving the source account with the same ratio it started with", () => {

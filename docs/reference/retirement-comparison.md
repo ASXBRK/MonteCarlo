@@ -58,14 +58,14 @@ drift from what the engine actually computes.
 | Figure | Our figure | Other tool | Which is right, and why |
 |---|---|---|---|
 | Retirement age | 65 | | |
-| Capital at retirement | $996,422 | | |
+| Capital at retirement | $996,428 | | |
 | First shortfall age | None — never occurs | | |
 | Super/pension exhaustion age | None — see note below | | |
 | Life expectancy (used for the figures below) | Age 83 | | |
-| Capital at life expectancy | $674,162 | | |
-| Average retirement income to life expectancy | $54,346/yr | | |
-| Average age pension to life expectancy | $19,859/yr (35.9% of income) | | |
-| Sustainable income to life expectancy | $41,306/yr | | |
+| Capital at life expectancy | $674,051 | | |
+| Average retirement income to life expectancy | $54,420/yr | | |
+| Average age pension to life expectancy | $19,857/yr (35.9% of income) | | |
+| Sustainable income to life expectancy | $41,307/yr | | |
 
 **"Life expectancy" and "life expectancy + 5" coincide at age 83 for
 this fixture** (both resolve to the same figure: sustainable income to
