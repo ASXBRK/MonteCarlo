@@ -5984,6 +5984,51 @@ Commit: `Browser: displayed totals reconcile to the ledger`.
 
 ---
 
+### Browser test harness, Commit 4: smoke across every view (spec 40)
+
+**The defect class.** Cheap breadth, to catch "renders blank" and
+"throws on empty data" — the class the app's own earlier blank-chart
+bug belonged to: 19 chart containers built via `innerHTML` with no CSS
+height at all. `.chart-mount` (`styles.css`) is the fix already
+shipped — every Plotly mount other than `#chart` itself carries it, and
+gets a real height from the class alone, before Plotly ever touches it.
+`tests/browser/smoke.test.mjs` is the test that would have caught a
+chart shipped without the class, and catches a regression the same way.
+
+**All 17 input sections and 42 output views** (`INPUT_SECTIONS`/
+`OUTPUT_VIEWS`, router.js's own registries — never copied), against
+**all three fixtures already built for Commit 2** (fully populated,
+nearly empty, a single data point) — 177 area visits total, reused
+directly rather than duplicated. For each: the area becomes visible
+within a bounded wait (a render that throws or hangs fails loudly
+here, not silently), zero console errors, and every `.chart-mount`/
+`#chart` element currently visible has a non-zero rendered height —
+checked across the whole document each time rather than scoped to one
+container, since a blank chart is exactly as much a bug wherever it
+sits.
+
+**A deliberately blank chart mount** — a synthetic `.chart-mount` div
+with `height: 0` forced via inline style, standing in for the
+historical bug — proves the height check actually fails on one rather
+than passing by construction, the same pattern as Commit 2's
+disconnected control and Commit 3's sabotaged cell.
+
+**Timing**: 12 tests (this commit's 4 plus Commits 1-3's 8) in a single
+`test:browser` run, ~23.8s test time / ~29.6s wall-clock including
+build + preview + teardown — comfortably inside the spec's own budget.
+
+Tests: all views across all three fixtures (this commit's main tests,
+one per fixture); the synthetic blank-mount failure. Full existing unit
+suite 2253/2253 unaffected, build green.
+
+Commit: `Browser: smoke across every view`.
+
+Spec 40 complete — four commits, as specified. Per its own "Then stop"
+section: no further browser-test commits without a specific new defect
+class to justify one.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
