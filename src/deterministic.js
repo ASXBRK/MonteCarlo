@@ -74,6 +74,7 @@ import { exemptProportion } from "./mainResidence.js";
 import { spouseSuperRatesFor, spouseContributionOffset, coContribution, listo } from "./data/spouseSuperRates.js";
 import { assessPerson } from "./Tax/annual.js";
 import { div296Tax } from "./Tax/div296.js";
+import { assessmentIncomeBase } from "./Tax/assessmentIncomeBase.js";
 import { decomposeNetWorthChange } from "./conservationCheck.js";
 import { dependentChildrenCountInFY, pensionMinCommenceAge } from "./planState.js";
 import {
@@ -5870,10 +5871,12 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // assessed from real[p], not measured[p], the same reason CGT
       // already is), which this engine only ever assesses in a later,
       // separately-timed block.
-      repaymentIncome[p] = pre.taxableIncome
-        + (superOutcome[p]?.reportableSuperContributions ?? 0)
-        + netInvestmentLoss[p]
-        + reportableFringeBenefits[p];
+      repaymentIncome[p] = assessmentIncomeBase("help", {
+        taxableIncome: pre.taxableIncome,
+        reportableSuperContributions: superOutcome[p]?.reportableSuperContributions ?? 0,
+        netInvestmentLoss: netInvestmentLoss[p],
+        reportableFringeBenefits: reportableFringeBenefits[p],
+      });
     }
 
     // Commonwealth Seniors Health Card (spec 21b, Commit 4) — income-

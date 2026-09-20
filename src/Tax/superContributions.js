@@ -2,6 +2,8 @@
 // engine/DOM knowledge; operates on already-aggregated per-FY,
 // per-person contribution totals (deterministic.js does the
 // aggregation, this module does the cap arithmetic).
+
+import { assessmentIncomeBase } from "./assessmentIncomeBase.js";
 //
 // Concessional (SG + salary sacrifice + personal deductible):
 //   - ALL concessional contributions attract 15% contributions tax at
@@ -145,14 +147,14 @@ export function processNonConcessionalCap({ requestedNCC, baseCap, tsbPriorJune,
 
 // --- Division 293 -------------------------------------------------------
 
-// div293Income = taxableIncome + reportableSuperContributions +
-// lowTaxContributions + reportableFringeBenefits (spec 23, Commit 3 —
-// packaging that reduces income tax can increase Division 293 income;
-// net investment losses are still not captured). reportableFringeBenefits
-// defaults to 0 so every existing call site (none of which packages
-// benefits) is unaffected.
+// div293Income comes from assessmentIncomeBase("div293", ...) — spec
+// 41 Commit 3's consolidated single source (previously spelled out
+// inline, right here). reportableFringeBenefits defaults to 0 so every
+// existing call site (none of which packages benefits) is unaffected.
 export function div293Tax({ taxableIncome, reportableSuperContributions, lowTaxContributions, reportableFringeBenefits = 0, threshold, rate }) {
-  const div293Income = taxableIncome + reportableSuperContributions + lowTaxContributions + reportableFringeBenefits;
+  const div293Income = assessmentIncomeBase("div293", {
+    taxableIncome, reportableSuperContributions, lowTaxContributions, reportableFringeBenefits,
+  });
   const overThreshold = Math.max(0, div293Income - threshold);
   const base = Math.max(0, Math.min(lowTaxContributions, overThreshold));
   return { div293Income, tax: rate * base };

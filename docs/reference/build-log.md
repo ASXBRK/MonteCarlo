@@ -6173,6 +6173,82 @@ Spec 41 Commits 1–2 (vendor Plotly) complete.
 
 ---
 
+### Dependency, ordering, density, Commit 3: consolidate the assessment income base (spec 41)
+
+**One function, the base as a parameter** — `src/Tax/assessmentIncomeBase.js`
+— replacing two independent formulas that had each needed the identical
+fix at a different time: Division 293's own inline arithmetic (previously
+spelled out inside `div293Tax`, `src/Tax/superContributions.js`) excluded
+the year's own net capital gain until spec 37 Commit 5; HELP/MLS's own
+inline arithmetic (previously spelled out directly in `deterministic.js`'s
+`repaymentIncome` block) had the identical gap until spec 39 Commit 2.
+Same income-base concept, patched twice, because there was no one place
+to patch. `div293Tax` and `deterministic.js`'s `repaymentIncome[p]` both
+now call the one function; HELP and MLS share an identical formula today
+(kept as two distinct base ids, not merged — the ATO defines them
+independently and ties in the spec's own explicit reasoning). **No
+behaviour change**: full existing unit suite (2260 tests, including
+`div293Tax`'s own known-value regression cases) passes unchanged; full
+browser suite green.
+
+**Division 296 is deliberately NOT one of this function's bases** —
+investigated and found structurally incompatible, not merely inconvenient:
+`div296Tax` (`src/Tax/div296.js`) computes from the higher of opening/
+closing TSB (for threshold proportioning) and realised fund earnings (for
+the tax itself), neither of which is a "taxable income plus add-backs"
+figure the other three share. It also already has exactly one call site —
+no parallel derivation existed to consolidate. Forcing it through the same
+function/shape would have been a false unification. Documented in the
+module's own header rather than silently left out.
+
+**What consolidation exposed, per the spec's own expectation** ("the TSB
+consolidation in spec 37 Commit 2 found two further defects purely by
+routing every gate through one source... expect the same here"):
+
+1. **Division 293's income base silently omits a component HELP/MLS's
+   own base includes.** `deterministic.js`'s Division 293 assessment pass
+   (`a2`, the `assessPerson()` call feeding `div293Tax`) passes
+   `bondAssessableWithdrawal: bondDeficitAssessableWithdrawal` — only the
+   deficit-funded component — while the HELP/MLS pass (`pre`) passes
+   `measured[p].bondAssessableWithdrawal`, which ALSO includes the
+   schedule-driven, education-linked withdrawal (spec 25 Commit 3). A
+   schedule-driven bond withdrawal therefore reaches HELP/MLS assessment
+   and the person's real tax liability, but not Division 293's. Not fixed
+   here — Commit 3 is consolidation only, no behaviour change — but now
+   visible in one place (both passes are the two remaining call sites
+   feeding the one function) rather than buried in two formulas that
+   never sat next to each other.
+2. **The HELP/MLS "top-up" recomputation drops add-back terms the SAME-YEAR
+   assessment already included.** The deferred top-up loop (spec 39
+   Commit 2, `deterministic.js` ~6645-6680) recomputes HELP/MLS's "full"
+   (capital-gain-inclusive) figure from `fullTaxableIncome[p]`
+   (`= a2.taxableIncome`) alone — with NO reportable-super-contributions,
+   net-investment-loss, or reportable-fringe-benefits add-back — while the
+   ORIGINAL same-year figure it's diffed against (`helpDue[p]`/`mlsDue[p]`,
+   via `repaymentIncome[p]`) included all three. For a person with any of
+   those in a capital-gain year, the "full" recomputation can come out
+   LOWER than what was already withheld even though it's meant to be the
+   more complete figure — understating, or zeroing, a top-up that should
+   be positive. This is a genuine, real bug, not preserved-on-purpose the
+   way finding 1 is (finding 1 is an intentional-looking asymmetry between
+   two different measurement passes; this one drops known, already-
+   computed values for no apparent reason). **Not fixed here** — flagged
+   for the user; distinct from Commit 4's own ordering fix (cascade-
+   sourced contributions), a third, independent occurrence of "the same
+   income base needing the same kind of attention."
+
+Tests: `src/Tax/assessmentIncomeBase.test.js` — each base's formula by
+hand-calculated known value, confirmed HELP/MLS produce identical results,
+confirmed each base's own excluded term stays excluded, confirmed an
+unknown base throws rather than silently returning something wrong.
+`div293Tax`'s own existing regression tests continue to pass unchanged
+(`superContributions.test.js`). Full unit suite 2260/2260, full browser
+suite 14/14, build green.
+
+Commit: `Consolidate the assessment income base`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
