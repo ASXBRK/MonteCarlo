@@ -2561,6 +2561,13 @@ export function defaultState(profiles = {}, now = new Date()) {
       chartTreatment: defaultChartTreatment(),
       hideEmptyRows: true,
       showIndividualCashflowItems: false,
+      // Retirement-focused input ordering (docs/specs/41-dependency-
+      // ordering-density.md, Commit 6) — per SCENARIO, not per user
+      // (unlike hide-if-empty's own preference, Commit 5): "a debt-
+      // recycling conversation wants a different order than a
+      // retirement one" is a property of the conversation, so it lives
+      // in the scenario blob like every other display choice here.
+      inputOrdering: "default",
       // Navigation/charts spec (17), Commit 1 — which form (chart|table)
       // each dual-form Output subject last showed, per scenario. Keyed
       // by subject id; a subject with no entry falls back to its first
@@ -4371,6 +4378,7 @@ export function hydrate(json, profiles = {}) {
         chartTreatment: clampChartTreatment(raw.display?.chartTreatment),
         hideEmptyRows: raw.display?.hideEmptyRows !== false,
         showIndividualCashflowItems: raw.display?.showIndividualCashflowItems === true,
+        inputOrdering: raw.display?.inputOrdering === "retirement" ? "retirement" : "default",
         snapshotYears: clampSnapshotYears(raw.display?.snapshotYears, plan),
         outputForm: clampOutputForm(raw.display?.outputForm),
         navExpanded: clampNavExpanded(raw.display?.navExpanded),

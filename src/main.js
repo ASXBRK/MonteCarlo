@@ -638,6 +638,32 @@ const INPUT_GROUPS = [
   { id: "debt", label: "Debt", ids: ["liabilities"] },
   { id: "plan", label: "Plan", ids: ["implementation", "investment-cashflows", "settings"] },
 ];
+// Retirement-focused input ordering (docs/specs/41-dependency-ordering-
+// density.md, Commit 6) — "what a retirement conversation needs at the
+// top: super, income, contributions, expenses, assets" (contributions
+// live inside Investment cashflows, not their own section — see
+// router.js's own INPUT_SECTIONS). An ORDERING, not a filter: every id
+// derives from INPUT_GROUPS itself, relocated into one new group at
+// the top and removed from wherever it started, rather than a second,
+// hand-maintained copy of the full section list that could silently
+// drift out of sync with it (e.g. a future section added to
+// INPUT_GROUPS but forgotten here). "Leave the mechanism open for
+// more" (the spec's own words) — INPUT_ORDERINGS below is where a
+// third ordering would register.
+const RETIREMENT_FOCUS_IDS = ["super", "income", "investment-cashflows", "expenses", "financial-assets"];
+const INPUT_GROUPS_RETIREMENT = [
+  { id: "retirement-focus", label: "Retirement essentials", ids: RETIREMENT_FOCUS_IDS },
+  ...INPUT_GROUPS
+    .map((g) => ({ ...g, ids: g.ids.filter((id) => !RETIREMENT_FOCUS_IDS.includes(id)) }))
+    .filter((g) => g.ids.length > 0),
+];
+const INPUT_ORDERINGS = {
+  default: { label: "Default order", groups: INPUT_GROUPS },
+  retirement: { label: "Retirement-focused order", groups: INPUT_GROUPS_RETIREMENT },
+};
+function activeInputGroups() {
+  return INPUT_ORDERINGS[state.display.inputOrdering ?? "default"]?.groups ?? INPUT_GROUPS;
+}
 // Navigation, View Consolidation, and Simple Charts (docs/specs/17-
 // navigation-and-charts.md), Commit 1 — one subject per row, each
 // carrying whichever of chart/table it supports (mirrors router.js's
@@ -891,7 +917,7 @@ function sectionHasUntouched(sectionId) {
 // value as free-form since group ids are a presentation concern owned
 // here, not by the schema.
 function groupsFor(area) {
-  return area === "input" ? INPUT_GROUPS : OUTPUT_GROUPS;
+  return area === "input" ? activeInputGroups() : OUTPUT_GROUPS;
 }
 function groupContaining(area, sectionId) {
   const groups = groupsFor(area);
@@ -970,11 +996,27 @@ function renderSideNav() {
       <span>Hide empty sections${userPrefs.hideEmptySections && collapsedCount > 0 ? ` — ${collapsedCount} collapsed` : ""}</span>
     </label>
   `;
+  // Retirement-focused input ordering (docs/specs/41-dependency-
+  // ordering-density.md, Commit 6) — per scenario (state.display.
+  // inputOrdering), not per user like the toggle above: "a debt-
+  // recycling conversation wants a different order than a retirement
+  // one" travels with the scenario, not the adviser.
+  const inputOrderingSelectHTML = `
+    <label class="input-ordering-select">
+      <span>Order</span>
+      <select id="inputOrderingSelect">
+        ${Object.entries(INPUT_ORDERINGS).map(([id, o]) =>
+          `<option value="${id}"${(state.display.inputOrdering ?? "default") === id ? " selected" : ""}>${escapeHTML(o.label)}</option>`
+        ).join("")}
+      </select>
+    </label>
+  `;
   els.sideNav.innerHTML = `
     <button type="button" id="reviewDefaultsBtn" class="btn-text side-nav-review-btn">Review defaults</button>
     ${hideEmptyToggleHTML}
+    ${inputOrderingSelectHTML}
     <div class="nav-group-label">Input</div>
-    ${INPUT_GROUPS.map((g) => group("input", g)).join("")}
+    ${activeInputGroups().map((g) => group("input", g)).join("")}
     <div class="nav-group-label">Output</div>
     ${OUTPUT_GROUPS.map((g) => group("output", g)).join("")}
   `;
@@ -1002,11 +1044,26 @@ els.sideNav.addEventListener("click", (e) => {
 // since ANY of the nine hide-if-empty sections could now need to show
 // its collapsed line instead of its full empty form, or vice versa.
 els.sideNav.addEventListener("change", (e) => {
-  if (e.target.id !== "hideEmptySectionsToggle") return;
-  userPrefs = { ...userPrefs, hideEmptySections: e.target.checked };
-  saveUserPrefs();
-  renderAll();
-  renderSideNav();
+  if (e.target.id === "hideEmptySectionsToggle") {
+    userPrefs = { ...userPrefs, hideEmptySections: e.target.checked };
+    saveUserPrefs();
+    renderAll();
+    renderSideNav();
+    return;
+  }
+  if (e.target.id === "inputOrderingSelect") {
+    // "Switching preserves state and scroll position where sensible"
+    // (the spec's own test requirement): the currently active section
+    // is untouched by construction (this never calls navigate(), only
+    // re-renders the sidebar's own markup) — and #sideNav has no
+    // overflow/max-height of its own (.side-nav-wrap is a sticky flex
+    // item; the PAGE scrolls, not the sidebar independently), so there
+    // is no scroll position of its own for an innerHTML swap to reset
+    // in the first place. Nothing further to do here.
+    state.display = { ...state.display, inputOrdering: e.target.value };
+    saveState();
+    renderSideNav();
+  }
 });
 
 // Toggle which single canvas section is visible; drives the output

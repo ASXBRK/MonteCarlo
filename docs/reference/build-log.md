@@ -6414,6 +6414,61 @@ Commit: `Hide-if-empty on input sections`.
 
 ---
 
+### Dependency, ordering, density, Commit 6: retirement-focused input ordering (spec 41)
+
+**An ordering of the input rail that puts what a retirement
+conversation needs at the top** — Super, Income, Investment cashflows
+(where contributions actually live — there's no standalone
+"Contributions" section), Expenses, Financial assets — with everything
+else beneath, unchanged. An ordering, not a filter: every one of
+router.js's own 17 `INPUT_SECTIONS` is present in both arrangements,
+confirmed directly rather than assumed.
+
+**Derived, not duplicated.** `INPUT_GROUPS_RETIREMENT` is built
+programmatically from the existing `INPUT_GROUPS` — a new group holding
+the five relocated ids at the top, then every existing group with those
+same ids filtered back out (and dropped entirely if that empties it) —
+rather than a second, hand-written copy of the full group structure
+that could silently drift out of sync with it. `INPUT_ORDERINGS`
+registers both by name (`default`, `retirement`) with a label, "leaving
+the mechanism open for more" (the spec's own words) exactly where a
+third ordering would register.
+
+**Per scenario, not per user** — the opposite storage choice from
+Commit 5's hide-if-empty toggle, deliberately: "a debt-recycling
+conversation wants a different order than a retirement one" is a
+property of the conversation itself, so `state.display.inputOrdering`
+lives in the scenario blob like every other display field, not a new
+top-level preference key. Selected via a `<select>` in the sidebar,
+next to the hide-if-empty toggle.
+
+**"Switching preserves state and scroll position where sensible"
+turned out to need almost no code**, once checked directly rather than
+assumed: the active section is untouched by construction (switching
+never calls `navigate()`, only re-renders the sidebar's own markup),
+and `#sideNav` has no `overflow`/`max-height` of its own — it's a plain
+flex column inside a sticky wrapper, so the PAGE scrolls, not the
+sidebar independently, and an `innerHTML` swap of a child element never
+touches the page's own scroll position. An earlier draft added an
+explicit scrollTop capture/restore on `#sideNav` itself before
+confirming this — harmless, but a no-op, since that element is never
+actually scrollable; removed once the browser test proved the real
+concern (the page's own scroll) was never disturbed in the first
+place.
+
+Tests: both orderings present every section (and the retirement one
+demonstrably moves Super earlier, not just a same-membership reshuffle);
+switching preserves the currently-viewed section and the page's own
+scroll position; the choice persists for the scenario across a reload.
+Full unit suite 2263/2263, full browser suite (7 files, 19 tests)
+green.
+
+Commit: `Retirement-focused input ordering`.
+
+Spec 41 complete — all six commits, as specified.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

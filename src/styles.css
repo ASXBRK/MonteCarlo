@@ -1505,6 +1505,25 @@ html, body {
 }
 .hide-empty-toggle input { margin: 0; }
 
+/* Retirement-focused input ordering (docs/specs/41-dependency-
+   ordering-density.md, Commit 6). */
+.input-ordering-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px 10px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.input-ordering-select select {
+  font-size: 12.5px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+}
+
 /* A collapsed input section (hide-if-empty, on, this section has
    nothing in it): the same single-line-plus-add-control shape every
    list section's own populated-state "+ Add" row already uses, just
