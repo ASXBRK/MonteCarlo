@@ -670,6 +670,7 @@ export const COMMITTED_SHAPE ={
           "rolloverTax": "number",
           "salarySacrifice": "number",
           "sg": "number",
+          "surplusNonConcessional": "number",
           "surplusPersonalDeductible": "number",
           "surplusSalarySacrifice": "number",
           "taxFreeClosing": "number",

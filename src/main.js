@@ -42,8 +42,10 @@ import {
   SCHEMA_VERSION,
   ADJUSTMENT_TARGETS, ADJUSTMENT_TARGET_LABELS, createAdjustment,
   TERMINATION_TYPES, INDEX_BASES,
-  createSurplusPeriod, normaliseSurplusPeriods, ALLOCATION_TARGET_TYPES,
-  DEBT_ORDER_MODES, REMAINDER_TARGETS, DEFICIT_SELL_RULES,
+  normaliseSurplusPeriods,
+  DEBT_ORDER_MODES, DEFICIT_SELL_RULES,
+  createCascadeStep, createCascadeBranch, createCascadeDestination, createCascadeCondition,
+  clampCascadeStep, CASCADE_DESTINATION_TYPES, CASCADE_CONDITION_KINDS, LOAN_DEDUCTIBILITY_SCOPES,
   PENSION_TYPES, PENSION_DRAWDOWN_OPTIONS, COMMUTATION_DESTINATIONS,
   createPension, createCommutation,
   createDefinedBenefit,
@@ -2261,7 +2263,7 @@ els.taxDetailsSection.addEventListener("click", (e) => {
 // balance distributed — every edit here is clamped to the remaining
 // headroom (100% minus every OTHER row's share), the same "incapable
 // of exceeding 100%, prevented at input" convention the surplus
-// allocation percentage field already uses (onSurplusPeriodChange).
+// allocation percentage field already uses (onCascadeChange).
 function deathBenefitBeneficiaryRowHTML(prefix, b) {
   const isDependant = isDeathBenefitTaxDependant(b.relationship);
   return `
@@ -4488,10 +4490,328 @@ function commitSurplusPeriods(periods) {
   renderSettings();
 }
 
+// --- Surplus cascade editor (docs/specs/37-surplus-cascade.md, Commit
+// 1, the engine; docs/specs/39-cleanup-rules-cascade.md, Commit 8, this
+// UI) --------------------------------------------------------------
+//
+// state.settings.surplus.periods stores the cascade's own ordered STEP
+// list, one or more branches each. An element may still be an OLD
+// period (a plan saved before this editor existed) — clampCascadeStep
+// already auto-upgrades that shape transparently (planState.js), so
+// this editor always DISPLAYS the native step/branch/condition
+// vocabulary and always SAVES back step-shaped objects
+// (commitSurplusCascade below), never the old shape — the one-way
+// migration spec 39 Commit 5 proved bit-identical at the engine level
+// now actually happens the first time an adviser touches this panel,
+// same as CLAUDE.md's own "do not keep two systems" instruction asks
+// for at the point where an adviser can actually SEE the difference.
+
+function findSuperContributionRow(scid) {
+  return (state.cashflows.superContributions ?? []).find((sc) => sc.id === scid) || null;
+}
+
+function surplusCascadeSteps() {
+  const raw = state.settings.surplus.periods;
+  const out = [];
+  for (const p of raw) {
+    if (p && Array.isArray(p.branches)) out.push(p);
+    else out.push(...clampCascadeStep(p, state.plan, state.assets, surplusCtx()));
+  }
+  return out.length > 0 ? out : [createCascadeStep()];
+}
+
+function commitSurplusCascade(steps) {
+  state.settings.surplus.periods = normaliseSurplusPeriods(steps, state.plan, state.assets, surplusCtx());
+  saveState();
+  refreshOutputs();
+  renderSettings();
+}
+
+// Every super contribution row eligible as a cascade target, split by
+// which destination type it fits (v1 scope, same narrowing note as
+// planState.js's own clampCascadeDestination): salarySacrifice/
+// personalDeductible for superConcessional, personalNonDeductible for
+// superNonConcessional.
+function cascadeEligibleSuperRows(concessional) {
+  return (state.cashflows.superContributions ?? []).filter((sc) =>
+    concessional ? sc.type === "salarySacrifice" || sc.type === "personalDeductible" : sc.type === "personalNonDeductible"
+  );
+}
+
+const CASCADE_DESTINATION_LABELS = {
+  debt: "Debt", asset: "Asset", superConcessional: "Super (concessional)",
+  superNonConcessional: "Super (non-concessional)", goal: "Goal", cash: "Cash", expenditure: "Expenditure",
+};
+
+// A short, human description of what a destination actually points at
+// — used by the resolved-effect line's own fallback text and nowhere
+// else needing precision (the real resolved amounts come from
+// surplusDestinationBreakdown, reading the engine's own output).
+function cascadeDestinationSummary(d) {
+  if (d.type === "asset") return findAsset(d.targetId)?.name ?? "an asset";
+  if (d.type === "goal") return findGoal(d.targetId)?.label ?? "a goal";
+  if (d.type === "superConcessional" || d.type === "superNonConcessional") {
+    const row = findSuperContributionRow(d.targetId);
+    const acct = row ? findSuperAccount(row.accountId) : null;
+    return row ? `${row.label}${acct ? ` (${acct.name})` : ""}` : "a super contribution";
+  }
+  if (d.type === "debt") {
+    if (Array.isArray(d.loanIds) && d.loanIds.length) return d.loanIds.map((lid) => findLiability(lid)?.name ?? "a loan").join(", ");
+    return d.deductibility === "deductible" ? "deductible debt" : d.deductibility === "any" ? "any debt" : "non-deductible debt";
+  }
+  return CASCADE_DESTINATION_LABELS[d.type] ?? d.type;
+}
+
+// The projection's own year each condition is first expected to CLOSE
+// (stop being open) — read straight off the real engine output's
+// per-target reporting fields, never re-derived from engine internals,
+// so it can only ever be as precise as what's already published there.
+// A debt destination scoped by deductibility fraction (rather than an
+// explicit loanIds selection or "any") is a disclosed approximation:
+// the per-loan deductible/non-deductible SPLIT is a live, dynamic
+// engine computation (liabilities.js's currentDeductibleFraction) this
+// function has no access to, so it reads each candidate loan's WHOLE
+// balance instead — exact for "any"/explicit loanIds, approximate
+// (usually conservative — the true eligible balance is smaller, so the
+// true "repaid" date is usually EARLIER than this shows) otherwise.
+function cascadeConditionProjectedYear(condition, destination) {
+  const yl = projection?.yearly;
+  if (!yl || !yl.length) return null;
+  const valueAt = (y) => {
+    const row = yl[y];
+    if (destination.type === "debt") {
+      const idFilter = Array.isArray(destination.loanIds) && destination.loanIds.length ? new Set(destination.loanIds) : null;
+      const candidates = (state.liabilities ?? []).filter((l) => !idFilter || idFilter.has(l.id));
+      if (!candidates.length) return null;
+      return candidates.reduce((s, l) => s + (row.liabilities?.[l.id]?.closing ?? 0), 0);
+    }
+    if (destination.type === "asset") return row.perAssetDetail?.[destination.targetId]?.closing ?? null;
+    if (destination.type === "superConcessional" || destination.type === "superNonConcessional") {
+      const sc = findSuperContributionRow(destination.targetId);
+      return sc ? (row.superDetail?.[sc.accountId]?.closing ?? null) : null;
+    }
+    return null;
+  };
+  for (let y = 0; y < yl.length; y++) {
+    const v = valueAt(y);
+    if (v == null) return null;
+    let met = false;
+    if (condition.kind === "repaid") met = v <= 0.5;
+    else if (condition.kind === "balanceBelow") met = v < condition.amount;
+    else if (condition.kind === "valueReaches") met = v >= condition.amount;
+    else if (condition.kind === "date") {
+      const resolved = resolveRef(condition.ref, state.plan, projection.schedule, "client");
+      met = condition.direction === "atOrAfter" ? y >= resolved.planYear : y < resolved.planYear;
+    } else continue;
+    if (met) return { year: y, fyLabel: projection.schedule.fyLabels[y] };
+  }
+  return null;
+}
+
+function cascadeConditionLabel(kind) {
+  return kind === "repaid" ? "Until repaid" : kind === "balanceBelow" ? "Until balance below" : kind === "valueReaches" ? "Until value reaches" : "Until age or date";
+}
+
+// One condition row: kind selector, kind-specific field(s), the
+// projected-met-year line (spec's own "that figure is the whole point
+// of the redesign"), and a remove button.
+function cascadeConditionRowHTML(sid, bid, condition, cidx, destination) {
+  const kindOptions = CASCADE_CONDITION_KINDS
+    .filter((k) => k !== "repaid" || destination.type === "debt")
+    .map((k) => `<option value="${k}"${condition.kind === k ? " selected" : ""}>${escapeHTML(cascadeConditionLabel(k))}</option>`)
+    .join("");
+  let fieldHTML = "";
+  if (condition.kind === "balanceBelow" || condition.kind === "valueReaches") {
+    fieldHTML = `<input type="number" min="0" step="1000" value="${condition.amount}" data-sid="${sid}" data-bid="${bid}" data-cidx="${cidx}" data-cfield="amount" aria-label="Amount" />`;
+  } else if (condition.kind === "date") {
+    fieldHTML = dateRefControlHTML(condition.ref, "client", `data-sid="${sid}" data-bid="${bid}" data-cidx="${cidx}" data-cfield="date"`, state.plan.client.currentAge, state.plan.endAge);
+  }
+  const projected = cascadeConditionProjectedYear(condition, destination);
+  const projectedHTML = condition.kind === "date"
+    ? ""
+    : `<span class="helper-text cascade-projected">${projected ? `Projected: ${escapeHTML(projected.fyLabel)}` : "Projected: not reached within this projection"}</span>`;
+  return `
+    <div class="cascade-condition-row" data-sid="${sid}" data-bid="${bid}" data-cidx="${cidx}">
+      <select data-sid="${sid}" data-bid="${bid}" data-cidx="${cidx}" data-cfield="kind">${kindOptions}</select>
+      ${fieldHTML}
+      ${projectedHTML}
+      <button type="button" class="btn-text" data-sid="${sid}" data-bid="${bid}" data-cidx="${cidx}" data-caction="remove-condition">Remove</button>
+    </div>
+  `;
+}
+
+// The debt destination's own scope sub-fields: deductibility, pay-down
+// order, and an optional explicit loan selection ("[which loans:
+// select]", the spec's own worked example) — an explicit selection
+// OVERRIDES deductibility (deterministic.js's resolveDebtScope), shown
+// as a plain checkbox list since this app has no other multi-select
+// control to reuse.
+function cascadeDebtScopeHTML(sid, bid, destination) {
+  const liabs = state.liabilities ?? [];
+  const loanIds = new Set(destination.loanIds ?? []);
+  const checks = liabs.map((l) => `
+    <label class="ptg-check">
+      <input type="checkbox"${loanIds.has(l.id) ? " checked" : ""} data-sid="${sid}" data-bid="${bid}" data-cfield="loanId" data-lid="${l.id}" />
+      <span>${escapeHTML(l.name)}</span>
+    </label>
+  `).join("");
+  return `
+    <div class="cf-cell">
+      <label>Scope</label>
+      <select data-sid="${sid}" data-bid="${bid}" data-cfield="deductibility">
+        <option value="nonDeductible"${destination.deductibility === "nonDeductible" ? " selected" : ""}>Non-deductible debt</option>
+        <option value="deductible"${destination.deductibility === "deductible" ? " selected" : ""}>Deductible debt</option>
+        <option value="any"${destination.deductibility === "any" ? " selected" : ""}>Any debt (whole balance)</option>
+      </select>
+    </div>
+    <div class="cf-cell">
+      <label>Pay-down order</label>
+      <select data-sid="${sid}" data-bid="${bid}" data-cfield="order">
+        <option value="interestRate"${destination.order === "interestRate" ? " selected" : ""}>Highest interest rate first</option>
+        <option value="manual"${destination.order === "manual" ? " selected" : ""}>Manual (Liabilities section order)</option>
+      </select>
+    </div>
+    ${liabs.length ? `<div class="cf-cell"><label>Restrict to specific loans (optional)</label>${checks}</div>` : ""}
+  `;
+}
+
+// A fresh destination of the given type, with a sensible default
+// target already picked — createCascadeDestination alone leaves
+// targetId null, which clampCascadeDestination then treats as an
+// invalid reference and DROPS (the same "never coerced to a fallback
+// target" rule a genuinely stale reference gets) — so switching to a
+// target-requiring type with nothing pre-selected silently deleted the
+// WHOLE branch on the next commit. Mirrors surplusDefaultTarget's own
+// "first eligible option" convention for the old allocation picker.
+function cascadeDefaultDestination(type) {
+  const d = createCascadeDestination(type);
+  if (type === "asset") return { ...d, targetId: surplusEligibleTargets().assets[0]?.id ?? null };
+  if (type === "goal") return { ...d, targetId: surplusEligibleTargets().goals[0]?.id ?? null };
+  if (type === "superConcessional") return { ...d, targetId: cascadeEligibleSuperRows(true)[0]?.id ?? null };
+  if (type === "superNonConcessional") return { ...d, targetId: cascadeEligibleSuperRows(false)[0]?.id ?? null };
+  return d;
+}
+
+// The destination's own type selector plus type-specific sub-fields.
+function cascadeDestinationHTML(sid, bid, destination) {
+  const { assets, goals } = surplusEligibleTargets();
+  const ccRows = cascadeEligibleSuperRows(true), nccRows = cascadeEligibleSuperRows(false);
+  // A type with nothing currently eligible to target is hidden from
+  // the list of types you could SWITCH to — but if the destination is
+  // ALREADY that type (e.g. every liability was since removed), it
+  // must stay in the list regardless, or the select would silently
+  // show a DIFFERENT type as "selected" than what's actually stored
+  // (the browser falls back to the first option when none matches),
+  // showing that type's own sub-fields under the wrong dropdown label.
+  const typeOptions = CASCADE_DESTINATION_TYPES
+    .filter((t) => t === destination.type
+      || (t !== "superConcessional" || ccRows.length)
+      && (t !== "superNonConcessional" || nccRows.length)
+      && (t !== "asset" || assets.length)
+      && (t !== "goal" || goals.length)
+      && (t !== "debt" || (state.liabilities ?? []).length))
+    .map((t) => `<option value="${t}"${destination.type === t ? " selected" : ""}>${escapeHTML(CASCADE_DESTINATION_LABELS[t])}</option>`)
+    .join("");
+  let subFieldsHTML = "";
+  if (destination.type === "asset") {
+    subFieldsHTML = `<select data-sid="${sid}" data-bid="${bid}" data-cfield="targetId">${assets.map((a) => `<option value="${a.id}"${destination.targetId === a.id ? " selected" : ""}>${escapeHTML(a.name)}</option>`).join("")}</select>`;
+  } else if (destination.type === "goal") {
+    subFieldsHTML = `<select data-sid="${sid}" data-bid="${bid}" data-cfield="targetId">${goals.map((g) => `<option value="${g.id}"${destination.targetId === g.id ? " selected" : ""}>${escapeHTML(g.label)}</option>`).join("")}</select>`;
+  } else if (destination.type === "superConcessional") {
+    subFieldsHTML = `<select data-sid="${sid}" data-bid="${bid}" data-cfield="targetId">${ccRows.map((sc) => `<option value="${sc.id}"${destination.targetId === sc.id ? " selected" : ""}>${escapeHTML(sc.label)}${findSuperAccount(sc.accountId) ? ` (${escapeHTML(findSuperAccount(sc.accountId).name)})` : ""}</option>`).join("")}</select>`;
+  } else if (destination.type === "superNonConcessional") {
+    subFieldsHTML = `
+      <select data-sid="${sid}" data-bid="${bid}" data-cfield="targetId">${nccRows.map((sc) => `<option value="${sc.id}"${destination.targetId === sc.id ? " selected" : ""}>${escapeHTML(sc.label)}${findSuperAccount(sc.accountId) ? ` (${escapeHTML(findSuperAccount(sc.accountId).name)})` : ""}</option>`).join("")}</select>
+      <label class="ptg-check">
+        <input type="checkbox"${destination.allowBringForward ? " checked" : ""} data-sid="${sid}" data-bid="${bid}" data-cfield="allowBringForward" />
+        <span>Allow this to trigger or extend a bring-forward window</span>
+      </label>
+    `;
+  } else if (destination.type === "debt") {
+    subFieldsHTML = cascadeDebtScopeHTML(sid, bid, destination);
+  }
+  return `
+    <div class="cf-cell">
+      <label>Destination</label>
+      <select data-sid="${sid}" data-bid="${bid}" data-cfield="destinationType">${typeOptions}</select>
+    </div>
+    ${subFieldsHTML}
+  `;
+}
+
+function cascadeBranchHTML(step, branch, showPct) {
+  const sid = step.id, bid = branch.id;
+  const conditionsHTML = branch.conditions.map((c, cidx) => cascadeConditionRowHTML(sid, bid, c, cidx, branch.destination)).join("");
+  return `
+    <div class="cf-section surplus-branch" data-sid="${sid}" data-bid="${bid}">
+      ${showPct ? `<div class="cf-cell"><label>Share (%)</label><input type="number" min="0" max="100" step="1" value="${branch.pct}" data-sid="${sid}" data-bid="${bid}" data-cfield="pct" aria-label="Share percent" /></div>` : ""}
+      <div class="person-grid">${cascadeDestinationHTML(sid, bid, branch.destination)}</div>
+      <div class="cascade-conditions">${conditionsHTML}</div>
+      <button type="button" class="btn-text" data-sid="${sid}" data-bid="${bid}" data-caction="add-condition">+ Add until-condition</button>
+      ${showPct ? `<button type="button" class="btn-text" data-sid="${sid}" data-bid="${bid}" data-caction="remove-branch">Remove this branch</button>` : ""}
+    </div>
+  `;
+}
+
+// "Resolved effect" line (spec's own worked example: "$2,340/month:
+// $1,400 to Home loan, $600 to Super, $340 to Cash") — read from the
+// FIRST projection year, using whatever the engine actually did that
+// year (never re-derived), so it's never wrong relative to the real
+// projection. Unlike the old period-shaped version, a step has no
+// "from"/"to" of its own to pick a year from (a step may not even be
+// REACHED in year 0, if an earlier step's own conditions are still
+// open then) — year 0 is simply the spec's own illustrative snapshot,
+// same mechanism as before, applied uniformly.
+function cascadeStepResolvedEffectHTML() {
+  const row = projection.yearly?.[0];
+  if (!row) return "";
+  const items = surplusDestinationBreakdown(row, state);
+  const fyLabel = projection.schedule.fyLabels[0];
+  if (!items.length) {
+    return `<p class="helper-text">Resolved effect, ${escapeHTML(fyLabel)}: no surplus was swept this year under this cascade.</p>`;
+  }
+  const total = items.reduce((s, x) => s + x.amount, 0);
+  const parts = items.map((x) => `${fmtMoney(Math.round(x.amount / 12))} to ${escapeHTML(x.label)}`).join(", ");
+  return `<p class="helper-text">Resolved effect, ${escapeHTML(fyLabel)} (swept once at FY-end; shown per month for scale): ${fmtMoney(Math.round(total / 12))}/month: ${parts}.</p>`;
+}
+
+function cascadeStepHTML(step, i, steps) {
+  const sid = step.id;
+  const branches = step.branches;
+  const showPct = branches.length > 1;
+  const branchesHTML = branches.map((b) => cascadeBranchHTML(step, b, showPct)).join("");
+  return `
+    <div class="cf-section surplus-step" data-sid="${sid}">
+      <div class="cf-section-title">
+        Step ${i + 1}
+        ${i > 0 ? `<button type="button" class="btn-text" data-sid="${sid}" data-caction="move-step-up">Move up</button>` : ""}
+        ${i < steps.length - 1 ? `<button type="button" class="btn-text" data-sid="${sid}" data-caction="move-step-down">Move down</button>` : ""}
+        ${steps.length > 1 ? `<button type="button" class="btn-text" data-sid="${sid}" data-caction="remove-step">Remove step</button>` : ""}
+      </div>
+      <p class="helper-text">Whatever reaches this step is split across its branch(es) by share; a branch whose own until-condition is closed takes nothing, and its share cascades to the NEXT step, not to its sibling branch.</p>
+      ${branchesHTML}
+      <button type="button" class="btn-text" data-sid="${sid}" data-caction="add-branch">+ Split into another branch</button>
+      ${i === 0 ? cascadeStepResolvedEffectHTML() : ""}
+    </div>
+  `;
+}
+
+function surplusPeriodsSectionHTML() {
+  const steps = surplusCascadeSteps();
+  return `
+    <div class="cf-section">
+      <div class="cf-section-title">Surplus treatment</div>
+      <p class="helper-text">Once a year, at the end of each financial year, whatever is sitting in the Working Cash Account above its minimum is swept through this cascade — step 1 first, then whatever's left cascades to step 2, and so on.</p>
+    </div>
+    ${steps.map((s, i) => cascadeStepHTML(s, i, steps)).join("")}
+    <button type="button" class="btn-text" data-caction="add-step">+ Add step</button>
+  `;
+}
+
 // Retirement: Income Required (spec 32, Commit 1) — field dispatch,
-// mirroring onSurplusPeriodChange's shape immediately below for the
-// same reason (a nested plan object, not a row list, so no id lookup
-// is needed — just read-modify-clamp-write the one object).
+// mirroring onCascadeChange's shape immediately below for the same
+// reason (a nested plan object, not a row list, so no id lookup is
+// needed — just read-modify-clamp-write the one object).
 function onIncomeRequiredChange(el, field) {
   const ir = state.plan.retirement.incomeRequired;
   if (field === "irSource") {
@@ -4551,105 +4871,6 @@ function commitIncomeRequired(next) {
   renderSettings();
 }
 
-// "Resolved effect" line (spec's own worked example: "$2,340/month:
-// $1,400 to Home loan, $600 to Super, $340 to Cash") — read from the
-// period's own FIRST covered plan year, using whatever the engine
-// actually did that year (never re-derived), so it's never wrong
-// relative to the real projection. The sweep itself is a single FY-end
-// lump sum, not a monthly transfer — the "/month" framing is the
-// spec's own (a familiar budgeting scale for an adviser), so the
-// caption says plainly that it's shown per month for scale only.
-function surplusResolvedEffectHTML(p) {
-  const schedule = projection.schedule;
-  const y = resolveRef(p.from, state.plan, schedule, "client").planYear;
-  const row = projection.yearly?.[y];
-  if (!row) return "";
-  const items = surplusDestinationBreakdown(row, state);
-  if (!items.length) {
-    return `<p class="helper-text">Resolved effect, ${schedule.fyLabels[y]}: no surplus was swept this year under this period's rules.</p>`;
-  }
-  const total = items.reduce((s, x) => s + x.amount, 0);
-  const parts = items.map((x) => `${fmtMoney(Math.round(x.amount / 12))} to ${escapeHTML(x.label)}`).join(", ");
-  return `<p class="helper-text">Resolved effect, ${schedule.fyLabels[y]} (swept once at FY-end; shown per month for scale): ${fmtMoney(Math.round(total / 12))}/month: ${parts}.</p>`;
-}
-
-function surplusPeriodCardHTML(p, i, periods) {
-  const plan = state.plan, schedule = projection.schedule;
-  const isFirst = i === 0, isLast = i === periods.length - 1;
-  const fromAge = resolveRef(p.from, plan, schedule, "client").age;
-  const toAge = resolveRef(p.to, plan, schedule, "client").age;
-  const canSplit = toAge > fromAge;
-  const usedPct = p.allocations.reduce((s, a) => s + a.pct, 0);
-  const remainderPct = Math.max(0, 100 - usedPct);
-
-  // Only an INTERNAL boundary (a non-first period's own "from") is
-  // ever directly edited — the outer edges (period 0's from, the last
-  // period's to) always track Start/End so the periods keep covering
-  // the whole projection even if the plan's own bounds later move.
-  // Bounded to (previous boundary, next boundary) so the control
-  // itself can never produce an overlap — the spec's own "incapable of
-  // entering a gap/overlap" requirement, enforced at the input, not
-  // after the fact.
-  const fromHTML = isFirst
-    ? `<span class="date-ref-resolved">Start (age ${fromAge})</span>`
-    : dateRefControlHTML(p.from, "client", `data-pid="${p.id}" data-pfield="boundary"`, plan.client.currentAge, plan.endAge);
-  const toHTML = isLast
-    ? `<span class="date-ref-resolved">End (age ${toAge})</span>`
-    : `<span class="date-ref-resolved">age ${toAge} — set by the next period's start</span>`;
-
-  const allocRows = p.allocations.map((a) => `
-    <div class="alloc-row" data-said="${a.id}">
-      <select data-pid="${p.id}" data-said="${a.id}" data-pfield="target">${surplusAllocationTargetOptionsHTML(a.targetType, a.targetId)}</select>
-      <input type="number" min="0" max="100" step="1" value="${a.pct}" data-pid="${p.id}" data-said="${a.id}" data-pfield="pct" aria-label="Percent" />%
-      <button type="button" class="btn-text" data-pid="${p.id}" data-said="${a.id}" data-paction="remove-allocation">Remove</button>
-    </div>
-  `).join("");
-
-  return `
-    <div class="cf-section surplus-period" data-pid="${p.id}">
-      <div class="cf-section-title">
-        Period ${i + 1}
-        ${periods.length > 1 ? `<button type="button" class="btn-text" data-pid="${p.id}" data-paction="remove-period">Remove period</button>` : ""}
-      </div>
-      <div class="person-grid">
-        <div class="cf-cell"><label>From</label>${fromHTML}</div>
-        <div class="cf-cell"><label>To</label>${toHTML}</div>
-      </div>
-      <label class="ptg-check">
-        <input type="checkbox"${p.payNonDeductibleDebtFirst ? " checked" : ""} data-pid="${p.id}" data-pfield="payNonDeductibleDebtFirst" />
-        <span>Pay non-deductible debt first, before any other destination</span>
-      </label>
-      <div class="cf-cell">
-        <label>Order debt is paid down in</label>
-        <select data-pid="${p.id}" data-pfield="debtOrder"${p.payNonDeductibleDebtFirst ? "" : " disabled"}>
-          <option value="interestRate"${p.debtOrder === "interestRate" ? " selected" : ""}>Highest interest rate first</option>
-          <option value="manual"${p.debtOrder === "manual" ? " selected" : ""}>Manual (Liabilities section order)</option>
-        </select>
-      </div>
-      <div class="alloc-list">${allocRows}</div>
-      ${remainderPct > 0 ? `<button type="button" class="btn-text" data-pid="${p.id}" data-paction="add-allocation">+ Add allocation</button>` : ""}
-      <p class="surplus-remainder">Remainder: <strong>${remainderPct}%</strong> →
-        <select data-pid="${p.id}" data-pfield="remainderTo">
-          <option value="cash"${p.remainderTo === "cash" ? " selected" : ""}>Cash</option>
-          <option value="expenditure"${p.remainderTo === "expenditure" ? " selected" : ""}>Expenditure</option>
-        </select>
-      </p>
-      ${canSplit ? `<button type="button" class="btn-text" data-pid="${p.id}" data-paction="split-period">+ Split into two periods</button>` : ""}
-      ${surplusResolvedEffectHTML(p)}
-    </div>
-  `;
-}
-
-function surplusPeriodsSectionHTML() {
-  const periods = state.settings.surplus.periods;
-  return `
-    <div class="cf-section">
-      <div class="cf-section-title">Surplus treatment</div>
-      <p class="helper-text">Once a year, at the end of each financial year, whatever is sitting in the Working Cash Account above its minimum is allocated per the period covering that year.</p>
-    </div>
-    ${periods.map((p, i) => surplusPeriodCardHTML(p, i, periods)).join("")}
-  `;
-}
 
 function deficitSectionHTML(orderItems) {
   const d = state.settings.deficit;
@@ -5175,8 +5396,8 @@ els.settingsPanel.addEventListener("change", (e) => {
     renderSettings();
     return;
   }
-  const pid = e.target.dataset.pid;
-  if (pid) { onSurplusPeriodChange(e.target, pid); return; }
+  const sid = e.target.dataset.sid;
+  if (sid) { onCascadeChange(e.target, sid); return; }
   const field = e.target.dataset.settingsField;
   if (!field) return;
   if (field.startsWith("ir")) { onIncomeRequiredChange(e.target, field); return; }
@@ -5208,79 +5429,107 @@ els.settingsPanel.addEventListener("change", (e) => {
   renderSettings();
 });
 
-// A period's own from/to are mutated as a PAIR: editing period i's
-// "from" (the only boundary ever directly exposed — see
-// surplusPeriodCardHTML's own comment) always writes period i-1's "to"
-// in the SAME commit, one age below the new value, so the two periods
-// can never drift out of contiguity between renders.
-function onSurplusPeriodChange(el, pid) {
-  const periods = state.settings.surplus.periods;
-  const i = periods.findIndex((p) => p.id === pid);
-  if (i < 0) return;
-  const plan = state.plan, schedule = projection.schedule;
-  const field = el.dataset.pfield;
-  const next = periods.map((p) => ({ ...p, allocations: p.allocations.map((a) => ({ ...a })) }));
+// Deep-clones the step list so every mutation below can read-modify-
+// write without touching the live state (commitSurplusCascade is the
+// only path that writes state back) — steps/branches/conditions/
+// destinations each get their own fresh copy.
+function cloneCascadeSteps() {
+  return surplusCascadeSteps().map((s) => ({
+    ...s,
+    branches: s.branches.map((b) => ({ ...b, destination: { ...b.destination }, conditions: b.conditions.map((c) => ({ ...c })) })),
+  }));
+}
 
-  if (field === "boundary") {
-    if (i === 0) return; // the first period's "from" is never editable
+function onCascadeChange(el, sid) {
+  const steps = cloneCascadeSteps();
+  const si = steps.findIndex((s) => s.id === sid);
+  if (si < 0) return;
+  const bid = el.dataset.bid;
+  const branches = steps[si].branches;
+  const bi = bid ? branches.findIndex((b) => b.id === bid) : -1;
+  const field = el.dataset.cfield;
+
+  if (field === "pct" && bi >= 0) {
+    // Clamped to this branch's own remaining headroom (100% minus
+    // every OTHER branch's share) — the same "incapable of exceeding
+    // 100%, prevented at input" convention the old allocation
+    // percentage field used.
+    const othersSum = branches.reduce((s, b, k) => (k === bi ? s : s + b.pct), 0);
+    branches[bi] = { ...branches[bi], pct: clampNumber(el.value, 0, Math.max(0, 100 - othersSum)) };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (bi < 0) return;
+  const destination = branches[bi].destination;
+
+  if (field === "destinationType") {
+    if (!CASCADE_DESTINATION_TYPES.includes(el.value)) return;
+    // A fresh destination of the chosen type — any conditions authored
+    // against the OLD type (e.g. "repaid" against a debt destination)
+    // are dropped rather than carried over onto a type they can't
+    // apply to (clampCascadeBranch's own rule for a stray "repaid").
+    const conditions = el.value === "debt" ? branches[bi].conditions : branches[bi].conditions.filter((c) => c.kind !== "repaid");
+    branches[bi] = { ...branches[bi], destination: cascadeDefaultDestination(el.value), conditions };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (field === "targetId") {
+    branches[bi] = { ...branches[bi], destination: { ...destination, targetId: el.value } };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (field === "deductibility") {
+    if (!LOAN_DEDUCTIBILITY_SCOPES.includes(el.value)) return;
+    branches[bi] = { ...branches[bi], destination: { ...destination, deductibility: el.value } };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (field === "order") {
+    if (!DEBT_ORDER_MODES.includes(el.value)) return;
+    branches[bi] = { ...branches[bi], destination: { ...destination, order: el.value } };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (field === "loanId") {
+    const lid = el.dataset.lid;
+    const current = new Set(destination.loanIds ?? []);
+    if (el.checked) current.add(lid); else current.delete(lid);
+    branches[bi] = { ...branches[bi], destination: { ...destination, loanIds: current.size ? [...current] : null } };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (field === "allowBringForward") {
+    branches[bi] = { ...branches[bi], destination: { ...destination, allowBringForward: el.checked } };
+    commitSurplusCascade(steps);
+    return;
+  }
+
+  const cidx = Number(el.dataset.cidx);
+  if (!Number.isInteger(cidx)) return;
+  const conditions = branches[bi].conditions;
+  if (cidx < 0 || cidx >= conditions.length) return;
+  if (field === "kind") {
+    if (!CASCADE_CONDITION_KINDS.includes(el.value)) return;
+    conditions[cidx] = createCascadeCondition(el.value);
+  } else if (field === "amount") {
+    conditions[cidx] = { ...conditions[cidx], amount: clampNumber(el.value, 0) };
+  } else if (field === "date") {
+    const plan = state.plan, schedule = projection.schedule;
     let ref;
     if (el.dataset.drRole === "anchor") {
       ref = el.value === "__age__"
-        ? { kind: "age", age: resolveRef(next[i].from, plan, schedule, "client").age }
+        ? { kind: "age", age: resolveRef(conditions[cidx].ref, plan, schedule, "client").age }
         : { kind: "anchor", anchorId: el.value };
     } else {
-      ref = { kind: "age", age: clampInt(el.value, plan.client.currentAge, plan.endAge) };
+      const age = clampInt(el.value, plan.client.currentAge, plan.endAge);
+      ref = { kind: "age", age };
+      flagIfClamped(el, age);
     }
-    // Bound strictly between the neighbouring boundaries so the SAME
-    // input that lets the user choose an anchor can never itself
-    // create a gap or an overlap — an anchor whose own resolved age
-    // falls outside the band is converted to a plain clamped age
-    // rather than accepted and silently misordering the list (the
-    // project's standing "unenterable state, not a warning" rule).
-    const minAge = resolveRef(next[i - 1].from, plan, schedule, "client").age + 1;
-    const maxAge = i + 1 < next.length ? resolveRef(next[i + 1].from, plan, schedule, "client").age - 1 : plan.endAge;
-    const resolvedAge = resolveRef(ref, plan, schedule, "client").age;
-    const clampedAge = Math.min(Math.max(resolvedAge, minAge), maxAge);
-    if (clampedAge !== resolvedAge) ref = { kind: "age", age: clampedAge };
-    next[i] = { ...next[i], from: ref };
-    next[i - 1] = { ...next[i - 1], to: { kind: "age", age: clampedAge - 1 } };
-    commitSurplusPeriods(next);
+    conditions[cidx] = { ...conditions[cidx], ref };
+  } else {
     return;
   }
-  if (field === "payNonDeductibleDebtFirst") {
-    next[i] = { ...next[i], payNonDeductibleDebtFirst: el.checked };
-    commitSurplusPeriods(next);
-    return;
-  }
-  if (field === "debtOrder") {
-    next[i] = { ...next[i], debtOrder: DEBT_ORDER_MODES.includes(el.value) ? el.value : "interestRate" };
-    commitSurplusPeriods(next);
-    return;
-  }
-  if (field === "remainderTo") {
-    next[i] = { ...next[i], remainderTo: REMAINDER_TARGETS.includes(el.value) ? el.value : "cash" };
-    commitSurplusPeriods(next);
-    return;
-  }
-  if (field === "target" || field === "pct") {
-    const said = el.dataset.said;
-    const allocs = next[i].allocations;
-    const j = allocs.findIndex((a) => a.id === said);
-    if (j < 0) return;
-    if (field === "target") {
-      const [targetType, targetId] = el.value.split(":");
-      if (!ALLOCATION_TARGET_TYPES.includes(targetType)) return;
-      allocs[j] = { ...allocs[j], targetType, targetId };
-    } else {
-      // Clamped to this row's own remaining headroom (100% minus every
-      // OTHER row's percentage) — the spec's own "incapable of
-      // exceeding 100%, prevented at input" requirement.
-      const othersSum = allocs.reduce((s, a, k) => (k === j ? s : s + a.pct), 0);
-      allocs[j] = { ...allocs[j], pct: clampNumber(el.value, 0, Math.max(0, 100 - othersSum)) };
-    }
-    commitSurplusPeriods(next);
-    return;
-  }
+  commitSurplusCascade(steps);
 }
 
 els.settingsPanel.addEventListener("click", (e) => {
@@ -5303,10 +5552,10 @@ els.settingsPanel.addEventListener("click", (e) => {
     return;
   }
   if (onGlidePathAction(e)) return;
-  const btn = e.target.closest("[data-action], [data-paction]");
+  const btn = e.target.closest("[data-action], [data-caction]");
   if (!btn) return;
-  const { action, paction, pid, said } = btn.dataset;
-  if (paction) { onSurplusPeriodAction(paction, pid, said); return; }
+  const { action, caction, sid, bid, cidx } = btn.dataset;
+  if (caction) { onCascadeAction(caction, sid, bid, cidx); return; }
   if (action === "open-modal") { openModal(btn.dataset.modalScrollTo); return; }
   if (action !== "order-up" && action !== "order-down") return;
   const order = [...state.settings.fundingOrder];
@@ -5319,45 +5568,90 @@ els.settingsPanel.addEventListener("click", (e) => {
   renderSettings();
 });
 
-function onSurplusPeriodAction(paction, pid, said) {
-  const periods = state.settings.surplus.periods;
-  const i = periods.findIndex((p) => p.id === pid);
-  if (i < 0) return;
-  const plan = state.plan, schedule = projection.schedule;
-  const next = periods.map((p) => ({ ...p, allocations: p.allocations.map((a) => ({ ...a })) }));
+// The default destination for a freshly added branch/step — cash
+// (always legal, needs no target picked), matching the OLD editor's
+// own "never a fresh row pointing at nothing" rule without assuming
+// any particular asset/liability exists.
+function cascadeDefaultBranch(pct) {
+  return { ...createCascadeBranch("cash"), pct };
+}
 
-  if (paction === "add-allocation") {
-    const usedPct = next[i].allocations.reduce((s, a) => s + a.pct, 0);
-    const remainderPct = Math.max(0, 100 - usedPct);
-    if (remainderPct <= 0) return;
-    next[i].allocations.push({ id: uid("sa"), ...surplusDefaultTarget(), pct: remainderPct });
-    commitSurplusPeriods(next);
-  } else if (paction === "remove-allocation") {
-    next[i].allocations = next[i].allocations.filter((a) => a.id !== said);
-    commitSurplusPeriods(next);
-  } else if (paction === "remove-period" && periods.length > 1) {
-    // Merge into a neighbour rather than leaving a gap: the first
-    // period is absorbed forward (period 1 extends back to Start), any
-    // other period is absorbed by the one before it (which extends to
-    // this period's own "to") — contiguity is preserved by construction,
-    // never re-validated after the fact.
-    if (i === 0) {
-      next[1] = { ...next[1], from: { kind: "anchor", anchorId: "start" } };
+function onCascadeAction(caction, sid, bid, cidx) {
+  const steps = cloneCascadeSteps();
+  // "add-step" is the one action with no step of its own to find yet
+  // (its button carries no data-sid) — handled before the step lookup
+  // below, whose own early return would otherwise make this action
+  // permanently unreachable.
+  if (caction === "add-step") {
+    steps.push(createCascadeStep());
+    commitSurplusCascade(steps);
+    return;
+  }
+  const si = steps.findIndex((s) => s.id === sid);
+  if (si < 0) return;
+  const branches = steps[si].branches;
+  const bi = bid ? branches.findIndex((b) => b.id === bid) : -1;
+
+  if (caction === "add-condition" && bi >= 0) {
+    // "repaid" only ever makes sense against a debt destination —
+    // default to "balanceBelow" otherwise, the same fallback
+    // clampCascadeCondition itself would settle on for a stray
+    // "repaid" against a non-debt branch.
+    const kind = branches[bi].destination.type === "debt" ? "repaid" : "balanceBelow";
+    branches[bi] = { ...branches[bi], conditions: [...branches[bi].conditions, createCascadeCondition(kind)] };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (caction === "remove-condition" && bi >= 0) {
+    const idx = Number(cidx);
+    branches[bi] = { ...branches[bi], conditions: branches[bi].conditions.filter((_, k) => k !== idx) };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (caction === "add-branch") {
+    // A single branch always holds 100% by construction (its own pct
+    // input is hidden until there's something to split against — see
+    // cascadeBranchHTML's own showPct) — gating this action on
+    // leftover headroom would make a FIRST split permanently
+    // impossible, the exact shape of bug this comment is here to
+    // prevent reintroducing. Leftover headroom (already <100% used)
+    // goes to the new branch unchanged; otherwise every branch,
+    // including the new one, splits evenly.
+    const usedPct = branches.reduce((s, b) => s + b.pct, 0);
+    let newBranches;
+    if (usedPct < 100) {
+      newBranches = [...branches, cascadeDefaultBranch(100 - usedPct)];
     } else {
-      next[i - 1] = { ...next[i - 1], to: next[i].to };
+      const newCount = branches.length + 1;
+      const evenPct = Math.floor(100 / newCount);
+      newBranches = [
+        ...branches.map((b) => ({ ...b, pct: evenPct })),
+        cascadeDefaultBranch(100 - evenPct * (newCount - 1)), // remainder absorbs any rounding
+      ];
     }
-    next.splice(i, 1);
-    commitSurplusPeriods(next);
-  } else if (paction === "split-period") {
-    const p = next[i];
-    const fromAge = resolveRef(p.from, plan, schedule, "client").age;
-    const toAge = resolveRef(p.to, plan, schedule, "client").age;
-    if (toAge <= fromAge) return;
-    const splitAge = Math.min(Math.max(fromAge + Math.ceil((toAge - fromAge) / 2), fromAge + 1), toAge);
-    const added = { ...createSurplusPeriod(), from: { kind: "age", age: splitAge }, to: p.to };
-    next[i] = { ...p, to: { kind: "age", age: splitAge - 1 } };
-    next.splice(i + 1, 0, added);
-    commitSurplusPeriods(next);
+    steps[si] = { ...steps[si], branches: newBranches };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (caction === "remove-branch" && bi >= 0 && branches.length > 1) {
+    steps[si] = { ...steps[si], branches: branches.filter((_, k) => k !== bi) };
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (caction === "remove-step" && steps.length > 1) {
+    steps.splice(si, 1);
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (caction === "move-step-up" && si > 0) {
+    [steps[si - 1], steps[si]] = [steps[si], steps[si - 1]];
+    commitSurplusCascade(steps);
+    return;
+  }
+  if (caction === "move-step-down" && si < steps.length - 1) {
+    [steps[si], steps[si + 1]] = [steps[si + 1], steps[si]];
+    commitSurplusCascade(steps);
+    return;
   }
 }
 

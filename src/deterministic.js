@@ -1898,6 +1898,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         wcaBal -= consumed;
         row.superDetail[target.accountId].contributions += consumed;
         row.superDetail[target.accountId].nonConcessional += consumed;
+        row.superDetail[target.accountId].surplusNonConcessional += consumed;
       }
       if (share - consumed > 1e-6) {
         superWarnings.push({
@@ -2333,6 +2334,18 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       // bypass), so this exists purely so the Cashflow table's Funding
       // group and the Focus → Surplus allocation view can show it.
       surplusPersonalDeductible: 0,
+      // docs/specs/39-cleanup-rules-cascade.md, Commit 7 — the same
+      // reporting-only breakdown as surplusSalarySacrifice/
+      // surplusPersonalDeductible above, but for the cascade's own
+      // superNonConcessional destination. No invariant add-back needed
+      // here either (a non-concessional credit already passes through
+      // wcaBal with no upstream-income exclusion to correct for) —
+      // exists purely so a step targeting this destination has
+      // something for the settings UI's resolved-effect line (Commit
+      // 8) and the Funding group/Focus view to read, distinct from an
+      // ORDINARY personalNonDeductible row landing in the same
+      // `nonConcessional` total.
+      surplusNonConcessional: 0,
       // Untaxed superannuation elements (spec 26, Commit 1) — a
       // same-person rollover between two of the owner's own accounts.
       // rolloverOut/rolloverIn are the GROSS/NET amounts either side of

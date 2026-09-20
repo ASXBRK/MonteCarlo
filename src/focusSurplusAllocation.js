@@ -31,7 +31,11 @@ export function surplusDestinationBreakdown(row, state) {
   }
   for (const sa of state.plan?.superAccounts ?? []) {
     const d = row.superDetail?.[sa.id];
-    const amt = (d?.surplusSalarySacrifice ?? 0) + (d?.surplusPersonalDeductible ?? 0);
+    // docs/specs/39-cleanup-rules-cascade.md, Commit 7's own
+    // superNonConcessional destination — the same "surplus-sourced,
+    // reporting-only" shape surplusSalarySacrifice/
+    // surplusPersonalDeductible already have here.
+    const amt = (d?.surplusSalarySacrifice ?? 0) + (d?.surplusPersonalDeductible ?? 0) + (d?.surplusNonConcessional ?? 0);
     if (amt > 0.005) out.push({ label: sa.name, amount: amt });
   }
   for (const g of state.goals ?? []) {
