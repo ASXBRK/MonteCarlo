@@ -4965,6 +4965,47 @@ ArrowDown moving the active result; "/" focusing the box from
 elsewhere on the page; the empty-result message; zero console errors
 throughout.
 
+### Finding and editing inputs, Commit 3: not built — closes spec 38
+
+**Decision: skip it, on the record.** Commit 3 (a chart/table preview
+at the bottom of an input section, gated by the spec's own "reassess
+whether it is still needed" instruction) was assessed after Commits 1
+and 2 landed and deliberately not built.
+
+**Why.** The pain the whole spec exists to fix — navigate to a section,
+edit, navigate back to see the effect — is closed for the common case
+two different ways once Commits 1 and 2 exist: from any output view,
+the review panel edits a simple field in place and the chart/table
+above it updates immediately; from anywhere, search jumps to and
+inline-edits that same class of simple field without leaving the
+current view at all. That is the high-frequency loop ("bump this
+number, does it fix the shortfall") fully covered without a third
+mechanism, and it is precisely the loop the spec's own "Why" section
+names.
+
+**What remains uncovered, named rather than silently dropped:**
+multi-field STRUCTURAL editing — tuning a liability's rate/term/IO-years
+together, a property's sale settings, anything Commits 1 and 2
+deliberately treat as "link out for anything complex" rather than
+inline-editable. A preview would still help there: watching a chart
+respond while several interacting fields are tuned together is a
+genuinely different use case from editing one simple field, and neither
+the review panel nor search attempts it. Judged narrower and more
+occasional than the spec's own "45 sections" framing implies, and not
+worth 45 new mount points — each one "a place for something to drift"
+(the spec's own words) — for a workflow this specific. If a real,
+recurring need for it surfaces later (not hypothetical), the spec's own
+"start with one section — cashflow — and report before extending" gate
+is still the right way back in: build the cashflow pilot alone, reuse
+the existing transposed year table and chart exactly as instructed, and
+decide on the other 44 from real usage rather than up front.
+
+No code changes. Full suite and build unaffected (2219/2219, unchanged
+from Commit 2).
+
+**Spec 38 closes here** — Commits 1 and 2 shipped, Commit 3 assessed and
+declined for the reasons above.
+
 ---
 
 ## WHERE WE'RE GOING
