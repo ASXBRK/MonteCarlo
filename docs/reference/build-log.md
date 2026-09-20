@@ -5773,6 +5773,146 @@ Commit: `Browser test harness`.
 
 ---
 
+### Browser test harness, Commit 2: every interactive control is alive (spec 40)
+
+**The defect class.** Spec 39 Commit 8 shipped four dead controls in a
+just-built, hand-verified feature, including a "+ Add step" button that
+did nothing at all. `tests/browser/controls.test.mjs` is the test that
+would have caught all four: for every interactive control across all
+17 input sections and 42 output views (`INPUT_SECTIONS`/`OUTPUT_VIEWS`,
+router.js's own registries — never a copied list), operate it and
+assert an observable trace: a DOM change, a `localStorage` change, or
+(for the two control kinds that produce neither) a dedicated check of
+its own.
+
+**The control list is derived structurally**
+(`button, select, input[type=checkbox], input[type=radio], summary`,
+`support.mjs`'s `CONTROL_SELECTOR`), not from `data-*` attribute names
+— `main.js` uses roughly 20 different `-action` names and 18 different
+`*field` names with no single convention linking them, so an
+attribute-based list would silently miss whatever doesn't happen to
+match. `sweepArea` (`support.mjs`) re-derives the worklist from the
+live DOM every iteration, not a snapshot taken up front, since
+operating a control commonly adds, removes, or reveals others (an "Add
+row" button's own new row; a "Run" button's own "Cancel" button; a
+confirm dialog's own buttons) — each exactly as much "a control" as
+the one that revealed it.
+
+**Four real bugs in the test mechanism itself, found building this —
+each would have made the harness worse than useless (false passes,
+false failures, or hangs) had it shipped as first written:**
+
+1. **The change-tracking MutationObserver never actually attached.**
+   `document.documentElement` doesn't exist yet at the point
+   `page.addInitScript()` runs (before the page's HTML is parsed at
+   all) — `observe(documentElement, ...)` threw, silently, leaving the
+   mutation count frozen at 0 for the page's entire life. Every control
+   looked dead regardless of what it did. Fixed by observing `document`
+   itself (a `Node` from the start) instead.
+2. **Marking a control "tested" via a scratch DOM attribute leaked into
+   its own diff.** `MutationObserver` delivers records as a microtask,
+   not synchronously — `el.setAttribute("data-bt-tested", "1")` then
+   immediately reading the mutation count under-counted (the mark's own
+   record hadn't been delivered yet), and that pending record then
+   landed during the settle wait, making a genuinely inert synthetic
+   button look "alive." Fixed by tracking tested controls in an
+   in-memory `Set`/`WeakSet` instead, which touches nothing the
+   observer watches.
+3. **Node-identity dedup infinite-looped on real re-rendering.** This
+   app re-renders whole sections via `innerHTML` replacement (e.g.
+   toggling Setup's household Single/Married buttons replaces
+   `#planBar`'s entire subtree) — a `WeakSet` keyed by DOM node kept
+   discovering the SAME two buttons as "new" forever, toggling back and
+   forth until it hit the 400-control runaway guard (confirmed
+   directly: `input/setup` alone took 31 seconds and still capped out).
+   Fixed by keying on a structural signature (id, or sorted `data-*`
+   attributes, or — last resort — the rendered label) instead of node
+   identity; the same logical control's fresh post-render node computes
+   the same key, so the second sighting is correctly recognised as
+   already-tested.
+4. **A single document-wide mutation count was too noisy.** Even keyed
+   correctly, a completely inert synthetic button in an isolated
+   wrapper appended straight to `<body>` still registered as "changed"
+   — some ambient settling activity elsewhere on a page this busy moved
+   the count within the same window, unrelated to anything clicked.
+   Fixed by scoping each `sweepArea` call's own `MutationObserver` to
+   just the container being swept, plus every `<dialog>` (a control's
+   real effect is sometimes to open one of those, which live outside
+   any `[data-section]` container) — not `document` globally.
+
+**Two control kinds structurally can't be caught by a DOM/storage
+diff, each given its own dedicated check rather than forced through
+the generic one:**
+
+- **Monte Carlo / lifecycle-comparison "Run" buttons** kick off a real
+  2,000–4,000-path simulation. Sweeping them like any other button
+  left a Chromium renderer at 60%+ CPU for minutes after the test
+  itself had moved on — confirmed directly, and the reason
+  `tests/browser/run.mjs`'s 110-second watchdog got a second, load-
+  bearing fix in the same session (see below). Excluded from the
+  generic sweep (`HEAVY_RUN_BUTTON_IDS`); checked separately in a page
+  that's discarded immediately after confirming an immediate "now
+  running" state change — closing the page tears down the Worker
+  regardless of whether Cancel was ever clicked.
+- **`#exportBtn`**'s whole job is a `Blob` + anchor download, never a
+  DOM or `localStorage` change. Checked via Playwright's own
+  `page.waitForEvent('download')` against a table-only output subject
+  ("tax") rather than "projection" — `exportChartPNG`'s own
+  `typeof Plotly === "undefined"` guard returns without downloading
+  anything when the CDN is unreachable (this sandbox's own proxy
+  blocks it, the same documented "CDN may be blocked" case Commit 1's
+  console-error filter already accounts for), which is exactly what a
+  first attempt against "projection" hit.
+
+**A fifth, load-bearing fix to `run.mjs` itself, found the same way
+Commit 1's `npx` bug was:** the 110-second watchdog's `process.exit(1)`
+only ever ended the orchestrator's own process — the preview server and
+the `node --test` child it was watching over were orphaned by it, not
+stopped, on the exact hang this test's early, broken drafts kept
+producing (Monte Carlo runs left running for real; `node:test`'s own
+timeout logically failing a test doesn't unwind a dangling
+`page.evaluate()` promise underneath it). Fixed by tracking every
+spawned child in a `Set` and `SIGKILL`-ing each one before the watchdog
+exits.
+
+**A sixth, correctness (not mechanism) bug, found once the above were
+all fixed and one real failure remained:** `paramsBtn` intermittently
+reported dead. Root cause: an open `<dialog>` makes the rest of the
+document **inert** per the HTML spec — `adjustmentsBtn`, tested
+immediately before `paramsBtn` in DOM order, opened its own modal and
+left it open, which silently dropped every subsequent control's
+`.click()` for the rest of that sweep. Nothing wrong with `paramsBtn`
+itself. Fixed by closing any open `<dialog>` right after each control's
+own check, so the page never goes inert mid-sweep.
+
+**Two legitimate skips, not failures**, extending the same "nothing to
+operate" reasoning already applied to an already-checked radio and a
+single-option select: a tab/segmented-toggle button that already IS
+the active one (`aria-selected`/`aria-pressed="true"`, the convention
+this app's entity selectors and toggle groups use throughout) has
+nothing different to move to.
+
+**Two buttons are NOT reachable and NOT tested**, a documented gap
+rather than a silent one: `retirementSustainableSpendRunBtn` ("Solve")
+and `retirementLeversRunBtn` ("Show what would help") only become
+visible after Retirement's own Monte Carlo run has already completed —
+reaching that condition costs exactly the full simulation the heavy-
+button exclusion above exists to avoid.
+
+**Timing**: 319 controls tested, 0 failures, two consecutive full runs
+(build + preview + all four `tests/browser/` test files + teardown) at
+~27.5 seconds wall-clock each.
+
+Tests: every control across a fully populated scenario (this commit's
+main test); a synthetic disconnected control proving the mechanism
+actually fails on a genuinely dead one; the four heavy Run buttons;
+the Export button's download. Full existing suite 2253/2253 unaffected,
+build green.
+
+Commit: `Browser: every interactive control is alive`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

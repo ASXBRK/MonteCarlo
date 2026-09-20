@@ -21,10 +21,27 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.
 // tests themselves had already finished in under ten seconds.
 const viteBin = path.join(rootDir, "node_modules/.bin/vite");
 
+// Every spawned child, tracked so the watchdog (below) can SIGKILL them
+// directly on a hang. The npx-orphan bug above was one way a child
+// outlives this script; a child that hangs on its own (network stall,
+// or — found while building Commit 2 — a test that clicks a real
+// "Run Monte Carlo" button and waits out the whole simulation instead
+// of just checking it started) is another. Without this, the watchdog's
+// process.exit() below kills only this process: the test child (and
+// the preview server it's talking to) keep running, orphaned, forever
+// — exactly what was observed: `node --test` and `vite preview` both
+// still alive and burning CPU minutes after this script's own process
+// had already exited.
+const liveChildren = new Set();
+
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd: rootDir, stdio: "inherit", ...opts });
-    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} ${args.join(" ")} exited ${code}`))));
+    liveChildren.add(child);
+    child.on("exit", (code) => {
+      liveChildren.delete(child);
+      code === 0 ? resolve() : reject(new Error(`${cmd} ${args.join(" ")} exited ${code}`));
+    });
     child.on("error", reject);
   });
 }
@@ -51,8 +68,9 @@ async function main() {
   const preview = spawn(viteBin, ["preview", "--port", String(PREVIEW_PORT), "--strictPort"], {
     cwd: rootDir, stdio: "inherit",
   });
+  liveChildren.add(preview);
   let previewExited = false;
-  preview.on("exit", () => { previewExited = true; });
+  preview.on("exit", () => { previewExited = true; liveChildren.delete(preview); });
 
   const stopPreview = () => {
     if (!previewExited && !preview.killed) preview.kill("SIGKILL");
@@ -80,6 +98,14 @@ async function main() {
 // to eventually notice.
 const watchdog = setTimeout(() => {
   console.error("[test:browser] FAILED: exceeded 110s overall — killing the run rather than hanging.");
+  // process.exit() only ends THIS process — every still-running child
+  // (the preview server, or a test runner stuck on a control that
+  // triggered real background work) is orphaned by it, not stopped.
+  // SIGKILL each one directly first, exactly the class of bug the
+  // npx-vite fix above closed for the ordinary exit path.
+  for (const child of liveChildren) {
+    if (!child.killed) child.kill("SIGKILL");
+  }
   process.exit(1);
 }, 110_000);
 watchdog.unref();
