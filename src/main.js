@@ -381,6 +381,21 @@ function loadWorkspaceIndex() {
 
 let workspace = loadWorkspaceIndex();
 
+// Per-USER preferences (docs/specs/41-dependency-ordering-density.md,
+// Commit 5) — a THIRD top-level key, sibling to INDEX_KEY/scenarioKey,
+// deliberately outside both: "remember the choice per user, not per
+// scenario" means it must survive switching clients/scenarios, a new
+// scenario, import/export — none of which this key is ever touched by.
+const PREFS_KEY = "planner.prefs.v1";
+function loadUserPrefs() {
+  const raw = readJSON(PREFS_KEY);
+  return { hideEmptySections: !!raw?.hideEmptySections };
+}
+function saveUserPrefs() {
+  writeRaw(PREFS_KEY, JSON.stringify(userPrefs));
+}
+let userPrefs = loadUserPrefs();
+
 function loadActiveState() {
   const blob = readRaw(scenarioKey(workspace.activeScenarioId));
   if (blob) {
@@ -533,6 +548,83 @@ const INPUT_NAV = [
   { id: "investment-cashflows", label: "Investment cashflows" },
   { id: "settings", label: "Settings" },
 ];
+
+// Hide-if-empty (docs/specs/41-dependency-ordering-density.md, Commit
+// 5) — an input section with no data collapses to a single line with
+// an add control, rather than its full empty form. Every id here
+// already has a working sectionCounts() entry (planState.js) driving
+// the sidebar's own nav badges, so "empty" is never a new definition,
+// just a new CONSEQUENCE of the existing one — except "financial-
+// assets", left out deliberately: it can never be empty (the last-
+// financial-asset rule, renderAssets()'s own comment), so there is
+// nothing to collapse.
+const HIDE_IF_EMPTY_SECTIONS = [
+  "income", "deductions", "expenses", "lifestyle-assets", "property",
+  "super", "liabilities", "goals", "investment-cashflows",
+];
+// "Never hide a section that has data, under any circumstance" (the
+// spec's own words) — sectionCounts() alone isn't safe for every
+// section here. Two sections render an ALWAYS-PRESENT block beyond
+// their own row list, and that block can hold real, non-default data
+// even when the row list itself is empty: Liabilities always renders
+// helpBlockHTML() (a HELP/HECS balance field per person — a nonzero
+// balance is genuine data with zero liability ROWS); Super always
+// renders personDivTaxHTML() (the Division 293/296 "paid from"
+// election per person — switching it to "cash" is genuine data with
+// zero super ACCOUNTS). Found by checking every section's own empty-
+// branch markup by hand before trusting sectionCounts() for it, the
+// same "consolidation exposes a second defect" caution this spec's
+// earlier commits kept running into.
+function sectionHasUncountedData(id) {
+  if (id === "liabilities") {
+    return (state.plan.client?.helpBalance ?? 0) !== 0
+      || (isCouple() && (state.plan.partner?.helpBalance ?? 0) !== 0);
+  }
+  if (id === "super") {
+    const nonDefault = (p) => (p?.super?.divTaxPaidFrom ?? "super") !== "super";
+    return nonDefault(state.plan.client) || (isCouple() && nonDefault(state.plan.partner));
+  }
+  return false;
+}
+function isSectionEmpty(id) {
+  // sectionCounts()["investment-cashflows"] sums only contributions/
+  // withdrawals/lumpSums (planState.js's own definition, built for the
+  // nav badge) — bonds live in this same section but are a separate
+  // array it never counts. renderCashflows()'s own emptiness check
+  // (allEmpty) DOES include them; using sectionCounts alone here would
+  // let the collapsed-count overstate what's actually shown, exactly
+  // the "count is accurate" requirement this commit's own spec names.
+  if (id === "investment-cashflows") {
+    const cf = state.cashflows;
+    return cf.contributions.length === 0 && cf.withdrawals.length === 0 && cf.lumpSums.length === 0
+      && (state.bonds ?? []).length === 0 && (cf.bondContributions ?? []).length === 0;
+  }
+  return (sectionCounts(state)[id] ?? 0) === 0 && !sectionHasUncountedData(id);
+}
+function shouldCollapseSection(id) {
+  return userPrefs.hideEmptySections && isSectionEmpty(id);
+}
+function collapsedSectionsCount() {
+  if (!userPrefs.hideEmptySections) return 0;
+  return HIDE_IF_EMPTY_SECTIONS.filter(isSectionEmpty).length;
+}
+// A collapsed section is reachable, not hidden: its own add control
+// still works (the same data-*-action="add" attribute the full empty
+// state uses, picked up by that section's existing delegated click
+// listener regardless of which markup rendered it), search can still
+// navigate to it (it lands on this same compact line), and the review
+// panel's link-out does too. What it does NOT need is a "force expand"
+// path — a section search/link-out would ever highlight a SPECIFIC
+// ROW in is by definition non-empty already, so it was never a
+// collapse candidate to begin with.
+function collapsedSectionHTML(title, addButtonHTML) {
+  return `
+    <div class="section-collapsed">
+      <span class="section-collapsed-label">${escapeHTML(title)}</span>
+      ${addButtonHTML}
+    </div>
+  `;
+}
 
 // Navigation, View Consolidation, and Simple Charts (spec 17), Commit 2
 // — nested collapsible sidebar groups. Every id below must appear in
@@ -863,8 +955,24 @@ function renderSideNav() {
       </div>
     `;
   };
+  // Hide-if-empty toggle (docs/specs/41-dependency-ordering-density.md,
+  // Commit 5) — "show the count of sections currently collapsed, so
+  // it's visible that something is being withheld rather than
+  // missing." Rendered here (not a static index.html control) so the
+  // count is recomputed every time this function runs, the same
+  // staleness profile the existing nav badges already have — genuinely
+  // live would mean re-rendering the sidebar on every single edit
+  // anywhere in the app, which nothing else in this file does either.
+  const collapsedCount = collapsedSectionsCount();
+  const hideEmptyToggleHTML = `
+    <label class="hide-empty-toggle">
+      <input type="checkbox" id="hideEmptySectionsToggle"${userPrefs.hideEmptySections ? " checked" : ""} />
+      <span>Hide empty sections${userPrefs.hideEmptySections && collapsedCount > 0 ? ` — ${collapsedCount} collapsed` : ""}</span>
+    </label>
+  `;
   els.sideNav.innerHTML = `
     <button type="button" id="reviewDefaultsBtn" class="btn-text side-nav-review-btn">Review defaults</button>
+    ${hideEmptyToggleHTML}
     <div class="nav-group-label">Input</div>
     ${INPUT_GROUPS.map((g) => group("input", g)).join("")}
     <div class="nav-group-label">Output</div>
@@ -886,6 +994,19 @@ els.sideNav.addEventListener("click", (e) => {
     page: "workspace", clientId: client.id, scenarioId: scenario.id,
     area: btn.dataset.navArea, section: btn.dataset.navSection,
   });
+});
+
+// Off by default for a new user, so nothing is hidden while an adviser
+// is still entering data — flipping it on re-renders every section
+// (renderAll(), the same full pass a scenario mount already does)
+// since ANY of the nine hide-if-empty sections could now need to show
+// its collapsed line instead of its full empty form, or vice versa.
+els.sideNav.addEventListener("change", (e) => {
+  if (e.target.id !== "hideEmptySectionsToggle") return;
+  userPrefs = { ...userPrefs, hideEmptySections: e.target.checked };
+  saveUserPrefs();
+  renderAll();
+  renderSideNav();
 });
 
 // Toggle which single canvas section is visible; drives the output
@@ -3291,13 +3412,15 @@ function renderAssets() {
 
   const lifestyleCards = state.assets.filter((a) => a.class === "lifestyle").map(assetCardHTML).join("");
   els.lifestyleSection.innerHTML = lifestyleCards === ""
-    ? `
+    ? (shouldCollapseSection("lifestyle-assets")
+      ? collapsedSectionHTML("Lifestyle assets", `<button class="add-row-btn" type="button" data-action="add-lifestyle-asset">+ Add lifestyle asset</button>`)
+      : `
       <h2 class="section-heading">Lifestyle assets</h2>
       ${pageEmptyHTML(
         "Add lifestyle assets like vehicles, contents, or jewellery to include their value in net assets.",
         `<button class="add-row-btn" type="button" data-action="add-lifestyle-asset">+ Add lifestyle asset</button>`
       )}
-    `
+    `)
     : `
       <h2 class="section-heading">Lifestyle assets</h2>
       <div id="lifestyleAssets" class="portfolio-stack">${lifestyleCards}</div>
@@ -3986,8 +4109,11 @@ function cfTableHTML(headerCellsHTML, rowsHTML) {
 // Top-level fact-find section (Income / Expenses / Deductions):
 // page-sized empty state with a purpose sentence when empty; heading +
 // table otherwise.
-function ffSectionHTML(title, kind, addLabel, headerCellsHTML, rowsHTML, helperHTML = "", purposeSentence = "") {
+function ffSectionHTML(title, kind, addLabel, headerCellsHTML, rowsHTML, helperHTML = "", purposeSentence = "", sectionId = null) {
   const empty = rowsHTML === "";
+  if (empty && sectionId && shouldCollapseSection(sectionId)) {
+    return collapsedSectionHTML(title, addRowBtn(kind, addLabel));
+  }
   if (empty) {
     return `
       <h2 class="section-heading">${title}</h2>
@@ -4038,7 +4164,8 @@ function renderCashflows() {
     cfHeaders.income(),
     cf.income.map(incomeRowHTML).join(""),
     `<p class="helper-text">Enter income before tax.</p>`,
-    "Add income to include salary, rental, or other regular receipts in the projection."
+    "Add income to include salary, rental, or other regular receipts in the projection.",
+    "income"
   );
 
   els.deductionsSection.innerHTML = ffSectionHTML(
@@ -4046,7 +4173,8 @@ function renderCashflows() {
     cfHeaders.deductions(),
     cf.deductions.map(deductionRowHTML).join(""),
     `<p class="helper-text">Deductions reduce assessable income only — they never themselves debit household cash. If the underlying spend also needs to leave cash, enter a matching Expense row too.</p>`,
-    "Add deductions such as work-related expenses, vehicle deductions, or salary packaging to reduce assessable income."
+    "Add deductions such as work-related expenses, vehicle deductions, or salary packaging to reduce assessable income.",
+    "deductions"
   );
 
   els.expensesSection.innerHTML = ffSectionHTML(
@@ -4054,20 +4182,23 @@ function renderCashflows() {
     cfHeaders.expenses(),
     cf.expenses.map(expenseRowHTML).join(""),
     "",
-    "Add expenses to model the household's regular spending."
+    "Add expenses to model the household's regular spending.",
+    "expenses"
   );
 
   const bonds = state.bonds ?? [];
   const allEmpty = cf.contributions.length === 0 && cf.withdrawals.length === 0 && cf.lumpSums.length === 0
     && bonds.length === 0 && (cf.bondContributions ?? []).length === 0;
   els.investSection.innerHTML = allEmpty
-    ? `
+    ? (shouldCollapseSection("investment-cashflows")
+      ? collapsedSectionHTML("Investment cashflows", addRowBtn("contributions", "Add contribution"))
+      : `
       <h2 class="section-heading">Investment cashflows</h2>
       ${pageEmptyHTML(
         "Add contributions, withdrawals, or one-off amounts to model cashflows into and out of your assets, or a bond to model a tax-paid investment or education bond.",
         `${addRowBtn("contributions", "Add contribution")}${addRowBtn("withdrawals", "Add withdrawal")}${addRowBtn("lumpSums", "Add one-off amount")}<button class="add-row-btn" type="button" data-bond-action="add">+ Add bond</button>`
       )}
-    `
+    `)
     : `
       <div class="ff-section">
         <div class="ff-head"><h2 class="section-heading">Investment cashflows</h2></div>
@@ -6738,13 +6869,15 @@ function propertyCardHTML(p) {
 function renderProperties() {
   const cards = (state.properties ?? []).map(propertyCardHTML).join("");
   els.propertySection.innerHTML = cards === ""
-    ? `
+    ? (shouldCollapseSection("property")
+      ? collapsedSectionHTML("Property", `<button class="add-row-btn" type="button" data-prop-action="add">+ Add property</button>`)
+      : `
       <h2 class="section-heading">Property</h2>
       ${pageEmptyHTML(
         "Add property to project value growth, purchases, rent, and gearing.",
         `<button class="add-row-btn" type="button" data-prop-action="add">+ Add property</button>`
       )}
-    `
+    `)
     : `
       <h2 class="section-heading">Property</h2>
       <div id="properties" class="portfolio-stack">${cards}</div>
@@ -7401,14 +7534,16 @@ function renderSuper() {
     ${couple ? personDivTaxHTML("partner", state.plan.partner, `Partner — ${partnerName()}`) : ""}
   `;
   els.superSection.innerHTML = accounts.length === 0
-    ? `
+    ? (shouldCollapseSection("super")
+      ? collapsedSectionHTML("Super", `<button class="add-row-btn" type="button" data-super-action="add-account">+ Add super account</button>`)
+      : `
       <h2 class="section-heading">Super</h2>
       ${divTaxHTML}
       ${pageEmptyHTML(
         "Add a super account to model accumulation-phase superannuation — balances, contributions, caps, and withdrawals.",
         `<button class="add-row-btn" type="button" data-super-action="add-account">+ Add super account</button>`
       )}
-    `
+    `)
     : `
       <h2 class="section-heading">Super</h2>
       ${divTaxHTML}
@@ -8833,14 +8968,16 @@ function renderLiabilities() {
   const cards = (state.liabilities ?? []).map(liabilityCardHTML).join("");
   const helpHTML = helpBlockHTML();
   els.liabilitiesSection.innerHTML = cards === ""
-    ? `
+    ? (shouldCollapseSection("liabilities")
+      ? collapsedSectionHTML("Liabilities", `<button class="add-row-btn" type="button" data-liab-action="add">+ Add liability</button>`)
+      : `
       <h2 class="section-heading">Liabilities</h2>
       ${helpHTML}
       ${pageEmptyHTML(
         "Add loans and mortgages to project repayments, interest and net assets.",
         `<button class="add-row-btn" type="button" data-liab-action="add">+ Add liability</button>`
       )}
-    `
+    `)
     : `
       <h2 class="section-heading">Liabilities</h2>
       ${helpHTML}
@@ -9058,13 +9195,15 @@ function renderGoals() {
   const goals = state.goals ?? [];
   const cards = goals.map(goalCardHTML).join("");
   els.goalsSection.innerHTML = cards === ""
-    ? `
+    ? (shouldCollapseSection("goals")
+      ? collapsedSectionHTML("Goals", `<button class="add-row-btn" type="button" data-goal-action="add">+ Add goal</button>`)
+      : `
       <h2 class="section-heading">Goals</h2>
       ${pageEmptyHTML(
         "Track named savings goals — a car, a wedding, a deposit — separately from ordinary living expenses.",
         `<button class="add-row-btn" type="button" data-goal-action="add">+ Add goal</button>`
       )}
-    `
+    `)
     : `
       <h2 class="section-heading">Goals</h2>
       <div class="portfolio-stack">${cards}</div>
@@ -16022,7 +16161,10 @@ function renderInputReviewPanel() {
   const section = $("inputReviewSection");
   if (section) section.hidden = activeView === "retirement-projection";
   if (activeView === "retirement-projection") return;
-  renderReviewPanelInto("inputReviewPanel", buildReviewGroups(state, reviewPanelGroupOrderFor(activeView)));
+  renderReviewPanelInto(
+    "inputReviewPanel",
+    buildReviewGroups(state, reviewPanelGroupOrderFor(activeView), userPrefs.hideEmptySections ? HIDE_IF_EMPTY_SECTIONS : [])
+  );
 }
 
 // Refreshes every mounted review panel — an edit committed through

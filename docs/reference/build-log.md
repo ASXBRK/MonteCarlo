@@ -6328,6 +6328,92 @@ Spec 41 Commits 1–4 complete — Commits 5–6 (input density) remain.
 
 ---
 
+### Dependency, ordering, density, Commit 5: hide-if-empty on input sections (spec 41)
+
+**An input section with no data collapses to a single line with an add
+control.** Scoped to 9 sections — income, deductions, expenses,
+lifestyle-assets, property, super, liabilities, goals, investment-
+cashflows — each already covered by `sectionCounts()`
+(`planState.js`), the same function already driving the sidebar's own
+nav badges. `financial-assets` is deliberately excluded: it can never
+be empty (the last-financial-asset rule — `renderAssets()`'s own
+comment), so there is nothing to collapse. `pension`/`aged-care`/
+`children` are deferred, not silently dropped: they follow the same
+`add-row-btn` empty-state convention but have no existing, verified
+count in `sectionCounts()`, and "never hide a section that has data,
+under any circumstance" made getting a NEW count right, for three more
+sections, more important than covering all of them in one commit.
+
+**"Never hide a section that has data" found two real gaps before
+they could ship**, by checking every one of the 9 sections' own
+empty-branch markup by hand rather than trusting `sectionCounts()`
+blindly — the same caution this spec's own earlier commits kept
+finding reason for:
+- **Liabilities** always renders `helpBlockHTML()` — a HELP/HECS
+  balance field per person — even with zero liability rows. A nonzero
+  balance is genuine data with no liability ROWS to signal it.
+- **Super** always renders `personDivTaxHTML()` — the Division 293/296
+  "paid from" election per person — even with zero super accounts.
+  Switching it to "cash" is genuine data with no super ACCOUNTS to
+  signal it.
+
+Both sections now carry an extra guard (`sectionHasUncountedData()`)
+checked alongside `sectionCounts()`, so a nonzero HELP balance or a
+non-default tax election keeps the section expanded regardless of how
+many rows it has.
+
+**A third, smaller accuracy gap, found while testing rather than by
+inspection**: `sectionCounts()["investment-cashflows"]` sums only
+contributions/withdrawals/lump sums — bonds live in the same section
+but were never part of that count. `renderCashflows()`'s own emptiness
+check already includes them; `isSectionEmpty()` now mirrors it exactly
+for this one section, rather than let the collapsed-count overstate
+what's actually shown (a scenario with a bond but no contributions
+would otherwise report a section as empty/collapsed when it wasn't).
+
+**A fourth gap, structural rather than a miscount**: the review
+panel's `buildReviewGroups()` (`retirementReviewPanel.js`) drops any
+group with zero rows entirely — which meant a collapsed section, being
+empty by definition, could never have a review-panel link-out at all;
+the group that would carry it was always filtered out before it
+rendered. `buildReviewGroups` gained an `alwaysShowSectionIds`
+parameter (default `[]`, every existing caller unaffected); main.js's
+own call site now passes `HIDE_IF_EMPTY_SECTIONS` while the preference
+is on. The Retirement view's own separate review-panel mount
+(`buildRetirementReviewGroups`) is unchanged — a narrower, less central
+surface, left out of this commit's scope.
+
+**Per-user, not per-scenario** — a genuinely new storage key
+(`planner.prefs.v1`), sibling to the existing workspace index and
+per-scenario blobs, read once at boot and written independent of
+`saveState()`/`saveWorkspace()` so it survives switching clients,
+scenarios, import/export. Off by default. The sidebar shows the toggle
+and, while it's on, "N collapsed" — recomputed on the same render pass
+the existing nav badges already use, the same staleness profile they
+already have.
+
+**No "force expand when navigated to" mechanism was needed** — search
+and the review panel's link-out both already route through the exact
+same `navigate()`/`showSection()` path a sidebar click uses, and a
+search result or link-out that points at a SPECIFIC ROW is, by
+definition, pointing at a non-empty section (never a collapse
+candidate to begin with). Reachability for an empty section just means
+landing on its own collapsed line — which is not hidden, per the
+spec's own words, just compact.
+
+Tests: a populated section never collapses even with the preference on
+(`controls.test.mjs`'s own exhaustive control sweep also exercises the
+new toggle and every collapsed-line add button, confirming both are
+genuinely wired); a collapsed section reachable by the sidebar, search,
+the review-panel link-out, and its own add control (which genuinely
+un-collapses the section once used); the toggle survives a reload; the
+collapsed count is accurate. Full unit suite 2263/2263, full browser
+suite (6 files, 17 tests) green.
+
+Commit: `Hide-if-empty on input sections`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits

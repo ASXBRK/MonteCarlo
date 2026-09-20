@@ -1493,6 +1493,39 @@ html, body {
   font-size: 12.5px;
 }
 
+/* Hide-if-empty (docs/specs/41-dependency-ordering-density.md, Commit 5). */
+.hide-empty-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px 10px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.hide-empty-toggle input { margin: 0; }
+
+/* A collapsed input section (hide-if-empty, on, this section has
+   nothing in it): the same single-line-plus-add-control shape every
+   list section's own populated-state "+ Add" row already uses, just
+   with no heading or dashed empty-state card above it. */
+.section-collapsed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.section-collapsed-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.section-collapsed .add-row-btn { margin: 0; }
+
 /* Search across inputs (docs/specs/38-finding-and-editing-inputs.md,
    Commit 2). */
 .input-search-bar { position: relative; }

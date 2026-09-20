@@ -96,7 +96,18 @@ export const RETIREMENT_REVIEW_GROUP_SECTIONS = {
   glidePath: "settings",
 };
 
-export function buildReviewGroups(state, order = REVIEW_GROUP_ORDER) {
+// alwaysShowSectionIds (docs/specs/41-dependency-ordering-density.md,
+// Commit 5) — normally a group with nothing in it is dropped entirely
+// ("nothing gets missed" means showing only what's actually there).
+// Hide-if-empty's own "a collapsed section stays reachable... by the
+// review panel's link-out" needs the opposite for exactly the sections
+// it collapses: a section with zero rows is precisely when it's
+// collapsed, so without this, a collapsed section could NEVER have a
+// review-panel link-out — the group that would carry it is always
+// filtered out before it renders. Empty by default (every existing
+// caller keeps today's behaviour unchanged); main.js passes its own
+// HIDE_IF_EMPTY_SECTIONS list here only while that preference is on.
+export function buildReviewGroups(state, order = REVIEW_GROUP_ORDER, alwaysShowSectionIds = []) {
   const plan = state.plan;
   const isCouple = isCoupleHousehold(plan.household) && !!plan.partner;
   const includedSuperAccounts = (plan.superAccounts ?? []).filter((sa) => sa.include !== false);
@@ -124,7 +135,7 @@ export function buildReviewGroups(state, order = REVIEW_GROUP_ORDER) {
       sectionId: RETIREMENT_REVIEW_GROUP_SECTIONS[key],
       ids: idsByGroup[key],
     }))
-    .filter((g) => g.ids.length > 0);
+    .filter((g) => g.ids.length > 0 || alwaysShowSectionIds.includes(g.sectionId));
 }
 
 // Unchanged behaviour, unchanged call site (Retirement > Projection) —
