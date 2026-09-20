@@ -5636,6 +5636,46 @@ Commit: `Surplus cascade: conservation coverage`.
   directly-published cap could in principle diverge from the derived
   one.
 
+### Known engine gaps — needs restructuring, not another patch
+
+- **The shared income base (`repaymentIncome`, `deterministic.js`) that
+  feeds Division 293, HELP repayment, and MLS doesn't see a surplus-
+  cascade-sourced concessional contribution in the year it's actually
+  made.** Third time this exact income base has come up: spec 37
+  Commit 5 fixed it to include the year's net capital gain but
+  deliberately left HELP/MLS with the identical gap (disclosed, not
+  silently dropped); spec 39 Commit 2 closed that HELP/MLS gap; spec 39
+  Commit 6 found a THIRD instance while fixing the cascade's own
+  carry-forward double-count — Division 293's `lowTaxContributions` and
+  HELP/MLS's `reportableSuperContributions` are both computed in the
+  per-person loop before the FY-end surplus sweep runs, so a surplus-
+  cascade superConcessional branch's own credit (known only once the
+  sweep executes, near the end of the monthly loop) understates both
+  figures for the year it lands. Three separate patches to the same
+  income base, each closing one specific omission the last one didn't
+  cover, is exactly the pattern CLAUDE.md's own "close the whole
+  class" rule warns against repeating a fourth time.
+  **What it would take**: this isn't a same-shape post-hoc correction
+  the way the Commit 6 carry-forward fix was (redo a ledger update once
+  the sweep's result is known) — Division 293/HELP/MLS assessment
+  happens via `assessPerson` calls substantially EARLIER in the same
+  year's processing (inside the measure pass), before the surplus sweep
+  exists to correct against. Closing this properly means one of: (a)
+  moving Division 293/HELP/MLS assessment to AFTER the FY-end sweep,
+  which likely has its own ordering dependencies on `taxOut`/`cgtDue`
+  worth mapping first; or (b) giving the sweep's own superConcessional
+  destination a two-stage resolve (a provisional cap check now, a
+  deferred top-up next FY, mirroring the `pendingDiv293`/
+  `pendingHelpMlsTopUp` lagged-differencing pattern spec 39 Commit 2
+  already established for the NET-CAPITAL-GAIN version of this same
+  income base). Whichever approach, a single fix at the SOURCE
+  (`repaymentIncome`'s own construction, or wherever the surplus
+  sweep's timing moves to) rather than three independent call-site
+  patches is the point — the next feature that credits concessional
+  super outside the ordinary per-person loop will hit this exact gap
+  again otherwise. Not scheduled; recorded so it's a decision on the
+  record, not a rediscovered surprise.
+
 ### Deferred — do not build
 
 Accumulated across specs 11–15; see each spec's own "Deferred" section
