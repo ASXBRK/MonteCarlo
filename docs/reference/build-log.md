@@ -5684,6 +5684,95 @@ Commit: `Surplus cascade: splits and UI`.
 
 ---
 
+### Browser test harness, Commit 1: the harness (spec 40)
+
+**Why now.** Three real defect classes in a row — spec 37's display
+totals drifting from the ledger, spec 38's stale cached DOM after a
+review-panel edit, spec 39 Commit 8's four dead controls including an
+"Add step" button that did nothing at all — all found by a person
+driving a browser, none of which the 2,253-test unit suite could ever
+have caught, since `src/main.js` (19,000+ lines) has no automated
+coverage of its own. Playwright was already a dependency, already used
+ad hoc across several sessions; this makes that standing.
+
+**`npm run test:browser`** (`tests/browser/run.mjs`) builds, serves the
+BUILT output via `vite preview` (not the dev server — this tests what
+ships), waits for it to actually answer, runs every
+`tests/browser/*.test.mjs` file under Node's own built-in `node:test`
+(zero new dependencies — `@playwright/test` was deliberately not
+added; the bare `playwright` package already installed is the whole
+toolkit, matching the spec's own "not a rewrite" instruction), then
+tears the preview server down and exits with the test run's own code.
+A 110-second watchdog (`.unref()`d, so it never itself keeps the
+process alive) kills the run outright rather than hanging if anything
+above it ever doesn't — "keep it fast" as a hard guarantee, not a hope.
+
+**A real process-cleanup bug, found building this.** The preview
+server was launched via `npx vite preview`; `npx` spawns the actual
+`vite` process as ITS OWN child, so killing the `npx` wrapper (what
+`preview.kill()` targeted) left the real server orphaned, holding the
+port — and this script's own process — open for minutes after the
+tests themselves had already finished in under ten seconds (confirmed
+directly: `time` showed `real 2m47s` against `user 0m9.6s`, the
+textbook signature of a wait on something external, not genuine CPU
+work). Fixed by invoking `node_modules/.bin/vite` directly for both
+the build and the preview server, no `npx` layer in between.
+
+**Fixture seeding** (`tests/browser/fixtures.mjs`,
+`tests/browser/support.mjs`) — through the SAME real factories/
+`clampAllToPlan` pipeline the demo clients (`src/demo/*.js`) and
+`hydrate()` itself use, never a hand-written state object literal
+(this project's own stated policy — `src/demo/index.js`'s own header).
+Three fixtures: `fullyPopulatedState` (a couple exercising
+accumulation super, an already-commenced pension, a bond, a PPR
+property, a liability, AND age-pension eligibility together — kept
+deliberately modest in total assessable wealth, since none of the four
+existing demo clients combine all six; a wealthy household prices the
+age pension out entirely), `nearlyEmptyState` (the structural floor —
+`hydrate()` itself refuses a state with zero assets, so
+`defaultState()`'s own single default asset, not a truly empty state,
+IS the minimum seedable fixture), and `singleDataPointState` (the
+floor plus exactly one real entry, a salary row). Seeded via
+`page.addInitScript()` writing `planner.workspace.v1` and
+`planner.scenario.<id>` directly to localStorage BEFORE `page.goto()`
+— `main.js` reads localStorage synchronously at module top level the
+instant it parses (`mountWorkspace`'s own header), so seeding after
+navigation is already too late.
+
+**Console errors fail the test** (`trackConsoleErrors`,
+`support.mjs`), with one narrow, documented filter: this sandbox's own
+outbound proxy blocks the Plotly CDN (`index.html` loads Plotly from
+`cdn.plot.ly` — the "CDN may be blocked" case `src/chart.js`/CLAUDE.md
+already document as guarded, not a bug), so `net::ERR_`/404/`plot.ly`
+console noise is filtered — narrow enough that it can't hide a genuine
+app error, which never mentions those strings. Screenshots on failure
+go to `tests/browser/screenshots/` (gitignored).
+
+**Commit 1's own tests**: the harness runs green against the current
+build (seed the fully-populated fixture, load it, assert
+`[data-section="setup"]` — an EXISTING static attribute, not a new
+one — becomes visible, assert zero console errors); a deliberately
+broken selector fails within its own short, explicit timeout (under 5
+seconds) rather than Playwright's 30-second default, proving the
+"every wait bounds itself" convention actually takes effect.
+
+**Timing**: two consecutive full runs (build + preview boot + both
+tests + teardown) at 9.7-9.8 seconds wall-clock each — comfortably
+inside the spec's own "a couple of minutes" budget, with room for
+Commits 2-4's own additional suites.
+
+Vitest's own default include glob would otherwise also try to collect
+`tests/browser/*.test.mjs` (a `node:test` file has no vitest suite in
+it, which vitest reports as a failure, not a skip) — a new
+`vitest.config.js` excludes `tests/browser/**` explicitly.
+
+Tests: the two described above. Full existing suite 2253/2253
+unaffected, build green.
+
+Commit: `Browser test harness`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
