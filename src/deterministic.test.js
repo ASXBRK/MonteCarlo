@@ -4311,11 +4311,23 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
     const eligibleSuperContributions = superContributions.filter(
       (sc) => sc.type === "salarySacrifice" || sc.type === "personalDeductible"
     );
+    // docs/specs/39-cleanup-rules-cascade.md, Commit 7 — the super sub-
+    // cascade's own NCC leg. Not a new pocket of its own (a non-
+    // concessional super credit is a transfer between two already-
+    // counted pockets, cash down/super up, exactly like an ordinary
+    // personalNonDeductible row or the pre-existing bonus-to-super NCC
+    // redirect — conservationCheck.js's own header on that redirect
+    // already covers this shape), but a genuinely new DESTINATION TYPE
+    // this generator must reach, per CLAUDE.md's own "extend
+    // randomScenario()" rule for any commit touching this class of
+    // engine change.
+    const eligiblePersonalNonDeductibleRows = superContributions.filter((sc) => sc.type === "personalNonDeductible");
     function randomCascadeDestination() {
       const options = [];
       if (liabilities.length) options.push("debt");
       if (assets.length) options.push("asset");
       if (eligibleSuperContributions.length) options.push("superConcessional");
+      if (eligiblePersonalNonDeductibleRows.length) options.push("superNonConcessional");
       if (goals.length) options.push("goal");
       options.push("cash", "expenditure");
       const type = pick(options);
@@ -4329,6 +4341,16 @@ describe("Conservation invariant (engine-correctness fix, generalized)", () => {
       }
       if (type === "asset") return { type: "asset", targetId: pick(assets).id };
       if (type === "superConcessional") return { type: "superConcessional", targetId: pick(eligibleSuperContributions).id };
+      if (type === "superNonConcessional") {
+        return {
+          type: "superNonConcessional", targetId: pick(eligiblePersonalNonDeductibleRows).id,
+          // Opt-in, drawn true a MINORITY of the time — the generator's
+          // own coverage should lean toward the default-off case (the
+          // common, automatic-trigger-must-NOT-happen path) while still
+          // regularly exercising the opt-in trigger/extend path too.
+          allowBringForward: rngFn() < 0.3,
+        };
+      }
       if (type === "goal") return { type: "goal", targetId: pick(goals).id };
       return { type };
     }
@@ -7712,6 +7734,173 @@ describe("Surplus and deficit allocation (docs/specs/16-surplus-allocation.md, C
     const totalSurplusSacrifice = out.yearly.reduce((s2, r) => s2 + (r.superDetail?.su1?.surplusSalarySacrifice ?? 0), 0);
     expect(totalSurplusSacrifice).toBeGreaterThan(20000);
     for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `split-branch shared-cap regression, year ${y}`);
+  });
+
+  // --- The super sub-cascade (docs/specs/39-cleanup-rules-cascade.md,
+  // Commit 7) — "CC to cap, then NCC" is two ORDINARY, sequential
+  // STEPS (a superConcessional branch, then a superNonConcessional
+  // one), not a new compound destination: applyBranch already only
+  // ever returns what it actually consumed, so whatever the CC step
+  // doesn't use reaches the NCC step untouched, for free.
+  const nccRow = (over = {}) => scRow({ id: "sc2", type: "personalNonDeductible", ...over });
+
+  it("'CC to cap, then NCC': a concessional step fills to its own cap, and ONLY the remainder reaches the non-concessional step behind it", () => {
+    const s = {
+      ...mkState({
+        endAge: 41,
+        assets: [],
+        plan: { superAccounts: [superAcct()] },
+        cashflows: {
+          income: [employmentRow({ amount: 250000, sgApplies: false, from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+          superContributions: [
+            scRow({ id: "sc1", type: "salarySacrifice", amount: 2000, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+            nccRow({ amount: 0, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } }),
+          ],
+        },
+        surplus: { periods: [
+          step([branch({ destination: { type: "superConcessional", targetId: "sc1" } })]),
+          step([branch({ destination: { type: "superNonConcessional", targetId: "sc2" } })]),
+        ] },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed" },
+    };
+    const out = projectPlan(s);
+    const y0 = out.yearly[0];
+    const cap = y0.superCapUsage?.client?.cap ?? Infinity;
+    // The CC step filled to EXACTLY the cap (ordinary $2,000 + the
+    // surplus top-up) — never more, matching the SAME cap-respecting
+    // behaviour Commit 6's own regression already proved for a single
+    // superConcessional branch.
+    expect(y0.superDetail.su1.salarySacrifice).toBeCloseTo(cap, 0);
+    // The NCC step behind it genuinely received money too — not
+    // starved to zero, proving the fallthrough actually reached it.
+    expect(y0.superDetail.su1.nonConcessional).toBeGreaterThan(20000);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `CC-to-NCC fallthrough, year ${y}`);
+  });
+
+  it("a non-concessional branch REJECTED OUTRIGHT (TSB at/above the nil gate) debits cash for NOTHING, and the full surplus reaches the step behind it (docs/specs/39-cleanup-rules-cascade.md, Commit 7 — money bug 7's own shape)", () => {
+    // TSB ≥ the general transfer balance cap ($2.1m) → the NCC cap is
+    // NIL under s292-85(2) (processNonConcessionalCap's own existing,
+    // already-tested rule) — this branch's ENTIRE request is rejected,
+    // not partially accepted. Money bug 7 was exactly this shape but
+    // inverted (a rejected NCC debiting cash for the FULL requested
+    // amount while crediting only the accepted portion) — asserting
+    // BOTH "nothing credited" AND "the fallback step receives the
+    // WHOLE surplus, not surplus-minus-the-rejected-amount" together
+    // rules out that exact failure mode, not just the crediting half.
+    const s = {
+      ...mkState({
+        endAge: 40,
+        assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() })],
+        plan: { superAccounts: [superAcct({ balance: 2500000 })] },
+        cashflows: {
+          income: [cf({ assetId: null, amount: 2000, toAge: 40 })], // ~$24,000/yr surplus
+          superContributions: [nccRow({ amount: 0, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+        },
+        surplus: { periods: [
+          step([branch({ destination: { type: "superNonConcessional", targetId: "sc2" } })]),
+          step([branch({ destination: { type: "asset", targetId: "a1" } })]),
+        ] },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed" },
+    };
+    const out = projectPlan(s);
+    const y0 = out.yearly[0];
+    // Nothing credited — the request was rejected outright, not
+    // partially accepted (TSB is already ≥ $2.1m with no ordinary NCC
+    // rows in play at all, so there was never any headroom to begin
+    // with).
+    expect(y0.superDetail.su1.nonConcessional).toBeCloseTo(0, 6);
+    expect(y0.superDetail.su1.contributions).toBeCloseTo(0, 6);
+    // The FULL surplus reached the fallback step — not reduced by the
+    // amount that was requested-then-rejected upstream. A bug that
+    // debited cash for the rejected amount (money bug 7's own shape)
+    // would show this asset UNDER-funded relative to the genuine
+    // surplus actually available.
+    expect(y0.perAssetDetail.a1.surplusInvested).toBeGreaterThan(20000);
+    expect(out.superWarnings.some((w) => w.type === "nonConcessional")).toBe(true);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `NCC rejected-outright regression, year ${y}`);
+  });
+
+  it("bring-forward is OPT-IN: the SAME oversized request is capped at the flat annual cap by default, but accepted up to the bring-forward total when allowBringForward is explicitly set", () => {
+    // TSB comfortably under $1.84m → eligible for the full 3-year/
+    // $390,000 bring-forward tier if triggered. Flat annual cap alone
+    // is $130,000 — the request below ($200,000) exceeds the flat cap
+    // but fits inside the bring-forward total, so the two scenarios'
+    // own accepted figures can only differ if the opt-in flag is what
+    // actually gates the trigger.
+    const mkScenario = (allowBringForward) => ({
+      ...mkState({
+        endAge: 40,
+        assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() })],
+        plan: { superAccounts: [superAcct({ balance: 500000 })] },
+        cashflows: {
+          income: [cf({ assetId: null, amount: 20000, toAge: 40 })], // ~$240,000/yr surplus — comfortably covers the $200k request
+          superContributions: [nccRow({ amount: 0, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 40 } })],
+        },
+        surplus: { periods: [
+          step([branch({ destination: { type: "superNonConcessional", targetId: "sc2", allowBringForward } })]),
+        ] },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed" },
+    });
+    const withoutBF = projectPlan(mkScenario(false));
+    const withBF = projectPlan(mkScenario(true));
+    const acceptedWithout = withoutBF.yearly[0].superDetail.su1.nonConcessional;
+    const acceptedWith = withBF.yearly[0].superDetail.su1.nonConcessional;
+    // Default (opt-in OFF): capped at the flat $130,000 cap, never the
+    // bring-forward total, however large the request or however much
+    // surplus is available.
+    expect(acceptedWithout).toBeCloseTo(130000, -2);
+    // allowBringForward: true — the SAME oversized request now
+    // triggers the window and is accepted well beyond the flat cap.
+    expect(acceptedWith).toBeGreaterThan(150000);
+    expect(acceptedWith).toBeLessThanOrEqual(390000 + 1);
+    for (let y = 0; y < withoutBF.yearly.length - 1; y++) checkYearConservation(withoutBF, y, `bring-forward opt-in OFF, year ${y}`);
+    for (let y = 0; y < withBF.yearly.length - 1; y++) checkYearConservation(withBF, y, `bring-forward opt-in ON, year ${y}`);
+  });
+
+  it("a bring-forward window a cascade branch triggers PERSISTS to next year — the year-end write-back, not a fresh $130,000 cap every year", () => {
+    // Two years, same allowBringForward branch both years. Year 0
+    // triggers the 3-year/$390,000 window and takes a large chunk of
+    // it; year 1's own request, against the SAME window (now with less
+    // remaining), must be constrained by what's LEFT, not treated as a
+    // brand-new flat-cap year — proving superBringForward[owner] (the
+    // module-level ledger NEXT year's own assessment reads) was
+    // actually updated, not left stale the way superCarryForward was
+    // before Commit 6's own fix.
+    const s = {
+      ...mkState({
+        endAge: 41,
+        assets: [mkAsset({ id: "a1", balance: 0, allocation: zeroRealAlloc() })],
+        plan: { superAccounts: [superAcct({ balance: 500000, allocation: zeroRealAlloc() })] },
+        cashflows: {
+          income: [cf({ assetId: null, amount: 20000, toAge: 41 })], // ~$240,000/yr surplus, both years
+          superContributions: [nccRow({ amount: 0, frequency: "annual", from: { kind: "age", age: 40 }, to: { kind: "age", age: 41 } })],
+        },
+        surplus: { periods: [
+          step([branch({ destination: { type: "superNonConcessional", targetId: "sc2", allowBringForward: true } })]),
+        ] },
+      }),
+      assumptions: { cpi: 0.025, bracketMode: "indexed" },
+    };
+    const out = projectPlan(s);
+    const acceptedY0 = out.yearly[0].superDetail.su1.nonConcessional;
+    const acceptedY1 = out.yearly[1].superDetail.su1.nonConcessional;
+    // Year 0 triggers the window, taking a large slice of the
+    // $390,000 total (well beyond the flat $130,000 cap).
+    expect(acceptedY0).toBeGreaterThan(150000);
+    // Across BOTH years combined, never more than the window's own
+    // total — the definitive proof the window's remaining balance
+    // carried over, not reset. A stale (un-written-back) ledger would
+    // let year 1 accept up to ANOTHER full flat cap on top, blowing
+    // straight through this ceiling.
+    expect(acceptedY0 + acceptedY1).toBeLessThanOrEqual(390000 + 1);
+    // And year 1 still genuinely received SOMETHING (not starved to
+    // zero by an overcautious fix) — the window still has headroom
+    // left after year 0's own share.
+    expect(acceptedY1).toBeGreaterThan(0);
+    for (let y = 0; y < out.yearly.length - 1; y++) checkYearConservation(out, y, `bring-forward persistence, year ${y}`);
   });
 });
 

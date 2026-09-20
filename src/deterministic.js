@@ -1615,6 +1615,15 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       .filter((sc) => (sc.type === "salarySacrifice" || sc.type === "personalDeductible") && sc.accountId in superBal)
       .map((sc) => [sc.id, { accountId: sc.accountId, owner: sc.owner, type: sc.type }])
   );
+  // Non-concessional contribution rows a surplus branch may top up
+  // (docs/specs/39-cleanup-rules-cascade.md, Commit 7 — v1 scope, same
+  // narrowing note as surplusSuperTargets above: personalNonDeductible
+  // only, see planState.js's clampCascadeDestination for why).
+  const surplusSuperNccTargets = Object.fromEntries(
+    (state.cashflows.superContributions ?? [])
+      .filter((sc) => sc.type === "personalNonDeductible" && sc.accountId in superBal)
+      .map((sc) => [sc.id, { accountId: sc.accountId, owner: sc.owner }])
+  );
 
   // Surplus cascade (docs/specs/37-surplus-cascade.md, Commit 1): an
   // ordered list of steps, each with one or more branches. Re-validated
@@ -1631,6 +1640,7 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
       if (d.type === "debt") return true; // scope resolved live per-year below; an empty/stale scope just contributes nothing
       if (d.type === "asset") return d.targetId in bal && !meta[d.targetId].lifestyle;
       if (d.type === "superConcessional") return d.targetId in surplusSuperTargets;
+      if (d.type === "superNonConcessional") return d.targetId in surplusSuperNccTargets;
       if (d.type === "goal") return d.targetId in goalMeta;
       if (d.type === "cash" || d.type === "expenditure") return true;
       return false;
@@ -1808,6 +1818,92 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // closed for adviser fees/Division 293/296/FHSSS sharing one
         // account (conservationCheck.js's own header).
         superOutcome[target.owner].concessionalHeadroomAfterFills -= consumed;
+      }
+      return consumed;
+    }
+    if (d.type === "superNonConcessional" && row) {
+      // docs/specs/39-cleanup-rules-cascade.md, Commit 7 — the second
+      // half of "CC to cap, then NCC": a superConcessional branch
+      // ahead of this one in the SAME cascade already only ever
+      // consumes what it can, cascading the rest on unchanged (its own
+      // "return consumed", not "return share") — so this branch simply
+      // receives whatever the CC leg didn't use, no compound
+      // destination needed.
+      //
+      // Money bug 7's own rule again: reject, don't create. A rejected
+      // (or partially rejected) amount is NEVER debited from cash —
+      // superOutcome[owner].nccAcceptedRunning/nonConcessionalHeadroomAfterFills
+      // (both live-decremented, the SAME same-year-second-claimant
+      // guard concessionalHeadroomAfterFills already gives CC, extended
+      // here to a second CASCADE branch sharing the same NCC cap — the
+      // exact "Bug 5" shape Commit 6 found and fixed for concessional)
+      // cap `consumed` below the point where more than the true
+      // remaining cap could ever be credited; whatever's left over
+      // cascades to the next branch/step untouched, same as a closed
+      // condition's own share.
+      const target = surplusSuperNccTargets[d.targetId];
+      const owner = target.owner;
+      const outcome = superOutcome[owner];
+      const headroomNow = Math.max(0, outcome?.nonConcessionalHeadroomAfterFills ?? 0);
+      let consumed;
+      // Bring-forward is OPT-IN (the destination's own allowBringForward
+      // flag, default false — see planState.js's createCascadeDestination
+      // for why): a plain branch is capped at whatever headroom the
+      // ordinary NCC rows (and any earlier same-year claimant) already
+      // established, exactly like the bonus-to-super NCC redirect
+      // (deterministic.js's own bonusCredits block) already behaves —
+      // it never independently triggers or extends a bring-forward
+      // window just because ITS OWN request happens to exceed the flat
+      // annual cap. Only when allowBringForward is explicitly set does
+      // a request beyond current headroom get a genuine re-check
+      // against processNonConcessionalCap with the EXPANDED total,
+      // which can open (or extend) a bring-forward window the same way
+      // an ordinary large NCC row would.
+      if (d.allowBringForward && share > headroomNow + 1e-9 && outcome) {
+        const superRatesY = superRatesFor(fy0 + y, superIndexMode, cpi, awoteAssum);
+        const attemptTotal = outcome.nccAcceptedRunning + share;
+        const attempt = processNonConcessionalCap({
+          requestedNCC: attemptTotal, baseCap: superRatesY.nonConcessionalCap,
+          tsbPriorJune: outcome.tsbPriorJune, thresholds: superRatesY.bringForwardTsbThresholds,
+          bringForward: outcome.nccBringForwardState, planYear: y,
+        });
+        consumed = Math.min(share, Math.max(0, attempt.accepted - outcome.nccAcceptedRunning));
+        if (consumed > 0) {
+          // Live-updated so a LATER branch this same sweep (sharing this
+          // person's cap) sees the window this one just opened/extended
+          // — and so this year's own final state, written back to the
+          // module-level superBringForward ledger right after the real
+          // pass returns (see that block's own header), is correct for
+          // NEXT year too.
+          outcome.nccBringForwardState = attempt.bringForward;
+          outcome.nccAcceptedRunning += consumed;
+          outcome.nonConcessionalHeadroomAfterFills = Math.max(0, attempt.capThisYear - attempt.accepted);
+        }
+      } else {
+        consumed = Math.min(share, headroomNow);
+        if (consumed > 0 && outcome) {
+          outcome.nccAcceptedRunning += consumed;
+          outcome.nonConcessionalHeadroomAfterFills = headroomNow - consumed;
+        }
+      }
+      if (consumed > 0) {
+        // Non-concessional (post-tax) credit — no contributions tax,
+        // the whole amount joins the tax-free component, exactly like
+        // an ordinary personalNonDeductible row or the bonus-to-super
+        // NCC redirect (conservationCheck.js's own header: "needs no
+        // term" — a transfer between two already-counted pockets, cash
+        // down, super up, by the identical amount).
+        superBal[target.accountId] += consumed;
+        superTaxFree[target.accountId] += consumed;
+        wcaBal -= consumed;
+        row.superDetail[target.accountId].contributions += consumed;
+        row.superDetail[target.accountId].nonConcessional += consumed;
+      }
+      if (share - consumed > 1e-6) {
+        superWarnings.push({
+          fyLabel: schedule.fyLabels[y], owner, type: "nonConcessional",
+          reason: `Surplus cascade contribution exceeds the non-concessional cap — $${Math.round(share - consumed)} not credited, cascades onward`,
+        });
       }
       return consumed;
     }
@@ -5370,6 +5466,25 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         // (bonusCredits), and must not independently believe the FULL
         // cap is still available.
         nonConcessionalHeadroomAfterFills: Math.max(0, nccResult.capThisYear - nccResult.accepted),
+        // docs/specs/39-cleanup-rules-cascade.md, Commit 7 — inputs a
+        // cascade superNonConcessional branch needs to (optionally,
+        // opt-in only) re-check the NCC cap against an EXPANDED total
+        // including its own request, exactly the same "resolved once,
+        // live-mutated by a later same-year claimant" shape
+        // concessionalHeadroomAfterFills already uses. nccAcceptedRunning
+        // starts at what the ordinary rows already got accepted;
+        // nccBringForwardState starts at the SAME value superBringForward[p]
+        // was just set to above — both live-updated inside applyBranch's
+        // own superNonConcessional handler if an allowBringForward
+        // branch actually triggers/extends the window, then written
+        // back to the module-level superBringForward ledger right after
+        // the real pass returns (the post-sweep correction block below
+        // — same timing fix Commit 6 built for superCarryForward, for
+        // the identical reason: this FY's OWN bring-forward state isn't
+        // fully known until the sweep, which runs after this loop).
+        tsbPriorJune,
+        nccBringForwardState: superBringForward[p],
+        nccAcceptedRunning: nccResult.accepted,
       };
     }
 
@@ -6166,6 +6281,25 @@ export function projectPlan(state, profiles = PROFILES, mc = null) {
         carryForward: inputs.carryForwardBefore, tsbPriorJune: inputs.tsbPriorJune, gate: superRatesY.carryForwardTsbGate,
       });
       superCarryForward[p] = corrected.newCarryForward;
+    }
+    // Bring-forward write-back (docs/specs/39-cleanup-rules-cascade.md,
+    // Commit 7) — the SAME timing fix as the carry-forward correction
+    // just above, for the non-concessional side: superOutcome[p].
+    // nccBringForwardState is initialised to whatever the ordinary NCC
+    // rows already set superBringForward[p] to, and live-mutated inside
+    // applyBranch's own superNonConcessional handler only when an
+    // allowBringForward branch actually triggers/extends the window —
+    // in EITHER case, copying it back here is correct: a no-op when
+    // nothing changed, the genuine update when something did. Without
+    // this, a bring-forward window a cascade branch opened this year
+    // would vanish at year-end (superOutcome is a fresh object every
+    // year; only superBringForward itself persists to the next
+    // iteration), silently un-triggering itself for NEXT year's own
+    // ordinary NCC assessment.
+    for (const p of persons) {
+      if (superOutcome[p]?.nccBringForwardState !== undefined) {
+        superBringForward[p] = superOutcome[p].nccBringForwardState;
+      }
     }
     // Defined benefit pensions (spec 26, Commit 2) — report the FY's
     // income-cap excess on every one of this owner's DB rows,

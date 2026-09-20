@@ -3438,7 +3438,15 @@ export const DEFICIT_SELL_RULES = ["order", "minimumCapitalGain"];
 // working, unchanged, indefinitely (the established tolerance pattern
 // this file already uses for the pre-v17 shorthand itself).
 export const CASCADE_CONDITION_KINDS = ["repaid", "balanceBelow", "valueReaches", "date"];
-export const CASCADE_DESTINATION_TYPES = ["debt", "asset", "superConcessional", "goal", "cash", "expenditure"];
+// docs/specs/39-cleanup-rules-cascade.md, Commit 7 — superNonConcessional
+// completes the "CC to cap, then NCC" sub-cascade the spec's own worked
+// example (step 4) describes: NOT a single compound destination, but two
+// ordinary cascade branches/steps in sequence (a superConcessional branch,
+// then a superNonConcessional one) — the existing partial-fill-passthrough
+// (applyBranch returns only what it actually consumed; the rest cascades
+// on unchanged) already gives "CC to cap, then whatever's left tries NCC"
+// for free, with no new compound-destination shape needed.
+export const CASCADE_DESTINATION_TYPES = ["debt", "asset", "superConcessional", "superNonConcessional", "goal", "cash", "expenditure"];
 export const LOAN_DEDUCTIBILITY_SCOPES = ["nonDeductible", "deductible", "any"];
 
 export function createCascadeCondition(kind = "date") {
@@ -3458,6 +3466,12 @@ export function createCascadeDestination(type = "cash") {
   if (type === "debt") return { type: "debt", deductibility: "nonDeductible", loanIds: null, order: "interestRate" };
   if (type === "asset") return { type: "asset", targetId: null };
   if (type === "superConcessional") return { type: "superConcessional", targetId: null };
+  // allowBringForward defaults OFF (spec 39 Commit 7's own explicit
+  // requirement: bring-forward triggering from a surplus branch is
+  // opt-in, never automatic just because the branch's own request
+  // happens to exceed the flat annual cap) — see clampCascadeDestination
+  // and deterministic.js's applyBranch for the ON/OFF behaviour split.
+  if (type === "superNonConcessional") return { type: "superNonConcessional", targetId: null, allowBringForward: false };
   if (type === "goal") return { type: "goal", targetId: null };
   if (type === "expenditure") return { type: "expenditure" };
   return { type: "cash" };
@@ -3628,6 +3642,17 @@ function clampCascadeDestination(d, assets, ctx) {
     const row = (ctx.superContributions ?? []).find((sc) => sc.id === d.targetId);
     const targetId = row && (row.type === "salarySacrifice" || row.type === "personalDeductible") ? d.targetId : null;
     return targetId ? { type, targetId } : null;
+  }
+  if (type === "superNonConcessional") {
+    // v1 scope, same narrowing note as superConcessional above:
+    // personalNonDeductible only — a spouse contribution row has its
+    // own separate cap/tax-offset mechanics (the receiving spouse's
+    // own NCC cap, the contributing spouse's own tax offset) that a
+    // surplus top-up mirroring this fill isn't scoped to handle yet.
+    const row = (ctx.superContributions ?? []).find((sc) => sc.id === d.targetId);
+    const targetId = row && row.type === "personalNonDeductible" ? d.targetId : null;
+    if (!targetId) return null;
+    return { type, targetId, allowBringForward: d?.allowBringForward === true };
   }
   return null;
 }

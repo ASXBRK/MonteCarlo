@@ -5553,6 +5553,111 @@ Commit: `Surplus cascade: conservation coverage`.
 
 ---
 
+### Surplus cascade, Commit 7: the super sub-cascade (spec 39)
+
+**"CC to cap, then NCC" is two ordinary sequential STEPS, not a new
+compound destination.** The spec's own worked example draws it as one
+step, but the cascade's existing partial-fill-passthrough (`applyBranch`
+returns only what it actually consumed; whatever's left cascades on
+untouched, already proven by the multi-step debt-then-asset test from
+spec 37 Commit 1) already gives "CC to cap, then whatever's left tries
+NCC" for free from a `superConcessional` step followed by a new
+`superNonConcessional` step — no new shape needed, just a new
+destination TYPE.
+
+**New destination: `superNonConcessional`** (`planState.js`:
+`CASCADE_DESTINATION_TYPES`, `clampCascadeDestination`,
+`createCascadeDestination`) — v1 scope, `personalNonDeductible`
+contribution rows only (same narrowing note as `superConcessional`'s
+own salarySacrifice/personalDeductible restriction; spouse rows have
+their own separate cap/offset mechanics out of scope here). Carries one
+new field, `allowBringForward` (default `false`).
+
+**Behaviour at the NCC cap; rejection; bring-forward opt-in — all one
+mechanism.** `applyBranch`'s new handler (`deterministic.js`) mirrors
+the EXISTING same-year-second-claimant pattern
+`concessionalHeadroomAfterFills` already established for CC (and which
+Commit 6 just fixed a real bug in): capped at
+`nonConcessionalHeadroomAfterFills`, live-decremented so a second
+cascade branch sharing the same person's NCC cap can't double-spend —
+the exact "Bug 5" shape, now guarded for NCC too, not just CC. A
+request beyond current headroom is REJECTED, not partially forced
+through — and per money bug 7's own rule, the rejection costs the
+household nothing: `applyBranch` returns only what it actually
+credited, so the sweep's own `remaining -= applyBranch(...)` never
+subtracts the rejected portion, which cascades to whatever step comes
+next (or the implicit cash catch-all) exactly like a closed condition's
+own share already does.
+
+**Bring-forward triggering is genuinely opt-in, not automatic** — the
+spec's own explicit requirement. Default (`allowBringForward: false`):
+capped at whatever headroom the ordinary NCC rows (and any earlier
+same-year claimant) already established, exactly like the pre-existing
+bonus-to-super NCC redirect already behaves — it never independently
+triggers or extends a window just because its own request exceeds the
+flat annual cap. `allowBringForward: true`: a request beyond current
+headroom gets a genuine re-check against `processNonConcessionalCap`
+with the EXPANDED total (this person's running accepted total plus this
+branch's own ask), which can open or extend a bring-forward window the
+same way a large ordinary NCC row would — verified this doesn't
+accidentally bypass the TSB-at-or-above-general-cap NIL gate either (a
+`allowBringForward: true` branch against a TSB already over $2.1m still
+gets rejected outright, since `processNonConcessionalCap`'s own nil-tier
+check runs regardless of how large the attempted total is).
+
+**A second instance of Commit 6's own timing bug, closed the same way
+before it could ship.** `superBringForward[owner]`'s module-level
+ledger — what NEXT year's own ordinary NCC assessment reads — is set in
+the per-person loop BEFORE the FY-end sweep runs, same timing shape as
+`superCarryForward` had. A bring-forward window this cascade's own
+branch opens or extends during the sweep needed writing back
+afterward, or it would vanish at year-end (the per-year `superOutcome`
+object that tracks it live doesn't itself persist) — closed with the
+SAME post-sweep write-back pattern Commit 6 built for carry-forward,
+right after `runYear`'s real pass returns. Found by writing the
+persistence test below BEFORE assuming the mechanism would just work —
+it didn't, on the first pass, for the identical reason carry-forward
+didn't.
+
+**Division 293 / TSB.** `outcome.tsbPriorJune` (the input to the
+opt-in bring-forward re-check) is the SAME `tsbPriorJune =
+totalSuperBalance(p)` local every other cap check in the per-person
+loop already reads — not a second, independently-derived figure — so
+it inherits spec 37 Commit 2's pension-inclusive TSB fix by
+construction, with nothing new to verify beyond confirming (read
+directly, not assumed) that no separate TSB computation was introduced
+here. Division 293's own income base is untouched by this commit —
+still carries the assessment-ordering gap logged as a pending item
+before this commit started (this same per-person-loop-vs-sweep timing
+shape, but Division 293/HELP/MLS assessment happens too early in the
+SAME year's processing for a same-shape post-hoc correction; see that
+entry for what closing it properly would take).
+
+**Not a new money flow — verified, not assumed.** A non-concessional
+super credit is cash-down/super-up with no contributions tax, the
+identical shape `conservationCheck.js`'s own header already describes
+for the bonus-to-super NCC redirect ("needs no term... a transfer
+between two already-counted pockets"). No new `conservationCheck.js`
+term added. `randomScenario()` DOES need extending, per CLAUDE.md's own
+rule for a new destination TYPE the generator must learn to reach:
+`superNonConcessional` added to the native-cascade destination pool,
+targeting the generator's own already-existing `personalNonDeductible`
+rows, `allowBringForward` drawn true 30% of the time (leaning toward
+exercising the default-off path more often, since that's the common
+case an accidental-automatic-trigger bug would hide in). Conservation
+re-run clean 4 additional fresh sweeps after the extension.
+
+Tests: 4 new (CC-then-NCC sequential fallthrough; rejected-outright
+with the fallback step receiving the FULL surplus, not surplus-minus-
+rejected — money bug 7's exact shape, both halves; opt-in vs default-
+off on the identical oversized request; the year-end persistence
+regression) — `git stash`-confirmed all 4 fail without this commit's
+engine changes. Full suite 2253/2253, build green.
+
+Commit: `Surplus cascade: super sub-cascade`.
+
+---
+
 ## WHERE WE'RE GOING
 
 1. **Surplus allocation outputs and advice signal** (spec 16, Commits
